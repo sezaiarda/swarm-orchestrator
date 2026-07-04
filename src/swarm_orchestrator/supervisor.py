@@ -76,7 +76,10 @@ class Supervisor:
                 continue
             if self._fifo_fd not in ready:
                 continue
-            chunk = os.read(self._fifo_fd, 65536)
+            try:
+                chunk = os.read(self._fifo_fd, 65536)
+            except BlockingIOError:
+                continue  # spurious select wake; nothing to read yet
             buf += chunk
             while b"\n" in buf:
                 raw, buf = buf.split(b"\n", 1)

@@ -38,6 +38,7 @@ class Config:
     done_hook: str
     worker_cmd: str
     ready_marker: str
+    worker_settings: str
     ledger: str
     roadmap: str
     exclude: list[str]
@@ -131,6 +132,13 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             # "" => auto: match the running claude version (see ready_needle).
             # An explicit value (config or SWARM_READY_MARKER) overrides.
             "SWARM_READY_MARKER", worker.get("ready_marker", "")
+        ),
+        worker_settings=os.environ.get(
+            # Merged over user settings on each worker's `claude` (see
+            # _worker_shell) so a worker's own teammates run in-process — no
+            # extra tmux panes. Set to "" to disable (e.g. a non-claude worker).
+            "SWARM_WORKER_SETTINGS",
+            worker.get("worker_settings", '{"teammateMode":"in-process"}'),
         ),
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
         roadmap=str(tasks.get("roadmap", "docs/ROADMAP-MASTER.md")),

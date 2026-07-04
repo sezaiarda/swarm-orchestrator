@@ -29,6 +29,11 @@ TRUST_PROMPT = "Do you trust the files"
 
 def _worker_shell(cfg: Config, phase: str) -> str:
     cmd = cfg.worker_cmd.format(phase=phase)
+    if cfg.worker_settings:
+        # Force in-process teammates: a worker's own subagents then never open
+        # extra tmux panes in the workers window. Merges over the user's
+        # settings, so bypassPermissions etc. are preserved.
+        cmd += f" --settings {shlex.quote(cfg.worker_settings)}"
     return f"cd {shlex.quote(str(cfg.project_dir))} && exec {cmd}"
 
 

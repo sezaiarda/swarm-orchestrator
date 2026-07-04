@@ -8,6 +8,7 @@ command_file    = ".claude/commands/prime.md" # init master inspects/patches thi
 env_marker      = "SWARM_PHASE"
 done_hook       = 'swarm done "$SWARM_PHASE" ok'
 worker_cmd      = "claude -n worker:{phase}"  # launched as: cd <project> && exec <worker_cmd>
+worker_settings = '{"teammateMode":"in-process"}'  # worker's own teammates run in-process (no extra panes)
 # ready_marker auto-derives from `claude --version` (its banner). Set only to override.
 
 [tasks]

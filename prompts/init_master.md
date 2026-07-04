@@ -30,8 +30,9 @@ interactive:
   AskUserQuestion and build that phase directly.
 - **Completion hook**: at the end of a successful build, run the configured
   `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`). If already present, skip.
-Also add a one-line note: the slots already provide parallelism, so a worker
-should prefer NOT to spawn its own teammates.
+Do NOT restrict the worker from delegating: swarm workers already launch with
+`teammateMode=in-process`, so any teammates they spawn run in-process (no extra
+tmux panes) and cannot clutter the workers window.
 
 ## 4. Launch the initial batch, then idle
 AskUserQuestion-confirm the initial batch. For each chosen phase run

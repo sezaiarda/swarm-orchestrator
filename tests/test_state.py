@@ -54,6 +54,18 @@ def test_claim_and_free_slots():
     assert st.claim_slot("P5").id == 2
 
 
+def test_claim_rejects_duplicate_phase():
+    """A phase never occupies two slots (else `done` can't free both)."""
+    st = State.fresh(4)
+    first = st.claim_slot("P1")
+    assert first is not None and first.id == 0
+    assert st.claim_slot("P1") is None  # duplicate refused
+    other = st.claim_slot("P2")  # a different phase still claims
+    assert other is not None and other.id == 1
+    st.free_slot_for("P1")
+    assert st.claim_slot("P1").id == 0  # reclaimable once freed
+
+
 # -- flock check-and-set under real concurrency ---------------------------
 def test_concurrent_launch_never_double_claims(swarm):
     """8 concurrent `swarm launch` against 4 slots -> exactly 4 claim."""

@@ -158,7 +158,10 @@ class Supervisor:
     def _spawn_master(self, kind: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             master_pane = st.master_pane
-        self.master.spawn(kind, master_pane)
+        if not self.master.spawn(kind, master_pane):
+            # No master is running; do not claim one is alive (else the next
+            # `done` would inject into nothing). Owner sees spawn-master-failed.
+            return
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = True
 

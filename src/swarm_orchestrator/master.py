@@ -95,34 +95,46 @@ class Master:
             return self.proc is not None and self.proc.poll() is None
         return self.pane is not None
 
-    def spawn(self, kind: str, master_pane: str | None = None) -> None:
-        """Start a fresh master (``kind`` is ``init`` or ``step``)."""
+    def spawn(self, kind: str, master_pane: str | None = None) -> bool:
+        """Start a fresh master (``kind`` is ``init`` or ``step``).
+
+        Returns True on success. A False return means no master is running, so
+        the caller must NOT mark the master alive.
+        """
         cmd = master_command(self.cfg, kind)
         if self.cfg.driver == "bare":
-            self._spawn_bare(cmd)
+            ok = self._spawn_bare(cmd)
         else:
-            self._spawn_tmux(cmd, kind, master_pane)
-        self.log.line(f"ACTION spawn-master kind={kind}")
+            ok = self._spawn_tmux(cmd, kind, master_pane)
+        if ok:
+            self.log.line(f"ACTION spawn-master kind={kind}")
+        return ok
 
-    def _spawn_bare(self, cmd: str) -> None:
-        self.proc = subprocess.Popen(
-            ["/bin/sh", "-c", cmd],
-            cwd=str(self.cfg.project_dir),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
+    def _spawn_bare(self, cmd: str) -> bool:
+        try:
+            self.proc = subprocess.Popen(
+                ["/bin/sh", "-c", cmd],
+                cwd=str(self.cfg.project_dir),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+            return True
+        except OSError as exc:
+            self.log.line(f"ACTION spawn-master-failed bare {exc}")
+            return False
 
-    def _spawn_tmux(self, cmd: str, kind: str, master_pane: str | None) -> None:
+    def _spawn_tmux(self, cmd: str, kind: str, master_pane: str | None) -> bool:
         if master_pane is None:
             self.log.line("ACTION spawn-master-failed no-pane")
-            return
+            return False
         self.pane = master_pane
         tmux.respawn_pane(master_pane, cmd, env=_master_env(self.cfg))
         if not self.cfg.master_cmd:
             self._deliver_prompt(master_pane, kind)
+        return True
 
     def _deliver_prompt(self, pane: str, kind: str) -> None:
         """Type the init/step prompt into a freshly launched claude master.

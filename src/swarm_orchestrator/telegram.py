@@ -16,9 +16,12 @@ def notify(script: str, message: str) -> bool:
     """Send ``message``; return True on success. Never raises."""
     sink = os.environ.get("SWARM_TG_SINK")
     if sink:
-        with Path(sink).open("a", encoding="utf-8") as fh:
-            fh.write(message + "\n")
-        return True
+        try:
+            with Path(sink).open("a", encoding="utf-8") as fh:
+                fh.write(message + "\n")
+            return True
+        except OSError:
+            return False
     path = Path(script).expanduser()
     try:
         proc = subprocess.run(

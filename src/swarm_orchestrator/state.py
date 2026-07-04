@@ -57,7 +57,15 @@ class State:
         return next((s for s in self.slots if s.id == sid), None)
 
     def claim_slot(self, phase: str) -> Slot | None:
-        """Mark the first free slot busy for ``phase`` (check-and-set)."""
+        """Mark the first free slot busy for ``phase`` (check-and-set).
+
+        Returns ``None`` if no slot is free OR ``phase`` already occupies a slot
+        — one phase never holds two slots, so a duplicate/stale ``swarm launch``
+        (or a master acting on a stale context) can't strand a slot that
+        ``done`` would never free.
+        """
+        if any(s.busy and s.phase == phase for s in self.slots):
+            return None
         slot = next((s for s in self.slots if not s.busy), None)
         if slot is None:
             return None

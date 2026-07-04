@@ -139,5 +139,9 @@ def swarm(tmp_path: Path):
                 os.kill(st["supervisor_pid"], signal.SIGKILL)
             except OSError:
                 pass
-        # Reap any stray fake processes rooted at this throwaway project dir.
-        subprocess.run(["pkill", "-9", "-f", str(project)], check=False)
+        # Insurance net for any orphaned fake (e.g. a master left in
+        # `exec sleep infinity`). Workers `exec bash ./fake-*.sh` after a `cd`,
+        # so their argv is the relative script name -- match on that. The suite
+        # runs serially, so a global match cannot cross-kill another live test.
+        subprocess.run(["pkill", "-9", "-f", "fake-master.sh"], check=False)
+        subprocess.run(["pkill", "-9", "-f", "fake-worker.sh"], check=False)

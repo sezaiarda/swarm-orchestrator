@@ -23,13 +23,14 @@ echo "${SWARM_READY_MARKER:-fake-ready-marker}"
 # bare mode (stdin is /dev/null).
 IFS= read -r -t 1 _cmd 2>/dev/null || true
 
-sleep "${FAKE_WORKER_SLEEP:-2}"
-
 if [ "${FAKE_WORKER_PARK:-0}" = "1" ]; then
-    # Parked: a real worker would block on an AskUserQuestion. We just exit
-    # without `done`; the slot stays busy in state, so finish cannot fire.
+    # Parked: a real worker would block on an AskUserQuestion after a gate
+    # failure. We exit fast without `done`; the slot stays busy in state (the
+    # claim lives in state.json, not in this process), so finish cannot fire.
     exit 0
 fi
+
+sleep "${FAKE_WORKER_SLEEP:-2}"
 
 # shellcheck disable=SC2086
 ${SWARM_BIN:-swarm} done "$SWARM_PHASE" "${FAKE_WORKER_STATUS:-ok}"

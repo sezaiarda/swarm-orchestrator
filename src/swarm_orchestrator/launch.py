@@ -53,7 +53,7 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
     log.line(f"CLAIM {phase} slot={sid}")
 
     if cfg.driver == "bare":
-        ok = _launch_bare(cfg, phase)
+        ok = _launch_bare(cfg, phase, log)
     else:
         ok = _launch_tmux(cfg, phase, pane, log)
 
@@ -67,7 +67,7 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
     return True
 
 
-def _launch_bare(cfg: Config, phase: str) -> bool:
+def _launch_bare(cfg: Config, phase: str, log: Log) -> bool:
     """Spawn a detached worker process (no tmux)."""
     env = {**os.environ, **_worker_env(cfg, phase)}
     try:
@@ -80,7 +80,8 @@ def _launch_bare(cfg: Config, phase: str) -> bool:
             start_new_session=True,
         )
         return True
-    except OSError:
+    except OSError as exc:
+        log.line(f"LAUNCH-SPAWN-ERROR {phase} {exc}")
         return False
 
 
@@ -130,8 +131,24 @@ def _write_sentinel(cfg: Config, phase: str, status: str, note: str) -> None:
     os.replace(tmp, dest)
 
 
+def _log_poke_drop(cfg: Config, detail: str) -> None:
+    """Record a dropped FIFO poke centrally (best-effort; never raises)."""
+    try:
+        cfg.log_dir.mkdir(parents=True, exist_ok=True)
+        with cfg.supervisor_log.open("a", encoding="utf-8") as fh:
+            fh.write(f"POKE-DROP {detail}\n")
+    except OSError:
+        pass
+
+
 def _poke_fifo(cfg: Config, line: str) -> bool:
-    """Non-blocking one-line FIFO poke. Never hangs; skips if no reader."""
+    """Non-blocking one-line FIFO poke. Never hangs the caller.
+
+    A missing FIFO or ``ENXIO`` (no reader attached) is the expected
+    supervisor-down case and is skipped silently. Any *other* write error is
+    unexpected and logged to the supervisor log (no retry, no backstop) rather
+    than swallowed, so a genuinely dropped event is diagnosable.
+    """
     if not cfg.fifo_path.exists():
         return False
     try:
@@ -139,11 +156,13 @@ def _poke_fifo(cfg: Config, line: str) -> bool:
     except OSError as exc:
         if exc.errno == errno.ENXIO:  # no reader attached
             return False
-        raise
+        _log_poke_drop(cfg, f"open {line.strip()}: {exc}")
+        return False
     try:
         os.write(fd, line.encode("utf-8"))
         return True
-    except OSError:
+    except OSError as exc:
+        _log_poke_drop(cfg, f"write {line.strip()}: {exc}")
         return False
     finally:
         os.close(fd)

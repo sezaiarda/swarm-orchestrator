@@ -11,6 +11,7 @@ FIFO poke that must never hang the worker if the supervisor is down.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import shlex
 import subprocess
@@ -25,7 +26,56 @@ from .logutil import Log
 
 READY_TIMEOUT_S = 30.0
 POLL_INTERVAL_S = 0.25
-TRUST_PROMPT = "Do you trust the files"
+# Substrings that identify claude's workspace-trust dialog (matched
+# case-insensitively against joined pane text, so wrapping never hides them).
+TRUST_MARKERS = ("do you trust", "trust the files", "trust the authors")
+
+
+def _claude_config_path() -> Path:
+    """Where claude stores per-directory trust (`~/.claude.json`).
+
+    Overridable via ``SWARM_CLAUDE_CONFIG`` so tests never touch the real file.
+    """
+    override = os.environ.get("SWARM_CLAUDE_CONFIG")
+    return Path(override).expanduser() if override else Path.home() / ".claude.json"
+
+
+def pretrust_dir(path: Path, log: Log) -> None:
+    """Mark ``path`` trusted in claude's config so no folder-trust dialog appears.
+
+    Worktree mode launches every worker in a brand-new directory claude has never
+    seen, which would otherwise pop the "Do you trust the files in this folder?"
+    dialog for *every* phase. We pre-seed
+    ``projects[<path>].hasTrustDialogAccepted = true`` before the pane starts.
+    Best-effort and additive (never drops other projects), written atomically so a
+    concurrent claude write can't see a half file. A no-op if already trusted.
+    """
+    cfg_path = _claude_config_path()
+    key = str(path.resolve())
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    projects = data.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        projects, data["projects"] = {}, {}
+    entry = projects.setdefault(key, {})
+    if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+        return  # already trusted -> don't rewrite (avoids racing a live claude)
+    if not isinstance(entry, dict):
+        entry = projects[key] = {}
+    entry["hasTrustDialogAccepted"] = True
+    entry.setdefault("hasCompletedProjectOnboarding", True)
+    tmp = cfg_path.with_name(cfg_path.name + ".swarm-tmp")
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, cfg_path)
+        log.line(f"PRETRUST {key}")
+    except OSError as exc:
+        log.line(f"PRETRUST-FAIL {key} {exc}")
 
 
 def _worker_shell(cfg: Config, phase: str, cwd: Path) -> str:
@@ -96,6 +146,8 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
             telegram.notify(cfg.telegram_notify, f"swarm: worktree {phase} failed: {exc}")
             log.line(f"WORKTREE-FAIL {phase} {exc}")
             return False
+        # Pre-trust the fresh worktree so claude never pops the folder-trust dialog.
+        pretrust_dir(worktree, log)
 
     if cfg.driver == "bare":
         ok = _launch_bare(cfg, phase, worktree, log)
@@ -156,21 +208,29 @@ def _launch_tmux(
     return True
 
 
+def _trust_prompt_showing(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in TRUST_MARKERS)
+
+
 def await_ready(cfg: Config, pane: str, log: Log) -> bool:
-    """Wait until claude has booted (its version banner shows); dismiss a
-    first-run folder-trust prompt if one appears. Shared by worker, master, and
-    resolver pane launches so all three honour the trust prompt and the timeout.
-    Returns False on timeout (the caller treats it as a launch failure)."""
+    """Wait until claude has booted (its version banner shows), dismissing the
+    folder-trust dialog if it appears. Shared by worker, master, and resolver
+    pane launches. Returns False on timeout (a launch failure to the caller).
+
+    The trust dialog is checked on **every** poll (not latched) and re-accepted
+    with Enter each time it shows, and readiness is never declared while it is up
+    — so a dialog that renders late, re-prompts, or wraps can't be mistaken for a
+    ready pane. (Belt-and-suspenders: :func:`pretrust_dir` normally stops the
+    dialog from ever appearing.)"""
     needle = ready_needle(cfg)
     deadline = time.monotonic() + READY_TIMEOUT_S
-    dismissed = False
     while time.monotonic() < deadline:
-        text = tmux.capture(pane)
-        if TRUST_PROMPT in text and not dismissed:
-            tmux.send_enter(pane)
-            dismissed = True
+        text = tmux.capture_joined(pane)
+        if _trust_prompt_showing(text):
+            tmux.send_enter(pane)  # accept (default = trust); re-sent if it lingers
             time.sleep(POLL_INTERVAL_S)
-            continue
+            continue  # never 'ready' while the dialog is up
         if needle in text:
             return True
         time.sleep(POLL_INTERVAL_S)
@@ -178,8 +238,9 @@ def await_ready(cfg: Config, pane: str, log: Log) -> bool:
     return False
 
 
-# Backwards-compatible internal alias.
+# Backwards-compatible aliases.
 _await_ready = await_ready
+TRUST_PROMPT = TRUST_MARKERS[1]
 
 
 def _write_sentinel(cfg: Config, phase: str, status: str, note: str) -> None:

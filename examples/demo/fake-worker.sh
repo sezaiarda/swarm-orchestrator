@@ -16,6 +16,21 @@
 #   SWARM_PHASE         phase id (set by the launcher)
 set -u
 
+# Optional: simulate claude's workspace-trust dialog before the banner. It
+# RE-PROMPTS once (models a dialog that lingers / renders late), and only a bare
+# Enter dismisses it -- so a launcher that latches after one dismissal, or that
+# declares readiness while the dialog is up, gets stuck here and never boots.
+if [ "${FAKE_WORKER_TRUST:-0}" = "1" ]; then
+    for _ in 1 2; do
+        printf '\033[2J\033[H'   # redraw the screen (as claude's TUI does)
+        echo "╭─ Do you trust the files in this folder? ──────╮"
+        echo "│  1. Yes, proceed        2. No, exit           │"
+        echo "╰───────────────────────────────────────────────╯"
+        while IFS= read -r _l; do [ -z "$_l" ] && break; done
+    done
+    printf '\033[2J\033[H'       # dialog gone once dismissed
+fi
+
 echo "${SWARM_READY_MARKER:-fake-ready-marker}"
 
 # In tmux mode a "/prime <phase>" line is typed via send-keys; consume it if

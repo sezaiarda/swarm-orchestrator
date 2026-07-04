@@ -82,3 +82,26 @@ def test_worker_launch_readiness_sendkeys_and_done(monkeypatch, tmp_path):
     finally:
         log.close()
         session_mod.teardown(cfg)
+
+
+def test_worker_survives_the_folder_trust_dialog(monkeypatch, tmp_path):
+    """A real claude in a fresh worktree pops "Do you trust the files in this
+    folder?". The fake reproduces it (and re-prompts once). Readiness detection
+    must dismiss it reactively and still submit /prime — so the worker reaches
+    `done` rather than sitting on the dialog. A launcher that dismisses only once
+    (or treats the dialog as ready) would hang here and time out."""
+    monkeypatch.setenv("FAKE_WORKER_TRUST", "1")
+    monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(tmp_path / "claude.json"))  # never the real one
+    cfg = _cfg(monkeypatch, tmp_path, "trust")
+    log = Log(cfg.supervisor_log)
+    try:
+        session_mod.setup(cfg)
+        assert launch_mod.launch(cfg, "P0", log) is True
+        sentinel = cfg.done_dir / "P0.ok"
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not sentinel.is_file():
+            time.sleep(0.1)
+        assert sentinel.is_file(), "worker stuck at the folder-trust dialog"
+    finally:
+        log.close()
+        session_mod.teardown(cfg)

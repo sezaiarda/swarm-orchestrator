@@ -110,6 +110,64 @@ def test_max_workers_must_be_positive(tmp_path, monkeypatch):
         load(project_dir=str(tmp_path))
 
 
+# -- pre-trusting a worktree so claude never pops the folder-trust dialog --
+def test_pretrust_dir_seeds_trust_additively(tmp_path, monkeypatch):
+    import json
+
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator.logutil import Log
+
+    cfg_file = tmp_path / "claude.json"
+    cfg_file.write_text(
+        json.dumps({"projects": {"/other": {"hasTrustDialogAccepted": True, "lastCost": 1.5}}})
+    )
+    monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(cfg_file))
+    log = Log(tmp_path / "l.log")
+    try:
+        wt = tmp_path / "wt" / "P1"
+        wt.mkdir(parents=True)
+        launch_mod.pretrust_dir(wt, log)
+        data = json.loads(cfg_file.read_text())
+        assert data["projects"][str(wt.resolve())]["hasTrustDialogAccepted"] is True
+        assert data["projects"]["/other"]["lastCost"] == 1.5  # existing entry untouched
+        launch_mod.pretrust_dir(wt, log)  # idempotent, no error
+        assert (
+            json.loads(cfg_file.read_text())["projects"][str(wt.resolve())][
+                "hasTrustDialogAccepted"
+            ]
+            is True
+        )
+    finally:
+        log.close()
+
+
+def test_pretrust_dir_tolerates_missing_or_bad_config(tmp_path, monkeypatch):
+    import json
+
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator.logutil import Log
+
+    log = Log(tmp_path / "l.log")
+    try:
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        missing = tmp_path / "new.json"  # absent -> created
+        monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(missing))
+        launch_mod.pretrust_dir(wt, log)
+        assert json.loads(missing.read_text())["projects"][str(wt.resolve())][
+            "hasTrustDialogAccepted"
+        ] is True
+        bad = tmp_path / "bad.json"  # malformed -> replaced, never raises
+        bad.write_text("{ not json")
+        monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(bad))
+        launch_mod.pretrust_dir(wt, log)
+        assert json.loads(bad.read_text())["projects"][str(wt.resolve())][
+            "hasTrustDialogAccepted"
+        ] is True
+    finally:
+        log.close()
+
+
 # -- flock check-and-set under real concurrency ---------------------------
 def test_concurrent_launch_never_double_claims(swarm):
     """8 concurrent `swarm launch` against 4 slots -> exactly 4 claim."""

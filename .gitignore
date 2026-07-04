@@ -13,3 +13,6 @@ wheels/
 .swarm/
 *.log
 /state/
+
+# local-only audit deliverable — never tracked
+/audit/

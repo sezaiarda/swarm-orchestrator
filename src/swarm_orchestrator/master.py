@@ -137,10 +137,12 @@ class Master:
         return True
 
     def _deliver_prompt(self, pane: str, kind: str) -> None:
-        """Type the init/step prompt into a freshly launched claude master.
+        """Point a freshly launched claude master at its prompt file.
 
-        Unvalidated against real ``claude`` (owner-supervised smoke, step 6);
-        the fake-master override never reaches this path.
+        Delivered as ONE line with no embedded newlines: tmux ``send-keys``
+        submits on every newline, so pasting the multi-line prompt file would
+        fire it off line-by-line. We tell the master to *read* the file instead.
+        The fake-master override never reaches this path.
         """
         prompt_file = (
             Path(__file__).resolve().parent.parent.parent
@@ -155,7 +157,11 @@ class Master:
             if self.cfg.ready_marker in tmux.capture(pane):
                 break
             time.sleep(_POLL_S)
-        tmux.send_literal(pane, prompt_file.read_text(encoding="utf-8"))
+        line = (
+            f"Read {prompt_file} and follow every instruction in it exactly. "
+            f"You are orchestrating the project at {self.cfg.project_dir}."
+        )
+        tmux.send_literal(pane, line)
         tmux.send_enter(pane)
 
     def inject(self, text: str) -> None:

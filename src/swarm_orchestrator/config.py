@@ -127,7 +127,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             "SWARM_WORKER_CMD", worker.get("worker_cmd", "claude -n worker:{phase}")
         ),
         ready_marker=os.environ.get(
-            "SWARM_READY_MARKER", worker.get("ready_marker", "? for shortcuts")
+            # Idle-input hint present in every permission mode on claude v2.1.201
+            # (bottom bar: "… (shift+tab to cycle) …"). Empirically pinned.
+            "SWARM_READY_MARKER", worker.get("ready_marker", "shift+tab to cycle")
         ),
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
         roadmap=str(tasks.get("roadmap", "docs/ROADMAP-MASTER.md")),

@@ -1,9 +1,9 @@
 """Tier B: real tmux mechanics (no claude).
 
-Exercises session bring-up + tagged slots, the worker launcher's real
-respawn-pane / readiness-detect / send-keys / echo-verify path against the fake
-worker banner, and level-triggered teammate break-out. Skipped if tmux is
-absent. Each test uses a throwaway session and tears it down in ``finally``.
+Exercises session bring-up + tagged slots and the worker launcher's real
+respawn-pane / readiness-detect / send-submit path against the fake worker
+banner. Skipped if tmux is absent. Each test uses a throwaway session and tears
+it down in ``finally``.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def test_session_setup_creates_four_tagged_slots(monkeypatch, tmp_path):
         session_mod.setup(cfg)
         assert tmux.session_exists(cfg.session)
         st = state_mod.read(cfg)
-        assert set(st.windows) == {"master", "workers", "teammates"}
+        assert set(st.windows) == {"master", "workers"}
         assert st.master_pane
         pairs = tmux.list_panes_with_slot(st.windows["workers"])
         assert len(pairs) == 4
@@ -81,27 +81,4 @@ def test_worker_launch_readiness_sendkeys_and_done(monkeypatch, tmp_path):
         assert sentinel.is_file(), "worker never signalled done"
     finally:
         log.close()
-        session_mod.teardown(cfg)
-
-
-def test_teammate_pane_is_broken_out(monkeypatch, tmp_path):
-    cfg = _cfg(monkeypatch, tmp_path, "teammate")
-    try:
-        session_mod.setup(cfg)
-        st = state_mod.read(cfg)
-        workers, teammates = st.windows["workers"], st.windows["teammates"]
-
-        # Simulate a claude teammate: an untagged pane in the workers window.
-        tmux.run(["split-window", "-t", workers, "exec sleep infinity"], check=True)
-        tmux.select_layout_tiled(workers)
-        assert len(tmux.list_panes(workers)) == 5
-
-        moved = tmux.reconcile_teammates(workers, teammates)
-        assert len(moved) == 1
-
-        pairs = tmux.list_panes_with_slot(workers)
-        assert len(pairs) == 4  # slot count stays 4
-        assert sorted(tag for _, tag in pairs) == ["0", "1", "2", "3"]
-        assert len(tmux.list_panes(teammates)) == 2  # placeholder + moved
-    finally:
         session_mod.teardown(cfg)

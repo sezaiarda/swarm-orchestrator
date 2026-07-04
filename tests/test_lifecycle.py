@@ -107,6 +107,24 @@ def test_pause_holds_then_resume_advances(swarm):
     ), swarm.log_text()
 
 
+def test_duplicate_done_is_ignored(swarm):
+    """A second `swarm done` for an already-finished phase is a true no-op."""
+    swarm.env["FAKE_WORKER_PARK"] = "1"  # workers hold; test drives `done`
+    swarm.up()
+    assert swarm.wait(lambda: swarm.busy_phases() == ["P0"], timeout=20), swarm.log_text()
+
+    swarm.cli("done", "P0", "ok")  # P0 completes -> fan-out launches
+    assert swarm.wait(
+        lambda: set(swarm.busy_phases()) == {"P1", "P2", "P3"}, timeout=20
+    ), swarm.log_text()
+
+    busy_before = sorted(swarm.busy_phases())
+    swarm.cli("done", "P0", "ok")  # duplicate -> must be ignored
+    time.sleep(1.5)
+    assert sorted(swarm.busy_phases()) == busy_before  # nothing disturbed
+    assert "DONE-DUPLICATE" in swarm.log_text()
+
+
 def test_done_never_hangs_when_supervisor_down(swarm):
     """Assertion 4: `swarm done` returns immediately with no supervisor."""
     import os

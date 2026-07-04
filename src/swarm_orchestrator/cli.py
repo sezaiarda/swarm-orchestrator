@@ -2,7 +2,7 @@
 
 Thin dispatch over the library. Commands that only signal the supervisor poke
 the FIFO (best-effort, never hang); commands that own an action (launch, done,
-free, skip, reap, status) act directly under the state lock.
+free, skip, status) act directly under the state lock.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from . import session as session_mod
 from . import state as state_mod
 from . import supervisor as sup_mod
 from . import telegram
-from . import tmux
 from .config import Config, load
 from .logutil import Log
 from .master import build_context
@@ -120,24 +119,8 @@ def cmd_bootstrap(cfg: Config) -> int:
     return 0
 
 
-def cmd_reconcile(cfg: Config) -> int:
-    _poke(cfg, "reconcile")
-    return 0
-
-
 def cmd_finish(cfg: Config) -> int:
     _poke(cfg, "shutdown")
-    return 0
-
-
-def cmd_reap(cfg: Config) -> int:
-    if cfg.driver != "tmux":
-        return 0
-    st = state_mod.read(cfg)
-    teammates = st.windows.get("teammates")
-    if teammates:
-        for pane in tmux.list_panes(teammates):
-            tmux.kill_pane(pane)
     return 0
 
 
@@ -203,9 +186,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("context", help="print the read-only state snapshot (JSON)")
     sub.add_parser("master-idle", help="signal the master finished a pass")
     sub.add_parser("bootstrap", help="ask the supervisor to spawn the init master")
-    sub.add_parser("reconcile", help="break out stray teammate panes")
     sub.add_parser("finish", help="ask the supervisor to stop now")
-    sub.add_parser("reap", help="kill parked teammate panes")
     sub.add_parser("status", help="human-readable state dump")
     sub.add_parser("pause", help="stop launching new workers (in-flight finish)")
     sub.add_parser("resume", help="resume launching workers into free slots")
@@ -247,12 +228,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_master_idle(cfg)
     if cmd == "bootstrap":
         return cmd_bootstrap(cfg)
-    if cmd == "reconcile":
-        return cmd_reconcile(cfg)
     if cmd == "finish":
         return cmd_finish(cfg)
-    if cmd == "reap":
-        return cmd_reap(cfg)
     if cmd == "free":
         return cmd_free(cfg, args.target)
     if cmd == "skip":

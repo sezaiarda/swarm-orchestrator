@@ -117,10 +117,6 @@ def set_slot(pane_id: str, slot: int) -> None:
     run(["set-option", "-p", "-t", pane_id, SLOT_OPT, str(slot)], check=True)
 
 
-def select_layout_tiled(window_id: str) -> None:
-    run(["select-layout", "-t", window_id, "tiled"])
-
-
 def respawn_pane(pane_id: str, cmd: str, env: dict[str, str] | None = None) -> None:
     """Kill and respawn ``pane_id`` running ``cmd`` (pane id + tags survive)."""
     args = ["respawn-pane", "-k", "-t", pane_id]
@@ -173,27 +169,3 @@ def send_submit(pane_id: str, text: str, settle: float = 0.5) -> None:
     send_enter(pane_id)
 
 
-def join_pane(src_pane: str, dst_window: str) -> None:
-    """Move ``src_pane`` into ``dst_window`` (process-safe; %id is stable)."""
-    run(["join-pane", "-d", "-s", src_pane, "-t", dst_window])
-
-
-def kill_pane(pane_id: str) -> None:
-    run(["kill-pane", "-t", pane_id])
-
-
-def reconcile_teammates(workers_win: str, teammates_win: str) -> list[str]:
-    """Break out untagged (teammate) panes from the workers window.
-
-    Level-triggered: any pane in ``workers_win`` lacking an ``@swarm_slot`` tag
-    is joined into ``teammates_win`` and the workers window is re-tiled. Returns
-    the moved pane ids. Moving a pane never signals its process.
-    """
-    moved: list[str] = []
-    for pane, tag in list_panes_with_slot(workers_win):
-        if tag == "":
-            join_pane(pane, teammates_win)
-            moved.append(pane)
-    if moved:
-        select_layout_tiled(workers_win)
-    return moved

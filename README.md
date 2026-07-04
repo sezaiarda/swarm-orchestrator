@@ -55,9 +55,10 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
    ```
 
 ### What happens
-- `swarm up` builds a tmux session `swarm` (a **master** window, a **workers**
-  window of 4 tiled slots, a **teammates** parking window), starts the
-  background **supervisor**, and launches the **init master**.
+- `swarm up` builds a tmux session `swarm` (a **master** window and a **workers**
+  window of 4 tiled slots), starts the background **supervisor**, and launches
+  the **init master**. Workers run their own teammates in-process, so no extra
+  panes ever appear.
 - The init master checks telegram, reads your ledger, (offers to) patch the
   worker command, asks you to confirm the first batch, then `swarm launch`es up
   to 4 phases — each a real `claude` running `/prime <phase>` in a slot.
@@ -66,7 +67,7 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
   slot. Loops until nothing is left, then `finish` telegrams you.
 
 ### Watching & answering
-- **Attach:** `tmux attach -t swarm`; switch windows `Ctrl-b 0/1/2`, detach
+- **Attach:** `tmux attach -t swarm`; switch windows `Ctrl-b 0/1`, detach
   `Ctrl-b d`.
 - A worker only stops for you when it genuinely needs a decision — it
   **telegram-pings first**, then asks in its own pane; switch to the workers
@@ -144,8 +145,8 @@ uv run pytest
   sentinel plumbing, dep gating, fan-out, injection, convergence, parked-worker
   deadlock-freedom, and best-effort `done` that never hangs.
 - **Tier B** (`test_selftest.py`, real tmux, no claude) — session bring-up +
-  tagged slots, the launcher's respawn-pane / readiness-detect / send-keys /
-  echo-verify path against the fake banner, and teammate break-out.
+  tagged slots, and the launcher's respawn-pane / readiness-detect / send-submit
+  path against the fake banner.
 - **Unit** (`test_state.py`) — slot claim, `flock` under real concurrency, the
   dependency resolver, and the FIFO line format.
 

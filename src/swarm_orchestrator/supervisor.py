@@ -21,7 +21,7 @@ import signal
 
 from . import master as master_mod
 from . import state as state_mod
-from . import telegram, tmux
+from . import telegram
 from .config import Config
 from .logutil import Log
 
@@ -86,8 +86,6 @@ class Supervisor:
                 self._handle(raw.decode("utf-8", "replace").strip())
                 if self._stop:
                     break
-            if not self._stop:
-                self._reconcile()
         if self.master.is_alive():
             self.master.kill()  # never orphan a master on the way out
             with state_mod.transaction(self.cfg) as st:
@@ -112,8 +110,6 @@ class Supervisor:
             self._on_bootstrap()
         elif verb == "resume":
             self._on_resume()
-        elif verb == "reconcile":
-            self._reconcile()
         elif verb == "shutdown":
             self._stop = True
         else:
@@ -135,10 +131,16 @@ class Supervisor:
     # -- rule 1: done -----------------------------------------------------
     def _on_done(self, phase: str, status: str) -> None:
         with state_mod.transaction(self.cfg) as st:
+            already = phase in st.done
             st.mark_done(phase, status)
             freed = st.free_slot_for(phase)
             paused = st.paused
         freed_id = freed.id if freed else None
+        if already and freed is None:
+            # Duplicate `swarm done` for an already-completed phase (its slot was
+            # already freed/reused). True no-op: don't spuriously spawn/inject.
+            self.log.line(f"DONE-DUPLICATE {phase} ignored")
+            return
         self.log.line(f"EVENT done {phase} {status} freed_slot={freed_id}")
         if paused:
             # Paused: the slot is freed but we launch nothing and hold — no
@@ -190,7 +192,6 @@ class Supervisor:
             if st.finished:
                 return
             st.finished = True
-        self._reap_teammates()
         msg = f"swarm finished: {done_count} phase(s) done"
         if leftover:
             # Accepted-race surfacing: a nudge was lost, so these ready phases
@@ -202,29 +203,6 @@ class Supervisor:
         telegram.notify(self.cfg.telegram_notify, msg)
         self.log.line("ACTION finish")
         self._stop = True
-
-    # -- teammate hygiene (tmux only) -------------------------------------
-    def _reconcile(self) -> None:
-        if self.cfg.driver != "tmux":
-            return
-        with state_mod.transaction(self.cfg) as st:
-            workers = st.windows.get("workers")
-            teammates = st.windows.get("teammates")
-        if not workers or not teammates:
-            return
-        moved = tmux.reconcile_teammates(workers, teammates)
-        if moved:
-            self.log.line(f"RECONCILE moved={moved}")
-
-    def _reap_teammates(self) -> None:
-        if self.cfg.driver != "tmux":
-            return
-        with state_mod.transaction(self.cfg) as st:
-            teammates = st.windows.get("teammates")
-        if not teammates:
-            return
-        for pane in tmux.list_panes(teammates):
-            tmux.kill_pane(pane)
 
 
 def main(cfg: Config) -> None:

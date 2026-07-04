@@ -1,9 +1,10 @@
 """Bring up / tear down the ``swarm`` tmux topology.
 
-Layout: a ``master`` window (1 idle pane), a ``workers`` window split into
-``max_workers`` tiled panes each tagged ``@swarm_slot 0..N-1``, and a
-``teammates`` parking window. Windows are referenced by captured id everywhere
-downstream; slot pane ids are recorded in state so accounting is tag-driven.
+Layout: a ``master`` window (1 idle pane) and a ``workers`` window split into
+``max_workers`` tiled panes each tagged ``@swarm_slot 0..N-1``. Windows are
+referenced by captured id everywhere downstream; slot pane ids are recorded in
+state so accounting is tag-driven (workers run their own teammates in-process,
+so no teammate panes ever appear).
 """
 
 from __future__ import annotations
@@ -29,12 +30,9 @@ def setup(cfg: Config) -> dict[str, str]:
     for i, pane in enumerate(slot_panes):
         tmux.set_slot(pane, i)
 
-    teammates_win = tmux.new_window(cfg.session, "teammates")
-
     windows = {
         "master": master_win,
         "workers": workers_win,
-        "teammates": teammates_win,
     }
     with state_mod.transaction(cfg) as st:
         st.windows = windows

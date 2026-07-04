@@ -316,6 +316,20 @@ def test_dirty_umbrella_tree_is_held_not_wedged(monkeypatch, tmp_path):
         log.close()
 
 
+# -- Test: an untracked file in the umbrella does NOT hold the queue as DIRTY
+def test_untracked_file_does_not_hold_integrate(monkeypatch, tmp_path):
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        _worker(cfg, "P1", {"p1.txt": "1"}, log)
+        # A stray untracked file (like a runtime .swarm.toml) must not wedge things.
+        (project / ".swarm.toml").write_text("[git]\nisolation='worktree'\n")
+        assert gitq.integrate(cfg, "P1", log) == gitq.MERGED  # merged, not held DIRTY
+    finally:
+        log.close()
+
+
 # -- Test: a push-time / base conflict leaves a RESOLVABLE mid-merge, not a wedge
 def test_push_time_conflict_is_resolvable(monkeypatch, tmp_path):
     project, origin = _make_project(tmp_path)

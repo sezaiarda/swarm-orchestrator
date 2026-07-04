@@ -138,7 +138,18 @@ def _rebase_in_progress(repo: Path) -> bool:
 
 
 def _dirty(repo: Path) -> bool:
-    return bool(_git(repo, "status", "--porcelain", check=False).stdout.strip())
+    """True if the canonical tree has uncommitted changes to TRACKED files.
+
+    Untracked files are ignored on purpose: they don't block a clean merge (a
+    merge that would actually overwrite one fails on its own and surfaces as a
+    CONFLICT), so a stray untracked file — e.g. an uncommitted ``.swarm.toml`` at
+    the project root — must not falsely hold the whole merge-queue as DIRTY.
+    """
+    return bool(
+        _git(
+            repo, "status", "--porcelain", "--untracked-files=no", check=False
+        ).stdout.strip()
+    )
 
 
 def _current_branch(repo: Path) -> str:

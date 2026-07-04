@@ -9,6 +9,7 @@ environment variables so the hermetic tests never touch tmux or ``claude``.
 from __future__ import annotations
 
 import os
+import subprocess
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,9 +128,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             "SWARM_WORKER_CMD", worker.get("worker_cmd", "claude -n worker:{phase}")
         ),
         ready_marker=os.environ.get(
-            # Idle-input hint present in every permission mode on claude v2.1.201
-            # (bottom bar: "… (shift+tab to cycle) …"). Empirically pinned.
-            "SWARM_READY_MARKER", worker.get("ready_marker", "shift+tab to cycle")
+            # "" => auto: match the running claude version (see ready_needle).
+            # An explicit value (config or SWARM_READY_MARKER) overrides.
+            "SWARM_READY_MARKER", worker.get("ready_marker", "")
         ),
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
         roadmap=str(tasks.get("roadmap", "docs/ROADMAP-MASTER.md")),
@@ -141,3 +142,28 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         driver=driver,
         master_cmd=os.environ.get("SWARM_MASTER_CMD", swarm.get("master_cmd", "")),
     )
+
+
+def claude_version() -> str:
+    """Best-effort ``claude --version`` token (e.g. ``2.1.201``), else ''."""
+    try:
+        r = subprocess.run(
+            ["claude", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    parts = (r.stdout or "").split()
+    return parts[0] if parts else ""
+
+
+def ready_needle(cfg: Config) -> str:
+    """A string meaning "claude has booted" in a pane.
+
+    An explicit ``ready_marker`` wins (tests inject a fake banner via
+    ``SWARM_READY_MARKER``). Otherwise match the running claude version — the
+    boot banner prints ``Claude Code vX.Y.Z`` — falling back to the
+    always-present ``Claude Code``.
+    """
+    if cfg.ready_marker:
+        return cfg.ready_marker
+    return claude_version() or "Claude Code"

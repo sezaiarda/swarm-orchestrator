@@ -12,17 +12,15 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
 from pathlib import Path
 
 from . import ledger as ledger_mod
 from . import tmux
-from .config import Config
+from .config import Config, ready_needle
 from .logutil import Log
 from .state import State
 
 _READY_TIMEOUT_S = 30.0
-_POLL_S = 0.25
 
 # Env vars a master pane needs so its `swarm` calls find this run. Forwarded on
 # the tmux respawn (bare masters inherit the supervisor's env directly).
@@ -152,17 +150,12 @@ class Master:
         if not prompt_file.is_file():
             self.log.line(f"ACTION prompt-missing {prompt_file}")
             return
-        deadline = time.monotonic() + _READY_TIMEOUT_S
-        while time.monotonic() < deadline:
-            if self.cfg.ready_marker in tmux.capture(pane):
-                break
-            time.sleep(_POLL_S)
+        tmux.await_text(pane, ready_needle(self.cfg), _READY_TIMEOUT_S)
         line = (
             f"Read {prompt_file} and follow every instruction in it exactly. "
             f"You are orchestrating the project at {self.cfg.project_dir}."
         )
-        if not tmux.submit_line(pane, line):
-            self.log.line("ACTION deliver-prompt-failed")
+        tmux.send_submit(pane, line)
 
     def inject(self, text: str) -> None:
         """Nudge the live master with one line of guidance."""

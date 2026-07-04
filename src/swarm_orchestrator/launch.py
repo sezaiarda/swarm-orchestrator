@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import state as state_mod
 from . import telegram, tmux
-from .config import Config
+from .config import Config, ready_needle
 from .logutil import Log
 
 READY_TIMEOUT_S = 30.0
@@ -94,14 +94,14 @@ def _launch_tmux(cfg: Config, phase: str, pane: str | None, log: Log) -> bool:
     if not _await_ready(cfg, pane, log):
         return False
     command = cfg.command_template.format(phase=phase)
-    if tmux.submit_line(pane, command):
-        return True
-    log.line(f"SUBMIT-FAIL {phase}")
-    return False
+    tmux.send_submit(pane, command)
+    return True
 
 
 def _await_ready(cfg: Config, pane: str, log: Log) -> bool:
-    """Poll capture-pane for the readiness marker; dismiss a trust prompt."""
+    """Wait until claude has booted (its version banner shows); dismiss a
+    first-run folder-trust prompt if one appears."""
+    needle = ready_needle(cfg)
     deadline = time.monotonic() + READY_TIMEOUT_S
     dismissed = False
     while time.monotonic() < deadline:
@@ -111,7 +111,7 @@ def _await_ready(cfg: Config, pane: str, log: Log) -> bool:
             dismissed = True
             time.sleep(POLL_INTERVAL_S)
             continue
-        if cfg.ready_marker in text:
+        if needle in text:
             return True
         time.sleep(POLL_INTERVAL_S)
     log.line(f"READY-TIMEOUT pane={pane}")

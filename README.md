@@ -39,18 +39,65 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
 
 ## Use
 
-Add a `.swarm.toml` to your project (see `examples/multi-repo.swarm.toml`), then:
+1. **Add a `.swarm.toml`** to your project root (see
+   `examples/multi-repo.swarm.toml`).
+2. **The worker command needs a completion hook.** The command named in
+   `[worker].command_file` must, *when `$SWARM_PHASE` is set*, (a) skip any
+   initial "which phase?" prompt and build `$SWARM_PHASE` directly, and (b) run
+   `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`) once the phase is green.
+   On the first `swarm up` the **init master** proposes those two edits for you
+   to approve — or add them yourself.
+3. **Run it** from the project root (or pass `--project-dir`):
+
+   ```bash
+   swarm up               # create tmux session + supervisor + init master
+   tmux attach -t swarm   # watch — window 0 = master, window 1 = 4 workers
+   ```
+
+### What happens
+- `swarm up` builds a tmux session `swarm` (a **master** window, a **workers**
+  window of 4 tiled slots, a **teammates** parking window), starts the
+  background **supervisor**, and launches the **init master**.
+- The init master checks telegram, reads your ledger, (offers to) patch the
+  worker command, asks you to confirm the first batch, then `swarm launch`es up
+  to 4 phases — each a real `claude` running `/prime <phase>` in a slot.
+- When a worker finishes it calls `swarm done`; the supervisor spawns a fresh
+  master (or nudges the live one) to launch the next ready phase into the freed
+  slot. Loops until nothing is left, then `finish` telegrams you.
+
+### Watching & answering
+- **Attach:** `tmux attach -t swarm`; switch windows `Ctrl-b 0/1/2`, detach
+  `Ctrl-b d`.
+- A worker only stops for you when it genuinely needs a decision — it
+  **telegram-pings first**, then asks in its own pane; switch to the workers
+  window and answer there. The master's questions (batch confirm, the `prime.md`
+  diff) show in the master window.
+
+### Owner escape hatches
+| command | use |
+|---|---|
+| `swarm status` | human-readable state dump |
+| `swarm context` | the JSON snapshot the master reasons over |
+| `swarm launch <phase>` | manually start a phase in a free slot |
+| `swarm free <slot\|phase>` | free a stuck slot |
+| `swarm skip <phase>` | mark a phase done without building it |
+| `swarm down` | stop the supervisor + tear the session down |
+
+> `finish` leaves the tmux windows up so you can inspect results; run
+> `swarm down` to tear everything down.
+
+## Deploy a multi-repo project
 
 ```bash
-swarm up        # set up the tmux session + start the supervisor + init master
-swarm status    # human-readable state dump
-swarm down      # stop the supervisor + tear down
+uv tool install --editable ~/Projects/swarm-orchestrator          # once
+cp ~/projects/swarm-orchestrator/examples/multi-repo.swarm.toml \
+   ~/projects/myproject/.swarm.toml                               # once
+cd ~/projects/myproject && swarm up && tmux attach -t swarm       # go
 ```
 
-Everything else (`launch`, `done`, `context`, `master-idle`, `reconcile`,
-`reap`, `free`, `skip`, `finish`) is used by the master/worker sessions or as an
-owner escape hatch. `swarm context` prints the read-only JSON snapshot the
-master reasons over.
+The multi-repo example config points the master at `docs/PHASE-LEDGER.md`, excludes the
+externally-blocked phases (`intake-P1..5`, `I1..6`), and has the init master
+patch `.claude/commands/prime.md` on first run. Stop anytime with `swarm down`.
 
 ## Config (`.swarm.toml`)
 

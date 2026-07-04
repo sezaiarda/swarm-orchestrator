@@ -151,11 +151,6 @@ def capture_joined(pane_id: str) -> str:
     return run(["capture-pane", "-p", "-J", "-t", pane_id]).stdout
 
 
-def clear_input(pane_id: str) -> None:
-    """Clear the current input line (readline ``C-u``)."""
-    run(["send-keys", "-t", pane_id, "C-u"])
-
-
 def _poll(pred: Callable[[], bool], timeout: float, interval: float = 0.15) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -165,22 +160,17 @@ def _poll(pred: Callable[[], bool], timeout: float, interval: float = 0.15) -> b
     return False
 
 
-def submit_line(pane_id: str, text: str, present_timeout: float = 10.0) -> bool:
-    """Type ``text`` into ``pane_id`` and submit it, race-free.
+def await_text(pane_id: str, needle: str, timeout: float = 30.0) -> bool:
+    """Poll (bounded) until ``needle`` appears in the pane — i.e. claude booted."""
+    return _poll(lambda: needle in capture_joined(pane_id), timeout)
 
-    A bare ``send_literal`` + ``send_enter`` can fire Enter *before* the typed
-    text has landed in the input box — Enter then submits an empty box and the
-    text is left sitting, unsent. So we type, poll until the full text is
-    present, *then* Enter. Retries once (clearing partial input first). Returns
-    True once the text was confirmed present and Enter was sent.
-    """
-    for _ in range(2):
-        send_literal(pane_id, text)
-        if _poll(lambda: text in capture_joined(pane_id), present_timeout):
-            send_enter(pane_id)
-            return True
-        clear_input(pane_id)
-    return False
+
+def send_submit(pane_id: str, text: str, settle: float = 0.5) -> None:
+    """Type ``text`` then submit it. The short settle lets the keystrokes land
+    before Enter, so Enter can't race ahead and submit an empty box."""
+    send_literal(pane_id, text)
+    time.sleep(settle)
+    send_enter(pane_id)
 
 
 def join_pane(src_pane: str, dst_window: str) -> None:

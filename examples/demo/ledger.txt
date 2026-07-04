@@ -1,0 +1,7 @@
+# Hermetic demo ledger. One phase per line; `needs:` lists dependencies.
+# Shape: single launch (P0) -> 3-way fan-out (P1,P2,P3) -> dep-gated join (P4).
+P0
+P1 needs:P0
+P2 needs:P0
+P3 needs:P0
+P4 needs:P1,P2

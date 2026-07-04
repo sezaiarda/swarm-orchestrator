@@ -1,0 +1,22 @@
+[project]
+name = "swarm-orchestrator"
+version = "0.1.0"
+description = "Run many claude sessions in tmux to build a project's phases in parallel"
+readme = "README.md"
+authors = [
+    { name = "Arda Sezai" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+swarm = "swarm_orchestrator.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.24,<0.12.0"]
+build-backend = "uv_build"

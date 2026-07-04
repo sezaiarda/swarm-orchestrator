@@ -1,0 +1,21 @@
+[swarm]
+max_workers = 4
+master_model = ""                 # "" = inherit; else "opus"/"sonnet"/...
+
+[worker]
+command_template = "/prime {phase}"          # sent via send-keys into each slot
+command_file    = ".claude/commands/prime.md" # init master inspects/patches this
+env_marker      = "SWARM_PHASE"
+done_hook       = 'swarm done "$SWARM_PHASE" ok'
+
+[tasks]
+ledger  = "docs/PHASE-LEDGER.md"   # master reads this directly (no brittle regex parse)
+roadmap = "docs/ROADMAP-MASTER.md"
+exclude = ["intake-P1","intake-P2","intake-P3","intake-P4","intake-P5",
+           "I1","I2","I3","I4","I5","I6"]      # externally blocked
+
+[telegram]
+notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
+
+[tmux]
+session = "swarm"

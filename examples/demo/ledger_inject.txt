@@ -1,0 +1,7 @@
+# Injection-test ledger: two independent roots, each with one successor.
+# Finishing A and B (near-simultaneously, while a master is ALIVE) frees two
+# slots that each get a successor (X, Y) injected into the live master.
+A
+B
+X needs:A
+Y needs:B

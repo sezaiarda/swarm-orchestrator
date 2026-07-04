@@ -1,0 +1,26 @@
+# Hermetic demo config: bare driver + fake master/worker scripts, no tmux, no
+# claude. Point `swarm --project-dir examples/demo` at this to dry-run the
+# lifecycle. The tests build equivalent configs pointing at absolute fixture
+# paths in a temp dir.
+[swarm]
+max_workers = 4
+driver = "bare"
+master_cmd = "bash ./fake-master.sh"
+
+[worker]
+command_template = "/prime {phase}"
+worker_cmd = "bash ./fake-worker.sh"
+ready_marker = "fake-ready-marker"
+env_marker = "SWARM_PHASE"
+done_hook = 'swarm done "$SWARM_PHASE" ok'
+
+[tasks]
+ledger = "ledger.txt"
+roadmap = "ledger.txt"
+exclude = []
+
+[telegram]
+notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
+
+[tmux]
+session = "swarm-demo"

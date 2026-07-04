@@ -40,6 +40,26 @@ def test_prose_ledger_yields_no_false_phases():
     assert graph == {}
 
 
+def test_needs_list_tolerates_whitespace_but_keeps_trailing_note():
+    # Spaces after the colon / commas must NOT silently drop dependencies.
+    assert ledger.parse("P4 needs: P1, P2\n")["P4"] == {"P1", "P2"}
+    assert ledger.parse("P4 needs:P1, P2\n")["P4"] == {"P1", "P2"}
+    assert ledger.parse("P4 needs:P1,P2\n")["P4"] == {"P1", "P2"}
+    # A prose trailing note (not a comma-continuation) is still ignored.
+    assert ledger.parse("P4 needs:P1,P2 (blocked externally)\n")["P4"] == {"P1", "P2"}
+    assert ledger.parse("P4 needs: P1, P2 optional-ish note\n")["P4"] == {"P1", "P2"}
+
+
+def test_validate_detects_cycles_self_and_unknown_deps():
+    issues = ledger.validate(ledger.parse("A needs:B\nB needs:A\nC needs:C\nD needs:Z\n"))
+    joined = " | ".join(issues)
+    assert "cycle" in joined  # A <-> B
+    assert "self-dependency: C" in joined
+    assert "unknown dependency: D needs Z" in joined
+    # A clean ledger has no issues.
+    assert ledger.validate(ledger.parse("P0\nP1 needs:P0\n")) == []
+
+
 # -- slot accounting (in-memory) ------------------------------------------
 def test_claim_and_free_slots():
     st = State.fresh(4)
@@ -64,6 +84,30 @@ def test_claim_rejects_duplicate_phase():
     assert other is not None and other.id == 1
     st.free_slot_for("P1")
     assert st.claim_slot("P1").id == 0  # reclaimable once freed
+
+
+# -- config: state-dir slug is path-unique; max_workers is validated ------
+def test_default_slug_is_unique_per_path(tmp_path):
+    from swarm_orchestrator.config import _default_slug
+
+    a = tmp_path / "left" / "myproject"
+    b = tmp_path / "right" / "myproject"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    # Same basename, different parents -> distinct slugs (no shared state dir).
+    assert _default_slug(a) != _default_slug(b)
+    assert _default_slug(a).startswith("myproject-")
+
+
+def test_max_workers_must_be_positive(tmp_path, monkeypatch):
+    import pytest
+
+    from swarm_orchestrator.config import load
+
+    monkeypatch.delenv("SWARM_SLUG", raising=False)
+    (tmp_path / ".swarm.toml").write_text("[swarm]\nmax_workers = 0\n")
+    with pytest.raises(ValueError):
+        load(project_dir=str(tmp_path))
 
 
 # -- flock check-and-set under real concurrency ---------------------------

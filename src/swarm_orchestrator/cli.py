@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -52,20 +53,33 @@ def _wait_supervisor_up(cfg: Config, timeout: float = 10.0) -> int | None:
 
 # -- commands -------------------------------------------------------------
 def _reconcile_orphans(cfg: Config) -> None:
-    """Integrate/GC leftover ``swarm/*`` branches before the supervisor starts.
+    """Rehydrate done-state and reconcile leftover ``swarm/*`` branches on ``up``.
 
-    Git-state-derived (not lifecycle): a branch whose phase is done is GC'd, an
-    orphan (worker committed, supervisor died before ``done``) is integrated and
-    then marked done so the master won't rebuild it.
+    Sentinel-driven, not topology-derived: the durable ``swarm done`` sentinels
+    are the record of which phases actually finished. We first rehydrate ``done``
+    from them (so a restart doesn't rebuild completed phases), then reconcile —
+    a finished phase's (possibly incomplete) integration is completed, while an
+    *interrupted* phase (a leftover branch with no ``ok`` sentinel) is discarded
+    and left NOT done so the master rebuilds it. A git failure here degrades to a
+    warning instead of aborting ``swarm up``.
     """
     log = Log(cfg.supervisor_log)
     try:
+        seed = gitq.sentinel_done(cfg)
         st = state_mod.read(cfg)
-        integrated = gitq.reconcile_orphans(cfg, dict(st.done), log)
-        if integrated:
+        try:
+            integrated = gitq.reconcile_orphans(cfg, dict(st.done), log)
+        except gitq.GitError as exc:
+            print(f"reconcile skipped (git error): {exc}", file=sys.stderr)
+            log.line(f"RECONCILE-ERROR {exc}")
+            integrated = []
+        if seed or integrated:
             with state_mod.transaction(cfg) as s:
+                for phase, status in seed.items():
+                    s.mark_done(phase, status)
                 for phase in integrated:
                     s.mark_done(phase, "ok")
+        if integrated:
             print(f"reconciled orphan branches: {', '.join(integrated)}")
     finally:
         log.close()
@@ -106,8 +120,21 @@ def cmd_supervise(cfg: Config) -> int:
 def cmd_down(cfg: Config) -> int:
     st = state_mod.read(cfg)
     _poke(cfg, "shutdown")
-    if st.supervisor_pid:
-        _wait_pid_gone(st.supervisor_pid)
+    pid = st.supervisor_pid
+    if pid and not _wait_pid_gone(pid, timeout=30.0):
+        # Still alive — likely mid-integration. Escalate before tearing down the
+        # session, so we never kill the master/worker/resolver panes out from
+        # under a live integration (which would fail its pane ops mid-merge).
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        if not _wait_pid_gone(pid, timeout=10.0):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            _wait_pid_gone(pid, timeout=5.0)
     if cfg.driver == "tmux":
         session_mod.teardown(cfg)
     print("swarm down")

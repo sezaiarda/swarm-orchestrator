@@ -8,6 +8,7 @@ environment variables so the hermetic tests never touch tmux or ``claude``.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import tomllib
@@ -22,6 +23,19 @@ def _slugify(name: str) -> str:
     keep = [c.lower() if c.isalnum() else "-" for c in name]
     slug = "".join(keep).strip("-")
     return slug or "project"
+
+
+def _default_slug(pdir: Path) -> str:
+    """A slug that is unique to the *full* project path, not just its basename.
+
+    Two projects that share a folder name in different parents (``a/myproject``
+    and ``b/myproject``) must not collapse to the same runtime state dir — that
+    would make them share ``state.json``, the FIFO, and per-phase worktrees. We
+    suffix the basename slug with a short hash of the resolved path so distinct
+    projects never collide, while the same project is always stable.
+    """
+    digest = hashlib.sha1(str(pdir.resolve()).encode()).hexdigest()[:8]
+    return f"{_slugify(pdir.name)}-{digest}"
 
 
 @dataclass
@@ -48,6 +62,7 @@ class Config:
     master_cmd: str
     git_isolation: str
     git_main_branch: str
+    git_repos: list[str]
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -129,10 +144,15 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     git = data.get("git", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
+    max_workers = int(swarm.get("max_workers", 4))
+    if max_workers < 1:
+        # A swarm with < 1 slots can never claim a phase and would stall in
+        # silence. One slot is the floor; anything below it is a misconfig.
+        raise ValueError(f"[swarm].max_workers must be >= 1, got {max_workers}")
     return Config(
         project_dir=pdir,
-        slug=os.environ.get("SWARM_SLUG", swarm.get("slug", _slugify(pdir.name))),
-        max_workers=int(swarm.get("max_workers", 4)),
+        slug=os.environ.get("SWARM_SLUG", swarm.get("slug", _default_slug(pdir))),
+        max_workers=max_workers,
         master_model=str(swarm.get("master_model", "")),
         command_template=str(worker.get("command_template", "/prime {phase}")),
         command_file=str(worker.get("command_file", ".claude/commands/prime.md")),
@@ -170,7 +190,24 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         git_main_branch=os.environ.get(
             "SWARM_GIT_MAIN", str(git.get("main_branch", "master"))
         ),
+        git_repos=_git_repos(git),
     )
+
+
+def _git_repos(git: dict) -> list[str]:
+    """Globs (relative to the project root) that select the component repos a
+    phase's worktree mirror should include, besides the umbrella itself.
+
+    Default ``["*"]`` = every independent git repo that is a direct child of the
+    project root (matches a monorepo-of-repos like myproject). Set explicitly for
+    nested layouts, e.g. ``repos = ["*", "packages/*"]``. ``SWARM_GIT_REPOS`` (a
+    comma-separated list) overrides for tests/one-offs. A single-repo project
+    simply matches nothing here and gets a one-repo (umbrella-only) mirror.
+    """
+    env = os.environ.get("SWARM_GIT_REPOS")
+    if env is not None:
+        return [s.strip() for s in env.split(",") if s.strip()]
+    return [str(p) for p in git.get("repos", ["*"])]
 
 
 def claude_version() -> str:

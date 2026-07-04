@@ -44,9 +44,11 @@ def _worker_env(
     """Env vars a worker (and its ``swarm done``) need to find this run.
 
     Under ``isolation = worktree`` the worker also gets ``SWARM_WORKTREE`` (its
-    isolated tree / cwd), ``SWARM_MAIN`` (the integration target branch) and
-    ``SWARM_PROJECT`` (the canonical project path, so multi-repo workers still
-    reach sibling repos even though their cwd is the worktree).
+    cwd — a full isolated mirror of the whole workspace on branch
+    ``swarm/<phase>``, umbrella + every component repo at its real path),
+    ``SWARM_MAIN`` (the integration target branch) and ``SWARM_PROJECT`` (the
+    canonical project path). The worker just works inside the mirror as if it
+    were the real project; the integrator merges whatever repos it changed.
     """
     env = {cfg.env_marker: phase, "SWARM_STATE_DIR": str(cfg.state_dir)}
     for key in ("SWARM_SLUG", "SWARM_TG_SINK", "SWARM_BIN", "SWARM_DRIVER"):
@@ -63,9 +65,12 @@ def _worker_env(
 def launch(cfg: Config, phase: str, log: Log) -> bool:
     """Claim a slot and start a worker for ``phase``. Returns success.
 
-    Under ``isolation = worktree`` an isolated worktree on ``swarm/<phase>`` is
-    created before the pane is respawned, and its path/branch recorded on the
-    slot; the worker's cwd becomes that worktree.
+    Under ``isolation = worktree`` a full-workspace mirror on ``swarm/<phase>``
+    is created before the pane is respawned; the branch and umbrella worktree
+    path (both deterministic from the phase) are recorded on the slot *in the
+    claiming transaction*, so a crash between claim and worktree creation can
+    still be reconciled/freed. Concurrent phases in the same repo are fine —
+    each has its own worktree/branch — so there is no per-repo launch gate.
     """
     with state_mod.transaction(cfg) as st:
         if st.paused:
@@ -76,6 +81,9 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
             log.line(f"LAUNCH-DENIED {phase} no-free-slot")
             return False
         sid, pane = slot.id, slot.pane_id
+        if cfg.git_isolation == "worktree":
+            slot.branch = f"swarm/{phase}"
+            slot.worktree = str(cfg.wt_dir / phase)
     log.line(f"CLAIM {phase} slot={sid}")
 
     worktree: Path | None = None
@@ -88,11 +96,6 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
             telegram.notify(cfg.telegram_notify, f"swarm: worktree {phase} failed: {exc}")
             log.line(f"WORKTREE-FAIL {phase} {exc}")
             return False
-        with state_mod.transaction(cfg) as st:
-            slot = next((s for s in st.slots if s.busy and s.phase == phase), None)
-            if slot is not None:
-                slot.worktree = str(worktree)
-                slot.branch = f"swarm/{phase}"
 
     if cfg.driver == "bare":
         ok = _launch_bare(cfg, phase, worktree, log)
@@ -100,6 +103,11 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
         ok = _launch_tmux(cfg, phase, pane, worktree, log)
 
     if not ok:
+        # Kill the half-started claude BEFORE dropping its worktree, so we never
+        # yank the cwd out from under a live process (which would strand an
+        # orphaned claude in a deleted directory).
+        if cfg.driver != "bare" and pane is not None:
+            tmux.respawn_pane(pane, "exec sleep infinity")
         with state_mod.transaction(cfg) as st:
             st.free_slot_for(phase)
         if worktree is not None:
@@ -148,9 +156,11 @@ def _launch_tmux(
     return True
 
 
-def _await_ready(cfg: Config, pane: str, log: Log) -> bool:
+def await_ready(cfg: Config, pane: str, log: Log) -> bool:
     """Wait until claude has booted (its version banner shows); dismiss a
-    first-run folder-trust prompt if one appears."""
+    first-run folder-trust prompt if one appears. Shared by worker, master, and
+    resolver pane launches so all three honour the trust prompt and the timeout.
+    Returns False on timeout (the caller treats it as a launch failure)."""
     needle = ready_needle(cfg)
     deadline = time.monotonic() + READY_TIMEOUT_S
     dismissed = False
@@ -166,6 +176,10 @@ def _await_ready(cfg: Config, pane: str, log: Log) -> bool:
         time.sleep(POLL_INTERVAL_S)
     log.line(f"READY-TIMEOUT pane={pane}")
     return False
+
+
+# Backwards-compatible internal alias.
+_await_ready = await_ready
 
 
 def _write_sentinel(cfg: Config, phase: str, status: str, note: str) -> None:

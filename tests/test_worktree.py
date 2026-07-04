@@ -241,25 +241,109 @@ def test_push_with_retry_rebases_external_commit(monkeypatch, tmp_path):
         log.close()
 
 
-# -- Test: orphan branch reconciled on `up` -------------------------------
-def test_reconcile_integrates_orphan_and_gcs_done(monkeypatch, tmp_path):
+# -- Test: reconcile is sentinel-driven, not branch-topology-driven -------
+def test_reconcile_uses_sentinel_not_topology(monkeypatch, tmp_path):
+    """A leftover branch is integrated only when its worker actually FINISHED
+    (durable `ok` sentinel). A committed-but-unsignalled branch is an interrupted
+    build: discarded and left NOT done so the master rebuilds it — never silently
+    declared complete off branch topology (the H3 misclassification)."""
+    from swarm_orchestrator import launch as launch_mod
+
     project, origin = _make_project(tmp_path)
     cfg = _cfg(monkeypatch, tmp_path, project)
     log = Log(cfg.supervisor_log)
     try:
-        # A worker committed swarm/P1 but died before `done` -> orphan.
+        # (1) FINISHED: worker committed AND wrote its `ok` sentinel, but the
+        # supervisor died before integrating -> reconcile completes it.
         _worker(cfg, "P1", {"orphan.txt": "O"}, log)
-        integrated = gitq.reconcile_orphans(cfg, {}, log)
-        assert integrated == ["P1"]
+        launch_mod._write_sentinel(cfg, "P1", "ok", "")
+        assert gitq.reconcile_orphans(cfg, {}, log) == ["P1"]
         _git(project, "checkout", "master")
         assert (project / "orphan.txt").read_text() == "O"
-        assert _out(project, "branch", "--list", "swarm/*").strip() == ""
+        assert _out(project, "branch", "--list", "swarm/P1").strip() == ""
 
-        # A branch whose phase is already done -> GC'd, NOT re-integrated.
+        # (2) INTERRUPTED: committed real work but NO `swarm done` sentinel ->
+        # discarded, NOT integrated, NOT done, so the master rebuilds it.
         _worker(cfg, "P2", {"p2.txt": "2"}, log)
-        assert gitq.reconcile_orphans(cfg, {"P2": "ok"}, log) == []
+        assert gitq.reconcile_orphans(cfg, {}, log) == []
         assert _out(project, "branch", "--list", "swarm/P2").strip() == ""
-        assert "p2.txt" not in _tree(project)  # its work was not merged
+        assert "p2.txt" not in _tree(project)  # partial work dropped, not merged
+
+        # (2b) The 0-commit case (H3): a branch created at launch but never even
+        # ticked -> also interrupted, discarded, never phantom-marked done.
+        gitq.worktree_add(cfg, "P4", log)
+        assert gitq.reconcile_orphans(cfg, {}, log) == []
+        assert _out(project, "branch", "--list", "swarm/P4").strip() == ""
+
+        # (3) A phase already RECORDED done -> GC'd, NOT re-integrated.
+        _worker(cfg, "P3", {"p3.txt": "3"}, log)
+        assert gitq.reconcile_orphans(cfg, {"P3": "ok"}, log) == []
+        assert _out(project, "branch", "--list", "swarm/P3").strip() == ""
+        assert "p3.txt" not in _tree(project)  # its work was not merged
+    finally:
+        log.close()
+
+
+# -- Test: a clean merge whose PUSH fails is PUSH_FAILED, not a clean-tree wedge
+def test_push_failure_is_distinct_from_conflict(monkeypatch, tmp_path):
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        _worker(cfg, "P1", {"p1.txt": "1"}, log)
+        # Make the remote unreachable so the push fails for a non-conflict reason.
+        _git(project, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+        assert gitq.integrate(cfg, "P1", log) == gitq.PUSH_FAILED
+        # Tree stays clean — nothing for a resolver to fix; no phantom wedge.
+        assert not (project / ".git" / "MERGE_HEAD").is_file()
+        assert gitq.blocked_repo(cfg, "P1") is None
+    finally:
+        log.close()
+
+
+# -- Test: a dirty canonical tree is HELD (DIRTY), never a spurious CONFLICT
+def test_dirty_umbrella_tree_is_held_not_wedged(monkeypatch, tmp_path):
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        _worker(cfg, "P1", {"p1.txt": "1"}, log)
+        (project / "README.md").write_text("uncommitted owner edit\n")  # dirty tree
+        assert gitq.integrate(cfg, "P1", log) == gitq.DIRTY
+        # No merge was started, so no resolver is needed and nothing is wedged.
+        assert not (project / ".git" / "MERGE_HEAD").is_file()
+    finally:
+        log.close()
+
+
+# -- Test: a push-time / base conflict leaves a RESOLVABLE mid-merge, not a wedge
+def test_push_time_conflict_is_resolvable(monkeypatch, tmp_path):
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        _worker(cfg, "P1", {"PHASE-LEDGER.md": "L1 P1\nL2\nL3\n"}, log)
+        # An external writer lands a conflicting commit on origin before our push.
+        ext = tmp_path / "ext"
+        subprocess.run(["git", "clone", str(origin), str(ext)], check=True, capture_output=True)
+        _identity(ext)
+        (ext / "PHASE-LEDGER.md").write_text("L1 EXT\nL2\nL3\n")
+        _git(ext, "add", "-A"); _git(ext, "commit", "-m", "ext"); _git(ext, "push", "origin", "master")
+
+        # Integrate conflicts, but leaves a REAL mid-merge a resolver can finish.
+        assert gitq.integrate(cfg, "P1", log) == gitq.CONFLICT
+        assert (project / ".git" / "MERGE_HEAD").is_file()
+        assert not gitq.resolve_ready(cfg, project)  # premature `resolved` refused
+
+        # Resolver keeps both intents, commits; re-integrate drains cleanly.
+        (project / "PHASE-LEDGER.md").write_text("L1 EXT P1\nL2\nL3\n")
+        _git(project, "add", "-A"); _git(project, "commit", "--no-edit")
+        assert gitq.resolve_ready(cfg, project)
+        assert gitq.integrate(cfg, "P1", log) == gitq.MERGED
+        _git(project, "checkout", "master")
+        text = (project / "PHASE-LEDGER.md").read_text()
+        assert "L1 EXT P1" in text and "<<<<<<<" not in text
+        assert _out(project, "branch", "--list", "swarm/*").strip() == ""
     finally:
         log.close()
 

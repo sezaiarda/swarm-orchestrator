@@ -129,7 +129,44 @@ session = "swarm"
 
 Runtime state lives outside the repo, under
 `~/.local/state/swarm-orchestrator/<project-slug>/` (`state.json`,
-`control.fifo`, `done/`, `logs/`).
+`control.fifo`, `done/`, `logs/`, and — in worktree mode — `wt/` and `git/`).
+
+## Worktree isolation (`[git] isolation = "worktree"`)
+
+Opt-in isolation for a **monorepo-of-repos** (an umbrella repo whose tracked
+files — docs, deploy config — are edited by every phase, gitignoring independent
+component repos where the real code lives). Each phase builds against a **full,
+isolated mirror of the whole workspace** on branch `swarm/<phase>`: a worktree of
+the umbrella with a worktree of every component repo nested inside it at its real
+path, all on that branch. The worker's cwd is the umbrella worktree, so the mirror
+looks exactly like the real project (`cd pricing` just works) but nothing it does
+touches the canonical repos or another phase's mirror. Which repos are mirrored is
+set by `[git].repos` globs (default: every git repo that is a direct child of the
+project root). Because each phase has its own worktree per repo, **concurrent
+phases may build in the same repo** — there is no per-repo launch gate.
+
+On `swarm done ok` a single serialized integrator (under a per-repo `flock`) merges
+every repo the phase actually changed into its main and pushes; repos it didn't
+touch are 0 commits ahead and are pruned with **no network**. A `swarm done ... fail`
+**rolls back every repo** (all worktrees + branches removed, no merge). Integration
+is idempotent and resumable, so a crash mid-run is reconciled on the next `swarm up`
+**from the durable `done` sentinels** — an interrupted phase (no `ok` sentinel) is
+discarded and rebuilt, never silently marked done.
+
+The merge-queue distinguishes four outcomes and never wedges on a clean tree: a
+real **conflict** opens a resolver pane pointed at the exact repo (`swarm resolved
+<phase>` finishes it); a **dirty** canonical tree or a **push failure** *hold* the
+queue with a telegram (fix it, then `swarm resolved <phase>` to retry) rather than
+spawning a resolver that has nothing to resolve. A git error or a hung remote can
+never crash the supervisor — it degrades to a hold.
+
+```toml
+[git]
+isolation   = "worktree"   # default "none" = commit in place, no isolation
+main_branch = "master"
+repos       = ["*"]        # component repos to mirror (globs from project root);
+                           # ["*"] = direct-child git repos. e.g. ["*","packages/*"]
+```
 
 ## Tests
 

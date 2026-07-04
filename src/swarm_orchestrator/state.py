@@ -29,7 +29,7 @@ class Slot:
     pane_id: str | None = None
     busy: bool = False
     phase: str | None = None
-    worktree: str | None = None  # isolation=worktree: the phase's worktree path
+    worktree: str | None = None  # isolation=worktree: the phase's umbrella worktree path
     branch: str | None = None  # isolation=worktree: swarm/<phase>
 
 
@@ -53,6 +53,8 @@ class State:
     # ``swarm resolved <phase>`` — so the FIFO reader never blocks on the human.
     integ_queue: list[str] = field(default_factory=list)
     integ_blocked: str | None = None
+    integ_blocked_repo: str | None = None  # repo path a CONFLICT/DIRTY hold is in
+    integ_blocked_kind: str | None = None  # conflict | dirty | push_failed
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -73,7 +75,8 @@ class State:
         Returns ``None`` if no slot is free OR ``phase`` already occupies a slot
         — one phase never holds two slots, so a duplicate/stale ``swarm launch``
         (or a master acting on a stale context) can't strand a slot that
-        ``done`` would never free.
+        ``done`` would never free. Two concurrent phases *may* target the same
+        repo: each builds in its own worktree/branch, so there is no per-repo cap.
         """
         if any(s.busy and s.phase == phase for s in self.slots):
             return None
@@ -119,6 +122,8 @@ class State:
             supervisor_pid=data.get("supervisor_pid"),
             integ_queue=list(data.get("integ_queue", [])),
             integ_blocked=data.get("integ_blocked"),
+            integ_blocked_repo=data.get("integ_blocked_repo"),
+            integ_blocked_kind=data.get("integ_blocked_kind"),
         )
 
     @classmethod

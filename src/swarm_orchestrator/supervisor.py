@@ -6,11 +6,15 @@ timer, no pane-died watchdog, no auto-retry:
 
 1. ``done``       -> free the slot; spawn a master if none is alive, else inject.
 2. ``master-idle``-> kill the master pane.
-3. after a kill   -> finish when no slot is busy (implies no ready phase remains).
+3. after a kill   -> finish when no slot is busy AND nothing is integrating.
 4. a parked worker keeps its slot busy, so finish cannot fire while it is parked.
 
-Being the single FIFO reader gives total event ordering, so the only races are
-in keystroke delivery (accepted by the owner; never papered over here).
+Being the single FIFO reader gives total event ordering. Integration (worktree
+mode) runs inline on this loop but can never crash it: every git failure is a
+:class:`gitq.GitError` that holds the merge-queue for a human instead of
+unwinding the loop, and the loop's teardown runs in a ``finally`` so the master
+is never orphaned. The only remaining races are in keystroke delivery (accepted
+by the owner; never papered over here).
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import os
 import select
 import signal
+from pathlib import Path
 
 from . import gitq
 from . import master as master_mod
@@ -64,37 +69,46 @@ class Supervisor:
 
     # -- main loop --------------------------------------------------------
     def run(self) -> None:
-        """Open the FIFO and process events until stopped."""
+        """Open the FIFO and process events until stopped.
+
+        Teardown (kill the master, close the FIFO) runs in a ``finally`` so that
+        even an unexpected exception escaping a handler can never leave a live
+        master pane orphaned or the FIFO open — the sole supervisor always exits
+        clean.
+        """
         self._open_fifo()
         self._install_signals()
         with state_mod.transaction(self.cfg) as st:
             st.supervisor_pid = os.getpid()
         self.log.line(f"SUPERVISOR-START pid={os.getpid()} driver={self.cfg.driver}")
         buf = b""
-        while not self._stop:
-            try:
-                ready, _, _ = select.select([self._fifo_fd], [], [])
-            except InterruptedError:
-                continue
-            if self._fifo_fd not in ready:
-                continue
-            try:
-                chunk = os.read(self._fifo_fd, 65536)
-            except BlockingIOError:
-                continue  # spurious select wake; nothing to read yet
-            buf += chunk
-            while b"\n" in buf:
-                raw, buf = buf.split(b"\n", 1)
-                self._handle(raw.decode("utf-8", "replace").strip())
-                if self._stop:
-                    break
-        if self.master.is_alive():
-            self.master.kill()  # never orphan a master on the way out
-            with state_mod.transaction(self.cfg) as st:
-                st.master_alive = False
-        os.close(self._fifo_fd)
-        self.log.line("SUPERVISOR-STOP")
-        self.log.close()
+        try:
+            while not self._stop:
+                try:
+                    ready, _, _ = select.select([self._fifo_fd], [], [])
+                except InterruptedError:
+                    continue
+                if self._fifo_fd not in ready:
+                    continue
+                try:
+                    chunk = os.read(self._fifo_fd, 65536)
+                except BlockingIOError:
+                    continue  # spurious select wake; nothing to read yet
+                buf += chunk
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    self._handle(raw.decode("utf-8", "replace").strip())
+                    if self._stop:
+                        break
+        finally:
+            if self.master.is_alive():
+                self.master.kill()  # never orphan a master on the way out
+                with state_mod.transaction(self.cfg) as st:
+                    st.master_alive = False
+            if self._fifo_fd >= 0:
+                os.close(self._fifo_fd)
+            self.log.line("SUPERVISOR-STOP")
+            self.log.close()
 
     # -- event dispatch ---------------------------------------------------
     def _handle(self, line: str) -> None:
@@ -131,24 +145,35 @@ class Supervisor:
         self.log.line("EVENT resume")
         if not self.master.is_alive():
             self._spawn_master("step")
+        else:
+            # A live-but-idle master launched nothing while paused; re-drive it
+            # (symmetric with the `done` inject path) so it fills free slots now
+            # instead of idling straight into a premature finish.
+            self.master.inject(
+                "resumed -- run `swarm context` and launch what is ready"
+            )
 
     # -- rule 1: done -----------------------------------------------------
     def _on_done(self, phase: str, status: str) -> None:
         """Integrate first (worktree mode), then run the pure-injection advance.
 
-        Non-worktree runs go straight to :meth:`_advance_done` (today's exact
-        four-rule behavior). Worktree ``ok`` runs enqueue the phase for
-        integration and pump the merge-queue: each ``swarm/<phase>`` is merged
-        into ``main`` (serialized) before its slot is freed. A conflict parks the
-        head phase and HOLDS the queue on a resolver, so dones arriving meanwhile
-        wait in ``integ_queue`` — never lost. A ``fail`` never integrates: its
-        branch is dropped and the slot advances (status preserved).
+        Non-worktree runs go straight to :meth:`_advance_done`. Worktree ``ok``
+        runs enqueue the phase and pump the merge-queue. A ``fail`` drops the
+        phase's branch(es) and advances — UNLESS the phase is already
+        integrating (blocked or queued after having reported ``ok``): a late,
+        contradictory ``fail`` must not yank a branch out from under a live merge
+        or free a parked slot, so it is ignored.
         """
         if self.cfg.git_isolation != "worktree":
             self._advance_done(phase, status)
             return
         if status != "ok":
-            gitq.discard(self.cfg, phase, self.log)  # failed build: drop the branch
+            with state_mod.transaction(self.cfg) as st:
+                integrating = st.integ_blocked == phase or phase in st.integ_queue
+            if integrating:
+                self.log.line(f"DONE-FAIL-IGNORED {phase} integrating")
+                return
+            gitq.discard(self.cfg, phase, self.log)  # failed build: roll back branches
             self._advance_done(phase, status)
             return
         with state_mod.transaction(self.cfg) as st:
@@ -171,12 +196,26 @@ class Supervisor:
                 self._dequeue(phase)
                 self._advance_done(phase, "ok")  # duplicate -> DONE-DUPLICATE no-op
                 continue
-            result = gitq.integrate(self.cfg, phase, self.log)
+            try:
+                result = gitq.integrate(self.cfg, phase, self.log)
+            except gitq.GitError as exc:
+                # A git failure must never kill the sole FIFO reader. Hold the
+                # queue for the owner instead of unwinding the loop.
+                self.log.line(f"INTEGRATE-ERROR {phase} {exc}")
+                self._hold(phase, gitq.DIRTY, None, f"git error integrating {phase}: {exc}")
+                return
             if result == gitq.MERGED:
                 self._dequeue(phase)
                 self._advance_done(phase, "ok")
                 continue
-            self._block_on_conflict(phase)  # head stays queued, queue held
+            # A conflict OR a dirty tree leaves an identifiable repo to clear; a
+            # push failure leaves the tree clean (nothing to resolve — retry).
+            repo = (
+                gitq.blocked_repo(self.cfg, phase)
+                if result in (gitq.CONFLICT, gitq.DIRTY)
+                else None
+            )
+            self._hold(phase, result, repo, None)  # head stays queued, queue held
             return
 
     def _dequeue(self, phase: str) -> None:
@@ -184,61 +223,87 @@ class Supervisor:
             if st.integ_queue and st.integ_queue[0] == phase:
                 st.integ_queue.pop(0)
 
-    def _block_on_conflict(self, phase: str) -> None:
+    def _hold(
+        self, phase: str, kind: str, repo: Path | None, detail: str | None
+    ) -> None:
+        """Park the head phase and HOLD the queue until it is resolved/retried.
+
+        Only a genuine :data:`gitq.CONFLICT` (a repo left mid-merge) spawns a
+        claude resolver pane. A :data:`gitq.DIRTY` tree or a :data:`gitq.PUSH_FAILED`
+        has nothing to *resolve* — the owner cleans the tree / restores
+        connectivity and re-runs ``swarm resolved <phase>`` to retry — so no
+        resolver is opened for those (avoiding a resolver staring at a clean tree
+        with nothing to fix).
+        """
         with state_mod.transaction(self.cfg) as st:
             st.integ_blocked = phase
-        pane = resolver_mod.spawn(self.cfg, phase, self.log)
-        with state_mod.transaction(self.cfg) as st:
+            st.integ_blocked_kind = kind
+            st.integ_blocked_repo = str(repo) if repo is not None else None
+        if kind == gitq.CONFLICT and repo is not None:
+            pane = resolver_mod.spawn(self.cfg, phase, repo, self.log)
             if pane is not None:
-                st.windows[f"resolve:{phase}"] = pane
-        self.log.line(f"INTEGRATE-BLOCKED {phase}")
-        telegram.notify(
-            self.cfg.telegram_notify,
-            f"swarm: merge conflict integrating {phase}; resolver pane open"
-            f" -- run `swarm resolved {phase}` once fixed",
-        )
+                with state_mod.transaction(self.cfg) as st:
+                    st.windows[f"resolve:{phase}"] = pane
+            msg = (
+                f"swarm: merge conflict integrating {phase} in {repo.name}; resolver"
+                f" pane open -- run `swarm resolved {phase}` once fixed"
+            )
+        elif kind == gitq.DIRTY:
+            where = f" in {repo.name}" if repo is not None else ""
+            msg = detail or (
+                f"swarm: {phase} held -- the working tree{where} has uncommitted"
+                f" changes; commit or stash them, then `swarm resolved {phase}`"
+            )
+        else:  # PUSH_FAILED
+            msg = (
+                f"swarm: {phase} merged locally but the push failed (remote"
+                f" unreachable?); fix it, then `swarm resolved {phase}` to retry"
+            )
+        self.log.line(f"INTEGRATE-BLOCKED {phase} {kind}")
+        telegram.notify(self.cfg.telegram_notify, msg)
 
     # -- resolved: finish a blocked integration, resume the queue ---------
     def _on_resolved(self, phase: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             blocked = st.integ_blocked
+            repo_s = st.integ_blocked_repo
         if blocked != phase:
             self.log.line(f"RESOLVED-IGNORED expected={blocked} got={phase}")
             return
-        result = gitq.finish_conflict(self.cfg, phase, self.log)
-        if result != gitq.MERGED:
-            # Resolver signalled early (merge still unfinished): stay blocked.
+        repo = Path(repo_s) if repo_s else None
+        if repo is not None and not gitq.resolve_ready(self.cfg, repo):
+            # Resolver / owner signalled early (still mid-merge or dirty): stay blocked.
             self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked")
             telegram.notify(
                 self.cfg.telegram_notify,
-                f"swarm: {phase} merge not finished yet -- resolve + commit,"
-                f" then re-run `swarm resolved {phase}`",
+                f"swarm: {phase} not finished yet ({repo.name} still has an unfinished"
+                f" merge / dirty tree) -- resolve + commit, then re-run `swarm resolved {phase}`",
             )
             return
         with state_mod.transaction(self.cfg) as st:
             st.integ_blocked = None
-            if st.integ_queue and st.integ_queue[0] == phase:
-                st.integ_queue.pop(0)
+            st.integ_blocked_repo = None
+            st.integ_blocked_kind = None
             win = st.windows.pop(f"resolve:{phase}", None)
         if win:
             resolver_mod.close(self.cfg, win, self.log)
         self.log.line(f"RESOLVED {phase}")
-        self._advance_done(phase, "ok")
-        self._pump_integrations()  # resume; may re-block on the next conflict
+        self._pump_integrations()  # re-integrate (resumes; may re-block downstream)
 
-    # -- rule 1 core (pure-injection, unchanged): free slot + spawn/inject -
+    # -- rule 1 core (pure-injection): free slot + spawn/inject -----------
     def _advance_done(self, phase: str, status: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             already = phase in st.done
-            st.mark_done(phase, status)
             freed = st.free_slot_for(phase)
+            if already and freed is None:
+                # Duplicate `swarm done` for an already-completed phase (its slot
+                # was already freed/reused). True no-op: DON'T overwrite the
+                # recorded status and don't spuriously spawn/inject.
+                self.log.line(f"DONE-DUPLICATE {phase} ignored")
+                return
+            st.mark_done(phase, status)
+            freed_id = freed.id if freed else None
             paused = st.paused
-        freed_id = freed.id if freed else None
-        if already and freed is None:
-            # Duplicate `swarm done` for an already-completed phase (its slot was
-            # already freed/reused). True no-op: don't spuriously spawn/inject.
-            self.log.line(f"DONE-DUPLICATE {phase} ignored")
-            return
         self.log.line(f"EVENT done {phase} {status} freed_slot={freed_id}")
         if paused:
             # Paused: the slot is freed but we launch nothing and hold — no
@@ -259,20 +324,28 @@ class Supervisor:
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False
             busy = st.any_busy()
+            integrating = bool(st.integ_queue) or st.integ_blocked is not None
             paused = st.paused
             ctx = master_mod.build_context(self.cfg, st)
-        self.log.line(f"EVENT master-idle busy={busy} paused={paused} ready={ctx['ready']}")
+        self.log.line(
+            f"EVENT master-idle busy={busy} integrating={integrating}"
+            f" paused={paused} ready={ctx['ready']}"
+        )
         if paused:
             # Held: do not finish while paused — resume decides what happens next.
             self.log.line("MASTER-IDLE paused — holding")
             return
-        if not busy:
-            if ctx["ready"]:
-                # Accepted lost-injection race: nothing is running yet a phase is
-                # ready. We finish anyway (no backstop); the owner is told (log +
-                # telegram) and can `swarm launch` it manually.
-                self.log.line(f"FINISH-WITH-READY leftover={ctx['ready']}")
-            self._finish(len(ctx["done"]), ctx["ready"])
+        if busy or integrating:
+            # A running/parked worker or a pending/blocked integration keeps the
+            # supervisor alive: it must stay in select() so `resolved`/`done` can
+            # still complete the merge-queue rather than finishing mid-flight.
+            return
+        if ctx["ready"]:
+            # Accepted lost-injection race: nothing is running or integrating yet
+            # a phase is ready. We finish anyway (no backstop); the owner is told
+            # (log + telegram) and can `swarm launch` it manually.
+            self.log.line(f"FINISH-WITH-READY leftover={ctx['ready']}")
+        self._finish(len(ctx["done"]), ctx["ready"])
 
     def _spawn_master(self, kind: str) -> None:
         with state_mod.transaction(self.cfg) as st:

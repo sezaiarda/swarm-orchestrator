@@ -14,8 +14,9 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import launch as launch_mod
 from . import ledger as ledger_mod
-from . import tmux
+from . import telegram, tmux
 from .config import Config, ready_needle
 from .logutil import Log
 from .state import State
@@ -24,12 +25,18 @@ _READY_TIMEOUT_S = 30.0
 
 # Env vars a master pane needs so its `swarm` calls find this run. Forwarded on
 # the tmux respawn (bare masters inherit the supervisor's env directly).
+# SWARM_GIT_* are included so a master spawned via the env seam keeps the same
+# isolation mode / repo set the run was started with — otherwise its
+# `swarm launch` would silently fall back to isolation="none".
 _FORWARD_ENV = (
     "SWARM_STATE_DIR",
     "SWARM_SLUG",
     "SWARM_DRIVER",
     "SWARM_BIN",
     "SWARM_TG_SINK",
+    "SWARM_GIT_ISOLATION",
+    "SWARM_GIT_MAIN",
+    "SWARM_GIT_REPOS",
     "FAKE_MASTER_WAIT",
     "SWARM_READY_MARKER",
 )
@@ -62,6 +69,10 @@ def build_context(cfg: Config, st: State) -> dict:
         "paused": st.paused,
         "ledger": str(ledger_path),
         "master_alive": st.master_alive,
+        # Structural ledger problems (cycles / self-deps / unknown deps) that
+        # would otherwise silently stall the run — surfaced so the master/owner
+        # can see them instead of a phase never becoming ready.
+        "ledger_issues": ledger_mod.validate(graph),
     }
 
 
@@ -131,16 +142,22 @@ class Master:
             return False
         self.pane = master_pane
         tmux.respawn_pane(master_pane, cmd, env=_master_env(self.cfg))
-        if not self.cfg.master_cmd:
-            self._deliver_prompt(master_pane, kind)
+        if not self.cfg.master_cmd and not self._deliver_prompt(master_pane, kind):
+            # Never primed (boot timed out / stuck on a modal): treat as a spawn
+            # failure so the caller does NOT mark the master alive — otherwise the
+            # next `done` would inject into a master that never got its prompt.
+            self.pane = None
+            return False
         return True
 
-    def _deliver_prompt(self, pane: str, kind: str) -> None:
+    def _deliver_prompt(self, pane: str, kind: str) -> bool:
         """Point a freshly launched claude master at its prompt file.
 
         Delivered as ONE line with no embedded newlines: tmux ``send-keys``
         submits on every newline, so pasting the multi-line prompt file would
         fire it off line-by-line. We tell the master to *read* the file instead.
+        Waits for readiness (dismissing a first-run folder-trust prompt) and
+        returns False on timeout instead of blindly typing into a not-ready pane.
         The fake-master override never reaches this path.
         """
         prompt_file = (
@@ -150,13 +167,20 @@ class Master:
         )
         if not prompt_file.is_file():
             self.log.line(f"ACTION prompt-missing {prompt_file}")
-            return
-        tmux.await_text(pane, ready_needle(self.cfg), _READY_TIMEOUT_S)
+            return False
+        if not launch_mod.await_ready(self.cfg, pane, self.log):
+            self.log.line("ACTION master-ready-timeout")
+            telegram.notify(
+                self.cfg.telegram_notify,
+                f"swarm: master ({kind}) never became ready -- check the master pane",
+            )
+            return False
         line = (
             f"Read {prompt_file} and follow every instruction in it exactly. "
             f"You are orchestrating the project at {self.cfg.project_dir}."
         )
         tmux.send_submit(pane, line)
+        return True
 
     def inject(self, text: str) -> None:
         """Nudge the live master with one line of guidance."""

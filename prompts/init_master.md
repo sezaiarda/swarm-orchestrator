@@ -34,6 +34,12 @@ Do NOT restrict the worker from delegating: swarm workers already launch with
 `teammateMode=in-process`, so any teammates they spawn run in-process (no extra
 tmux panes) and cannot clutter the workers window.
 
+**Commit the patch.** After the owner approves the edits, `git add` and
+`git commit` the `command_file` in the umbrella repo before you launch anything.
+Two reasons: the isolated per-phase worktrees only inherit the patched command if
+it is committed, and an uncommitted edit would leave the canonical integration
+tree dirty (which correctly *holds* the merge-queue). Leave the tree clean.
+
 ## 4. Launch the initial batch, then idle
 AskUserQuestion-confirm the initial batch. For each chosen phase run
 `swarm launch <phase>`. Then run `swarm master-idle` and STOP. Do not loop, do
@@ -45,12 +51,17 @@ before you idle. Only open an AskUserQuestion (and stop) if you genuinely need
 the owner; you almost never do (bypassPermissions means no permission modals).
 
 ## Note: worktree isolation (`[git] isolation = "worktree"`)
-When the config opts into worktree isolation, each worker's cwd is an isolated
-worktree on branch `swarm/<phase>` (env `SWARM_WORKTREE`, `SWARM_MAIN`,
-`SWARM_PROJECT`); the worker commits its ledger tick + STATUS to that branch and
-does **not** push the project main. When patching `[worker].command_file`, make
-the swarm-mode path (a) build in `$SWARM_WORKTREE` (single-repo) or the canonical
-sibling `$SWARM_PROJECT/<repo>` (multi-repo, committed+pushed directly there —
-sole writer), (b) commit the tick to `swarm/$SWARM_PHASE` in the worktree, and
-(c) **never** push the project main. The supervisor's serialized integrator
-merges each `swarm/<phase>` into `$SWARM_MAIN` on `swarm done`.
+When the config opts into worktree isolation, each worker's cwd (`$SWARM_WORKTREE`)
+is a **full, isolated mirror of the whole workspace** on branch `swarm/$SWARM_PHASE`
+— the umbrella *and* every component repo (per `[git].repos`), each nested at its
+real path and checked out on that branch. It looks exactly like the real project:
+`cd pricing` just works. Nothing the worker does touches the canonical repos or
+another phase's mirror, and concurrent phases may build in the same repo.
+
+So the worker contract is simply: **work inside the mirror as if it were the real
+project; commit your changes in each repo you touch (each is already on
+`swarm/$SWARM_PHASE`); NEVER push.** A single serialized integrator merges every
+repo the phase changed into its main on `swarm done`, prunes the untouched ones
+(0-ahead, no-op), and rolls **all** of them back on `swarm done ... fail`. When
+patching `[worker].command_file`, make the swarm-mode path build and commit in
+`$SWARM_WORKTREE` (and its nested repos), and never `git push`.

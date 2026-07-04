@@ -8,11 +8,15 @@ owner typed `/prime <phase>`.
 Do this, then stop:
 
 1. Run `swarm context`. It reports free slots, busy slots, done phases, the
-   ready set, and `paused`. **If `paused` is true (or `launchable` is empty),
-   launch nothing — run `swarm master-idle` and stop.**
+   ready set, `paused`, and `ledger_issues`. **If `paused` is true (or
+   `launchable` is empty), launch nothing — run `swarm master-idle` and stop.**
+   If `ledger_issues` is non-empty (a dependency cycle / self-dep / unknown dep
+   that would silently stall the build), telegram the owner with the issues and
+   stop — do not paper over it.
 2. From the ledger + free slots, pick the best ready phases: critical-path
-   first, at most one worker per repo/dir, honouring excludes and any
-   externally-blocked notes. Cap at the number of free slots.
+   first, honouring excludes and any externally-blocked notes. Cap at the number
+   of free slots. (Concurrent phases in the same repo are fine — each builds in
+   its own isolated worktree.)
 3. Run `swarm launch <phase>` for each chosen phase.
 4. If you are nudged that another worker finished while you were deciding, run
    `swarm context` again and launch any newly-ready phase into the freed slot.

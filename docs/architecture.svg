@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 470" width="940" height="470"
+     font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif"
+     role="img" aria-label="swarm-orchestrator runtime control loop: a supervisor drives an ephemeral master and four fixed worker slots in one tmux session">
+  <defs>
+    <marker id="ai" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4f46e5"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#16a34a"/></marker>
+    <marker id="am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#94a3b8"/></marker>
+  </defs>
+  <style>
+    .m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .ink{fill:#1f2933}.mut{fill:#64748b}.ind{fill:#4f46e5}.grn{fill:#16a34a}
+    .lbl{font-size:12.5px}.sm{font-size:11px}.big{font-size:15px;font-weight:600}
+    .eye{font-size:11px;letter-spacing:2.5px}
+    .flow{fill:none;stroke-width:2}
+  </style>
+
+  <rect x="4" y="4" width="932" height="462" rx="16" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="28" y="36" class="m eye mut">SWARM · RUNTIME CONTROL LOOP</text>
+
+  <!-- owner -->
+  <rect x="40" y="92" width="92" height="32" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="86" y="112" text-anchor="middle" class="ink lbl">owner</text>
+  <path class="flow" d="M96,124 C92,136 100,142 118,150" stroke="#94a3b8" marker-end="url(#am)"/>
+  <text x="138" y="140" class="m sm mut">swarm up</text>
+
+  <!-- supervisor -->
+  <rect x="40" y="150" width="212" height="212" rx="12" fill="#ffffff" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="58" y="180" class="ink big">supervisor</text>
+  <text x="58" y="199" class="m sm mut">sole FIFO reader ·</text>
+  <text x="58" y="213" class="m sm mut">sole state writer · sole killer</text>
+  <rect x="58" y="226" width="176" height="32" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="72" y="246" class="m lbl ink">control.fifo</text>
+  <rect x="58" y="266" width="176" height="32" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="72" y="286" class="m lbl ink">state.json · flock</text>
+  <text x="58" y="324" class="sm mut">four-rule pure-injection lifecycle</text>
+  <text x="58" y="342" class="sm mut">no timers · no watchdog · no retry</text>
+
+  <!-- telegram -->
+  <path class="flow" d="M146,362 L146,398" stroke="#94a3b8" marker-end="url(#am)"/>
+  <text x="156" y="384" class="m sm mut">notify</text>
+  <rect x="86" y="402" width="120" height="34" rx="17" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="146" y="424" text-anchor="middle" class="lbl ink">telegram</text>
+
+  <!-- tmux session -->
+  <rect x="348" y="64" width="430" height="344" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="366" y="86" class="m lbl mut">tmux session · swarm</text>
+
+  <!-- master window -->
+  <rect x="366" y="96" width="394" height="60" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="380" y="120" class="m sm mut">master window · 1 pane</text>
+  <text x="380" y="140" class="ink big">ephemeral master — claude</text>
+
+  <text x="366" y="180" class="m lbl mut">workers window · 4 slots</text>
+
+  <!-- slot 0 -->
+  <rect x="366" y="190" width="190" height="98" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="380" y="216" class="m lbl ink" font-weight="600">slot 0</text>
+  <text x="380" y="240" class="m lbl ind">swarm/pricing-P1</text>
+  <circle cx="385" cy="264" r="4" fill="#16a34a"/><text x="396" y="268" class="sm mut">building</text>
+  <!-- slot 1 -->
+  <rect x="570" y="190" width="190" height="98" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="584" y="216" class="m lbl ink" font-weight="600">slot 1</text>
+  <text x="584" y="240" class="m lbl ind">swarm/webhooks-P0</text>
+  <circle cx="589" cy="264" r="4" fill="#16a34a"/><text x="600" y="268" class="sm mut">building</text>
+  <!-- slot 2 -->
+  <rect x="366" y="302" width="190" height="98" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="380" y="328" class="m lbl ink" font-weight="600">slot 2</text>
+  <text x="380" y="352" class="m lbl ind">swarm/payments-P1</text>
+  <circle cx="385" cy="376" r="4" fill="#16a34a"/><text x="396" y="380" class="sm mut">building</text>
+  <!-- slot 3 free -->
+  <rect x="570" y="302" width="190" height="98" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="4 4"/>
+  <text x="584" y="328" class="m lbl mut" font-weight="600">slot 3</text>
+  <text x="584" y="352" class="m lbl mut">free</text>
+
+  <!-- launch arrow (master -> slots) -->
+  <path class="flow" d="M556,156 L556,188" stroke="#4f46e5" marker-end="url(#ai)"/>
+  <text x="566" y="174" class="m sm ind">swarm launch &lt;phase&gt;</text>
+
+  <!-- spawn / inject (supervisor -> master), label rides ABOVE the arc -->
+  <path class="flow" d="M252,182 C300,152 322,132 364,128" stroke="#4f46e5" marker-end="url(#ai)"/>
+  <text x="260" y="132" class="m sm ind">spawn / inject</text>
+
+  <!-- done (slot -> supervisor), label rides BELOW the arc -->
+  <path class="flow" d="M366,244 C320,260 300,290 254,300" stroke="#16a34a" marker-end="url(#ag)"/>
+  <text x="262" y="318" class="m sm grn">swarm done</text>
+
+  <!-- integrate note -->
+  <text x="366" y="404" class="sm mut">on <tspan class="m">done ok</tspan> → serialized integrator merges <tspan class="m">swarm/&lt;phase&gt;</tspan> into each repo's main</text>
+</svg>

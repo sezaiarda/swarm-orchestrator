@@ -52,13 +52,14 @@ def build_context(cfg: Config, st: State) -> dict:
     excluded = set(cfg.exclude)
     ready = ledger_mod.ready(graph, st.done, busy_phases, excluded)
     free = st.free_slots()
-    launchable = ready[: len(free)]
+    launchable = [] if st.paused else ready[: len(free)]
     return {
         "free_slots": [s.id for s in free],
         "busy_slots": {s.id: s.phase for s in st.busy_slots()},
         "done": dict(st.done),
         "ready": ready,
         "launchable": launchable,
+        "paused": st.paused,
         "ledger": str(ledger_path),
         "master_alive": st.master_alive,
     }

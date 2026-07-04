@@ -7,8 +7,9 @@ owner typed `/prime <phase>`.
 
 Do this, then stop:
 
-1. Run `swarm context`. It reports free slots, busy slots, done phases, and the
-   ready set computed from the ledger.
+1. Run `swarm context`. It reports free slots, busy slots, done phases, the
+   ready set, and `paused`. **If `paused` is true (or `launchable` is empty),
+   launch nothing — run `swarm master-idle` and stop.**
 2. From the ledger + free slots, pick the best ready phases: critical-path
    first, at most one worker per repo/dir, honouring excludes and any
    externally-blocked notes. Cap at the number of free slots.

@@ -76,7 +76,9 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
 ### Owner escape hatches
 | command | use |
 |---|---|
-| `swarm status` | human-readable state dump |
+| `swarm status` | human-readable state dump (shows `paused`) |
+| `swarm pause` | stop launching new workers; in-flight ones finish and hold |
+| `swarm resume` | resume — fill free slots again |
 | `swarm context` | the JSON snapshot the master reasons over |
 | `swarm launch <phase>` | manually start a phase in a free slot |
 | `swarm free <slot\|phase>` | free a stuck slot |

@@ -81,6 +81,32 @@ def test_parked_worker_blocks_finish(swarm):
     assert swarm.busy_phases() == ["P0"]
 
 
+def test_pause_holds_then_resume_advances(swarm):
+    """`pause` frees a finished worker's slot but launches nothing + never
+    finishes; `resume` then advances the fan-out."""
+    swarm.env["FAKE_WORKER_PARK"] = "1"  # workers hold their slot; test drives `done`
+    swarm.up()
+
+    # init master launches P0 (parked), then idles.
+    assert swarm.wait(lambda: swarm.busy_phases() == ["P0"], timeout=20), swarm.log_text()
+
+    swarm.cli("pause")
+    swarm.cli("done", "P0", "ok")  # P0 completes while paused
+
+    # Held: P0's slot frees, but nothing new launches and finish never fires.
+    assert swarm.wait(lambda: swarm.busy_phases() == [], timeout=10), swarm.log_text()
+    time.sleep(1.5)
+    assert not swarm.finished()
+    assert swarm.busy_phases() == []  # P1/P2/P3 NOT launched while paused
+    assert "DONE-PAUSED" in swarm.log_text()
+
+    # Resume -> the fan-out launches into the free slots.
+    swarm.cli("resume")
+    assert swarm.wait(
+        lambda: set(swarm.busy_phases()) == {"P1", "P2", "P3"}, timeout=20
+    ), swarm.log_text()
+
+
 def test_done_never_hangs_when_supervisor_down(swarm):
     """Assertion 4: `swarm done` returns immediately with no supervisor."""
     import os

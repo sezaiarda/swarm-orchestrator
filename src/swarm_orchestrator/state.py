@@ -41,6 +41,7 @@ class State:
     windows: dict[str, str] = field(default_factory=dict)
     done: dict[str, str] = field(default_factory=dict)
     finished: bool = False
+    paused: bool = False
     supervisor_pid: int | None = None
 
     # -- slot accounting -------------------------------------------------
@@ -100,6 +101,7 @@ class State:
             windows=data.get("windows", {}),
             done=data.get("done", {}),
             finished=data.get("finished", False),
+            paused=data.get("paused", False),
             supervisor_pid=data.get("supervisor_pid"),
         )
 

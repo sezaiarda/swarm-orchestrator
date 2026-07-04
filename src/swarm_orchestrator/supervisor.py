@@ -110,6 +110,8 @@ class Supervisor:
             self._on_master_idle()
         elif verb == "bootstrap":
             self._on_bootstrap()
+        elif verb == "resume":
+            self._on_resume()
         elif verb == "reconcile":
             self._reconcile()
         elif verb == "shutdown":
@@ -124,13 +126,25 @@ class Supervisor:
             return
         self._spawn_master("init")
 
+    # -- resume: fill free slots after a pause ----------------------------
+    def _on_resume(self) -> None:
+        self.log.line("EVENT resume")
+        if not self.master.is_alive():
+            self._spawn_master("step")
+
     # -- rule 1: done -----------------------------------------------------
     def _on_done(self, phase: str, status: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             st.mark_done(phase, status)
             freed = st.free_slot_for(phase)
+            paused = st.paused
         freed_id = freed.id if freed else None
         self.log.line(f"EVENT done {phase} {status} freed_slot={freed_id}")
+        if paused:
+            # Paused: the slot is freed but we launch nothing and hold — no
+            # master spawn/inject, so in-flight workers drain without advancing.
+            self.log.line("DONE-PAUSED holding — no launch")
+            return
         if not self.master.is_alive():
             self._spawn_master("step")
         else:
@@ -145,8 +159,13 @@ class Supervisor:
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False
             busy = st.any_busy()
+            paused = st.paused
             ctx = master_mod.build_context(self.cfg, st)
-        self.log.line(f"EVENT master-idle busy={busy} ready={ctx['ready']}")
+        self.log.line(f"EVENT master-idle busy={busy} paused={paused} ready={ctx['ready']}")
+        if paused:
+            # Held: do not finish while paused — resume decides what happens next.
+            self.log.line("MASTER-IDLE paused — holding")
+            return
         if not busy:
             if ctx["ready"]:
                 # Accepted lost-injection race: nothing is running yet a phase is

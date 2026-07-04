@@ -50,6 +50,9 @@ def _worker_env(cfg: Config, phase: str) -> dict[str, str]:
 def launch(cfg: Config, phase: str, log: Log) -> bool:
     """Claim a slot and start a worker for ``phase``. Returns success."""
     with state_mod.transaction(cfg) as st:
+        if st.paused:
+            log.line(f"LAUNCH-DENIED {phase} paused")
+            return False
         slot = st.claim_slot(phase)
         if slot is None:
             log.line(f"LAUNCH-DENIED {phase} no-free-slot")

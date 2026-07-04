@@ -161,10 +161,25 @@ def cmd_skip(cfg: Config, phase: str) -> int:
     return 0
 
 
+def cmd_pause(cfg: Config) -> int:
+    with state_mod.transaction(cfg) as st:
+        st.paused = True
+    print("swarm paused — no new workers launch; in-flight workers finish")
+    return 0
+
+
+def cmd_resume(cfg: Config) -> int:
+    with state_mod.transaction(cfg) as st:
+        st.paused = False
+    _poke(cfg, "resume")
+    print("swarm resumed — launching will fill free slots")
+    return 0
+
+
 def cmd_status(cfg: Config) -> int:
     st = state_mod.read(cfg)
     lines = [
-        f"slug={cfg.slug} driver={cfg.driver} finished={st.finished}",
+        f"slug={cfg.slug} driver={cfg.driver} finished={st.finished} paused={st.paused}",
         f"master_alive={st.master_alive} supervisor_pid={st.supervisor_pid}",
     ]
     for s in st.slots:
@@ -192,6 +207,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("finish", help="ask the supervisor to stop now")
     sub.add_parser("reap", help="kill parked teammate panes")
     sub.add_parser("status", help="human-readable state dump")
+    sub.add_parser("pause", help="stop launching new workers (in-flight finish)")
+    sub.add_parser("resume", help="resume launching workers into free slots")
 
     lp = sub.add_parser("launch", help="claim a slot and start a worker")
     lp.add_argument("phase")
@@ -242,6 +259,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_skip(cfg, args.phase)
     if cmd == "status":
         return cmd_status(cfg)
+    if cmd == "pause":
+        return cmd_pause(cfg)
+    if cmd == "resume":
+        return cmd_resume(cfg)
     return 2
 
 

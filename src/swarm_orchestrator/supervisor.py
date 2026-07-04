@@ -147,10 +147,10 @@ class Supervisor:
         if not busy:
             if ctx["ready"]:
                 # Accepted lost-injection race: nothing is running yet a phase is
-                # ready. We finish anyway (no backstop); the owner sees this line
-                # and can `swarm launch` it manually.
+                # ready. We finish anyway (no backstop); the owner is told (log +
+                # telegram) and can `swarm launch` it manually.
                 self.log.line(f"FINISH-WITH-READY leftover={ctx['ready']}")
-            self._finish(len(ctx["done"]))
+            self._finish(len(ctx["done"]), ctx["ready"])
 
     def _spawn_master(self, kind: str) -> None:
         with state_mod.transaction(self.cfg) as st:
@@ -160,16 +160,21 @@ class Supervisor:
             st.master_alive = True
 
     # -- finish -----------------------------------------------------------
-    def _finish(self, done_count: int) -> None:
+    def _finish(self, done_count: int, leftover: list[str] | None = None) -> None:
         with state_mod.transaction(self.cfg) as st:
             if st.finished:
                 return
             st.finished = True
         self._reap_teammates()
-        telegram.notify(
-            self.cfg.telegram_notify,
-            f"swarm finished: {done_count} phase(s) done",
-        )
+        msg = f"swarm finished: {done_count} phase(s) done"
+        if leftover:
+            # Accepted-race surfacing: a nudge was lost, so these ready phases
+            # were never launched. Tell the owner how to resume (no auto-retry).
+            msg += (
+                f"; {len(leftover)} ready but unlaunched (lost nudge): "
+                f"{', '.join(leftover)} -- run `swarm launch <phase>` to resume"
+            )
+        telegram.notify(self.cfg.telegram_notify, msg)
         self.log.line("ACTION finish")
         self._stop = True
 

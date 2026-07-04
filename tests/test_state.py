@@ -93,3 +93,26 @@ def test_done_writes_sentinel_and_fifo_line(swarm):
         assert line == "done P1 ok\n"
     finally:
         os.close(fd)
+
+
+# -- finish surfaces the accepted lost-injection race (no backstop) --------
+def test_finish_is_idempotent_and_surfaces_leftover(monkeypatch, tmp_path):
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
+    monkeypatch.setenv("SWARM_DRIVER", "bare")
+    from swarm_orchestrator.config import load
+    from swarm_orchestrator.supervisor import Supervisor
+
+    cfg = load(project_dir=str(tmp_path))
+    sup = Supervisor(cfg)
+    try:
+        sup._finish(2, ["P1", "P7"])  # a lost nudge left P1,P7 ready-but-unlaunched
+        tg = (tmp_path / "tg.log").read_text().splitlines()
+        assert len(tg) == 1
+        assert "2 phase(s) done" in tg[0]
+        assert "unlaunched" in tg[0] and "P1" in tg[0] and "P7" in tg[0]
+        # rule: finish fires exactly once -- a second call is a no-op.
+        sup._finish(2, ["P1", "P7"])
+        assert len((tmp_path / "tg.log").read_text().splitlines()) == 1
+    finally:
+        sup.log.close()

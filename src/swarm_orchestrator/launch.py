@@ -94,14 +94,9 @@ def _launch_tmux(cfg: Config, phase: str, pane: str | None, log: Log) -> bool:
     if not _await_ready(cfg, pane, log):
         return False
     command = cfg.command_template.format(phase=phase)
-    for attempt in range(2):
-        tmux.send_literal(pane, command)
-        tmux.send_enter(pane)
-        time.sleep(POLL_INTERVAL_S)
-        if command in tmux.capture(pane):
-            return True
-        log.line(f"ECHO-RETRY {phase} attempt={attempt}")
-    log.line(f"ECHO-FAIL {phase}")
+    if tmux.submit_line(pane, command):
+        return True
+    log.line(f"SUBMIT-FAIL {phase}")
     return False
 
 

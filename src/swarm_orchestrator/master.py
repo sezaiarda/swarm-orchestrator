@@ -161,8 +161,8 @@ class Master:
             f"Read {prompt_file} and follow every instruction in it exactly. "
             f"You are orchestrating the project at {self.cfg.project_dir}."
         )
-        tmux.send_literal(pane, line)
-        tmux.send_enter(pane)
+        if not tmux.submit_line(pane, line):
+            self.log.line("ACTION deliver-prompt-failed")
 
     def inject(self, text: str) -> None:
         """Nudge the live master with one line of guidance."""

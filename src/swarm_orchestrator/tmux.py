@@ -9,7 +9,8 @@ accounting is tag-driven and immune to stray teammate panes.
 from __future__ import annotations
 
 import subprocess
-from typing import Sequence
+import time
+from typing import Callable, Sequence
 
 SLOT_OPT = "@swarm_slot"
 
@@ -139,6 +140,47 @@ def send_literal(pane_id: str, text: str) -> None:
 
 def send_enter(pane_id: str) -> None:
     run(["send-keys", "-t", pane_id, "Enter"], check=True)
+
+
+def capture_joined(pane_id: str) -> str:
+    """Capture pane text with wrapped lines joined (``-J``).
+
+    A long typed line wraps across visual rows; joining makes it a single
+    contiguous line so it can be matched as one substring.
+    """
+    return run(["capture-pane", "-p", "-J", "-t", pane_id]).stdout
+
+
+def clear_input(pane_id: str) -> None:
+    """Clear the current input line (readline ``C-u``)."""
+    run(["send-keys", "-t", pane_id, "C-u"])
+
+
+def _poll(pred: Callable[[], bool], timeout: float, interval: float = 0.15) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def submit_line(pane_id: str, text: str, present_timeout: float = 10.0) -> bool:
+    """Type ``text`` into ``pane_id`` and submit it, race-free.
+
+    A bare ``send_literal`` + ``send_enter`` can fire Enter *before* the typed
+    text has landed in the input box — Enter then submits an empty box and the
+    text is left sitting, unsent. So we type, poll until the full text is
+    present, *then* Enter. Retries once (clearing partial input first). Returns
+    True once the text was confirmed present and Enter was sent.
+    """
+    for _ in range(2):
+        send_literal(pane_id, text)
+        if _poll(lambda: text in capture_joined(pane_id), present_timeout):
+            send_enter(pane_id)
+            return True
+        clear_input(pane_id)
+    return False
 
 
 def join_pane(src_pane: str, dst_window: str) -> None:

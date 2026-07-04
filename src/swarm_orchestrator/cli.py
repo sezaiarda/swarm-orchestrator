@@ -20,7 +20,7 @@ from . import launch as launch_mod
 from . import session as session_mod
 from . import state as state_mod
 from . import supervisor as sup_mod
-from . import telegram
+from . import telegram, tmux
 from .config import Config, load
 from .logutil import Log
 from .master import build_context
@@ -85,7 +85,29 @@ def _reconcile_orphans(cfg: Config) -> None:
         log.close()
 
 
-def cmd_up(cfg: Config) -> int:
+def _attach(cfg: Config) -> None:
+    """Attach the caller's terminal to the swarm tmux session.
+
+    Interactive-only: a no-op when stdout is not a TTY (scripts and the hermetic
+    test harness run ``swarm up`` with captured output) or for the bare driver.
+    Inside an existing tmux session we switch the client instead of nesting;
+    otherwise we ``exec`` into ``tmux attach`` so the ``swarm`` process simply
+    becomes the tmux client (the detached supervisor keeps running).
+    """
+    if cfg.driver != "tmux" or not sys.stdout.isatty():
+        return
+    if not tmux.session_exists(cfg.session):
+        return
+    if os.environ.get("TMUX"):
+        subprocess.run(["tmux", "switch-client", "-t", cfg.session], check=False)
+        return
+    try:
+        os.execvp("tmux", ["tmux", "attach", "-t", cfg.session])
+    except OSError as exc:
+        print(f"could not attach to tmux session {cfg.session!r}: {exc}", file=sys.stderr)
+
+
+def cmd_up(cfg: Config, attach: bool = True) -> int:
     cfg.ensure_dirs()
     state_mod.init_state(cfg)
     if cfg.git_isolation == "worktree":
@@ -109,6 +131,8 @@ def cmd_up(cfg: Config) -> int:
         return 1
     _poke(cfg, "bootstrap")
     print(f"swarm up: supervisor pid={pid} driver={cfg.driver}")
+    if attach:
+        _attach(cfg)  # interactive: hand the terminal to the swarm window
     return 0
 
 
@@ -253,7 +277,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project-dir", help="project directory (default: cwd)")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("up", help="set up + start the supervisor")
+    up = sub.add_parser("up", help="set up + start the supervisor, then attach")
+    up.add_argument(
+        "--no-attach",
+        action="store_true",
+        help="don't attach the terminal to the swarm tmux session after bringing it up",
+    )
     sub.add_parser("down", help="stop the supervisor + tear down")
     sub.add_parser("_supervise", help=argparse.SUPPRESS)
     sub.add_parser("context", help="print the read-only state snapshot (JSON)")
@@ -292,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load(explicit=args.config, project_dir=args.project_dir)
     cmd = args.command
     if cmd == "up":
-        return cmd_up(cfg)
+        return cmd_up(cfg, attach=not args.no_attach)
     if cmd == "down":
         return cmd_down(cfg)
     if cmd == "_supervise":

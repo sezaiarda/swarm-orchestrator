@@ -50,9 +50,11 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
 3. **Run it** from the project root (or pass `--project-dir`):
 
    ```bash
-   swarm up               # create tmux session + supervisor + init master
-   tmux attach -t swarm   # watch — window 0 = master, window 1 = 4 workers
+   swarm up               # session + supervisor + init master, then attaches you
    ```
+   `swarm up` drops you straight into the tmux session (window 0 = master, window
+   1 = 4 workers; `Ctrl-b d` detaches, the supervisor keeps running). Already
+   inside tmux? it switches your client to it. Scripting it? `swarm up --no-attach`.
 
 ### What happens
 - `swarm up` builds a tmux session `swarm` (a **master** window and a **workers**
@@ -95,7 +97,7 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
 uv tool install --editable ~/Projects/swarm-orchestrator          # once
 cp ~/projects/swarm-orchestrator/examples/multi-repo.swarm.toml \
    ~/projects/myproject/.swarm.toml                               # once
-cd ~/projects/myproject && swarm up && tmux attach -t swarm       # go
+cd ~/projects/myproject && swarm up                               # go (auto-attaches)
 ```
 
 The multi-repo example config points the master at `docs/PHASE-LEDGER.md`, excludes the

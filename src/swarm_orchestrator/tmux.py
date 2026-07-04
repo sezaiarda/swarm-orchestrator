@@ -65,6 +65,11 @@ def rename_window(window_id: str, name: str) -> None:
     run(["rename-window", "-t", window_id, name])
 
 
+def kill_window(window_id: str) -> None:
+    """Kill one window by id (used to close a transient resolver pane)."""
+    run(["kill-window", "-t", window_id])
+
+
 def new_window(session: str, name: str, hold: str = "sleep infinity") -> str:
     """Create a window running a holding command; return its window id."""
     out = run(

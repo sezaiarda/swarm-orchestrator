@@ -22,3 +22,11 @@ notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
 
 [tmux]
 session = "swarm"
+
+[git]
+isolation   = "worktree"   # each worker builds on branch swarm/<phase> in an
+                           # isolated worktree; a serialized integrator merges it
+                           # into `master` on `swarm done`. "none" = commit in
+                           # place (today's behavior). Siblings need no config —
+                           # they are sole-writer, committed directly by the worker.
+main_branch = "master"

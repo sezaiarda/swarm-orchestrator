@@ -43,3 +43,14 @@ If, before idling, you are nudged that another worker finished, run
 `swarm context` again and launch any newly-ready phase into the freed slot
 before you idle. Only open an AskUserQuestion (and stop) if you genuinely need
 the owner; you almost never do (bypassPermissions means no permission modals).
+
+## Note: worktree isolation (`[git] isolation = "worktree"`)
+When the config opts into worktree isolation, each worker's cwd is an isolated
+worktree on branch `swarm/<phase>` (env `SWARM_WORKTREE`, `SWARM_MAIN`,
+`SWARM_PROJECT`); the worker commits its ledger tick + STATUS to that branch and
+does **not** push the project main. When patching `[worker].command_file`, make
+the swarm-mode path (a) build in `$SWARM_WORKTREE` (single-repo) or the canonical
+sibling `$SWARM_PROJECT/<repo>` (multi-repo, committed+pushed directly there —
+sole writer), (b) commit the tick to `swarm/$SWARM_PHASE` in the worktree, and
+(c) **never** push the project main. The supervisor's serialized integrator
+merges each `swarm/<phase>` into `$SWARM_MAIN` on `swarm done`.

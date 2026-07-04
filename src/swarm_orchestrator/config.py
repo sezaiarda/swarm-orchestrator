@@ -46,6 +46,8 @@ class Config:
     session: str
     driver: str
     master_cmd: str
+    git_isolation: str
+    git_main_branch: str
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -82,6 +84,16 @@ class Config:
     def supervisor_log(self) -> Path:
         return self.log_dir / "supervisor.log"
 
+    @property
+    def wt_dir(self) -> Path:
+        """Where per-phase worktrees live (``isolation = worktree`` only)."""
+        return self.state_dir / "wt"
+
+    @property
+    def git_lock_dir(self) -> Path:
+        """Where per-repo integration ``flock`` files live."""
+        return self.state_dir / "git"
+
     def ensure_dirs(self) -> None:
         """Create the state/done/log directories if absent."""
         for d in (self.state_dir, self.done_dir, self.log_dir):
@@ -114,6 +126,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     tasks = data.get("tasks", {})
     telegram = data.get("telegram", {})
     tmux = data.get("tmux", {})
+    git = data.get("git", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
     return Config(
@@ -149,6 +162,14 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         session=os.environ.get("SWARM_SESSION", tmux.get("session", "swarm")),
         driver=driver,
         master_cmd=os.environ.get("SWARM_MASTER_CMD", swarm.get("master_cmd", "")),
+        git_isolation=os.environ.get(
+            # "none" (default) == today's behavior: workers commit main in place.
+            # "worktree" opts into isolated worktrees + the serialized merge-queue.
+            "SWARM_GIT_ISOLATION", str(git.get("isolation", "none"))
+        ),
+        git_main_branch=os.environ.get(
+            "SWARM_GIT_MAIN", str(git.get("main_branch", "master"))
+        ),
     )
 
 

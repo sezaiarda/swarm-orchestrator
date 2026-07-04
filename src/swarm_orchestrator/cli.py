@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 
+from . import gitq
 from . import launch as launch_mod
 from . import session as session_mod
 from . import state as state_mod
@@ -50,9 +51,31 @@ def _wait_supervisor_up(cfg: Config, timeout: float = 10.0) -> int | None:
 
 
 # -- commands -------------------------------------------------------------
+def _reconcile_orphans(cfg: Config) -> None:
+    """Integrate/GC leftover ``swarm/*`` branches before the supervisor starts.
+
+    Git-state-derived (not lifecycle): a branch whose phase is done is GC'd, an
+    orphan (worker committed, supervisor died before ``done``) is integrated and
+    then marked done so the master won't rebuild it.
+    """
+    log = Log(cfg.supervisor_log)
+    try:
+        st = state_mod.read(cfg)
+        integrated = gitq.reconcile_orphans(cfg, dict(st.done), log)
+        if integrated:
+            with state_mod.transaction(cfg) as s:
+                for phase in integrated:
+                    s.mark_done(phase, "ok")
+            print(f"reconciled orphan branches: {', '.join(integrated)}")
+    finally:
+        log.close()
+
+
 def cmd_up(cfg: Config) -> int:
     cfg.ensure_dirs()
     state_mod.init_state(cfg)
+    if cfg.git_isolation == "worktree":
+        _reconcile_orphans(cfg)
     if not cfg.fifo_path.exists():
         os.mkfifo(cfg.fifo_path)
     if cfg.driver == "tmux":
@@ -114,6 +137,24 @@ def cmd_master_idle(cfg: Config) -> int:
     return 0
 
 
+def cmd_resolved(cfg: Config, phase: str) -> int:
+    """Signal that a merge-conflict resolver finished (unblocks the queue)."""
+    _poke(cfg, f"resolved {phase}")
+    print(f"resolved {phase}")
+    return 0
+
+
+def cmd_integrate(cfg: Config, phase: str) -> int:
+    """Manually integrate ``swarm/<phase>`` into main (owner escape hatch)."""
+    log = Log(cfg.supervisor_log)
+    try:
+        result = gitq.integrate(cfg, phase, log)
+    finally:
+        log.close()
+    print(f"integrate {phase}: {result}")
+    return 0 if result == gitq.MERGED else 1
+
+
 def cmd_bootstrap(cfg: Config) -> int:
     _poke(cfg, "bootstrap")
     return 0
@@ -131,6 +172,8 @@ def cmd_free(cfg: Config, target: str) -> int:
             if slot:
                 slot.busy = False
                 slot.phase = None
+                slot.worktree = None
+                slot.branch = None
         else:
             st.free_slot_for(target)
     print(f"freed {target}")
@@ -164,10 +207,13 @@ def cmd_status(cfg: Config) -> int:
     lines = [
         f"slug={cfg.slug} driver={cfg.driver} finished={st.finished} paused={st.paused}",
         f"master_alive={st.master_alive} supervisor_pid={st.supervisor_pid}",
+        f"isolation={cfg.git_isolation} main={cfg.git_main_branch}"
+        f" integ_blocked={st.integ_blocked} integ_queue={st.integ_queue}",
     ]
     for s in st.slots:
         mark = f"BUSY {s.phase}" if s.busy else "free"
-        lines.append(f"  slot {s.id} pane={s.pane_id} {mark}")
+        wt = f" branch={s.branch}" if s.branch else ""
+        lines.append(f"  slot {s.id} pane={s.pane_id} {mark}{wt}")
     lines.append(f"done={st.done}")
     print("\n".join(lines))
     return 0
@@ -186,6 +232,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("context", help="print the read-only state snapshot (JSON)")
     sub.add_parser("master-idle", help="signal the master finished a pass")
     sub.add_parser("bootstrap", help="ask the supervisor to spawn the init master")
+
+    rp = sub.add_parser("resolved", help="signal a merge-conflict resolver finished")
+    rp.add_argument("phase")
+
+    ip = sub.add_parser("integrate", help="manually integrate swarm/<phase> into main")
+    ip.add_argument("phase")
     sub.add_parser("finish", help="ask the supervisor to stop now")
     sub.add_parser("status", help="human-readable state dump")
     sub.add_parser("pause", help="stop launching new workers (in-flight finish)")
@@ -226,6 +278,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_context(cfg)
     if cmd == "master-idle":
         return cmd_master_idle(cfg)
+    if cmd == "resolved":
+        return cmd_resolved(cfg, args.phase)
+    if cmd == "integrate":
+        return cmd_integrate(cfg, args.phase)
     if cmd == "bootstrap":
         return cmd_bootstrap(cfg)
     if cmd == "finish":

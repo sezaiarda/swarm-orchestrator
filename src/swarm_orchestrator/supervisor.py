@@ -19,7 +19,9 @@ import os
 import select
 import signal
 
+from . import gitq
 from . import master as master_mod
+from . import resolver as resolver_mod
 from . import state as state_mod
 from . import telegram
 from .config import Config
@@ -106,6 +108,8 @@ class Supervisor:
             self._on_done(phase, status)
         elif verb == "master-idle":
             self._on_master_idle()
+        elif verb == "resolved":
+            self._on_resolved(parts[1] if len(parts) > 1 else "?")
         elif verb == "bootstrap":
             self._on_bootstrap()
         elif verb == "resume":
@@ -130,6 +134,100 @@ class Supervisor:
 
     # -- rule 1: done -----------------------------------------------------
     def _on_done(self, phase: str, status: str) -> None:
+        """Integrate first (worktree mode), then run the pure-injection advance.
+
+        Non-worktree runs go straight to :meth:`_advance_done` (today's exact
+        four-rule behavior). Worktree ``ok`` runs enqueue the phase for
+        integration and pump the merge-queue: each ``swarm/<phase>`` is merged
+        into ``main`` (serialized) before its slot is freed. A conflict parks the
+        head phase and HOLDS the queue on a resolver, so dones arriving meanwhile
+        wait in ``integ_queue`` — never lost. A ``fail`` never integrates: its
+        branch is dropped and the slot advances (status preserved).
+        """
+        if self.cfg.git_isolation != "worktree":
+            self._advance_done(phase, status)
+            return
+        if status != "ok":
+            gitq.discard(self.cfg, phase, self.log)  # failed build: drop the branch
+            self._advance_done(phase, status)
+            return
+        with state_mod.transaction(self.cfg) as st:
+            already = phase in st.done
+            has_slot = any(s.busy and s.phase == phase for s in st.slots)
+            if not (already and not has_slot) and phase not in st.integ_queue:
+                st.integ_queue.append(phase)
+        self._pump_integrations()
+
+    def _pump_integrations(self) -> None:
+        """Drain ``integ_queue`` head-first while nothing is blocked."""
+        while True:
+            with state_mod.transaction(self.cfg) as st:
+                if st.integ_blocked is not None or not st.integ_queue:
+                    return
+                phase = st.integ_queue[0]
+                already = phase in st.done
+                has_slot = any(s.busy and s.phase == phase for s in st.slots)
+            if already and not has_slot:
+                self._dequeue(phase)
+                self._advance_done(phase, "ok")  # duplicate -> DONE-DUPLICATE no-op
+                continue
+            result = gitq.integrate(self.cfg, phase, self.log)
+            if result == gitq.MERGED:
+                self._dequeue(phase)
+                self._advance_done(phase, "ok")
+                continue
+            self._block_on_conflict(phase)  # head stays queued, queue held
+            return
+
+    def _dequeue(self, phase: str) -> None:
+        with state_mod.transaction(self.cfg) as st:
+            if st.integ_queue and st.integ_queue[0] == phase:
+                st.integ_queue.pop(0)
+
+    def _block_on_conflict(self, phase: str) -> None:
+        with state_mod.transaction(self.cfg) as st:
+            st.integ_blocked = phase
+        pane = resolver_mod.spawn(self.cfg, phase, self.log)
+        with state_mod.transaction(self.cfg) as st:
+            if pane is not None:
+                st.windows[f"resolve:{phase}"] = pane
+        self.log.line(f"INTEGRATE-BLOCKED {phase}")
+        telegram.notify(
+            self.cfg.telegram_notify,
+            f"swarm: merge conflict integrating {phase}; resolver pane open"
+            f" -- run `swarm resolved {phase}` once fixed",
+        )
+
+    # -- resolved: finish a blocked integration, resume the queue ---------
+    def _on_resolved(self, phase: str) -> None:
+        with state_mod.transaction(self.cfg) as st:
+            blocked = st.integ_blocked
+        if blocked != phase:
+            self.log.line(f"RESOLVED-IGNORED expected={blocked} got={phase}")
+            return
+        result = gitq.finish_conflict(self.cfg, phase, self.log)
+        if result != gitq.MERGED:
+            # Resolver signalled early (merge still unfinished): stay blocked.
+            self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked")
+            telegram.notify(
+                self.cfg.telegram_notify,
+                f"swarm: {phase} merge not finished yet -- resolve + commit,"
+                f" then re-run `swarm resolved {phase}`",
+            )
+            return
+        with state_mod.transaction(self.cfg) as st:
+            st.integ_blocked = None
+            if st.integ_queue and st.integ_queue[0] == phase:
+                st.integ_queue.pop(0)
+            win = st.windows.pop(f"resolve:{phase}", None)
+        if win:
+            resolver_mod.close(self.cfg, win, self.log)
+        self.log.line(f"RESOLVED {phase}")
+        self._advance_done(phase, "ok")
+        self._pump_integrations()  # resume; may re-block on the next conflict
+
+    # -- rule 1 core (pure-injection, unchanged): free slot + spawn/inject -
+    def _advance_done(self, phase: str, status: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             already = phase in st.done
             st.mark_done(phase, status)

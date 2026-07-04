@@ -29,6 +29,8 @@ class Slot:
     pane_id: str | None = None
     busy: bool = False
     phase: str | None = None
+    worktree: str | None = None  # isolation=worktree: the phase's worktree path
+    branch: str | None = None  # isolation=worktree: swarm/<phase>
 
 
 @dataclass
@@ -43,6 +45,14 @@ class State:
     finished: bool = False
     paused: bool = False
     supervisor_pid: int | None = None
+    # isolation=worktree merge-queue (orthogonal to the master lifecycle). Phases
+    # whose ``ok`` worker finished queue in ``integ_queue`` and are integrated
+    # into the project ``main`` one-at-a-time by the supervisor. A merge conflict
+    # parks the head phase in ``integ_blocked`` and HOLDS the whole queue (no
+    # further integrations) until a transient resolver signals
+    # ``swarm resolved <phase>`` — so the FIFO reader never blocks on the human.
+    integ_queue: list[str] = field(default_factory=list)
+    integ_blocked: str | None = None
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -72,6 +82,8 @@ class State:
             return None
         slot.busy = True
         slot.phase = phase
+        slot.worktree = None
+        slot.branch = None
         return slot
 
     def free_slot_for(self, phase: str) -> Slot | None:
@@ -81,6 +93,8 @@ class State:
             return None
         slot.busy = False
         slot.phase = None
+        slot.worktree = None
+        slot.branch = None
         return slot
 
     def mark_done(self, phase: str, status: str) -> None:
@@ -103,6 +117,8 @@ class State:
             finished=data.get("finished", False),
             paused=data.get("paused", False),
             supervisor_pid=data.get("supervisor_pid"),
+            integ_queue=list(data.get("integ_queue", [])),
+            integ_blocked=data.get("integ_blocked"),
         )
 
     @classmethod

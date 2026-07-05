@@ -295,10 +295,29 @@ def cmd_skip(cfg: Config, phase: str) -> int:
     return 0
 
 
+def _warn_if_no_supervisor(cfg: Config, what: str) -> None:
+    """Warn when a control command lands on a state no supervisor is reading.
+
+    ``pause``/``resume`` mutate ``state.json`` directly; run from the wrong
+    directory (the CLI resolves the project + slug from the cwd) they write a state
+    file no live swarm observes, silently doing nothing — the footgun that makes
+    ``swarm pause`` look broken. Surfacing it turns a confusing no-op into a
+    visible warning.
+    """
+    if not _supervisor_running(cfg):
+        print(
+            f"WARNING: no swarm supervisor is running for {cfg.slug!r} "
+            f"(resolved from cwd={cfg.project_dir}) — this {what} affects a state "
+            "nothing is reading. Run it from a live swarm's project directory.",
+            file=sys.stderr,
+        )
+
+
 def cmd_pause(cfg: Config) -> int:
     with state_mod.transaction(cfg) as st:
         st.paused = True
     print("swarm paused — no new workers launch; in-flight workers finish")
+    _warn_if_no_supervisor(cfg, "pause")
     return 0
 
 
@@ -307,6 +326,7 @@ def cmd_resume(cfg: Config) -> int:
         st.paused = False
     _poke(cfg, "resume")
     print("swarm resumed — launching will fill free slots")
+    _warn_if_no_supervisor(cfg, "resume")
     return 0
 
 

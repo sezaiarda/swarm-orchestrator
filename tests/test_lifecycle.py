@@ -159,3 +159,19 @@ def test_done_never_hangs_when_supervisor_down(swarm):
     assert proc.returncode == 0
     assert elapsed < 3.0  # best-effort poke never blocks
     assert (swarm.state_dir / "done" / "P0.ok").is_file()
+
+
+def test_pause_warns_when_no_supervisor(swarm):
+    """`swarm pause`/`resume` warn (not silently no-op) when nothing is reading the
+    state — the wrong-cwd footgun that makes a pause land on a state no live swarm
+    observes. The flag is still written, but stderr says no supervisor is running.
+    """
+    r = swarm.cli("pause")
+    assert r.returncode == 0
+    assert swarm.state()["paused"] is True  # the flag IS written
+    assert "no swarm supervisor is running" in r.stderr  # ...and the no-op is surfaced
+
+    rr = swarm.cli("resume")
+    assert rr.returncode == 0
+    assert swarm.state()["paused"] is False
+    assert "no swarm supervisor is running" in rr.stderr

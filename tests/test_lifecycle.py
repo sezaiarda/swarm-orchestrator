@@ -36,8 +36,13 @@ def test_fanout_convergence_and_single_finish(swarm):
     assert st["finished"]
     assert set(st["done"]) >= {"P0", "P1", "P2", "P3", "P4"}
     assert swarm.log_text().count("ACTION finish") == 1  # finish fires once
-    assert swarm.wait(lambda: len(swarm.tg_lines()) == 1, timeout=5)
-    assert "finished" in swarm.tg_lines()[0]
+    # Each worker telegrams the owner "complete" as it finishes (workers ping
+    # directly, not just nudging the master); the supervisor sends exactly one
+    # terminal "swarm finished". The ACTION-finish wait above guarantees both are
+    # already flushed to the sink.
+    tg = swarm.tg_lines()
+    assert sum("swarm finished" in ln for ln in tg) == 1  # finish pings once
+    assert sum("worker complete" in ln for ln in tg) >= 5  # P0..P4 each ping
 
 
 def test_two_dones_while_master_alive_are_injected(swarm):

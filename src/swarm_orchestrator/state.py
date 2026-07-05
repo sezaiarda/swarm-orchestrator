@@ -173,11 +173,21 @@ def transaction(cfg: Config) -> Iterator[State]:
 
 
 def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
-    """Create a fresh state file for a new run."""
+    """Rebuild the run's slots from config, preserving completed-phase progress.
+
+    ``swarm up`` re-derives the slot list from ``max_workers`` (so a changed
+    worker count / isolation takes effect on the next boot — the only supported
+    way to resize a swarm), but carries the ``done`` record over from any existing
+    state file. Reboot is the documented way to change the slot count, so it must
+    not re-run already-finished phases. A genuinely clean slate = delete the state
+    dir. First boot has no prior file, so ``done`` starts empty as before.
+    """
     with transaction(cfg) as state:
+        prior_done = dict(state.done)
         fresh = State.fresh(cfg.max_workers)
         fresh.windows = windows or {}
         fresh.supervisor_pid = None
+        fresh.done = prior_done
         state.__dict__.update(fresh.__dict__)
         return state
 

@@ -53,6 +53,7 @@ class Config:
     worker_cmd: str
     ready_marker: str
     worker_settings: str
+    done_grace_s: int
     ledger: str
     roadmap: str
     exclude: list[str]
@@ -187,6 +188,14 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             # extra tmux panes. Set to "" to disable (e.g. a non-claude worker).
             "SWARM_WORKER_SETTINGS",
             worker.get("worker_settings", '{"teammateMode":"in-process"}'),
+        ),
+        # Seconds a worker holds its slot after signalling `done` before the
+        # supervisor is poked to reclaim it (a "finish buffer" so the worker can
+        # flush last work). 0 (the default) = advance immediately, unchanged
+        # behaviour. The delay lives in the worker's own `swarm done`, so the
+        # single-threaded supervisor loop never blocks.
+        done_grace_s=_int_env(
+            "SWARM_DONE_GRACE", worker.get("done_grace_s"), 0, minimum=0
         ),
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
         roadmap=str(tasks.get("roadmap", "docs/ROADMAP-MASTER.md")),

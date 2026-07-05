@@ -1,5 +1,5 @@
 [swarm]
-max_workers = 4
+max_workers = 1
 master_model = ""                 # "" = inherit; else "opus"/"sonnet"/...
 
 [worker]
@@ -9,6 +9,9 @@ env_marker      = "SWARM_PHASE"
 done_hook       = 'swarm done "$SWARM_PHASE" ok'
 worker_cmd      = "claude -n worker:{phase}"  # launched as: cd <project> && exec <worker_cmd>
 worker_settings = '{"teammateMode":"in-process"}'  # worker's own teammates run in-process (no extra panes)
+done_grace_s    = 30   # after a worker signals `done`, it holds its slot this many
+                       # seconds (a finish buffer to flush last work) before the
+                       # supervisor reclaims it. 0 = advance immediately.
 # ready_marker auto-derives from `claude --version` (its banner). Set only to override.
 
 [tasks]
@@ -34,7 +37,8 @@ cache          = true # symlink each worktree's cargo `target/` to a shared per-
                       # cache so only *changed* crates recompile across worktrees
 
 [git]
-isolation   = "worktree"   # each phase builds against a full isolated MIRROR of the
+isolation   = "none"       # commit in place (no isolation). Was "worktree", which builds each
+                           # phase against a full isolated MIRROR of the
                            # workspace on branch swarm/<phase>: the umbrella + every
                            # component repo, nested at its real path. A serialized
                            # integrator merges every repo the phase changed into its

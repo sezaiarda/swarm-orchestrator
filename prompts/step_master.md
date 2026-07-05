@@ -24,6 +24,7 @@ Do this, then stop:
    became ready. Then run `swarm master-idle` and STOP. The supervisor kills
    this pane — do not self-terminate, do not loop forever.
 
-Only open an AskUserQuestion (telegram-ping first, then ask, then STOP) if you
-hit real ambiguity that needs the owner. That is rare — normally you launch and
-idle silently.
+Never open an AskUserQuestion — the owner does not want to be questioned. On any
+ambiguity, pick the best option yourself (critical-path first) and proceed;
+launch and idle silently. Only a genuine blocker you cannot decide (e.g.
+`ledger_issues`) gets a telegram — informational, not a question — then STOP.

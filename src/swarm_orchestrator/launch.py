@@ -298,6 +298,17 @@ def _poke_fifo(cfg: Config, line: str) -> bool:
 
 
 def done(cfg: Config, phase: str, status: str, note: str = "") -> None:
-    """Signal phase completion: durable sentinel first, then best-effort poke."""
+    """Signal phase completion.
+
+    Order matters: (1) write the durable sentinel; (2) telegram the owner *from
+    the worker itself* that the phase is complete — not just nudging the master;
+    (3) hold the slot for ``done_grace_s`` so the worker has a buffer to flush any
+    last work before the supervisor reclaims it; (4) best-effort poke. The grace
+    sleeps in the worker's own process, so the single-threaded supervisor loop is
+    never blocked; ``done_grace_s = 0`` (the default) keeps the immediate path.
+    """
     _write_sentinel(cfg, phase, status, note)
+    telegram.notify(cfg.telegram_notify, f"swarm: worker complete — {phase} ({status})")
+    if cfg.done_grace_s > 0:
+        time.sleep(cfg.done_grace_s)
     _poke_fifo(cfg, f"done {phase} {status}\n")

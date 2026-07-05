@@ -261,3 +261,26 @@ def test_finish_is_idempotent_and_surfaces_leftover(monkeypatch, tmp_path):
         assert len((tmp_path / "tg.log").read_text().splitlines()) == 1
     finally:
         sup.log.close()
+
+
+# -- reboot resizes slots but keeps progress ------------------------------
+def test_init_state_preserves_done_and_rebuilds_slots(monkeypatch, tmp_path):
+    """`swarm up` re-derives the slot list from config (the only way to resize a
+    swarm) but must NOT wipe the completed-phase record -- otherwise a down/up to
+    change the worker count would silently re-run everything already done."""
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    from swarm_orchestrator import state as state_mod
+    from swarm_orchestrator.config import load
+
+    cfg4 = load(project_dir=str(tmp_path))  # default max_workers = 4
+    state_mod.init_state(cfg4)
+    with state_mod.transaction(cfg4) as st:
+        st.done = {"P0": "ok", "P1": "skip", "P2": "fail"}
+        st.finished = True
+
+    cfg1 = load(project_dir=str(tmp_path))
+    cfg1.max_workers = 1  # simulate a 4 -> 1 config edit before the next `up`
+    rebuilt = state_mod.init_state(cfg1)
+    assert len(rebuilt.slots) == 1  # slot count follows config
+    assert rebuilt.done == {"P0": "ok", "P1": "skip", "P2": "fail"}  # progress kept
+    assert not rebuilt.finished and not rebuilt.paused  # boot flags reset fresh

@@ -52,6 +52,28 @@ def _wait_supervisor_up(cfg: Config, timeout: float = 10.0) -> int | None:
     return None
 
 
+def _supervisor_running(cfg: Config) -> bool:
+    """True if a supervisor is already attached to this project's control FIFO.
+
+    The supervisor opens the FIFO ``O_RDWR`` at startup and holds it for its whole
+    life (it is the *sole* reader), so a non-blocking write-open that succeeds
+    means one is running. Unlike checking the recorded ``supervisor_pid`` this also
+    catches a *stray* supervisor whose pid was overwritten by an earlier ``up``:
+    the failure mode where a session was killed out-of-band, its detached
+    supervisor survived, and a second ``up`` co-opted the same FIFO — leaving two
+    supervisors racing every event (each poke read by only one of them). A missing
+    FIFO or ``ENXIO`` (no reader) means none is running.
+    """
+    if not cfg.fifo_path.exists():
+        return False
+    try:
+        fd = os.open(cfg.fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False  # ENXIO (no reader attached) or transient — not running
+    os.close(fd)
+    return True
+
+
 # -- commands -------------------------------------------------------------
 def _reconcile_orphans(cfg: Config) -> None:
     """Rehydrate done-state and reconcile leftover ``swarm/*`` branches on ``up``.
@@ -110,6 +132,17 @@ def _attach(cfg: Config) -> None:
 
 def cmd_up(cfg: Config, attach: bool = True) -> int:
     cfg.ensure_dirs()
+    if _supervisor_running(cfg):
+        # Refuse to start a second supervisor on the same FIFO. The tmux-session
+        # guard in session.setup misses the case where the session was killed
+        # out-of-band but the detached supervisor survived; without this a second
+        # `up` silently spawns a co-reader and both race every event.
+        print(
+            f"a supervisor is already running for {cfg.slug!r} "
+            "(control FIFO has a reader) -- run `swarm down` first",
+            file=sys.stderr,
+        )
+        return 1
     state_mod.init_state(cfg)
     if cfg.git_isolation == "worktree":
         _reconcile_orphans(cfg)

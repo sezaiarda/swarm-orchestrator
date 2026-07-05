@@ -45,6 +45,21 @@ def test_fanout_convergence_and_single_finish(swarm):
     assert sum("worker complete" in ln for ln in tg) >= 5  # P0..P4 each ping
 
 
+def test_second_up_is_refused_while_supervisor_running(swarm):
+    """A second `swarm up` must not spawn a co-reader on the control FIFO.
+
+    Regression for the two-supervisor bug: a stray supervisor holding the FIFO
+    would otherwise race a fresh one, so `up` must refuse while one is attached.
+    """
+    swarm.up()
+    assert swarm.wait(
+        lambda: bool(swarm.state() and swarm.state().get("supervisor_pid")), timeout=20
+    ), swarm.log_text()
+    proc = swarm.cli("up", check=False)
+    assert proc.returncode != 0
+    assert "already running" in (proc.stdout + proc.stderr).lower()
+
+
 def test_two_dones_while_master_alive_are_injected(swarm):
     """Assertion 3: two dones while a master is ALIVE -> both injected + reused."""
     swarm.env["FAKE_MASTER_WAIT"] = "8"  # keep the master alive across both dones

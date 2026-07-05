@@ -1,8 +1,10 @@
 """The supervisor: sole FIFO reader, sole master-killer, sole finisher.
 
 It implements EXACTLY the four-rule pure-injection lifecycle and nothing more —
-no redo/coalescing, no need re-derivation, no sentinel reconcile, no safety
-timer, no pane-died watchdog, no auto-retry:
+no redo/coalescing, no need re-derivation, no sentinel reconcile, no pane-died
+watchdog, no auto-retry, no liveness reaper. It is event-driven; its ONE timed
+wake is the park deadline a ``waiting`` worker arms (rule 4) — a deferred reaction
+to a worker's own signal, never a poll:
 
 1. ``done``       -> free the slot; spawn a master if none is alive, else inject.
 2. ``master-idle``-> kill the master pane.

@@ -1,45 +1,52 @@
 # swarm-orchestrator
 
 Run a swarm of `claude` (Claude Code CLI) sessions in tmux to build a project's
-**phases** in parallel — one ephemeral *master* that decides what to launch, four
-fixed *worker* slots that build, and a single long-running *supervisor* that owns
-the whole lifecycle through one FIFO. It is pure glue over tmux and the `claude`
-CLI, so it drives projects in **any language**, configured by a per-project
-`.swarm.toml`.
+**phases** in parallel — one ephemeral *master* that decides what to launch, a
+configurable pool of *worker* slots (`[swarm].max_workers`) that build, and a
+single long-running *supervisor* that owns the whole lifecycle through one FIFO.
+It is pure glue over tmux and the `claude` CLI, so it drives projects in **any
+language**, configured by a per-project `.swarm.toml`.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="swarm-orchestrator runtime control loop: an owner runs `swarm up`; a supervisor owns control.fifo and state.json and drives an ephemeral claude master plus four fixed worker slots inside one tmux session; workers signal completion with `swarm done`, the master launches phases, and the supervisor notifies over telegram" width="900">
+  <img src="docs/architecture.svg" alt="swarm-orchestrator runtime control loop: an owner runs `swarm up`; a supervisor owns control.fifo and state.json and drives an ephemeral claude master plus a configurable pool of worker slots (paginated into windows of at most four) inside one tmux session; workers signal completion with `swarm done`, the master launches phases, and the supervisor notifies the owner over telegram" width="900">
 </p>
 
 ## How it works
 
-`swarm up` builds a tmux session with a **master** window (one pane) and a
-**workers** window of four tiled slots, starts a detached **supervisor**, and
-launches an **init master**. The master reads your phase ledger, works out which
-phases are ready, and `swarm launch`es up to four into the slots — each a real
-`claude` running `/prime <phase>`. When a worker finishes it calls `swarm done`;
-the supervisor spawns a fresh master (or nudges the live one) to launch the next
-ready phase into the freed slot. It loops until nothing is left, then telegrams
-you.
+`swarm up` builds a tmux session with a **master** window (one pane) and one or
+more **workers** windows holding `[swarm].max_workers` slots, paginated into
+windows of at most four (`workers`, `workers-2`, …) — a lone slot fills its
+window, two split LEFT|RIGHT, three–four tile into a grid. It starts a detached
+**supervisor** and launches an **init master**. The master reads your phase
+ledger, works out which phases are ready, and `swarm launch`es as many as there
+are free slots — each a real `claude` running `/prime <phase>`. When a worker
+finishes it calls `swarm done`; the supervisor spawns a fresh master (or nudges
+the live one) to launch the next ready phase into the freed slot. It loops until
+nothing is left, then telegrams you.
 
-Slot accounting is **state-based**, not pane-counting: four fixed pane ids tagged
-`@swarm_slot N`, claimed check-and-set under `flock(state.json)`. A stray teammate
-pane can't corrupt the count, and two launches can't grab the same slot.
+Slot accounting is **state-based**, not pane-counting: `max_workers` pane ids
+tagged `@swarm_slot N` across a global index, claimed check-and-set under
+`flock(state.json)`. A stray teammate pane can't corrupt the count, and two
+launches can't grab the same slot.
 
-## The lifecycle — four rules, no safety net
+## The lifecycle — the supervisor's rules
 
 The supervisor is the **sole** FIFO reader (so every event is totally ordered),
-the sole writer of `state.json`, and the sole killer of the master pane. It runs
-exactly four rules — no redo, no reconcile pass, no safety timer, no crash
-watchdog, no auto-retry:
+the sole writer of `state.json`, and the sole killer of the master pane. It is
+event-driven — no redo, no reconcile pass, no crash watchdog, no auto-retry; its
+only timed wake is a park deadline a `waiting` worker armed (rule 5):
 
-1. **`done <phase> <ok|fail>`** — free the slot; if no master is alive, **spawn**
-   one, otherwise **inject** a one-line nudge into the live one.
+1. **`done <phase> <ok|needs-owner|fail>`** — free the slot; if no master is
+   alive, **spawn** one, otherwise **inject** a one-line nudge into the live one.
+   (`ok`/`needs-owner` integrate the work; `fail` rolls it back.)
 2. **`master-idle`** — kill the master pane.
-3. After a kill — **finish** (teardown + telegram) once no slot is busy *and*
-   nothing is integrating.
-4. A worker that fails a gate **parks** (emits no `done`), so its slot stays busy
-   and finish can't fire until you resolve it.
+3. After a kill — **finish** (teardown + telegram) once nothing is `pending`
+   *and* nothing is integrating.
+4. Anything in flight keeps the run `pending` so finish can't fire early — a busy
+   slot, a worker `waiting` on you, or a `parked` worker.
+5. **`waiting <phase>`** — a worker needs you. After `[worker].park_after` with no
+   answer it's moved alive into its own `wait:<phase>` window and its slot is
+   freed for a replacement; it stays `pending` until you answer and it runs `done`.
 
 ```mermaid
 flowchart TD
@@ -71,13 +78,22 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
 
 1. **Add a `.swarm.toml`** to your project root — copy
    [`examples/multi-repo.swarm.toml`](examples/multi-repo.swarm.toml) and trim it.
-2. **Give the worker command a completion hook.** The command in
-   `[worker].command_file` (e.g. `.claude/commands/prime.md`) must, *when
-   `$SWARM_PHASE` is set*, (a) skip any "which phase?" prompt and build
-   `$SWARM_PHASE` directly, and (b) run `[worker].done_hook`
-   (`swarm done "$SWARM_PHASE" ok`) once the phase is green. On the first
-   `swarm up` the init master proposes those two edits for you to approve — or add
-   them yourself.
+2. **Let the init master patch the worker command.** On the first `swarm up` the
+   init master runs **autonomously** — it does *not* ask you to approve anything —
+   and patches the command in `[worker].command_file` (e.g.
+   `.claude/commands/prime.md`) so that, *when `$SWARM_PHASE` is set*, it: (a)
+   **skips** the "which phase?" prompt and builds `$SWARM_PHASE` directly; (b) ends
+   by **self-classifying** its outcome and running
+   `swarm done "$SWARM_PHASE" <status> "<recap>"`, where `<status>` is `ok` (clean
+   success — integrates silently, no ping), `needs-owner` (integrates **exactly**
+   like `ok` but telegrams you the recap to review), or `fail` (rolls the phase
+   back and telegrams you); (c) routes every heavy compile/test through the **build
+   gate** (`swarm build cargo …`) so parallel worktrees can't OOM the host; and (d)
+   follows the **owner-question contract** — run
+   `swarm waiting "$SWARM_PHASE" "<question>"` *before* opening an AskUserQuestion
+   and `swarm resumed "$SWARM_PHASE"` *after* the answer returns. It commits the
+   patch before launching anything. (Everything is guarded by `$SWARM_PHASE`, so a
+   manual `/prime` stays fully interactive — or make the edits yourself.)
 3. **Run it** from the project root (or pass `--project-dir`):
 
 ```bash
@@ -86,16 +102,21 @@ swarm up          # session + supervisor + init master, then attaches you
 ```
 
 `swarm up` drops you straight into the tmux session — `Ctrl-b 0` is the master,
-`Ctrl-b 1` is the four workers, `Ctrl-b d` detaches (the supervisor keeps
-running). Already inside tmux? it switches your client to the session. Scripting
+`Ctrl-b 1` is the first `workers` window (`Ctrl-b 2`, … page through the rest),
+`Ctrl-b d` detaches (the supervisor keeps running). Already inside tmux? it switches your client to the session. Scripting
 it? `swarm up --no-attach`. Tear everything down with `swarm down`.
 
 ## Answering the swarm
 
-A worker stops for you only when it genuinely needs a decision — it telegram-pings
-first, then asks in its own pane. Switch to the workers window and answer there.
-The master's questions (confirm the first batch, approve the `prime.md` diff) show
-in the master window. Everything else runs unattended.
+A worker stops for you only when it genuinely needs a decision it must not guess —
+it never assumes. It runs `swarm waiting "$SWARM_PHASE" "<question>"` (which
+telegram-pings you), then asks in its own pane; switch to its workers window and
+answer there. If it stays unanswered for `[worker].park_after` seconds, the
+supervisor moves the **live** worker into its own `wait:<phase>` window and refills
+its grid slot with a replacement phase — the worker keeps waiting off-grid, its
+dependents stay blocked, and the run won't finish until you answer and it runs
+`swarm done`. Once answered it calls `swarm resumed` to cancel the pending park.
+The master never asks — it runs autonomously. Everything else runs unattended.
 
 ## Commands
 
@@ -103,12 +124,14 @@ in the master window. Everything else runs unattended.
 |---|---|
 | `swarm up [--no-attach]` | build the session, start the supervisor + init master, then attach |
 | `swarm down` | stop the supervisor and tear the session down |
-| `swarm status` | human-readable state dump — slots, `done`, `paused`, the integration queue |
-| `swarm context` | the JSON snapshot the master reasons over (ready set, free slots, ledger issues) |
+| `swarm status` | human-readable state dump — slots, `done`, `paused`, `waiting`/`parked`, the integration queue |
+| `swarm context` | the JSON snapshot the master reasons over (`ready`, `launchable`, free slots, `waiting`, `parked`, ledger issues) |
 | `swarm pause` / `swarm resume` | hold new launches (in-flight finish) / resume filling free slots |
 | `swarm launch <phase>` | claim a free slot and start a phase by hand |
 | `swarm build <cmd…>` | run a heavy build through the swarm-wide concurrency gate — what a worker wraps its gates in |
-| `swarm done <phase> [ok\|fail] [note]` | signal phase completion — what a worker calls |
+| `swarm done <phase> [ok\|needs-owner\|fail] [note]` | signal phase completion (self-classified) — what a worker calls |
+| `swarm waiting <phase> [question]` | a worker self-reports it is blocked on the owner — pings you and, after `[worker].park_after`, frees its slot and moves it to its own window |
+| `swarm resumed <phase>` | the worker got its answer — cancel the pending park |
 | `swarm skip <phase>` | mark a phase done without building it |
 | `swarm free <slot\|phase>` | free a stuck slot (by id or phase) |
 | `swarm resolved <phase>` | after you clear a held integration (conflict / dirty tree / push failure) |
@@ -199,7 +222,8 @@ master_model = ""                 # "" = inherit; else "opus" / "sonnet" / ...
 command_template = "/prime {phase}"           # sent via send-keys into each slot
 command_file    = ".claude/commands/prime.md" # init master inspects/patches this
 env_marker      = "SWARM_PHASE"
-done_hook       = 'swarm done "$SWARM_PHASE" ok'
+done_hook       = 'swarm done "$SWARM_PHASE" ok'   # fallback form; in swarm mode the worker self-classifies ok/needs-owner/fail
+park_after      = 120   # seconds a worker may wait on the owner before its slot is freed + it moves to its own window; 0 disables
 worker_settings = '{"teammateMode":"in-process"}'  # worker teammates run in-process
 
 [tasks]

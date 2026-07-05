@@ -41,6 +41,12 @@ CONFLICT = "conflict"
 DIRTY = "dirty"
 PUSH_FAILED = "push_failed"
 
+# `swarm done` completion statuses that INTEGRATE (merge into main) rather than
+# roll back. ``needs-owner`` lands exactly like ``ok``; it differs only in that
+# the finishing worker telegrams the owner its recap (done worker-side in
+# :func:`launch.done`). ``fail`` (anything else) rolls back with no merge.
+DONE_INTEGRATE = ("ok", "needs-owner")
+
 _GIT_TIMEOUT_S = 120.0
 _PUSH_ATTEMPTS = 5
 
@@ -482,9 +488,11 @@ def sentinel_done(cfg: Config) -> dict[str, str]:
         if entry.name.startswith(".") or "." not in entry.name:
             continue
         phase, _, status = entry.name.rpartition(".")
-        if phase and status in ("ok", "fail", "skip"):
-            if out.get(phase) != "ok":  # a completed build wins over fail/skip
-                out[phase] = status
+        if not phase or status not in ("ok", "needs-owner", "fail", "skip"):
+            continue
+        if out.get(phase) in DONE_INTEGRATE:
+            continue  # a completed build (ok/needs-owner) wins over fail/skip
+        out[phase] = status
     return out
 
 
@@ -508,11 +516,11 @@ def reconcile_orphans(
 ) -> list[str]:
     """Reconcile leftover ``swarm/*`` branches at ``swarm up`` (sentinel-driven).
 
-    A phase already recorded done is cleaned up. A phase with an ``ok`` sentinel
-    (worker finished, supervisor died before integrating) has its integration
-    completed. A leftover branch with **no** ``ok`` sentinel was interrupted
-    mid-build — discarded and left NOT done so the master rebuilds it, never
-    declared complete off branch topology. Returns the phases integrated.
+    A phase already recorded done is cleaned up. A phase with a completed sentinel
+    (``ok``/``needs-owner`` — worker finished, supervisor died before integrating)
+    has its integration completed. A leftover branch with **no** completed sentinel
+    was interrupted mid-build — discarded and left NOT done so the master rebuilds
+    it, never declared complete off branch topology. Returns the phases integrated.
     """
     sentinels = sentinel_done(cfg)
     integrated: list[str] = []
@@ -520,7 +528,7 @@ def reconcile_orphans(
         if phase in done_phases:
             discard(cfg, phase, log)
             log.line(f"RECONCILE-GC {phase} already-recorded")
-        elif sentinels.get(phase) == "ok":
+        elif sentinels.get(phase) in DONE_INTEGRATE:
             result = integrate(cfg, phase, log)
             if result == MERGED:
                 integrated.append(phase)

@@ -325,18 +325,40 @@ def _poke_fifo(cfg: Config, line: str) -> bool:
         os.close(fd)
 
 
+def _completion_ping(phase: str, status: str, note: str) -> str | None:
+    """The owner telegram for a finishing worker, or ``None`` for a clean success.
+
+    The worker self-classifies its outcome (the ``status`` it passes to ``swarm
+    done``): ``ok`` is a silent success (return ``None`` — no ping); ``needs-owner``
+    integrates like ``ok`` but the owner should look at something; ``fail`` rolled
+    back. The last two ping with the worker's one-line ``note`` recap so the owner
+    sees *why* without opening the pane; an empty/whitespace recap just drops the
+    trailing dash.
+    """
+    if status == "ok":
+        return None
+    recap = " ".join(note.split())  # trim + collapse the free-text recap
+    tail = f" — {recap}" if recap else ""
+    if status == "needs-owner":
+        return f"swarm: {phase} needs you{tail}"
+    return f"swarm: {phase} FAILED{tail}"
+
+
 def done(cfg: Config, phase: str, status: str, note: str = "") -> None:
     """Signal phase completion.
 
     Order matters: (1) write the durable sentinel; (2) telegram the owner *from
-    the worker itself* that the phase is complete — not just nudging the master;
-    (3) hold the slot for ``done_grace_s`` so the worker has a buffer to flush any
-    last work before the supervisor reclaims it; (4) best-effort poke. The grace
-    sleeps in the worker's own process, so the single-threaded supervisor loop is
-    never blocked; ``done_grace_s = 0`` (the default) keeps the immediate path.
+    the worker itself* — but ONLY when the outcome is not a clean success:
+    ``needs-owner`` and ``fail`` ping with the recap, ``ok`` stays silent; (3) hold
+    the slot for ``done_grace_s`` so the worker has a buffer to flush any last work
+    before the supervisor reclaims it; (4) best-effort poke. The grace sleeps in
+    the worker's own process, so the single-threaded supervisor loop is never
+    blocked; ``done_grace_s = 0`` (the default) keeps the immediate path.
     """
     _write_sentinel(cfg, phase, status, note)
-    telegram.notify(cfg.telegram_notify, f"swarm: worker complete — {phase} ({status})")
+    ping = _completion_ping(phase, status, note)
+    if ping is not None:
+        telegram.notify(cfg.telegram_notify, ping)
     if cfg.done_grace_s > 0:
         time.sleep(cfg.done_grace_s)
     _poke_fifo(cfg, f"done {phase} {status}\n")

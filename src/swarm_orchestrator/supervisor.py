@@ -157,17 +157,19 @@ class Supervisor:
     def _on_done(self, phase: str, status: str) -> None:
         """Integrate first (worktree mode), then run the pure-injection advance.
 
-        Non-worktree runs go straight to :meth:`_advance_done`. Worktree ``ok``
-        runs enqueue the phase and pump the merge-queue. A ``fail`` drops the
-        phase's branch(es) and advances — UNLESS the phase is already
-        integrating (blocked or queued after having reported ``ok``): a late,
-        contradictory ``fail`` must not yank a branch out from under a live merge
-        or free a parked slot, so it is ignored.
+        Non-worktree runs go straight to :meth:`_advance_done`. Worktree
+        integrating runs (``ok`` and ``needs-owner`` — see
+        :data:`gitq.DONE_INTEGRATE`) enqueue the phase and pump the merge-queue;
+        ``needs-owner`` lands identically to ``ok`` here (its owner ping already
+        fired worker-side). A ``fail`` drops the phase's branch(es) and advances —
+        UNLESS the phase is already integrating (blocked or queued after having
+        reported success): a late, contradictory ``fail`` must not yank a branch
+        out from under a live merge or free a parked slot, so it is ignored.
         """
         if self.cfg.git_isolation != "worktree":
             self._advance_done(phase, status)
             return
-        if status != "ok":
+        if status not in gitq.DONE_INTEGRATE:
             with state_mod.transaction(self.cfg) as st:
                 integrating = st.integ_blocked == phase or phase in st.integ_queue
             if integrating:

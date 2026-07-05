@@ -28,8 +28,16 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
 `/prime` stays fully interactive:
 - **Confirm-skip**: when `SWARM_PHASE` is set, skip the phase-selection
   AskUserQuestion and build that phase directly.
-- **Completion hook**: at the end of a successful build, run the configured
-  `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`). If already present, skip.
+- **Completion hook (self-classified)**: at the end of the session, the worker
+  classifies its own outcome and runs
+  `swarm done "$SWARM_PHASE" <status> "<one-line recap>"`, choosing `<status>`:
+  `ok` = clean success (integrates silently, no ping); `needs-owner` = finished
+  but the owner should review something specific (integrates **exactly** like
+  `ok`, and telegrams the owner the recap); `fail` = could not complete (rolls the
+  phase back and telegrams the owner). The recap is one line — for `ok` it may be
+  omitted. This generalizes `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`):
+  the self-classified form is the contract the worker follows. If a plain
+  completion hook is already present, upgrade it to this classified form.
 - **Build gate**: when `SWARM_PHASE` is set, every heavy compile/test command
   (`cargo …`, `bun run build|test`, and the like) must run as `swarm build <cmd>`
   (e.g. `swarm build cargo nextest run`). `swarm build` is a swarm-wide semaphore

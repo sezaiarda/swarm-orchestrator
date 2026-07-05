@@ -36,13 +36,13 @@ def test_fanout_convergence_and_single_finish(swarm):
     assert st["finished"]
     assert set(st["done"]) >= {"P0", "P1", "P2", "P3", "P4"}
     assert swarm.log_text().count("ACTION finish") == 1  # finish fires once
-    # Each worker telegrams the owner "complete" as it finishes (workers ping
-    # directly, not just nudging the master); the supervisor sends exactly one
-    # terminal "swarm finished". The ACTION-finish wait above guarantees both are
-    # already flushed to the sink.
+    # A clean-success (`ok`) worker is SILENT now: it self-classifies its outcome
+    # and only pings when it isn't a clean success. Every phase here finishes `ok`,
+    # so the ONLY telegram the owner gets is the supervisor's single terminal
+    # "swarm finished". The ACTION-finish wait above guarantees it is flushed.
     tg = swarm.tg_lines()
     assert sum("swarm finished" in ln for ln in tg) == 1  # finish pings once
-    assert sum("worker complete" in ln for ln in tg) >= 5  # P0..P4 each ping
+    assert not any("worker complete" in ln for ln in tg)  # ok completions silent
 
 
 def test_second_up_is_refused_while_supervisor_running(swarm):

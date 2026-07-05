@@ -350,7 +350,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     dp = sub.add_parser("done", help="signal phase completion")
     dp.add_argument("phase")
-    dp.add_argument("status", nargs="?", default="ok", choices=["ok", "fail"])
+    dp.add_argument(
+        "status", nargs="?", default="ok", choices=["ok", "needs-owner", "fail"]
+    )
     dp.add_argument("note", nargs="*", default=[])
 
     fp = sub.add_parser("free", help="manually free a slot (by id or phase)")

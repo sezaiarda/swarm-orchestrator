@@ -40,6 +40,37 @@ def test_prose_ledger_yields_no_false_phases():
     assert graph == {}
 
 
+def test_markdown_checklist_ledger_ignores_prose():
+    # A real project's markdown ledger: only `- [ ]`/`- [x]` checklist items are
+    # phases; the surrounding legend/heading/prose-note lines must NOT leak in as
+    # phantom deps-free phases (the bug: prose continuation words parsed as phases).
+    md = (
+        "# Ledger\n"
+        "> legend prose that must not become a phase\n"
+        "## Phase 0\n"
+        "- [x] `frontend-P0` · dir:`frontend` · needs:— · shell + routing\n"
+        "      _(2026: repos.txt uses master; shell over lazy groups; the note)_\n"
+        "- [ ] `frontend-P1` · needs:`frontend-P0` `bundle-v0.1.0` · browse list\n"
+        "- [ ] `I1` · needs:`frontend-P0` `billing-P1` · smoke test\n"
+    )
+    graph = ledger.parse(md)
+    assert set(graph) == {"frontend-P0", "frontend-P1", "I1"}  # only the checklist items
+    assert all(deps == set() for deps in graph.values())  # deps are LLM-gated
+    for phantom in ("repos.txt", "shell", "the", "note", "legend", "Phase"):
+        assert phantom not in graph
+    assert ledger.validate(graph) == []  # no phantom cycles/unknowns
+
+
+def test_markdown_ready_is_incomplete_minus_excluded():
+    graph = ledger.parse(
+        "- [x] `A` · done\n- [ ] `B` · next\n- [ ] `C` · blocked externally\n"
+    )
+    # A done, C excluded -> only B is "ready"; ready == what's left to build
+    assert ledger.ready(graph, {"A": "ok"}, set(), {"C"}) == ["B"]
+    # nothing left -> ready empty, so the master's launchable-empty stop-guard fires
+    assert ledger.ready(graph, {"A": "ok", "B": "ok"}, set(), {"C"}) == []
+
+
 def test_needs_list_tolerates_whitespace_but_keeps_trailing_note():
     # Spaces after the colon / commas must NOT silently drop dependencies.
     assert ledger.parse("P4 needs: P1, P2\n")["P4"] == {"P1", "P2"}

@@ -224,10 +224,12 @@ main_branch = "master"
 repos       = ["*"]                 # component repos to mirror; e.g. ["*", "packages/*"]
 ```
 
-The ledger is prose the LLM master reads directly. For deterministic gating (and
-the tests) it also understands one line format — `P4 needs:P1,P2` — and flags a
-dependency cycle, self-dependency, or unknown dependency in `swarm context` rather
-than stalling on it silently.
+The ledger is prose the LLM master reads directly. `swarm context` also parses it,
+auto-detecting the shape: a **markdown checklist** (`- [x] \`frontend-P1\` · needs:… · …`)
+yields the phase *set* — only checklist items count, so prose notes never leak in as
+phantom phases — with dependency gating left to the master; a **bare** one-line format
+(`P4 needs:P1,P2`) additionally gives deterministic dep-gating and flags a dependency
+cycle, self-dependency, or unknown dependency rather than stalling on it silently.
 
 ## Runtime state
 

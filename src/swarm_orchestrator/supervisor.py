@@ -6,8 +6,12 @@ timer, no pane-died watchdog, no auto-retry:
 
 1. ``done``       -> free the slot; spawn a master if none is alive, else inject.
 2. ``master-idle``-> kill the master pane.
-3. after a kill   -> finish when no slot is busy AND nothing is integrating.
-4. a parked worker keeps its slot busy, so finish cannot fire while it is parked.
+3. after a kill   -> finish when nothing is ``pending`` AND nothing is integrating.
+4. a worker that is still busy, ``waiting`` on the owner, or ``parked`` in its own
+   window keeps the swarm ``pending`` — so finish cannot fire until every phase has
+   run ``swarm done``. Parking frees the grid slot (via the deadline-driven
+   ``select`` timeout) but not the obligation, so ``pending()`` — not ``any_busy`` —
+   gates the finish.
 
 Being the single FIFO reader gives total event ordering. Integration (worktree
 mode) runs inline on this loop but can never crash it: every git failure is a
@@ -22,13 +26,14 @@ from __future__ import annotations
 import os
 import select
 import signal
+import time
 from pathlib import Path
 
 from . import gitq
 from . import master as master_mod
 from . import resolver as resolver_mod
 from . import state as state_mod
-from . import telegram
+from . import telegram, tmux
 from .config import Config
 from .logutil import Log
 
@@ -85,9 +90,14 @@ class Supervisor:
         try:
             while not self._stop:
                 try:
-                    ready, _, _ = select.select([self._fifo_fd], [], [])
+                    ready, _, _ = select.select(
+                        [self._fifo_fd], [], [], self._next_timeout()
+                    )
                 except InterruptedError:
                     continue
+                # Fire on EVERY wake — a FIFO event or a pure park-deadline timeout
+                # (which leaves `ready` empty and falls through the guard below).
+                self._check_park_deadlines()
                 if self._fifo_fd not in ready:
                     continue
                 try:
@@ -124,6 +134,10 @@ class Supervisor:
             self._on_master_idle()
         elif verb == "resolved":
             self._on_resolved(parts[1] if len(parts) > 1 else "?")
+        elif verb == "waiting":
+            self._on_waiting(parts[1] if len(parts) > 1 else "?")
+        elif verb == "resumed":
+            self._on_resumed(parts[1] if len(parts) > 1 else "?")
         elif verb == "bootstrap":
             self._on_bootstrap()
         elif verb == "resume":
@@ -292,32 +306,134 @@ class Supervisor:
         self.log.line(f"RESOLVED {phase}")
         self._pump_integrations()  # re-integrate (resumes; may re-block downstream)
 
+    # -- parking: a worker waiting on the owner vacates its slot after a delay --
+    def _on_waiting(self, phase: str) -> None:
+        """Arm the park timer for a worker that self-reported it needs the owner.
+
+        The FIFO poke already woke ``select``; recording the deadline re-arms the
+        loop's timeout on the next pass. ``park_after == 0`` disables parking (the
+        waiting worker just holds its slot, unchanged from before)."""
+        if self.cfg.park_after <= 0:
+            self.log.line(f"WAITING-IGNORED {phase} parking-disabled")
+            return
+        with state_mod.transaction(self.cfg) as st:
+            st.waiting[phase] = time.time() + self.cfg.park_after
+        self.log.line(f"EVENT waiting {phase} park_after={self.cfg.park_after}")
+
+    def _on_resumed(self, phase: str) -> None:
+        """The owner answered before the park fired: cancel the pending park.
+
+        Distinct from the ``resume`` (unpause) verb. A phase that was ALREADY
+        parked is not in ``waiting``, so this is a no-op for it — it stays in its
+        own window until ``swarm done``."""
+        with state_mod.transaction(self.cfg) as st:
+            cancelled = st.waiting.pop(phase, None) is not None
+        self.log.line(f"EVENT resumed {phase} cancelled={cancelled}")
+
+    def _next_timeout(self) -> float | None:
+        """Seconds until the earliest park deadline, or ``None`` when nothing is
+        waiting (``select`` then blocks indefinitely — no busy-poll). A deadline
+        already in the past clamps to 0.0 so the next wake parks it immediately."""
+        st = state_mod.read(self.cfg)
+        if not st.waiting:
+            return None
+        return max(0.0, min(st.waiting.values()) - time.time())
+
+    def _check_park_deadlines(self) -> None:
+        """Park every waiting phase whose deadline has fired. Runs on every wake;
+        a no-op when nothing is due (so a spurious/FIFO wake is harmless)."""
+        now = time.time()
+        due = [
+            p for p, deadline in state_mod.read(self.cfg).waiting.items() if deadline <= now
+        ]
+        for phase in due:
+            self._park(phase)
+
+    def _park(self, phase: str) -> None:
+        """Move a waiting worker to its own window, free its grid slot, relaunch.
+
+        Split-FIRST pane mechanic (driver-guarded, so the bare hermetic path is
+        PURE STATE): grow the slot's window with a fresh replacement pane BEFORE
+        breaking the live waiter out to ``wait:<phase>`` (so ``break-pane`` never
+        sees a single-pane window and renames in place), re-tidy the survivors, and
+        tag the replacement with the slot. Then ``st.park`` frees the slot record —
+        keeping its now-replacement ``pane_id`` — and ``_relaunch`` fills it with
+        the next ready phase (the parked phase is excluded from ``ready``)."""
+        with state_mod.transaction(self.cfg) as st:
+            slot = next((s for s in st.slots if s.busy and s.phase == phase), None)
+            if slot is None:
+                # No longer busy (already done / freed): just drop the dead timer.
+                st.waiting.pop(phase, None)
+                self.log.line(f"PARK-SKIP {phase} not-busy")
+                return
+            sid, old_pane = slot.id, slot.pane_id
+        wait_win: str | None = None
+        replacement: str | None = None
+        if self.cfg.driver == "tmux" and old_pane:
+            wait_win, replacement = tmux.park_pane(
+                tmux.window_of(old_pane), old_pane, sid, f"wait:{phase}"
+            )
+        with state_mod.transaction(self.cfg) as st:
+            if wait_win:
+                st.windows[f"wait:{phase}"] = wait_win
+            if replacement:
+                s = st.slot_by_id(sid)
+                if s is not None:
+                    s.pane_id = replacement
+            st.park(phase)
+            paused = st.paused
+        self.log.line(f"PARK {phase} slot={sid}")
+        telegram.notify(
+            self.cfg.telegram_notify,
+            f"swarm: {phase} moved to its own window (still waiting on you)",
+        )
+        if paused:
+            self.log.line("PARK-PAUSED holding — no launch")
+            return
+        self._relaunch(sid, f"{phase} parked")
+
     # -- rule 1 core (pure-injection): free slot + spawn/inject -----------
     def _advance_done(self, phase: str, status: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             already = phase in st.done
+            was_parked = phase in st.parked
             freed = st.free_slot_for(phase)
-            if already and freed is None:
+            if already and freed is None and not was_parked:
                 # Duplicate `swarm done` for an already-completed phase (its slot
-                # was already freed/reused). True no-op: DON'T overwrite the
-                # recorded status and don't spuriously spawn/inject.
+                # was already freed/reused, and it isn't parked). True no-op: DON'T
+                # overwrite the recorded status and don't spuriously spawn/inject.
                 self.log.line(f"DONE-DUPLICATE {phase} ignored")
                 return
             st.mark_done(phase, status)
+            # An owner-answered parked worker finishes here: drop it from the
+            # waiting/parked tracking (its dependents were only gated because it was
+            # not yet in `done`) and reclaim its off-grid window below.
+            st.clear_pending(phase)
+            wait_win = st.windows.pop(f"wait:{phase}", None) if was_parked else None
             freed_id = freed.id if freed else None
             paused = st.paused
-        self.log.line(f"EVENT done {phase} {status} freed_slot={freed_id}")
+        if wait_win and self.cfg.driver == "tmux":
+            tmux.kill_window(wait_win)  # close the parked worker's own window
+        self.log.line(
+            f"EVENT done {phase} {status} freed_slot={freed_id} parked={was_parked}"
+        )
         if paused:
             # Paused: the slot is freed but we launch nothing and hold — no
             # master spawn/inject, so in-flight workers drain without advancing.
             self.log.line("DONE-PAUSED holding — no launch")
             return
+        self._relaunch(freed_id, f"worker {phase} done")
+
+    def _relaunch(self, freed_id: int | None, reason: str) -> None:
+        """Fill a just-freed slot: spawn a master if none is alive, else nudge the
+        live one to launch what is ready. Shared by :meth:`_advance_done` (a worker
+        finished) and :meth:`_park` (a waiting worker vacated its slot)."""
         if not self.master.is_alive():
             self._spawn_master("step")
         else:
+            where = f", slot {freed_id} free" if freed_id is not None else ""
             self.master.inject(
-                f"worker {phase} done, slot {freed_id} free"
-                " -- run `swarm context` and launch what is ready"
+                f"{reason}{where} -- run `swarm context` and launch what is ready"
             )
 
     # -- rule 2 + 3: master-idle, then maybe finish -----------------------
@@ -325,22 +441,23 @@ class Supervisor:
         self.master.kill()
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False
-            busy = st.any_busy()
+            pending = st.pending()
             integrating = bool(st.integ_queue) or st.integ_blocked is not None
             paused = st.paused
             ctx = master_mod.build_context(self.cfg, st)
         self.log.line(
-            f"EVENT master-idle busy={busy} integrating={integrating}"
+            f"EVENT master-idle pending={pending} integrating={integrating}"
             f" paused={paused} ready={ctx['ready']}"
         )
         if paused:
             # Held: do not finish while paused — resume decides what happens next.
             self.log.line("MASTER-IDLE paused — holding")
             return
-        if busy or integrating:
-            # A running/parked worker or a pending/blocked integration keeps the
-            # supervisor alive: it must stay in select() so `resolved`/`done` can
-            # still complete the merge-queue rather than finishing mid-flight.
+        if pending or integrating:
+            # A busy/waiting/parked worker or a pending/blocked integration keeps the
+            # supervisor alive: it must stay in select() so `resolved`/`done` (and a
+            # firing park deadline) can still complete rather than finishing
+            # mid-flight.
             return
         if ctx["ready"]:
             # Accepted lost-injection race: nothing is running or integrating yet

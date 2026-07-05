@@ -44,6 +44,13 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   that caps how many heavy builds run at once so parallel worktrees can't OOM the
   host; it auto-releases even if a build is killed. If the gates already route
   through it, skip. Give these builds a generous bash timeout — they may queue.
+- **Owner questions (ask, don't guess)**: when `SWARM_PHASE` is set and the worker
+  genuinely needs the owner (an ambiguity it must not guess), it must NOT assume —
+  it runs `swarm waiting "$SWARM_PHASE" "<the question>"` *before* it opens the
+  AskUserQuestion, and `swarm resumed "$SWARM_PHASE"` *immediately after* the answer
+  returns. The principle: never guess or assume when you truly need the owner — ask,
+  and self-report so the swarm can free your grid slot (moving you to your own
+  window) while you wait, then finish normally with `swarm done` once answered.
 Do NOT restrict the worker from delegating: swarm workers already launch with
 `teammateMode=in-process`, so any teammates they spawn run in-process (no extra
 tmux panes) and cannot clutter the workers window.

@@ -55,6 +55,14 @@ class State:
     integ_blocked: str | None = None
     integ_blocked_repo: str | None = None  # repo path a CONFLICT/DIRTY hold is in
     integ_blocked_kind: str | None = None  # conflict | dirty | push_failed
+    # A worker that needs the owner self-reports via `swarm waiting`. Its phase is
+    # recorded in ``waiting`` with a park DEADLINE (epoch seconds, so it survives a
+    # supervisor restart); when the deadline fires the supervisor ``park``s it —
+    # moving its live pane to its own window and freeing the grid slot — and the
+    # phase moves to ``parked``. A ``parked`` worker owes the owner an answer but
+    # no longer holds a slot; it clears only on ``swarm done``.
+    waiting: dict[str, float] = field(default_factory=dict)
+    parked: list[str] = field(default_factory=list)
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -65,6 +73,13 @@ class State:
 
     def any_busy(self) -> bool:
         return any(s.busy for s in self.slots)
+
+    def pending(self) -> bool:
+        """True while any phase still owes work: a busy slot, a worker waiting on
+        the owner, or a parked worker. The finish guard uses this instead of
+        ``any_busy`` so a parked worker (which has freed its slot) still blocks
+        finish until it runs ``swarm done``."""
+        return self.any_busy() or bool(self.parked) or bool(self.waiting)
 
     def slot_by_id(self, sid: int) -> Slot | None:
         return next((s for s in self.slots if s.id == sid), None)
@@ -103,6 +118,27 @@ class State:
     def mark_done(self, phase: str, status: str) -> None:
         self.done[phase] = status
 
+    def park(self, phase: str) -> None:
+        """Move a waiting phase off the grid into the parked set.
+
+        Frees its busy slot (``free_slot_for`` nulls the phase but keeps the slot's
+        ``pane_id``, so a replacement worker can respawn into it) and records the
+        phase as parked — its worker keeps building/waiting on ``swarm/<phase>`` in
+        its own window. Idempotent on the parked list."""
+        self.free_slot_for(phase)
+        self.waiting.pop(phase, None)
+        if phase not in self.parked:
+            self.parked.append(phase)
+
+    def clear_pending(self, phase: str) -> bool:
+        """Drop a finished phase from the waiting/parked tracking. Returns whether
+        it had been parked (so the caller can close its ``wait:<phase>`` window)."""
+        self.waiting.pop(phase, None)
+        if phase in self.parked:
+            self.parked.remove(phase)
+            return True
+        return False
+
     # -- serialisation ---------------------------------------------------
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -124,6 +160,8 @@ class State:
             integ_blocked=data.get("integ_blocked"),
             integ_blocked_repo=data.get("integ_blocked_repo"),
             integ_blocked_kind=data.get("integ_blocked_kind"),
+            waiting=dict(data.get("waiting", {})),
+            parked=list(data.get("parked", [])),
         )
 
     @classmethod

@@ -55,7 +55,10 @@ def build_context(cfg: Config, st: State) -> dict:
     """Read-only snapshot the master uses to decide what to launch."""
     ledger_path = cfg.project_dir / cfg.ledger
     graph = ledger_mod.load(ledger_path)
-    busy_phases = {s.phase for s in st.busy_slots() if s.phase}
+    # A parked or waiting phase is still in flight (its worker owes the owner an
+    # answer) but is not in a slot, so exclude it from `ready` too — otherwise the
+    # master would relaunch a phase that is already being built off-grid.
+    busy_phases = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
     excluded = set(cfg.exclude)
     ready = ledger_mod.ready(graph, st.done, busy_phases, excluded)
     free = st.free_slots()

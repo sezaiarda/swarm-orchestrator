@@ -109,6 +109,44 @@ def split_layout(window_id: str, count: int, hold: str = "sleep infinity") -> li
     return _panes_ordered(window_id)
 
 
+def window_of(pane_id: str) -> str:
+    """The id of the window that currently holds ``pane_id``."""
+    return run(["display-message", "-p", "-t", pane_id, "#{window_id}"]).stdout.strip()
+
+
+def apply_layout(window_id: str, count: int) -> None:
+    """Re-apply the owner's per-count layout preset to an EXISTING window (no
+    splitting) — used after a pane is broken out so the survivors re-tidy. Mirrors
+    :func:`split_layout`'s presets (2 -> even-horizontal, 3-4 -> tiled, 1 -> full)."""
+    if count == 2:
+        run(["select-layout", "-t", window_id, "even-horizontal"])
+    elif count >= 3:
+        run(["select-layout", "-t", window_id, "tiled"])
+
+
+def split_one(window_id: str, hold: str = "sleep infinity") -> str:
+    """Split one fresh holding pane into ``window_id``; return its pane id."""
+    out = run(
+        ["split-window", "-t", window_id, "-P", "-F", "#{pane_id}", hold], check=True
+    )
+    return out.stdout.strip()
+
+
+def park_pane(window_id: str, old_pane: str, slot_id: int, wait_name: str) -> tuple[str, str]:
+    """Move the LIVE ``old_pane`` into its own window ``wait_name`` while leaving
+    ``window_id``'s slot filled by a fresh replacement pane tagged ``slot_id``.
+
+    Split-FIRST (add the replacement BEFORE breaking the waiter out) so the window
+    always carries >= 2 panes at break time: :func:`break_pane` on a *single*-pane
+    window renames it in place and returns an empty id, which split-first avoids.
+    Returns ``(wait_window_id, replacement_pane_id)``."""
+    replacement = split_one(window_id)
+    wait_win = break_pane(old_pane, wait_name)
+    apply_layout(window_id, len(list_panes(window_id)))
+    set_slot(replacement, slot_id)
+    return wait_win, replacement
+
+
 def break_pane(pane_id: str, name: str) -> str:
     """Move ``pane_id`` into a new detached window ``name`` WITHOUT killing its
     process; the pane id and its ``@swarm_slot`` tag survive the move. Returns the

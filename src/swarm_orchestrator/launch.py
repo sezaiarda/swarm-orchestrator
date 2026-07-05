@@ -362,3 +362,18 @@ def done(cfg: Config, phase: str, status: str, note: str = "") -> None:
     if cfg.done_grace_s > 0:
         time.sleep(cfg.done_grace_s)
     _poke_fifo(cfg, f"done {phase} {status}\n")
+
+
+def waiting(cfg: Config, phase: str, note: str = "") -> None:
+    """Signal that the worker for ``phase`` is blocked on the owner.
+
+    Mirror of :func:`done`'s ping path: telegram the owner the question *from the
+    worker itself* (``note`` in hand, so they can answer in the pane), then a
+    best-effort non-blocking FIFO poke asking the supervisor to arm the park timer.
+    Never hangs the worker if the supervisor is down. The note is NOT sent over the
+    FIFO — only ``waiting <phase>`` — since parking keys on the phase alone.
+    """
+    recap = " ".join(note.split())  # trim + collapse the free-text question
+    tail = f" — {recap}" if recap else ""
+    telegram.notify(cfg.telegram_notify, f"swarm: {phase} is waiting on you{tail}")
+    _poke_fifo(cfg, f"waiting {phase}\n")

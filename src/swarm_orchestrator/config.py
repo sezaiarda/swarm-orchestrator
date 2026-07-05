@@ -54,6 +54,7 @@ class Config:
     ready_marker: str
     worker_settings: str
     done_grace_s: int
+    park_after: int
     ledger: str
     roadmap: str
     exclude: list[str]
@@ -196,6 +197,14 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # single-threaded supervisor loop never blocks.
         done_grace_s=_int_env(
             "SWARM_DONE_GRACE", worker.get("done_grace_s"), 0, minimum=0
+        ),
+        # Seconds a worker may sit `swarm waiting` on the owner before the
+        # supervisor parks it (moves its live pane to its own window and frees the
+        # grid slot for a replacement). 120 (the default) balances "give the owner
+        # a chance to answer in place" against "don't strand a slot"; 0 disables
+        # parking entirely (a waiting worker just holds its slot as before).
+        park_after=_int_env(
+            "SWARM_PARK_AFTER", worker.get("park_after"), 120, minimum=0
         ),
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
         roadmap=str(tasks.get("roadmap", "docs/ROADMAP-MASTER.md")),

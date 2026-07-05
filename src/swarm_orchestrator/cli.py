@@ -238,6 +238,20 @@ def cmd_resolved(cfg: Config, phase: str) -> int:
     return 0
 
 
+def cmd_waiting(cfg: Config, phase: str, note: str) -> int:
+    """Self-report that this worker is blocked on the owner (pings + may park)."""
+    launch_mod.waiting(cfg, phase, note)
+    print(f"waiting {phase}")
+    return 0
+
+
+def cmd_resumed(cfg: Config, phase: str) -> int:
+    """Signal the owner answered — cancel a pending park (distinct from `resume`)."""
+    _poke(cfg, f"resumed {phase}")
+    print(f"resumed {phase}")
+    return 0
+
+
 def cmd_integrate(cfg: Config, phase: str) -> int:
     """Manually integrate ``swarm/<phase>`` into main (owner escape hatch)."""
     log = Log(cfg.supervisor_log)
@@ -335,6 +349,17 @@ def _build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("resolved", help="signal a merge-conflict resolver finished")
     rp.add_argument("phase")
 
+    wp = sub.add_parser(
+        "waiting", help="report this worker is blocked on the owner (may park its slot)"
+    )
+    wp.add_argument("phase")
+    wp.add_argument("note", nargs="*", default=[], help="the question, for the owner ping")
+
+    rsp = sub.add_parser(
+        "resumed", help="report the owner answered — cancel a pending park"
+    )
+    rsp.add_argument("phase")
+
     ip = sub.add_parser("integrate", help="manually integrate swarm/<phase> into main")
     ip.add_argument("phase")
     sub.add_parser("finish", help="ask the supervisor to stop now")
@@ -386,6 +411,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_master_idle(cfg)
     if cmd == "resolved":
         return cmd_resolved(cfg, args.phase)
+    if cmd == "waiting":
+        return cmd_waiting(cfg, args.phase, " ".join(args.note))
+    if cmd == "resumed":
+        return cmd_resumed(cfg, args.phase)
     if cmd == "integrate":
         return cmd_integrate(cfg, args.phase)
     if cmd == "bootstrap":

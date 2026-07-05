@@ -1,5 +1,5 @@
 [swarm]
-max_workers = 1
+max_workers = 2
 master_model = ""                 # "" = inherit; else "opus"/"sonnet"/...
 
 [worker]
@@ -37,14 +37,14 @@ cache          = true # symlink each worktree's cargo `target/` to a shared per-
                       # cache so only *changed* crates recompile across worktrees
 
 [git]
-isolation   = "none"       # commit in place (no isolation). Was "worktree", which builds each
-                           # phase against a full isolated MIRROR of the
+isolation   = "worktree"   # each phase builds against a full isolated MIRROR of the
                            # workspace on branch swarm/<phase>: the umbrella + every
                            # component repo, nested at its real path. A serialized
                            # integrator merges every repo the phase changed into its
                            # `master` on `swarm done` (untouched repos are 0-ahead
-                           # no-ops) and rolls ALL of them back on `fail`.
-                           # "none" = commit in place (no isolation).
+                           # no-ops) and rolls ALL of them back on `fail`. Required
+                           # for parallel workers (max_workers > 1) so two phases in
+                           # the same repo can't clobber each other. "none" = in place.
 main_branch = "master"
 repos       = ["*"]        # which component repos to mirror: globs relative to the
                            # project root. Default ["*"] = every git repo that is a

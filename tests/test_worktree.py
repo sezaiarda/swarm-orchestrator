@@ -362,6 +362,54 @@ def test_push_time_conflict_is_resolvable(monkeypatch, tmp_path):
         log.close()
 
 
+# -- Test: mirror seeds from local main when it is AHEAD of an unpushed origin
+def test_mirror_seeds_from_local_main_when_origin_is_behind(monkeypatch, tmp_path):
+    """A worktree branched off ``origin/master`` while local ``master`` held an
+    unpushed ``/prime`` patch would give every worker the stale command (no
+    ``swarm done``) and the master would never wake. The mirror
+    must seed from local ``main`` whenever the remote does not fast-forward it."""
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        # Owner commits locally but does NOT push -> local master is 1 ahead of
+        # origin/master (exactly the unpushed prime-patch situation).
+        (project / "prime.md").write_text("swarm done ok\n")
+        _git(project, "add", "-A")
+        _git(project, "commit", "-m", "prime: add swarm done (unpushed)")
+        assert int(_out(project, "rev-list", "--count", "origin/master..master")) == 1
+
+        wt = gitq.worktree_add(cfg, "P1", log)
+        # The mirror carries the local (unpushed) commit, not the stale origin.
+        assert (wt / "prime.md").read_text() == "swarm done ok\n"
+    finally:
+        log.close()
+
+
+# -- Test: mirror still prefers origin when it strictly fast-forwards local ---
+def test_mirror_prefers_origin_when_it_is_strictly_ahead(monkeypatch, tmp_path):
+    """Multi-machine case: work integrated elsewhere lands on origin ahead of a
+    fully-contained local main -> the mirror picks up the newer integrated base."""
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        # An external clone pushes a commit; local master stays behind (contained).
+        ext = tmp_path / "ext"
+        subprocess.run(["git", "clone", str(origin), str(ext)], check=True, capture_output=True)
+        _identity(ext)
+        (ext / "remote.txt").write_text("R")
+        _git(ext, "add", "-A")
+        _git(ext, "commit", "-m", "integrated elsewhere")
+        _git(ext, "push", "origin", "master")
+
+        wt = gitq.worktree_add(cfg, "P1", log)
+        # origin strictly fast-forwards local -> mirror seeds from origin's newer base.
+        assert (wt / "remote.txt").read_text() == "R"
+    finally:
+        log.close()
+
+
 # -- Test: default isolation is 'none' (today's behavior unchanged) -------
 def test_isolation_defaults_to_none(monkeypatch, tmp_path):
     project, _ = _make_project(tmp_path)

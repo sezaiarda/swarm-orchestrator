@@ -249,14 +249,39 @@ def discard(cfg: Config, phase: str, log: Log) -> None:
 
 
 # -- worktree creation ----------------------------------------------------
+def _mirror_base(repo: Path, main: str) -> str:
+    """The commit to seed a phase mirror from: local ``main`` unless the remote
+    strictly fast-forwards it.
+
+    Preferring ``origin/<main>`` picks up work integrated on another machine, but
+    only when it *fast-forwards* local ``main`` (local fully contained in origin).
+    If local ``main`` is ahead or has diverged — e.g. an owner commit not yet
+    pushed (a ``/prime`` patch, a ``.swarm.toml``) — seeding from the remote would
+    silently drop it from every worktree, so we seed from local ``main`` instead.
+    """
+    if not _has_remote(repo):
+        return main
+    _git(repo, "fetch", "origin", check=False)  # best effort
+    om = f"origin/{main}"
+    if not _ref_exists(repo, om):
+        return main
+    # origin strictly ahead  <=>  local has no commit origin lacks (fully
+    # contained) AND origin has >=1 commit local lacks. Any other shape (equal,
+    # local ahead, diverged) keeps local `main` so unpushed owner work survives.
+    if _commits_ahead(repo, om, main) == 0 and _commits_ahead(repo, main, om) > 0:
+        return om
+    return main
+
+
 def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
     """Build the phase's full-workspace mirror; return the umbrella worktree
     (the worker's cwd).
 
     The umbrella worktree is created first (its directory must exist before
     component worktrees nest inside it), then each component. Each branches off
-    ``origin/<main>`` when a remote is present (latest integrated base), else
-    local ``main``. A stale leftover from a prior run is GC'd first.
+    :func:`_mirror_base` — local ``main`` unless ``origin/<main>`` strictly
+    fast-forwards it — so unpushed owner commits are never dropped from the
+    mirror. A stale leftover from a prior run is GC'd first.
     """
     branch = f"swarm/{phase}"
     umbrella = (cfg.project_dir, cfg.git_main_branch)
@@ -267,11 +292,7 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
     for repo, main in ordered:
         wt = _wt_for(cfg, repo, phase)
         with repo_lock(cfg, repo):
-            base = main
-            if _has_remote(repo):
-                _git(repo, "fetch", "origin", check=False)  # best effort
-                if _ref_exists(repo, f"origin/{main}"):
-                    base = f"origin/{main}"
+            base = _mirror_base(repo, main)
             if _branch_exists(repo, branch) or wt.exists():
                 _gc(cfg, repo, phase, log)  # stale leftover -> start clean
             wt.parent.mkdir(parents=True, exist_ok=True)

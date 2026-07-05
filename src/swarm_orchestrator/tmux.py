@@ -90,18 +90,64 @@ def new_window(session: str, name: str, hold: str = "sleep infinity") -> str:
     return out.stdout.strip()
 
 
-def split_tiled(window_id: str, count: int, hold: str = "sleep infinity") -> list[str]:
-    """Grow ``window_id`` to ``count`` panes, tiled; return pane ids in order."""
-    for _ in range(count - 1):
-        run(["split-window", "-t", window_id, hold], check=True)
+def split_layout(window_id: str, count: int, hold: str = "sleep infinity") -> list[str]:
+    """Grow ``window_id`` to ``count`` panes per the owner's layout rule.
+
+    ``count==1`` leaves the lone pane untouched (full window); ``count==2`` makes
+    a LEFT|RIGHT pair via ``split-window -h`` locked to even-horizontal columns (a
+    vertical divider, never stacked); ``count`` in 3..4 uses the tiled grid preset.
+    Returns pane ids ordered top-left-to-bottom-right so slot indices track the
+    visible layout.
+    """
+    if count == 2:
+        run(["split-window", "-h", "-t", window_id, hold], check=True)
+        run(["select-layout", "-t", window_id, "even-horizontal"])
+    elif count >= 3:
+        for _ in range(count - 1):
+            run(["split-window", "-t", window_id, hold], check=True)
         run(["select-layout", "-t", window_id, "tiled"])
-    run(["select-layout", "-t", window_id, "tiled"])
-    return list_panes(window_id)
+    return _panes_ordered(window_id)
+
+
+def break_pane(pane_id: str, name: str) -> str:
+    """Move ``pane_id`` into a new detached window ``name`` WITHOUT killing its
+    process; the pane id and its ``@swarm_slot`` tag survive the move. Returns the
+    new window id."""
+    out = run(
+        [
+            "break-pane",
+            "-d",
+            "-s",
+            pane_id,
+            "-n",
+            name,
+            "-P",
+            "-F",
+            "#{window_id}",
+        ],
+        check=True,
+    )
+    return out.stdout.strip()
 
 
 def list_panes(window_id: str) -> list[str]:
     out = run(["list-panes", "-t", window_id, "-F", "#{pane_id}"])
     return [ln for ln in out.stdout.splitlines() if ln]
+
+
+def _panes_ordered(window_id: str) -> list[str]:
+    """Pane ids sorted top-left-to-bottom-right (stable geometric order)."""
+    out = run(
+        ["list-panes", "-t", window_id, "-F", "#{pane_top}\t#{pane_left}\t#{pane_id}"]
+    )
+    rows: list[tuple[int, int, str]] = []
+    for ln in out.stdout.splitlines():
+        if not ln:
+            continue
+        top, left, pane = ln.split("\t")
+        rows.append((int(top), int(left), pane))
+    rows.sort()
+    return [pane for _, _, pane in rows]
 
 
 def list_panes_with_slot(window_id: str) -> list[tuple[str, str]]:

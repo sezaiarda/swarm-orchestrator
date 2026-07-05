@@ -55,7 +55,10 @@ def test_markdown_checklist_ledger_ignores_prose():
     )
     graph = ledger.parse(md)
     assert set(graph) == {"frontend-P0", "frontend-P1", "I1"}  # only the checklist items
-    assert all(deps == set() for deps in graph.values())  # deps are LLM-gated
+    # needs: deps are captured from the `needs:` field only, then filtered to
+    # known phase ids: the `dir:`frontend`` back-tick, the git tag `bundle-v0.1.0`, and
+    # the undeclared `billing-P1` all drop; real phase deps stay.
+    assert graph == {"frontend-P0": set(), "frontend-P1": {"frontend-P0"}, "I1": {"frontend-P0"}}
     for phantom in ("repos.txt", "shell", "the", "note", "legend", "Phase"):
         assert phantom not in graph
     assert ledger.validate(graph) == []  # no phantom cycles/unknowns
@@ -201,7 +204,12 @@ def test_pretrust_dir_tolerates_missing_or_bad_config(tmp_path, monkeypatch):
 
 # -- flock check-and-set under real concurrency ---------------------------
 def test_concurrent_launch_never_double_claims(swarm):
-    """8 concurrent `swarm launch` against 4 slots -> exactly 4 claim."""
+    """8 concurrent `swarm launch` against 4 slots -> exactly 4 claim.
+
+    Uses phase ids absent from the demo ledger so the dependency backstop can't
+    deny any of them — this isolates the flock check-and-set (the four losers are
+    denied purely for `no-free-slot`, not for unmet deps).
+    """
     swarm.env["FAKE_WORKER_PARK"] = "1"  # parked workers: hold slot, never done
 
     results: list[int] = []
@@ -212,7 +220,7 @@ def test_concurrent_launch_never_double_claims(swarm):
         with lock:
             results.append(proc.returncode)
 
-    threads = [threading.Thread(target=launch, args=(f"P{i}",)) for i in range(8)]
+    threads = [threading.Thread(target=launch, args=(f"Q{i}",)) for i in range(8)]
     for t in threads:
         t.start()
     for t in threads:

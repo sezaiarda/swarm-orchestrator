@@ -28,6 +28,10 @@ _PHASE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]*$")
 # A markdown checklist item: ``- [x] `phase-id` · …`` / ``* [ ] `phase-id```.
 _CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+(.+)$")
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
+# Fields of a markdown ledger line are separated by ``space MIDDLE-DOT space``
+# (``- [x] `id` · needs:`dep` · dir:`d` · …``); dep extraction is scoped to the
+# single ``needs:``-prefixed field so ``dir:``/``TAG:`` back-ticks never leak in.
+_FIELD_SEP = " · "
 
 
 def parse(text: str) -> dict[str, set[str]]:
@@ -36,12 +40,13 @@ def parse(text: str) -> dict[str, set[str]]:
     Two shapes are supported:
 
     * **Markdown checklist** — a real project's human/LLM-facing ledger, whose
-      phase lines are ``- [x] `frontend-P1` · needs:`bundle-v0.1.0` · …`` amid prose
-      notes. If *any* line is a checklist item the whole file is read as markdown:
-      **only** checklist items yield phases (the first back-ticked token is the id),
-      so prose notes never leak in as phantom deps-free phases. Dependency gating
-      of a prose ledger is the LLM master's job — it reasons over the prose — so
-      the parsed graph carries the phase *set* with no deterministic deps.
+      phase lines are ``- [x] `frontend-P1` · needs:`frontend-P0` `bundle-v0.1.0` · …``
+      amid prose notes. If *any* line is a checklist item the whole file is read
+      as markdown: **only** checklist items yield phases (the first back-ticked
+      token is the id), so prose notes never leak in as phantom phases. The
+      ``needs:`` field's back-ticked tokens become that phase's deps, filtered to
+      *known phase ids* — git tags (``bundle-v0.1.0``), the ``needs:—`` root, and
+      prose words drop, while cross-repo phase deps are kept.
     * **Bare** — ``P0`` / ``P1 needs:P0,P2 trailing note``, the whitespace-tolerant
       one-line format the hermetic tests (and any project that adopts it) use for
       deterministic gating without an LLM.
@@ -55,22 +60,45 @@ def parse(text: str) -> dict[str, set[str]]:
 
 
 def _parse_markdown(lines: list[str]) -> dict[str, set[str]]:
-    """Phase ids from checklist items only; deps left to the LLM master.
+    """Phase ids (and their ``needs:`` deps) from checklist items only.
 
-    ``ready`` then reports every not-yet-done, not-excluded phase (deps empty ⇒
-    trivially satisfied), so ``launchable`` is non-empty exactly while work
-    remains — the master's stop-guard fires only when the ledger is complete —
-    and the surrounding prose can never be misread as a phantom phase.
+    The first back-ticked token of a checklist line is the phase id; the
+    ``needs:``-prefixed field carries its dependency tokens
+    (``- [ ] `inventory-P4` · needs:`inventory-P3` · …``). Once every phase is known, each
+    phase's deps are filtered down to *known phase ids* — git tags
+    (``bundle-v0.1.0``), the ``needs:—`` root, and prose words drop, while cross-repo
+    phase deps (``I4`` needs ``payments-P4``) are kept. Surrounding prose yields no
+    phase, so it can never be misread as a phantom deps-free phase.
     """
     graph: dict[str, set[str]] = {}
+    raw_deps: dict[str, set[str]] = {}
     for raw in lines:
         m = _CHECKBOX_RE.match(raw)
         if not m:
             continue
         ids = _BACKTICK_RE.findall(m.group(1))
         if ids and _PHASE_RE.match(ids[0]):
-            graph.setdefault(ids[0], set())
+            phase = ids[0]
+            graph.setdefault(phase, set())
+            raw_deps[phase] = _markdown_needs(m.group(1))
+    known = set(graph)
+    for phase in graph:
+        graph[phase] = {d for d in raw_deps[phase] if d in known}
     return graph
+
+
+def _markdown_needs(content: str) -> set[str]:
+    """Back-ticked tokens of a markdown checklist line's ``needs:`` field.
+
+    Scoped to the single ``·``-separated field beginning with ``needs:`` so a
+    sibling ``dir:`…``` / ``TAG:`…``` back-tick is never mistaken for a dep. The
+    returned tokens are still *candidates* — :func:`_parse_markdown` filters them
+    to known phase ids once the whole graph is built.
+    """
+    for field in content.split(_FIELD_SEP):
+        if field.strip().strip("*").strip().startswith("needs:"):
+            return set(_BACKTICK_RE.findall(field))
+    return set()
 
 
 def _parse_bare(lines: list[str]) -> dict[str, set[str]]:

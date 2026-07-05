@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from . import gitq
+from . import ledger as ledger_mod
 from . import state as state_mod
 from . import telegram, tmux
 from .config import Config, ready_needle
@@ -121,6 +122,21 @@ def _worker_env(
     return env
 
 
+def _unmet_deps(cfg: Config, phase: str, done: dict[str, str]) -> list[str]:
+    """Known-phase deps of ``phase`` not yet in ``done`` (launch-time backstop).
+
+    Resolves the same ledger the master reasons over (``cfg.project_dir /
+    cfg.ledger``). Best-effort: an empty list — never a block — is returned when
+    the ledger can't be loaded or ``phase`` isn't a declared phase, so a project
+    with no machine ledger (or a phase the resolver doesn't know) launches exactly
+    as before.
+    """
+    graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
+    if phase not in graph:
+        return []
+    return sorted(d for d in graph[phase] if d not in done)
+
+
 def launch(cfg: Config, phase: str, log: Log) -> bool:
     """Claim a slot and start a worker for ``phase``. Returns success.
 
@@ -138,6 +154,18 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
         slot = st.claim_slot(phase)
         if slot is None:
             log.line(f"LAUNCH-DENIED {phase} no-free-slot")
+            return False
+        # Dependency backstop: st.done is written only after a phase's worktree is
+        # merged, so gating on it means a phase can never start before every dep it
+        # depends on has merged — even if the LLM master mis-reasons over the prose
+        # ledger and asks to launch it out of order. Undo the just-claimed slot
+        # under the same flock so it isn't stranded.
+        missing = _unmet_deps(cfg, phase, st.done)
+        if missing:
+            st.free_slot_for(phase)
+            detail = " ".join(missing)
+            log.line(f"LAUNCH-DENIED {phase} unmet-deps [{detail}]")
+            print(f"LAUNCH-DENIED {phase}: unmet deps [{detail}]")
             return False
         sid, pane = slot.id, slot.pane_id
         if cfg.git_isolation == "worktree":

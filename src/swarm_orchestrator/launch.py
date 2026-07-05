@@ -109,6 +109,15 @@ def _worker_env(
         env["SWARM_WORKTREE"] = str(worktree)
         env["SWARM_MAIN"] = cfg.git_main_branch
         env["SWARM_PROJECT"] = str(cfg.project_dir)
+        # Worktree mode only (the parallel-build OOM problem is worktree-specific):
+        # carry the build-gate config so `swarm build` honours it from a worktree
+        # cwd (no .swarm.toml there), and cap raw `cargo` fan-out as a backstop for
+        # any build not routed through `swarm build`. In-place (`isolation="none"`)
+        # workers keep their full build parallelism untouched.
+        env["SWARM_BUILD_MAX"] = str(cfg.build_max_concurrent)
+        env["SWARM_BUILD_JOBS"] = str(cfg.build_jobs)
+        if cfg.build_jobs:
+            env["CARGO_BUILD_JOBS"] = str(cfg.build_jobs)
     return env
 
 

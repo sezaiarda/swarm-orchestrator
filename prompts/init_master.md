@@ -30,6 +30,12 @@ interactive:
   AskUserQuestion and build that phase directly.
 - **Completion hook**: at the end of a successful build, run the configured
   `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`). If already present, skip.
+- **Build gate**: when `SWARM_PHASE` is set, every heavy compile/test command
+  (`cargo …`, `bun run build|test`, and the like) must run as `swarm build <cmd>`
+  (e.g. `swarm build cargo nextest run`). `swarm build` is a swarm-wide semaphore
+  that caps how many heavy builds run at once so parallel worktrees can't OOM the
+  host; it auto-releases even if a build is killed. If the gates already route
+  through it, skip. Give these builds a generous bash timeout — they may queue.
 Do NOT restrict the worker from delegating: swarm workers already launch with
 `teammateMode=in-process`, so any teammates they spawn run in-process (no extra
 tmux panes) and cannot clutter the workers window.

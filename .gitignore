@@ -16,3 +16,6 @@ wheels/
 
 # local-only audit deliverable — never tracked
 /audit/
+
+# local-only working notes (plan / lessons) — never tracked
+/tasks/

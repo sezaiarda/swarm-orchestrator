@@ -249,6 +249,45 @@ def discard(cfg: Config, phase: str, log: Log) -> None:
 
 
 # -- worktree creation ----------------------------------------------------
+def _link_target_cache(cfg: Config, wt: Path, repo: Path, log: Log) -> None:
+    """Point a Rust worktree's ``target/`` at a shared, per-repo cache dir.
+
+    Isolated worktrees otherwise each recompile the whole dependency graph from
+    scratch. Symlinking ``<worktree>/target`` to one shared dir per repo lets
+    ``cargo`` reuse unchanged crates across phases (only changed crates rebuild) —
+    the single biggest cause of the parallel-build memory/CPU blow-up. A symlink
+    (not ``CARGO_TARGET_DIR``) is used so gate scripts that read a *relative*
+    ``target/release/<bin>`` still resolve.
+
+    We create the link ONLY when the repo actually gitignores ``target`` (checked
+    with ``git check-ignore``): that keeps the machine-local, absolute symlink out
+    of the tree, the integration DIRTY check, and any ``git add -A`` — so it can
+    never be committed onto ``swarm/<phase>`` and merged into canonical ``main``.
+    Best-effort otherwise: a failure/decline just means a cold (still-correct) build.
+
+    Trade-off: two phases building the *same* repo concurrently share one mutable
+    ``target/``; ``cargo``'s build-dir lock serializes them and their divergent
+    sources thrash each other's fingerprints. In practice the ledger's deps keep
+    same-repo phases from running at once, so this is a net win; cross-repo phases
+    (the common parallel case) use separate caches and don't interact.
+    """
+    if not cfg.build_cache or not (wt / "Cargo.toml").exists():
+        return
+    link = wt / "target"
+    if link.exists() or link.is_symlink():
+        return  # a fresh worktree shouldn't have one; don't clobber if it does
+    if _git(wt, "check-ignore", "-q", "target", check=False).returncode != 0:
+        # `target` isn't ignored here — linking would risk committing the symlink.
+        log.line(f"TARGET-CACHE-SKIP {repo.name} target-not-ignored")
+        return
+    shared = cfg.build_cache_dir / _slug(repo)
+    try:
+        shared.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(shared)
+    except OSError as exc:
+        log.line(f"TARGET-CACHE-SKIP {repo.name} {exc}")
+
+
 def _mirror_base(repo: Path, main: str) -> str:
     """The commit to seed a phase mirror from: local ``main`` unless the remote
     strictly fast-forwards it.
@@ -297,6 +336,7 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
                 _gc(cfg, repo, phase, log)  # stale leftover -> start clean
             wt.parent.mkdir(parents=True, exist_ok=True)
             _git(repo, "worktree", "add", str(wt), "-b", branch, base)
+            _link_target_cache(cfg, wt, repo, log)
     log.line(f"WORKTREE-ADD {phase} {cfg.wt_dir / phase}")
     return cfg.wt_dir / phase
 

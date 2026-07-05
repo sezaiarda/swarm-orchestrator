@@ -107,6 +107,7 @@ in the master window. Everything else runs unattended.
 | `swarm context` | the JSON snapshot the master reasons over (ready set, free slots, ledger issues) |
 | `swarm pause` / `swarm resume` | hold new launches (in-flight finish) / resume filling free slots |
 | `swarm launch <phase>` | claim a free slot and start a phase by hand |
+| `swarm build <cmd…>` | run a heavy build through the swarm-wide concurrency gate — what a worker wraps its gates in |
 | `swarm done <phase> [ok\|fail] [note]` | signal phase completion — what a worker calls |
 | `swarm skip <phase>` | mark a phase done without building it |
 | `swarm free <slot\|phase>` | free a stuck slot (by id or phase) |
@@ -154,6 +155,27 @@ idempotent and resumable, so a crash mid-run is reconciled on the next `swarm up
 **from the durable `done` sentinels**: an interrupted phase (no `ok` sentinel) is
 discarded and rebuilt, never silently marked done.
 
+### The build gate (`swarm build`)
+
+Isolated worktrees have a cost: N workers each compile in their own tree, so the
+same crates recompile N times over, and each `cargo` fans out across every core.
+On a memory-capped host that is exactly how the box OOM-thrashes. Two `[build]`
+knobs contain it, without capping the worker count:
+
+- **`swarm build <cmd>`** — a swarm-wide **counting semaphore**: at most
+  `[build].max_concurrent` heavy builds run at once; the rest queue. It *execs*
+  the build, so the build process itself holds the lock — a worker's bash-tool
+  timeout that kills the build **auto-releases** the slot (no daemon, no leak).
+  It also sets `CARGO_BUILD_JOBS` (`[build].jobs`) so one build can't grab every
+  core. Workers wrap their gates in it (`swarm build cargo nextest run`); cheap
+  commands (`fmt`, `git`) run unwrapped. Enabled via the prime / init-master
+  prompt; `max_concurrent = 0` disables the gate.
+- **`[build].cache`** — symlinks each Rust worktree's `target/` to one shared
+  per-repo cache, so only *changed* crates recompile across worktrees. A symlink
+  (not `CARGO_TARGET_DIR`) is used so gate scripts that read a relative
+  `target/release/<bin>` still resolve; `target` is gitignored, so it never
+  dirties the tree, and `discard`/rollback removes only the link, never the cache.
+
 The merge-queue never wedges on a clean tree — it distinguishes four outcomes:
 
 | outcome | meaning | what happens |
@@ -190,6 +212,11 @@ notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
 
 [tmux]
 session = "swarm"
+
+[build]                             # heavy-build concurrency gate + compile cache
+max_concurrent = 2                  # most concurrent `swarm build` jobs; 0 disables the gate
+jobs           = 6                  # CARGO_BUILD_JOBS cap per build (core fan-out)
+cache          = true               # shared per-repo cargo target cache across worktrees
 
 [git]                               # omit the block for isolation = "none"
 isolation   = "worktree"

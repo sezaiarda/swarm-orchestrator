@@ -63,6 +63,9 @@ class Config:
     git_isolation: str
     git_main_branch: str
     git_repos: list[str]
+    build_max_concurrent: int
+    build_jobs: int
+    build_cache: bool
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -109,6 +112,17 @@ class Config:
         """Where per-repo integration ``flock`` files live."""
         return self.state_dir / "git"
 
+    @property
+    def buildsem_dir(self) -> Path:
+        """Where the ``swarm build`` semaphore slot files live (one flock each)."""
+        return self.state_dir / "buildsem"
+
+    @property
+    def build_cache_dir(self) -> Path:
+        """Shared, per-repo cargo ``target`` cache (symlinked into each worktree),
+        so unchanged crates aren't recompiled from scratch in every worktree."""
+        return self.state_dir / "cache" / "target"
+
     def ensure_dirs(self) -> None:
         """Create the state/done/log directories if absent."""
         for d in (self.state_dir, self.done_dir, self.log_dir):
@@ -142,6 +156,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     telegram = data.get("telegram", {})
     tmux = data.get("tmux", {})
     git = data.get("git", {})
+    build = data.get("build", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
     max_workers = int(swarm.get("max_workers", 4))
@@ -191,7 +206,34 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             "SWARM_GIT_MAIN", str(git.get("main_branch", "master"))
         ),
         git_repos=_git_repos(git),
+        build_max_concurrent=_int_env(
+            "SWARM_BUILD_MAX", build.get("max_concurrent"), 2, minimum=0
+        ),
+        build_jobs=_int_env("SWARM_BUILD_JOBS", build.get("jobs"), 6, minimum=0),
+        build_cache=_bool_env("SWARM_BUILD_CACHE", build.get("cache", True)),
     )
+
+
+def _int_env(name: str, value: object, default: int, minimum: int) -> int:
+    """An int config value, floored at ``minimum``: the env override, else the
+    config value, else the code default — the first that parses. ``default`` is
+    always a valid int, so a malformed env override *or* a wrong-type config
+    value degrades to it instead of crashing ``load()`` for every command."""
+    for candidate in (os.environ.get(name), value, default):
+        if candidate is None:
+            continue
+        try:
+            return max(minimum, int(candidate))
+        except (TypeError, ValueError):
+            continue
+    return max(minimum, default)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _git_repos(git: dict) -> list[str]:

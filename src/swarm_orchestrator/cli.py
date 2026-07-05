@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 
+from . import buildsem
 from . import gitq
 from . import launch as launch_mod
 from . import session as session_mod
@@ -177,6 +178,15 @@ def cmd_done(cfg: Config, phase: str, status: str, note: str) -> int:
     return 0
 
 
+def cmd_build(cfg: Config, argv: list[str]) -> int:
+    """Run a heavy build command through the swarm-wide concurrency gate.
+
+    ``swarm build cargo nextest run`` etc. On success this ``exec``s the command
+    (never returns); the returned code only covers the error paths.
+    """
+    return buildsem.run(cfg, argv)
+
+
 def cmd_context(cfg: Config) -> int:
     st = state_mod.read(cfg)
     print(json.dumps(build_context(cfg, st)))
@@ -299,6 +309,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("pause", help="stop launching new workers (in-flight finish)")
     sub.add_parser("resume", help="resume launching workers into free slots")
 
+    bp = sub.add_parser("build", help="run a build command through the concurrency gate")
+    bp.add_argument("argv", nargs=argparse.REMAINDER, help="the build command, e.g. cargo nextest run")
+
     lp = sub.add_parser("launch", help="claim a slot and start a worker")
     lp.add_argument("phase")
 
@@ -326,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_down(cfg)
     if cmd == "_supervise":
         return cmd_supervise(cfg)
+    if cmd == "build":
+        return cmd_build(cfg, args.argv)
     if cmd == "launch":
         return cmd_launch(cfg, args.phase)
     if cmd == "done":

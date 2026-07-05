@@ -322,6 +322,8 @@ def cmd_status(cfg: Config) -> int:
         mark = f"BUSY {s.phase}" if s.busy else "free"
         wt = f" branch={s.branch}" if s.branch else ""
         lines.append(f"  slot {s.id} pane={s.pane_id} {mark}{wt}")
+    if st.waiting or st.parked:
+        lines.append(f"waiting={sorted(st.waiting)} parked={st.parked}")
     lines.append(f"done={st.done}")
     print("\n".join(lines))
     return 0

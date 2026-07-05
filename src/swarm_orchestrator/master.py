@@ -72,6 +72,12 @@ def build_context(cfg: Config, st: State) -> dict:
         "paused": st.paused,
         "ledger": str(ledger_path),
         "master_alive": st.master_alive,
+        # Phases whose worker is off-grid awaiting the owner: `waiting` armed a
+        # park timer (still holds its slot), `parked` was moved to its own window
+        # (slot freed). Both are excluded from `ready`, are never relaunched, and
+        # keep the run `pending` until the worker is answered and runs `swarm done`.
+        "waiting": sorted(st.waiting),
+        "parked": list(st.parked),
         # Structural ledger problems (cycles / self-deps / unknown deps) that
         # would otherwise silently stall the run — surfaced so the master/owner
         # can see them instead of a phase never becoming ready.

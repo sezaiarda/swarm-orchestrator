@@ -8,15 +8,18 @@ owner typed `/prime <phase>`.
 Do this, then stop:
 
 1. Run `swarm context`. It reports free slots, busy slots, done phases, the
-   ready set, `paused`, and `ledger_issues`. **If `paused` is true (or
-   `launchable` is empty), launch nothing — run `swarm master-idle` and stop.**
-   If `ledger_issues` is non-empty (a dependency cycle / self-dep / unknown dep
-   that would silently stall the build), telegram the owner with the issues and
-   stop — do not paper over it.
-2. From the ledger + free slots, pick the best ready phases: critical-path
-   first, honouring excludes and any externally-blocked notes. Cap at the number
-   of free slots. (Concurrent phases in the same repo are fine — each builds in
-   its own isolated worktree.)
+   `ready` set, `launchable`, `paused`, `ledger_issues`, and `waiting`/`parked`
+   (phases whose worker is off-grid awaiting the owner — already excluded from
+   `ready`, so never relaunch them; they simply keep the run alive until they are
+   answered and finish). **If `paused` is true (or `launchable` is empty), launch
+   nothing — run `swarm master-idle` and stop.** If `ledger_issues` is non-empty
+   (a dependency cycle / self-dep / unknown dep that would silently stall the
+   build), telegram the owner with the issues and stop — do not paper over it.
+2. From the `launchable` set, pick the best phases: critical-path first,
+   honouring excludes. Cap at the number of free slots. (Concurrent phases in the
+   same repo are fine — each builds in its own isolated worktree.) You cannot
+   mis-order: `swarm launch` refuses any phase whose deps aren't all done+merged,
+   so `ready`/`launchable` already reflect the true dependency graph — trust it.
 3. Run `swarm launch <phase>` for each chosen phase.
 4. If you are nudged that another worker finished while you were deciding, run
    `swarm context` again and launch any newly-ready phase into the freed slot.

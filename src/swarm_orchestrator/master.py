@@ -188,7 +188,13 @@ class Master:
             f"Read {prompt_file} and follow every instruction in it exactly. "
             f"You are orchestrating the project at {self.cfg.project_dir}."
         )
-        tmux.send_submit(pane, line)
+        if not tmux.send_submit(pane, line):
+            self.log.line("ACTION master-submit-lost")
+            telegram.notify(
+                self.cfg.telegram_notify,
+                f"swarm: master ({kind}) prompt would not submit -- check the master pane",
+            )
+            return False
         return True
 
     def inject(self, text: str) -> None:
@@ -213,8 +219,8 @@ class Master:
         if self.pane is None:
             self.log.line("ACTION inject-failed no-pane")
             return
-        tmux.send_literal(self.pane, text)
-        tmux.send_enter(self.pane)
+        if not tmux.send_submit(self.pane, text):
+            self.log.line("ACTION inject-lost")
 
     def kill(self) -> None:
         """Terminate the master (bare) or clear its pane (tmux)."""

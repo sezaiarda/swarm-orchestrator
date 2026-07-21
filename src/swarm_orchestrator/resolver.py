@@ -74,7 +74,8 @@ def _deliver(cfg: Config, pane: str, phase: str, repo: Path, log: Log) -> None:
         f"{cfg.git_main_branch}. Work only in {repo}. When done, run "
         f"`swarm resolved {phase}`."
     )
-    tmux.send_submit(pane, line)
+    if not tmux.send_submit(pane, line):
+        log.line(f"RESOLVER-SUBMIT-LOST {phase}")
 
 
 def close(cfg: Config, win: str, log: Log) -> None:

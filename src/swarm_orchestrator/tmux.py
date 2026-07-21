@@ -328,11 +328,45 @@ def await_text(pane_id: str, needle: str, timeout: float = 30.0) -> bool:
     return _poll(lambda: needle in capture_joined(pane_id), timeout)
 
 
-def send_submit(pane_id: str, text: str, settle: float = 0.5) -> None:
-    """Type ``text`` then submit it. The short settle lets the keystrokes land
-    before Enter, so Enter can't race ahead and submit an empty box."""
+def _box_holds(pane_id: str, head: str) -> bool:
+    """True while claude's input box still holds the typed text.
+
+    The box is the text after the LAST ``❯`` in the pane (past messages render
+    above it); on submit claude clears the box. ``head`` must fit the box's
+    first visual row — claude soft-wraps the rest onto indented rows that ``-J``
+    does not join."""
+    text = capture_joined(pane_id)
+    idx = text.rfind("❯")
+    if idx < 0:
+        return False
+    return text[idx + 1 :].lstrip().startswith(head)
+
+
+def send_submit(pane_id: str, text: str, settle: float = 0.5, tries: int = 4) -> bool:
+    """Type ``text`` then submit it — and verify the submit took.
+
+    claude's TUI can swallow a lone injected Enter (the text lands in the input
+    box, the submit never fires), which stalls the run with the prompt written
+    but unsent. The settle now *polls* for the text to show in the box, so the
+    first Enter still goes out within ``settle`` — same timing as before. Then,
+    while the box still holds the text, Enter is re-sent. Retrying is always
+    safe: Enter on a full box is the submit we wanted, Enter on an empty box is
+    a no-op. Returns False only if every retry left the text sitting there.
+    A pane that never renders claude's ``❯`` box (the fake-script test panes)
+    keeps the old single-Enter behavior and reports success; retries are
+    unchecked so a pane that exits mid-verify can't raise into the caller."""
     send_literal(pane_id, text)
-    time.sleep(settle)
+    head = text[:40]
+    landed = _poll(lambda: _box_holds(pane_id, head), settle)
+    if landed:
+        time.sleep(0.2)  # keystrokes rendered; brief settle before Enter
     send_enter(pane_id)
+    if not landed and not _box_holds(pane_id, head):
+        return True
+    for _ in range(tries):
+        if _poll(lambda: not _box_holds(pane_id, head), 2.0):
+            return True
+        run(["send-keys", "-t", pane_id, "Enter"])
+    return False
 
 

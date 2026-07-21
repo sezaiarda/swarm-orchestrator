@@ -241,7 +241,9 @@ def _launch_tmux(
     if not _await_ready(cfg, pane, log):
         return False
     command = cfg.command_template.format(phase=phase)
-    tmux.send_submit(pane, command)
+    if not tmux.send_submit(pane, command):
+        log.line(f"SUBMIT-LOST {phase} pane={pane}")
+        return False
     return True
 
 

@@ -268,6 +268,12 @@ def cmd_bootstrap(cfg: Config) -> int:
     return 0
 
 
+def cmd_poke_done(cfg: Config, phase: str, status: str) -> int:
+    """Deliver a delayed ``done`` poke (spawned detached by ``swarm done``)."""
+    _poke(cfg, f"done {phase} {status}")
+    return 0
+
+
 def cmd_finish(cfg: Config) -> int:
     _poke(cfg, "shutdown")
     return 0
@@ -414,6 +420,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("context", help="print the read-only state snapshot (JSON)")
     sub.add_parser("master-idle", help="signal the master finished a pass")
     sub.add_parser("bootstrap", help="ask the supervisor to spawn the init master")
+    pd = sub.add_parser("_poke-done", help=argparse.SUPPRESS)
+    pd.add_argument("phase")
+    pd.add_argument("status")
 
     rp = sub.add_parser("resolved", help="signal a merge-conflict resolver finished")
     rp.add_argument("phase")
@@ -498,6 +507,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_integrate(cfg, args.phase)
     if cmd == "bootstrap":
         return cmd_bootstrap(cfg)
+    if cmd == "_poke-done":
+        return cmd_poke_done(cfg, args.phase, args.status)
     if cmd == "finish":
         return cmd_finish(cfg)
     if cmd == "free":

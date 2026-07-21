@@ -346,6 +346,33 @@ def _completion_ping(phase: str, status: str, note: str) -> str | None:
     return f"swarm: {phase} FAILED{tail}"
 
 
+def _detach_poke(cfg: Config, phase: str, status: str) -> bool:
+    """Deliver the delayed ``done`` poke from a detached survivor process.
+
+    ``start_new_session`` detaches it from the worker's pane, so neither the
+    bash tool's timeout nor the next launch respawning the slot can kill the
+    grace timer. ``SWARM_BIN`` is the test seam (may be multi-word, hence
+    unquoted); production is the plain ``swarm`` entry point.
+    """
+    bin_ = os.environ.get("SWARM_BIN", "swarm")
+    script = (
+        f"sleep {cfg.done_grace_s}; "
+        f"exec {bin_} _poke-done {shlex.quote(phase)} {shlex.quote(status)}"
+    )
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", script],
+            cwd=str(cfg.project_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
 def done(cfg: Config, phase: str, status: str, note: str = "") -> None:
     """Signal phase completion.
 
@@ -353,15 +380,21 @@ def done(cfg: Config, phase: str, status: str, note: str = "") -> None:
     the worker itself* — but ONLY when the outcome is not a clean success:
     ``needs-owner`` and ``fail`` ping with the recap, ``ok`` stays silent; (3) hold
     the slot for ``done_grace_s`` so the worker has a buffer to flush any last work
-    before the supervisor reclaims it; (4) best-effort poke. The grace sleeps in
-    the worker's own process, so the single-threaded supervisor loop is never
-    blocked; ``done_grace_s = 0`` (the default) keeps the immediate path.
+    before the supervisor reclaims it; (4) best-effort poke. The grace does NOT
+    sleep in the worker's process: ``swarm done`` runs inside the worker's bash
+    tool call, whose timeout would kill a long sleep — and the poke with it. A
+    detached child sleeps and delivers the poke instead, so ``swarm done``
+    returns immediately and the worker spends the whole grace closing out its
+    session. Falls back to the old in-process sleep if the detach can't spawn;
+    ``done_grace_s = 0`` (the default) keeps the immediate path.
     """
     _write_sentinel(cfg, phase, status, note)
     ping = _completion_ping(phase, status, note)
     if ping is not None:
         telegram.notify(cfg.telegram_notify, ping)
     if cfg.done_grace_s > 0:
+        if _detach_poke(cfg, phase, status):
+            return
         time.sleep(cfg.done_grace_s)
     _poke_fifo(cfg, f"done {phase} {status}\n")
 

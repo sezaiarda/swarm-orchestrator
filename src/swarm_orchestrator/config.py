@@ -15,6 +15,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .tmux import AUTO_LAYOUT, normalize_layout
+
 DEFAULT_EXCLUDE: list[str] = []
 
 
@@ -60,6 +62,7 @@ class Config:
     exclude: list[str]
     telegram_notify: str
     session: str
+    tmux_layout: str
     driver: str
     master_cmd: str
     git_isolation: str
@@ -213,6 +216,12 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             telegram.get("notify", "scripts/notify.sh")
         ),
         session=os.environ.get("SWARM_SESSION", tmux.get("session", "swarm")),
+        # How the worker windows arrange their slot panes ("auto" = the historic
+        # 1-full / 2-side-by-side / 3-4-tiled rule). `swarm layout <name>` flips
+        # it live for the running session; this is the boot default.
+        tmux_layout=normalize_layout(
+            str(os.environ.get("SWARM_LAYOUT", tmux.get("layout", AUTO_LAYOUT)))
+        ),
         driver=driver,
         master_cmd=os.environ.get("SWARM_MASTER_CMD", swarm.get("master_cmd", "")),
         git_isolation=os.environ.get(

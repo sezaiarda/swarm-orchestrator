@@ -2,16 +2,19 @@
 
 ``plan_worker_windows`` is pure math (no tmux). ``split_layout`` shells out, so we
 stub :func:`swarm_orchestrator.tmux.run` to record the issued commands and fake
-``list-panes`` geometry — proving the per-count preset (1 full / 2 even-horizontal
-/ 3-4 tiled) without needing a real tmux server.
+``list-panes`` geometry — proving both the ``auto`` per-count preset (1 full / 2
+even-horizontal / 3-4 tiled) and a pinned ``[tmux].layout`` without needing a real
+tmux server.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from swarm_orchestrator import config as config_mod
 from swarm_orchestrator import tmux
 from swarm_orchestrator.session import PANES_PER_WINDOW, plan_worker_windows
 
@@ -91,3 +94,104 @@ def test_split_layout_preset_per_count(monkeypatch, count, n_splits, preset):
     # count==2 must be a horizontal (LEFT|RIGHT) split, never a stacked one
     if count == 2:
         assert splits == [["split-window", "-h", "-t", "@1", "sleep infinity"]]
+
+
+# -- configurable layout --------------------------------------------------
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("auto", "auto"),
+        ("even-vertical", "even-vertical"),
+        ("EVEN-HORIZONTAL", "even-horizontal"),
+        (" top-bottom ", "even-vertical"),
+        ("side-by-side", "even-horizontal"),
+        ("stacked", "even-vertical"),
+        ("grid", "tiled"),
+        ("", "auto"),
+    ],
+)
+def test_normalize_layout(name, expected):
+    assert tmux.normalize_layout(name) == expected
+
+
+def test_normalize_layout_rejects_unknown():
+    with pytest.raises(ValueError, match="unknown tmux layout"):
+        tmux.normalize_layout("diagonal")
+
+
+@pytest.mark.parametrize(
+    "count, layout, expected",
+    [
+        (1, "auto", None),
+        (1, "even-vertical", None),  # a lone pane already fills its window
+        (2, "auto", "even-horizontal"),
+        (3, "auto", "tiled"),
+        (2, "even-vertical", "even-vertical"),
+        (4, "even-vertical", "even-vertical"),
+        (2, "main-horizontal", "main-horizontal"),
+    ],
+)
+def test_preset_for(count, layout, expected):
+    assert tmux.preset_for(count, layout) == expected
+
+
+@pytest.mark.parametrize(
+    "layout, flag",
+    [
+        ("even-vertical", "-v"),
+        ("main-horizontal", "-v"),
+        ("even-horizontal", "-h"),
+        ("main-vertical", "-h"),
+        ("tiled", None),
+    ],
+)
+def test_split_layout_pinned(monkeypatch, layout, flag):
+    """A pinned layout drives BOTH the split direction and the locked preset."""
+    fake = _FakeTmux()
+    monkeypatch.setattr(tmux, "run", fake.run)
+
+    panes = tmux.split_layout("@1", 2, layout)
+
+    assert len(panes) == 2
+    expected = ["split-window", *([flag] if flag else []), "-t", "@1", "sleep infinity"]
+    assert _splits(fake.calls) == [expected]
+    assert [c[-1] for c in fake.calls if c[0] == "select-layout"] == [layout]
+
+
+def test_apply_layout_pinned(monkeypatch):
+    fake = _FakeTmux()
+    monkeypatch.setattr(tmux, "run", fake.run)
+
+    tmux.apply_layout("@1", 2, "even-vertical")
+    tmux.apply_layout("@1", 1, "even-vertical")  # single pane -> untouched
+
+    assert _splits(fake.calls) == []
+    assert [c[-1] for c in fake.calls if c[0] == "select-layout"] == ["even-vertical"]
+
+
+def _load_with_layout(tmp_path: Path, body: str):
+    (tmp_path / ".swarm.toml").write_text(body, encoding="utf-8")
+    return config_mod.load(project_dir=str(tmp_path))
+
+
+def test_config_layout_default_is_auto(tmp_path, monkeypatch):
+    monkeypatch.delenv("SWARM_LAYOUT", raising=False)
+    assert _load_with_layout(tmp_path, "[swarm]\nmax_workers = 2\n").tmux_layout == "auto"
+
+
+def test_config_layout_alias_is_normalized(tmp_path, monkeypatch):
+    monkeypatch.delenv("SWARM_LAYOUT", raising=False)
+    cfg = _load_with_layout(tmp_path, '[tmux]\nlayout = "top-bottom"\n')
+    assert cfg.tmux_layout == "even-vertical"
+
+
+def test_config_layout_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("SWARM_LAYOUT", "tiled")
+    cfg = _load_with_layout(tmp_path, '[tmux]\nlayout = "even-vertical"\n')
+    assert cfg.tmux_layout == "tiled"
+
+
+def test_config_layout_typo_fails_loudly(tmp_path, monkeypatch):
+    monkeypatch.delenv("SWARM_LAYOUT", raising=False)
+    with pytest.raises(ValueError, match="unknown tmux layout"):
+        _load_with_layout(tmp_path, '[tmux]\nlayout = "top_bottom"\n')

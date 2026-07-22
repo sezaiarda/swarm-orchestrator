@@ -63,6 +63,11 @@ class State:
     # no longer holds a slot; it clears only on ``swarm done``.
     waiting: dict[str, float] = field(default_factory=dict)
     parked: list[str] = field(default_factory=list)
+    # Live pane arrangement of the worker windows, set by ``swarm layout``.
+    # ``None`` = follow ``[tmux].layout``; a value here wins for the rest of the
+    # run (so a park re-tidy can't revert what the owner just chose). Reset on
+    # every ``up``, since the config is re-read there.
+    layout: str | None = None
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -162,6 +167,7 @@ class State:
             integ_blocked_kind=data.get("integ_blocked_kind"),
             waiting=dict(data.get("waiting", {})),
             parked=list(data.get("parked", [])),
+            layout=data.get("layout"),
         )
 
     @classmethod

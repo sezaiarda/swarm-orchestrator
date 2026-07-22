@@ -3,8 +3,9 @@
 Layout: a ``master`` window (1 idle pane) plus one or more worker windows tagged
 ``@swarm_slot 0..N-1`` across a GLOBAL slot index. Slots paginate into windows of
 at most :data:`PANES_PER_WINDOW` (``workers``, ``workers-2``, …), each laid out by
-:func:`swarm_orchestrator.tmux.split_layout` (1 full pane / 2 LEFT|RIGHT / 3-4
-tiled). Windows are referenced by captured id everywhere downstream; slot pane ids
+:func:`swarm_orchestrator.tmux.split_layout` per ``[tmux].layout`` (``auto`` = 1
+full pane / 2 LEFT|RIGHT / 3-4 tiled; or a pinned preset such as
+``even-vertical`` for a TOP/BOTTOM stack). Windows are referenced by captured id everywhere downstream; slot pane ids
 are recorded in state so accounting is tag-driven (workers run their own teammates
 in-process, so no teammate panes ever appear).
 """
@@ -53,7 +54,7 @@ def setup(cfg: Config) -> dict[str, str]:
     base = 0
     for name, size in plan_worker_windows(cfg.max_workers):
         win = tmux.new_window(cfg.session, name)
-        for offset, pane in enumerate(tmux.split_layout(win, size)):
+        for offset, pane in enumerate(tmux.split_layout(win, size, cfg.tmux_layout)):
             gidx = base + offset
             tmux.set_slot(pane, gidx)
             slot_panes[gidx] = pane

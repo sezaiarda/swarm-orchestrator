@@ -330,10 +330,57 @@ def cmd_resume(cfg: Config) -> int:
     return 0
 
 
+def _worker_windows(windows: dict[str, str]) -> list[str]:
+    """Window ids of the paginated worker grid (``workers``, ``workers-2``, …).
+
+    The master, ``wait:<phase>`` and ``resolve:<phase>`` windows are single-pane
+    by construction and are never re-arranged.
+    """
+    return [
+        wid
+        for name, wid in windows.items()
+        if name == "workers" or name.startswith("workers-")
+    ]
+
+
+def cmd_layout(cfg: Config, name: str | None) -> int:
+    """Show, or re-arrange live, how the worker windows stack their slot panes.
+
+    With no argument this prints the effective layout and the valid names. With
+    one it records the choice in state (so a later park re-tidy honours it) and
+    immediately re-lays out every worker window — no restart, no relaunch: the
+    panes and the processes in them are untouched, only their geometry changes.
+    """
+    if name is None:
+        st = state_mod.read(cfg)
+        print(f"layout: {st.layout or cfg.tmux_layout} (config default: {cfg.tmux_layout})")
+        print(f"choices: {', '.join(tmux.LAYOUTS)}")
+        print(f"aliases: {', '.join(sorted(tmux.LAYOUT_ALIASES))}")
+        return 0
+    try:
+        layout = tmux.normalize_layout(name)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    with state_mod.transaction(cfg) as st:
+        st.layout = layout
+        windows = _worker_windows(st.windows)
+    applied = 0
+    if cfg.driver == "tmux" and tmux.session_exists(cfg.session):
+        for wid in windows:
+            tmux.apply_layout(wid, len(tmux.list_panes(wid)), layout)
+            applied += 1
+    print(f"layout {layout} — re-arranged {applied} worker window(s)")
+    if layout != cfg.tmux_layout:
+        print(f'set `layout = "{layout}"` under [tmux] in .swarm.toml to make it the default')
+    return 0
+
+
 def cmd_status(cfg: Config) -> int:
     st = state_mod.read(cfg)
     lines = [
-        f"slug={cfg.slug} driver={cfg.driver} finished={st.finished} paused={st.paused}",
+        f"slug={cfg.slug} driver={cfg.driver} finished={st.finished} paused={st.paused}"
+        f" layout={st.layout or cfg.tmux_layout}",
         f"master_alive={st.master_alive} supervisor_pid={st.supervisor_pid}",
         f"isolation={cfg.git_isolation} main={cfg.git_main_branch}"
         f" integ_blocked={st.integ_blocked} integ_queue={st.integ_queue}",
@@ -407,6 +454,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     kp = sub.add_parser("skip", help="mark a phase done without running it")
     kp.add_argument("phase")
+
+    lyp = sub.add_parser(
+        "layout", help="show or change how the worker panes are arranged (live)"
+    )
+    lyp.add_argument(
+        "name",
+        nargs="?",
+        help="e.g. side-by-side, top-bottom, tiled, main-vertical, auto "
+        "(omit to print the current layout and every valid name)",
+    )
     return p
 
 
@@ -447,6 +504,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_free(cfg, args.target)
     if cmd == "skip":
         return cmd_skip(cfg, args.phase)
+    if cmd == "layout":
+        return cmd_layout(cfg, args.name)
     if cmd == "status":
         return cmd_status(cfg)
     if cmd == "pause":

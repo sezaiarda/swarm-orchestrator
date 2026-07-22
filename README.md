@@ -15,8 +15,10 @@ language**, configured by a per-project `.swarm.toml`.
 
 `swarm up` builds a tmux session with a **master** window (one pane) and one or
 more **workers** windows holding `[swarm].max_workers` slots, paginated into
-windows of at most four (`workers`, `workers-2`, …) — a lone slot fills its
-window, two split LEFT|RIGHT, three–four tile into a grid. It starts a detached
+windows of at most four (`workers`, `workers-2`, …), arranged by `[tmux].layout`
+— the default `"auto"` gives a lone slot its whole window, splits two LEFT|RIGHT,
+and tiles three–four into a grid; pin `"top-bottom"` (or any tmux preset) to
+stack them instead, or flip it live with `swarm layout`. It starts a detached
 **supervisor** and launches an **init master**. The master reads your phase
 ledger, works out which phases are ready, and `swarm launch`es as many as there
 are free slots — each a real `claude` running `/prime <phase>`. When a worker
@@ -127,6 +129,7 @@ The master never asks — it runs autonomously. Everything else runs unattended.
 | `swarm status` | human-readable state dump — slots, `done`, `paused`, `waiting`/`parked`, the integration queue |
 | `swarm context` | the JSON snapshot the master reasons over (`ready`, `launchable`, free slots, `waiting`, `parked`, ledger issues) |
 | `swarm pause` / `swarm resume` | hold new launches (in-flight finish) / resume filling free slots |
+| `swarm layout [name]` | re-arrange the live worker panes (`side-by-side`, `top-bottom`, `tiled`, `main-vertical`, `auto`, …); no argument prints the current one and every valid name |
 | `swarm launch <phase>` | claim a free slot and start a phase by hand |
 | `swarm build <cmd…>` | run a heavy build through the swarm-wide concurrency gate — what a worker wraps its gates in |
 | `swarm done <phase> [ok\|needs-owner\|fail] [note]` | signal phase completion (self-classified) — what a worker calls |
@@ -236,6 +239,13 @@ notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
 
 [tmux]
 session = "swarm"
+layout  = "auto"    # how the worker windows arrange their slot panes:
+                    #   auto            1 = full window, 2 = LEFT|RIGHT, 3-4 = tiled
+                    #   even-horizontal all side-by-side  (alias: side-by-side)
+                    #   even-vertical   all top-to-bottom (alias: top-bottom)
+                    #   tiled           grid              (alias: grid)
+                    #   main-vertical / main-horizontal   one big pane + the rest
+                    # `swarm layout <name>` changes it live, without a restart.
 
 [build]                             # heavy-build concurrency gate + compile cache
 max_concurrent = 2                  # most concurrent `swarm build` jobs; 0 disables the gate

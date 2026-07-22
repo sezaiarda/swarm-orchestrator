@@ -14,6 +14,73 @@ from typing import Callable, Sequence
 
 SLOT_OPT = "@swarm_slot"
 
+# -- pane arrangements ----------------------------------------------------
+# How a worker window arranges its slot panes. ``auto`` is the historical rule
+# (1 = full window, 2 = LEFT|RIGHT, 3+ = tiled grid); every other value pins ONE
+# tmux preset at every pane count, so two workers can be stacked TOP/BOTTOM
+# instead of side-by-side. Set it in ``[tmux].layout`` or flip it live with
+# ``swarm layout <name>``.
+AUTO_LAYOUT = "auto"
+TMUX_LAYOUTS = (
+    "even-horizontal",
+    "even-vertical",
+    "tiled",
+    "main-horizontal",
+    "main-vertical",
+)
+LAYOUTS = (AUTO_LAYOUT, *TMUX_LAYOUTS)
+# Plain-English spellings of the two arrangements people actually ask for.
+LAYOUT_ALIASES = {
+    "side-by-side": "even-horizontal",
+    "left-right": "even-horizontal",
+    "columns": "even-horizontal",
+    "top-bottom": "even-vertical",
+    "stacked": "even-vertical",
+    "rows": "even-vertical",
+    "grid": "tiled",
+}
+# The split direction that already matches each preset, so a window never
+# flashes the wrong arrangement between the split and ``select-layout``. Tiled
+# takes tmux's default direction (as it always has).
+_SPLIT_FLAG = {
+    "even-horizontal": "-h",
+    "main-vertical": "-h",
+    "even-vertical": "-v",
+    "main-horizontal": "-v",
+}
+
+
+def normalize_layout(name: str) -> str:
+    """Canonical layout name for ``name``, resolving aliases and case.
+
+    Raises ``ValueError`` on an unknown name — a typo in ``[tmux].layout`` must
+    fail loudly at config load, not silently arrange the panes some other way.
+    """
+    key = (name or AUTO_LAYOUT).strip().lower()
+    key = LAYOUT_ALIASES.get(key, key)
+    if key not in LAYOUTS:
+        choices = ", ".join(LAYOUTS)
+        aliases = ", ".join(sorted(LAYOUT_ALIASES))
+        raise ValueError(
+            f"unknown tmux layout {name!r}; choose one of: {choices} "
+            f"(aliases: {aliases})"
+        )
+    return key
+
+
+def preset_for(count: int, layout: str = AUTO_LAYOUT) -> str | None:
+    """The ``select-layout`` preset for a ``count``-pane window, or ``None``.
+
+    ``None`` means "leave the window alone": a lone pane already fills it. Under
+    ``auto`` a pair gets even-horizontal columns and 3+ tile; an explicit layout
+    is used verbatim at every count >= 2.
+    """
+    if count < 2:
+        return None
+    if layout == AUTO_LAYOUT:
+        return "even-horizontal" if count == 2 else "tiled"
+    return layout
+
 
 def run(args: Sequence[str], check: bool = False) -> subprocess.CompletedProcess:
     """Invoke ``tmux`` with ``args``; capture text output."""
@@ -90,22 +157,27 @@ def new_window(session: str, name: str, hold: str = "sleep infinity") -> str:
     return out.stdout.strip()
 
 
-def split_layout(window_id: str, count: int, hold: str = "sleep infinity") -> list[str]:
-    """Grow ``window_id`` to ``count`` panes per the owner's layout rule.
+def split_layout(
+    window_id: str,
+    count: int,
+    layout: str = AUTO_LAYOUT,
+    hold: str = "sleep infinity",
+) -> list[str]:
+    """Grow ``window_id`` to ``count`` panes arranged per ``layout``.
 
-    ``count==1`` leaves the lone pane untouched (full window); ``count==2`` makes
-    a LEFT|RIGHT pair via ``split-window -h`` locked to even-horizontal columns (a
-    vertical divider, never stacked); ``count`` in 3..4 uses the tiled grid preset.
+    ``count==1`` leaves the lone pane untouched (full window); otherwise the
+    window is split ``count-1`` times in the direction that matches the resolved
+    preset (see :func:`preset_for`) and locked to it with ``select-layout``.
     Returns pane ids ordered top-left-to-bottom-right so slot indices track the
     visible layout.
     """
-    if count == 2:
-        run(["split-window", "-h", "-t", window_id, hold], check=True)
-        run(["select-layout", "-t", window_id, "even-horizontal"])
-    elif count >= 3:
+    preset = preset_for(count, layout)
+    if preset is not None:
+        flag = _SPLIT_FLAG.get(preset)
+        args = ["split-window", *([flag] if flag else []), "-t", window_id, hold]
         for _ in range(count - 1):
-            run(["split-window", "-t", window_id, hold], check=True)
-        run(["select-layout", "-t", window_id, "tiled"])
+            run(args, check=True)
+        run(["select-layout", "-t", window_id, preset])
     return _panes_ordered(window_id)
 
 
@@ -114,14 +186,14 @@ def window_of(pane_id: str) -> str:
     return run(["display-message", "-p", "-t", pane_id, "#{window_id}"]).stdout.strip()
 
 
-def apply_layout(window_id: str, count: int) -> None:
-    """Re-apply the owner's per-count layout preset to an EXISTING window (no
-    splitting) — used after a pane is broken out so the survivors re-tidy. Mirrors
-    :func:`split_layout`'s presets (2 -> even-horizontal, 3-4 -> tiled, 1 -> full)."""
-    if count == 2:
-        run(["select-layout", "-t", window_id, "even-horizontal"])
-    elif count >= 3:
-        run(["select-layout", "-t", window_id, "tiled"])
+def apply_layout(window_id: str, count: int, layout: str = AUTO_LAYOUT) -> None:
+    """Re-apply ``layout``'s preset to an EXISTING window (no splitting) — used
+    after a pane is broken out so the survivors re-tidy, and by ``swarm layout``
+    to re-arrange live windows. Resolves the same preset :func:`split_layout`
+    does, so a re-tidy never contradicts how the window was built."""
+    preset = preset_for(count, layout)
+    if preset is not None:
+        run(["select-layout", "-t", window_id, preset])
 
 
 def split_one(window_id: str, hold: str = "sleep infinity") -> str:
@@ -132,7 +204,13 @@ def split_one(window_id: str, hold: str = "sleep infinity") -> str:
     return out.stdout.strip()
 
 
-def park_pane(window_id: str, old_pane: str, slot_id: int, wait_name: str) -> tuple[str, str]:
+def park_pane(
+    window_id: str,
+    old_pane: str,
+    slot_id: int,
+    wait_name: str,
+    layout: str = AUTO_LAYOUT,
+) -> tuple[str, str]:
     """Move the LIVE ``old_pane`` into its own window ``wait_name`` while leaving
     ``window_id``'s slot filled by a fresh replacement pane tagged ``slot_id``.
 
@@ -142,7 +220,7 @@ def park_pane(window_id: str, old_pane: str, slot_id: int, wait_name: str) -> tu
     Returns ``(wait_window_id, replacement_pane_id)``."""
     replacement = split_one(window_id)
     wait_win = break_pane(old_pane, wait_name)
-    apply_layout(window_id, len(list_panes(window_id)))
+    apply_layout(window_id, len(list_panes(window_id)), layout)
     set_slot(replacement, slot_id)
     return wait_win, replacement
 

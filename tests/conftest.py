@@ -113,6 +113,7 @@ def swarm(tmp_path: Path):
         "SWARM_READY_MARKER",
         "SWARM_SESSION",
         "SWARM_SLUG",
+        "SWARM_LAYOUT",
     ):
         env.pop(leak, None)
     env.update(

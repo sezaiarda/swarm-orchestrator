@@ -369,11 +369,12 @@ class Supervisor:
                 self.log.line(f"PARK-SKIP {phase} not-busy")
                 return
             sid, old_pane = slot.id, slot.pane_id
+            layout = st.layout or self.cfg.tmux_layout
         wait_win: str | None = None
         replacement: str | None = None
         if self.cfg.driver == "tmux" and old_pane:
             wait_win, replacement = tmux.park_pane(
-                tmux.window_of(old_pane), old_pane, sid, f"wait:{phase}"
+                tmux.window_of(old_pane), old_pane, sid, f"wait:{phase}", layout
             )
         with state_mod.transaction(self.cfg) as st:
             if wait_win:

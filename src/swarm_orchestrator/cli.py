@@ -420,6 +420,21 @@ def cmd_why(cfg: Config) -> int:
     state"; this answers "why is nothing happening", which is the question actually
     asked when a run goes quiet.
     """
+    # A slug is derived from the cwd, so running this from the wrong directory
+    # invents a brand-new empty project and then truthfully reports it as stalled.
+    # That reads exactly like a real swarm in trouble — the failure this command
+    # exists to prevent. If no state file was ever written, say THAT instead.
+    if not (cfg.state_dir / "state.json").exists():
+        print(
+            f"swarm why — {cfg.slug}\n\n"
+            f"NO RUN    no swarm has ever run for this directory\n"
+            f"    dir : {cfg.project_dir}\n"
+            f"    slug: {cfg.slug}  (derived from that path)\n"
+            f"    If you meant a different project, `cd` there or pass --project-dir —\n"
+            f"    every swarm verb resolves its run from the working directory."
+        )
+        return 0
+
     st = state_mod.read(cfg)
     ctx = build_context(cfg, st)
     out: list[str] = [f"swarm why — {cfg.slug}"]

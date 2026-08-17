@@ -180,3 +180,25 @@ def test_why_never_mutates_state(cfg, capsys):
     assert before.done == after.done
     assert before.integ_queue == after.integ_queue
     assert [s.phase for s in before.slots] == [s.phase for s in after.slots]
+
+
+def test_why_names_a_wrong_directory_instead_of_faking_a_stall(tmp_path, monkeypatch, capsys):
+    """Running from the wrong directory must not look like a broken swarm.
+
+    The slug is derived from the cwd, so `swarm why` in a sibling repo invents an
+    empty project and reports "no supervisor is alive — swarm up", which is true
+    of that phantom slug and deeply misleading about the actual state.
+    """
+    project = tmp_path / "somewhere-else"
+    shutil.copytree(DEMO, project)
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("SWARM_SLUG", raising=False)
+    monkeypatch.setenv("SWARM_DRIVER", "none")
+    c = config_mod.load(project_dir=str(project))
+    c.state_dir.mkdir(parents=True, exist_ok=True)  # dir exists, state.json does not
+
+    assert cli.cmd_why(c) == 0
+    out = capsys.readouterr().out
+    assert "NO RUN" in out
+    assert "--project-dir" in out
+    assert "STALLED" not in out

@@ -382,9 +382,170 @@ def cmd_layout(cfg: Config, name: str | None) -> int:
     return 0
 
 
+def _pid_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _unmerged_paths(repo: str) -> list[str]:
+    """Paths left unmerged in ``repo``. Empty if git cannot answer — best-effort."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo, "diff", "--name-only", "--diff-filter=U"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def _pane_alive(pane: str | None) -> bool:
+    return bool(pane) and bool(tmux.list_panes(str(pane)))
+
+
+def cmd_why(cfg: Config) -> int:
+    """Explain why the swarm is — or is not — making progress, and how to clear it.
+
+    Pure observability: reads state, never mutates it, never acts. Every finding
+    carries the command that clears it, because the pure-injection design has no
+    auto-retry *by decision* — which makes the owner the recovery path, and a
+    recovery path you cannot see is not one. ``swarm status`` answers "what is the
+    state"; this answers "why is nothing happening", which is the question actually
+    asked when a run goes quiet.
+    """
+    st = state_mod.read(cfg)
+    ctx = build_context(cfg, st)
+    out: list[str] = [f"swarm why — {cfg.slug}"]
+    stalls = 0
+
+    def finding(title: str, *body: str) -> None:
+        nonlocal stalls
+        stalls += 1
+        out.append("")
+        out.append(title)
+        out.extend(f"    {b}" for b in body)
+
+    # -- is anything driving the run at all? --------------------------------
+    if st.finished:
+        finding(
+            "FINISHED  this run is over; nothing further will launch",
+            f"{len(st.done)} phase(s) recorded done",
+            "fix: swarm up   (starts a fresh run)",
+        )
+    elif not _pid_alive(st.supervisor_pid):
+        finding(
+            "STALLED   no supervisor is alive — nothing launches, nothing integrates",
+            f"state records supervisor_pid={st.supervisor_pid}, which is not running",
+            "fix: swarm up",
+        )
+    if st.paused:
+        finding(
+            "PAUSED    launching is disabled; in-flight phases still finish",
+            "fix: swarm resume",
+        )
+
+    # -- an integration hold stops the ENTIRE queue, not just its own phase --
+    if st.integ_blocked:
+        phase = st.integ_blocked
+        repo = st.integ_blocked_repo or "?"
+        kind = st.integ_blocked_kind or "?"
+        body = [
+            f"repo    : {repo.rstrip('/').split('/')[-1]}   ({kind})",
+            f"path    : {repo}",
+        ]
+        if kind == gitq.CONFLICT:
+            files = _unmerged_paths(repo)
+            if files:
+                shown = ", ".join(files[:8]) + (" …" if len(files) > 8 else "")
+                body.append(f"unmerged: {shown}")
+            pane = st.windows.get(f"resolve:{phase}")
+            if pane is None:
+                body.append("resolver: none open — resolve it yourself")
+            elif _pane_alive(pane):
+                body.append(f"resolver: pane {pane} still open (it may be idle or interrupted)")
+            else:
+                body.append(f"resolver: pane {pane} is GONE — nothing is resolving this")
+        body.append(f"fix     : resolve + commit in that repo, then `swarm resolved {phase}`")
+        finding(
+            f"BLOCKED   integrating {phase} — this holds the whole integration queue",
+            *body,
+        )
+    elif st.integ_queue:
+        out.append("")
+        out.append(f"integrating: {', '.join(st.integ_queue)} (in progress)")
+
+    # -- workers that are off-grid waiting on the owner ---------------------
+    for phase in sorted(set(st.waiting) | set(st.parked)):
+        where = "parked in its own window" if phase in st.parked else "holding its slot"
+        finding(
+            f"WAITING   {phase} is waiting on YOU ({where})",
+            "it asked a question rather than guessing; answer it in its pane",
+            "then it finishes normally with `swarm done`",
+        )
+
+    # -- the accepted pure-injection race: ready but nothing launched -------
+    busy = ctx["busy_slots"]
+    free = ctx["free_slots"]
+    ready = ctx["ready"]
+    if free and ready and not st.paused and not st.integ_blocked:
+        finding(
+            f"IDLE      {len(free)} free slot(s) and {len(ready)} ready phase(s), none launched",
+            "a nudge was probably lost (accepted consequence of pure injection — no auto-retry)",
+            f"ready: {', '.join(ready[:6])}" + (" …" if len(ready) > 6 else ""),
+            f"fix: swarm launch {ready[0]}",
+        )
+
+    if ctx["ledger_issues"]:
+        finding(
+            "LEDGER    structural problems — phases may never become ready",
+            *[str(i) for i in ctx["ledger_issues"][:6]],
+        )
+
+    # -- nothing wrong: say what it is waiting ON, not just "fine" ----------
+    if stalls == 0:
+        if busy:
+            work = ", ".join(f"{p} (slot {sid})" for sid, p in sorted(busy.items()))
+            out.append("")
+            out.append(f"WORKING   {work}")
+            if free and not ready:
+                out.append(
+                    f"          {len(free)} slot(s) idle because every remaining phase"
+                    " depends on one still building — expected in a serial wave train"
+                )
+        else:
+            out.append("")
+            out.append("IDLE      nothing busy, nothing ready, nothing blocked")
+            out.append("          every remaining phase is excluded or already done")
+
+    print("\n".join(out))
+    return 0
+
+
 def cmd_status(cfg: Config) -> int:
     st = state_mod.read(cfg)
-    lines = [
+    lines: list[str] = []
+    # Lead with anything that has stopped the run. `integ_blocked` used to appear
+    # mid-way through line 3, where a held queue reads exactly like a healthy one —
+    # the state was reported and still not seen. Attention-worthy facts go first.
+    if st.integ_blocked:
+        lines.append(
+            f"!! BLOCKED integrating {st.integ_blocked}"
+            f" ({st.integ_blocked_kind} in"
+            f" {(st.integ_blocked_repo or '?').rstrip('/').split('/')[-1]})"
+            f" — the whole queue is held; `swarm why` for detail"
+        )
+    if not st.finished and not _pid_alive(st.supervisor_pid):
+        lines.append("!! NO SUPERVISOR — nothing launches or integrates; `swarm up`")
+    if st.paused:
+        lines.append("!! PAUSED — no new workers launch; `swarm resume`")
+    lines += [
         f"slug={cfg.slug} driver={cfg.driver} finished={st.finished} paused={st.paused}"
         f" layout={st.layout or cfg.tmux_layout}",
         f"master_alive={st.master_alive} supervisor_pid={st.supervisor_pid}",
@@ -442,6 +603,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ip.add_argument("phase")
     sub.add_parser("finish", help="ask the supervisor to stop now")
     sub.add_parser("status", help="human-readable state dump")
+    sub.add_parser("why", help="explain why the swarm is/isn't progressing, and how to clear it")
     sub.add_parser("pause", help="stop launching new workers (in-flight finish)")
     sub.add_parser("resume", help="resume launching workers into free slots")
 
@@ -519,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_layout(cfg, args.name)
     if cmd == "status":
         return cmd_status(cfg)
+    if cmd == "why":
+        return cmd_why(cfg)
     if cmd == "pause":
         return cmd_pause(cfg)
     if cmd == "resume":

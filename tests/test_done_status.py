@@ -1,12 +1,18 @@
-"""Self-classified completion: a finishing worker's status decides the ping.
+"""Self-classified completion: the status decides the *routing*, never a ping.
 
 Bare driver (no tmux/claude), real supervisor + FIFO + sentinels. Workers park
 (hold their slot, emit no `done`) so the test drives `swarm done <phase> <status>`
 itself and inspects the telegram sink:
 
-  - `ok`          -> integrate/advance, NO telegram (silent success).
-  - `needs-owner` -> integrate/advance EXACTLY like `ok`, PLUS ping the recap.
-  - `fail`        -> ping the recap (rollback path).
+  - `ok`          -> integrate/advance.
+  - `needs-owner` -> integrate/advance EXACTLY like `ok`.
+  - `fail`        -> rollback path.
+
+**No completion status pings the owner.** Mid-run the only
+notification is a worker's question; outcomes are reported once, in the run's
+FINISHED summary. These tests exist to keep that from silently regressing — a
+per-phase ping is easy to reintroduce and was the single largest source of
+notifications that needed nothing from the owner.
 """
 
 from __future__ import annotations
@@ -36,17 +42,16 @@ def test_done_ok_is_silent(swarm):
     assert not any("P0" in ln for ln in swarm.tg_lines()), swarm.tg_lines()
 
 
-def test_done_needs_owner_pings_recap_and_still_advances(swarm):
-    """`needs-owner` telegrams the recap AND advances the phase like `ok`."""
+def test_done_needs_owner_is_silent_and_still_advances(swarm):
+    """`needs-owner` advances exactly like `ok` and sends NO mid-run telegram."""
     _up_with_parked_p0(swarm)
 
     swarm.cli("done", "P0", "needs-owner", "check", "the", "auth", "change")
 
-    # The recap reaches the owner (the ping is written synchronously by `done`).
+    # The recap is recorded, not pushed: nothing reaches the owner mid-run.
     tg = swarm.tg_lines()
-    ping = [ln for ln in tg if "check the auth change" in ln]
-    assert ping, tg
-    assert "P0" in ping[0] and "needs you" in ping[0]
+    assert not any("check the auth change" in ln for ln in tg), tg
+    assert not any("P0" in ln for ln in tg), tg
 
     # Still advances exactly like ok: slot freed, fan-out launches, phase recorded.
     assert swarm.wait(
@@ -55,16 +60,15 @@ def test_done_needs_owner_pings_recap_and_still_advances(swarm):
     assert swarm.state()["done"].get("P0") == "needs-owner"
 
 
-def test_done_fail_pings_recap(swarm):
-    """`fail` telegrams the owner the recap."""
+def test_done_fail_is_silent_mid_run(swarm):
+    """`fail` rolls back without interrupting the owner; the summary carries it."""
     _up_with_parked_p0(swarm)
 
     swarm.cli("done", "P0", "fail", "build", "broke")
 
     tg = swarm.tg_lines()
-    ping = [ln for ln in tg if "build broke" in ln]
-    assert ping, tg
-    assert "P0" in ping[0] and "FAILED" in ping[0]
+    assert not any("build broke" in ln for ln in tg), tg
+    assert swarm.wait(lambda: swarm.state()["done"].get("P0") == "fail", timeout=20)
 
 
 def test_done_grace_detaches_the_poke(swarm):

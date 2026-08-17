@@ -179,9 +179,8 @@ class Master:
             return False
         if not launch_mod.await_ready(self.cfg, pane, self.log):
             self.log.line("ACTION master-ready-timeout")
-            telegram.notify(
-                self.cfg.telegram_notify,
-                f"swarm: master ({kind}) never became ready -- check the master pane",
+            telegram.notify_event(
+                "master-not-ready", f"master ({kind}) never became ready", self.log
             )
             return False
         line = (
@@ -190,9 +189,8 @@ class Master:
         )
         if not tmux.send_submit(pane, line):
             self.log.line("ACTION master-submit-lost")
-            telegram.notify(
-                self.cfg.telegram_notify,
-                f"swarm: master ({kind}) prompt would not submit -- check the master pane",
+            telegram.notify_event(
+                "master-submit-lost", f"master ({kind}) prompt would not submit", self.log
             )
             return False
         return True

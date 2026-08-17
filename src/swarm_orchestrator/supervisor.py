@@ -278,7 +278,9 @@ class Supervisor:
                 f" unreachable?); fix it, then `swarm resolved {phase}` to retry"
             )
         self.log.line(f"INTEGRATE-BLOCKED {phase} {kind}")
-        telegram.notify(self.cfg.telegram_notify, msg)
+        # Not pushed: a resolver pane handles conflicts unattended, and `swarm why`
+        # names the hold, the unmerged files and the fix the moment anyone looks.
+        telegram.notify_event("integrate-blocked", msg, self.log)
 
     # -- resolved: finish a blocked integration, resume the queue ---------
     def _on_resolved(self, phase: str) -> None:
@@ -292,10 +294,10 @@ class Supervisor:
         if repo is not None and not gitq.resolve_ready(self.cfg, repo):
             # Resolver / owner signalled early (still mid-merge or dirty): stay blocked.
             self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked")
-            telegram.notify(
-                self.cfg.telegram_notify,
-                f"swarm: {phase} not finished yet ({repo.name} still has an unfinished"
-                f" merge / dirty tree) -- resolve + commit, then re-run `swarm resolved {phase}`",
+            telegram.notify_event(
+                "resolved-incomplete",
+                f"{phase} not finished yet ({repo.name} still mid-merge / dirty)",
+                self.log,
             )
             return
         with state_mod.transaction(self.cfg) as st:
@@ -386,9 +388,11 @@ class Supervisor:
             st.park(phase)
             paused = st.paused
         self.log.line(f"PARK {phase} slot={sid}")
-        telegram.notify(
-            self.cfg.telegram_notify,
-            f"swarm: {phase} moved to its own window (still waiting on you)",
+        # Not pushed: the ONE question notification already went out from
+        # `swarm waiting`. Parking is bookkeeping about where the worker sits,
+        # not a second thing to ask the owner.
+        telegram.notify_event(
+            "park", f"{phase} moved to its own window (still waiting on you)", self.log
         )
         if paused:
             self.log.line("PARK-PAUSED holding — no launch")
@@ -485,7 +489,22 @@ class Supervisor:
             if st.finished:
                 return
             st.finished = True
+        # This is the ONE end-of-run message, so it carries everything that was
+        # deliberately not pushed while the run was live: failures and phases that
+        # ended `needs-owner`. Suppressing per-phase pings is only honest if the
+        # summary that replaces them is complete.
+        with state_mod.transaction(self.cfg) as st:
+            outcomes = dict(st.done)
+            parked = list(st.parked)
+        failed = sorted(p for p, s in outcomes.items() if s == "fail")
+        review = sorted(p for p, s in outcomes.items() if s == "needs-owner")
         msg = f"swarm finished: {done_count} phase(s) done"
+        if failed:
+            msg += f"; {len(failed)} FAILED: {', '.join(failed)}"
+        if review:
+            msg += f"; {len(review)} want a look: {', '.join(review)}"
+        if parked:
+            msg += f"; {len(parked)} still waiting on you: {', '.join(parked)}"
         if leftover:
             # Accepted-race surfacing: a nudge was lost, so these ready phases
             # were never launched. Tell the owner how to resume (no auto-retry).
@@ -493,7 +512,7 @@ class Supervisor:
                 f"; {len(leftover)} ready but unlaunched (lost nudge): "
                 f"{', '.join(leftover)} -- run `swarm launch <phase>` to resume"
             )
-        telegram.notify(self.cfg.telegram_notify, msg)
+        telegram.notify_owner(self.cfg.telegram_notify, telegram.FINISHED, msg, self.log)
         self.log.line("ACTION finish")
         self._stop = True
 

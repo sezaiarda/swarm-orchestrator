@@ -180,7 +180,7 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
         except gitq.GitError as exc:
             with state_mod.transaction(cfg) as st:
                 st.free_slot_for(phase)
-            telegram.notify(cfg.telegram_notify, f"swarm: worktree {phase} failed: {exc}")
+            telegram.notify_event("worktree-failed", f"worktree {phase} failed: {exc}", log)
             log.line(f"WORKTREE-FAIL {phase} {exc}")
             return False
         # Pre-trust the fresh worktree so claude never pops the folder-trust dialog.
@@ -201,7 +201,7 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
             st.free_slot_for(phase)
         if worktree is not None:
             gitq.discard(cfg, phase, log)  # don't leak the worktree on start failure
-        telegram.notify(cfg.telegram_notify, f"swarm: worker {phase} failed to start")
+        telegram.notify_event("worker-start-failed", f"worker {phase} failed to start", log)
         log.line(f"LAUNCH-FAIL {phase} slot={sid}")
         return False
     log.line(f"LAUNCH {phase} slot={sid}")
@@ -391,7 +391,11 @@ def done(cfg: Config, phase: str, status: str, note: str = "") -> None:
     _write_sentinel(cfg, phase, status, note)
     ping = _completion_ping(phase, status, note)
     if ping is not None:
-        telegram.notify(cfg.telegram_notify, ping)
+        # Not pushed. A per-phase outcome is not a question — `needs-owner` was a
+        # source of pings that needed nothing from the owner, and a
+        # `fail` is reported in the run's FINISHED summary instead, where it arrives
+        # with the rest of the picture rather than as an interruption.
+        telegram.notify_event(f"done-{status}", ping)
     if cfg.done_grace_s > 0:
         if _detach_poke(cfg, phase, status):
             return
@@ -410,5 +414,12 @@ def waiting(cfg: Config, phase: str, note: str = "") -> None:
     """
     recap = " ".join(note.split())  # trim + collapse the free-text question
     tail = f" — {recap}" if recap else ""
-    telegram.notify(cfg.telegram_notify, f"swarm: {phase} is waiting on you{tail}")
+    # THE one question notification. It is sent here, from the worker, because only
+    # here is the question text in hand. Nothing downstream (park, done) may ping
+    # about the same question again — one question, one message.
+    telegram.notify_owner(
+        cfg.telegram_notify,
+        telegram.QUESTION,
+        f"swarm: {phase} is waiting on you{tail}",
+    )
     _poke_fifo(cfg, f"waiting {phase}\n")

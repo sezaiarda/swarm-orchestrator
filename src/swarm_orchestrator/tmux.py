@@ -361,11 +361,23 @@ def send_submit(pane_id: str, text: str, settle: float = 0.5, tries: int = 4) ->
     if landed:
         time.sleep(0.2)  # keystrokes rendered; brief settle before Enter
     send_enter(pane_id)
-    if not landed and not _box_holds(pane_id, head):
-        return True
+
+    # An empty box is NOT proof of submission. Right after typing it means either
+    # "submitted" or "not drawn yet", and a snapshot cannot tell those apart — so
+    # the old `if not landed and not _box_holds(): return True` reported success
+    # for a prompt that had simply not rendered inside `settle`. It then rendered,
+    # sat unsubmitted, and the run stalled with the supervisor believing a master
+    # was driving it (a master sat idle for hours with its prompt in the
+    # box, while heavy builds made the pane slow to draw).
+    #
+    # Verify by persistence instead: the box must be empty and STAY empty. If the
+    # text turns up late, Enter goes again. Retrying is always safe — Enter on a
+    # full box is the submit we wanted, on an empty box a no-op.
     for _ in range(tries):
         if _poll(lambda: not _box_holds(pane_id, head), 2.0):
-            return True
+            time.sleep(0.6)  # let a late render appear before believing it
+            if not _box_holds(pane_id, head):
+                return True
         run(["send-keys", "-t", pane_id, "Enter"])
     return False
 

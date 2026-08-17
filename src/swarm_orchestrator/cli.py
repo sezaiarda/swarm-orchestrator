@@ -424,6 +424,10 @@ def cmd_why(cfg: Config) -> int:
     ctx = build_context(cfg, st)
     out: list[str] = [f"swarm why — {cfg.slug}"]
     stalls = 0
+    # Set by any non-stall line that already explains the situation, so the
+    # "nothing wrong" summary below cannot contradict it (printing both
+    # "DECIDING, 1 free slot" and "IDLE, nothing ready" is worse than either).
+    noted = False
 
     def finding(title: str, *body: str) -> None:
         nonlocal stalls
@@ -480,6 +484,7 @@ def cmd_why(cfg: Config) -> int:
     elif st.integ_queue:
         out.append("")
         out.append(f"integrating: {', '.join(st.integ_queue)} (in progress)")
+        noted = True
 
     # -- workers that are off-grid waiting on the owner ---------------------
     for phase in sorted(set(st.waiting) | set(st.parked)):
@@ -495,12 +500,26 @@ def cmd_why(cfg: Config) -> int:
     free = ctx["free_slots"]
     ready = ctx["ready"]
     if free and ready and not st.paused and not st.integ_blocked:
-        finding(
-            f"IDLE      {len(free)} free slot(s) and {len(ready)} ready phase(s), none launched",
-            "a nudge was probably lost (accepted consequence of pure injection — no auto-retry)",
-            f"ready: {', '.join(ready[:6])}" + (" …" if len(ready) > 6 else ""),
-            f"fix: swarm launch {ready[0]}",
-        )
+        if ctx["master_alive"]:
+            # NOT a stall: a live master is mid-decision. Spawning + claiming takes
+            # ~30 s, and calling that a lost nudge sends the owner to `swarm launch`
+            # for a phase the master is about to claim — the manual launch is then
+            # refused by the atomic slot claim, which is correct but looks broken.
+            # A diagnostic that cries wolf during normal operation is worse than none.
+            out.append("")
+            out.append(
+                f"DECIDING  master is choosing what to put in {len(free)} free slot(s)"
+                " — a claim normally lands within ~30s"
+            )
+            noted = True
+        else:
+            finding(
+                f"IDLE      {len(free)} free slot(s) and {len(ready)} ready phase(s), none launched",
+                "no master is alive to claim them — a nudge was probably lost",
+                "(accepted consequence of pure injection — there is no auto-retry by design)",
+                f"ready: {', '.join(ready[:6])}" + (" …" if len(ready) > 6 else ""),
+                f"fix: swarm launch {ready[0]}",
+            )
 
     if ctx["ledger_issues"]:
         finding(
@@ -519,7 +538,9 @@ def cmd_why(cfg: Config) -> int:
                     f"          {len(free)} slot(s) idle because every remaining phase"
                     " depends on one still building — expected in a serial wave train"
                 )
-        else:
+        elif not noted:
+            # Only when nothing is busy AND nothing above already explained the
+            # situation — otherwise this contradicts the line right above it.
             out.append("")
             out.append("IDLE      nothing busy, nothing ready, nothing blocked")
             out.append("          every remaining phase is excluded or already done")

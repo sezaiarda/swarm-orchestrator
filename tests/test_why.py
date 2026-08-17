@@ -96,11 +96,49 @@ def test_why_surfaces_a_worker_waiting_on_the_owner(cfg, capsys):
 
 
 def test_why_flags_the_lost_nudge_race(cfg, capsys):
-    """Free slots + ready phases + nothing launched is the one accepted race."""
-    st = _base(supervisor_pid=os.getpid())
+    """Free slots + ready phases + NO master is the one accepted race."""
+    st = _base(supervisor_pid=os.getpid(), master_alive=False)
     out = _why(cfg, st, capsys)
     assert "IDLE" in out
     assert "swarm launch" in out
+
+
+def test_why_does_not_cry_wolf_while_a_master_is_deciding(cfg, capsys):
+    """A live master with free slots is mid-decision, not a lost nudge.
+
+    Regression: the first cut of `why` omitted the `master_alive` check and
+    reported IDLE during the ~30 s between a resume poke and the master's claim.
+    That sent the owner to `swarm launch`, whose launch was then refused by the
+    atomic slot claim — correct behaviour that looks like a broken swarm. A
+    diagnostic that cries wolf during normal operation is worse than none.
+    """
+    st = _base(supervisor_pid=os.getpid(), master_alive=True)
+    out = _why(cfg, st, capsys)
+    assert "DECIDING" in out
+    assert "IDLE" not in out
+    assert "swarm launch" not in out
+
+
+def test_why_shows_running_work_while_a_master_fills_the_other_slot(cfg, capsys):
+    """DECIDING must ADD to the picture, not replace it.
+
+    One slot building and one being filled is the normal mid-campaign shape; a
+    reader who is told only "master is deciding" has lost the more useful fact,
+    which is what is currently building.
+    """
+    # Advance past the root so more than one phase is eligible at once, then put
+    # exactly one of them in a slot — leaving a free slot AND a ready phase.
+    root = cli.build_context(cfg, _base())["ready"][0]
+    st = _base(supervisor_pid=os.getpid(), master_alive=True)
+    st.done[root] = "ok"
+    unlocked = cli.build_context(cfg, st)["ready"]
+    if len(unlocked) < 2:
+        pytest.skip("demo ledger has no two-wide frontier to exercise this shape")
+    st.slots[0].busy = True
+    st.slots[0].phase = unlocked[0]
+    out = _why(cfg, st, capsys)
+    assert "WORKING" in out and unlocked[0] in out
+    assert "DECIDING" in out
 
 
 def test_why_explains_a_healthy_serial_run(cfg, capsys):

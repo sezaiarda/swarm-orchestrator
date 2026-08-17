@@ -95,6 +95,22 @@ def test_why_surfaces_a_worker_waiting_on_the_owner(cfg, capsys):
     assert "P1" in out
 
 
+def test_why_does_not_claim_a_parked_phase_is_still_unanswered(cfg, capsys):
+    """Parked means off-grid, NOT unanswered.
+
+    `swarm resumed` cancels the park timer, but a phase that was already parked
+    stays in `parked` until it reports done. Calling that "waiting on YOU" sends
+    the owner to answer a question they may have answered an hour ago while the
+    worker is busy building — the same cry-wolf failure as the DECIDING case.
+    """
+    st = _base(supervisor_pid=os.getpid(), master_alive=True)
+    st.parked = ["P1"]  # answered: no longer in `waiting`
+    out = _why(cfg, st, capsys)
+    assert "PARKED" in out and "P1" in out
+    assert "waiting on YOU" not in out
+    assert "WAITING" not in out
+
+
 def test_why_flags_the_lost_nudge_race(cfg, capsys):
     """Free slots + ready phases + NO master is the one accepted race."""
     st = _base(supervisor_pid=os.getpid(), master_alive=False)

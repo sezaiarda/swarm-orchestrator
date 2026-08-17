@@ -487,13 +487,22 @@ def cmd_why(cfg: Config) -> int:
         noted = True
 
     # -- workers that are off-grid waiting on the owner ---------------------
-    for phase in sorted(set(st.waiting) | set(st.parked)):
-        where = "parked in its own window" if phase in st.parked else "holding its slot"
+    # Still on the grid with a park timer armed: definitely unanswered.
+    for phase in sorted(st.waiting):
         finding(
-            f"WAITING   {phase} is waiting on YOU ({where})",
-            "it asked a question rather than guessing; answer it in its pane",
-            "then it finishes normally with `swarm done`",
+            f"WAITING   {phase} asked you something and is holding its slot",
+            "answer it in its pane; it then finishes normally with `swarm done`",
         )
+    # Parked means OFF-GRID, not unanswered. `swarm resumed` cancels the park timer,
+    # but a phase that was already parked stays in this list until it reports done —
+    # so reporting it as "waiting on YOU" sends the owner to answer a question they
+    # may have answered an hour ago, while the worker is busy building.
+    for phase in sorted(p for p in st.parked if p not in st.waiting):
+        out.append("")
+        out.append(f"PARKED    {phase} is off-grid in its own tmux window")
+        out.append("          it asked you something earlier. If you have answered, it is")
+        out.append("          building there and will report `swarm done` on its own.")
+        noted = True
 
     # -- the accepted pure-injection race: ready but nothing launched -------
     busy = ctx["busy_slots"]

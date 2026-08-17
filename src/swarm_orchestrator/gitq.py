@@ -224,17 +224,46 @@ def _wt_for(cfg: Config, repo: Path, phase: str) -> Path:
 
 
 # -- cleanup --------------------------------------------------------------
+#: Worktree removal walks the whole tree on disk, so it is IO-bound and scales
+#: with the checkout — a large dependency tree is hundreds of thousands of
+#: files. Under a loaded box (parallel builds) it can far exceed the
+#: ordinary git timeout, so it gets its own, generous one.
+_GC_TIMEOUT_S = 900.0
+
+
 def _gc(cfg: Config, repo: Path, phase: str, log: Log) -> None:
     """Remove one repo's ``swarm/<phase>`` worktree then delete its branch.
+
     Caller holds the repo lock. Uniform across umbrella and components (every
-    repo has a per-phase worktree now)."""
+    repo has a per-phase worktree now).
+
+    **Never raises.** This is housekeeping that runs *after* a merge has already
+    succeeded, so its failure must not fail the integration — a
+    `worktree remove` on a large repo could time out at 120 s and the merged, pushed
+    A phase could be reported to the owner as a blocked, dirty integration holding
+    the whole queue. `check=False` was not enough: a timeout raises regardless of
+    `check`. A leftover worktree is harmless and is reconciled on the next
+    `swarm up`; a blocked queue is not.
+    """
     branch = f"swarm/{phase}"
     wt = _wt_for(cfg, repo, phase)
-    if wt.exists():
-        _git(repo, "worktree", "remove", "--force", str(wt), check=False)
-    _git(repo, "worktree", "prune", check=False)
-    if _branch_exists(repo, branch):
-        _git(repo, "branch", "-D", branch, check=False)
+    try:
+        if wt.exists():
+            _git(
+                repo,
+                "worktree",
+                "remove",
+                "--force",
+                str(wt),
+                check=False,
+                timeout=_GC_TIMEOUT_S,
+            )
+        _git(repo, "worktree", "prune", check=False, timeout=_GC_TIMEOUT_S)
+        if _branch_exists(repo, branch):
+            _git(repo, "branch", "-D", branch, check=False)
+    except GitError as exc:
+        # Loud in the log, invisible to the queue.
+        log.line(f"WORKTREE-GC-FAILED {phase} {repo.name}: {exc}")
 
 
 def _rmtree_mirror(cfg: Config, phase: str) -> None:

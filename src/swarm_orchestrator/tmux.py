@@ -342,19 +342,52 @@ def _box_holds(pane_id: str, head: str) -> bool:
     return text[idx + 1 :].lstrip().startswith(head)
 
 
-def send_submit(pane_id: str, text: str, settle: float = 0.5, tries: int = 4) -> bool:
-    """Type ``text`` then submit it — and verify the submit took.
+def _pane_has(pane_id: str, head: str) -> bool:
+    """True if ``head`` appears anywhere in the pane — box or transcript."""
+    return head in capture_joined(pane_id)
 
-    claude's TUI can swallow a lone injected Enter (the text lands in the input
-    box, the submit never fires), which stalls the run with the prompt written
-    but unsent. The settle now *polls* for the text to show in the box, so the
-    first Enter still goes out within ``settle`` — same timing as before. Then,
-    while the box still holds the text, Enter is re-sent. Retrying is always
-    safe: Enter on a full box is the submit we wanted, Enter on an empty box is
-    a no-op. Returns False only if every retry left the text sitting there.
-    A pane that never renders claude's ``❯`` box (the fake-script test panes)
-    keeps the old single-Enter behavior and reports success; retries are
-    unchecked so a pane that exits mid-verify can't raise into the caller."""
+
+def _has_prompt_box(pane_id: str) -> bool:
+    """True if the pane renders claude's ``❯`` box at all.
+
+    A pane without one is not a claude TUI (the fake-script test panes), so the
+    box-based verification below cannot apply to it.
+    """
+    return "\u276f" in capture_joined(pane_id)
+
+
+def send_submit(pane_id: str, text: str, settle: float = 0.5, tries: int = 4) -> bool:
+    """Type ``text`` then submit it — and verify the submit actually took.
+
+    Injected input into claude's TUI fails in two different ways, and the whole
+    difficulty is that both leave the input box EMPTY, which is also what success
+    looks like:
+
+    * **Enter swallowed** — the text lands in the box and just sits there. The
+      run then stalls with the supervisor believing a master is driving it (seen
+      e.g. a master sits idle with its prompt written and
+      unsent).
+    * **Keystrokes dropped** — the pane was not ready for input, so the text
+      never arrives at all.
+
+    So an empty box proves nothing on its own; the pane must also show the text
+    *somewhere* (claude echoes a submitted message into the transcript). That
+    single extra check is what separates "submitted" from "never typed":
+
+    ==========================  ==========  ================================
+    pane state                  meaning     action
+    ==========================  ==========  ================================
+    box holds the text          unsent      Enter again
+    text absent entirely        never typed retype, then Enter
+    text present, box empty     submitted   done
+    ==========================  ==========  ================================
+
+    Retrying Enter is always safe — on a full box it is the submit we wanted, on
+    an empty box a no-op. Retyping is only done while the text has *never* been
+    seen, so a transcript that scrolls away cannot cause a duplicate submission.
+    A pane that renders no ``❯`` box keeps the old single-Enter behaviour and
+    reports success. Returns False only if every attempt left it unsent.
+    """
     send_literal(pane_id, text)
     head = text[:40]
     landed = _poll(lambda: _box_holds(pane_id, head), settle)
@@ -362,22 +395,23 @@ def send_submit(pane_id: str, text: str, settle: float = 0.5, tries: int = 4) ->
         time.sleep(0.2)  # keystrokes rendered; brief settle before Enter
     send_enter(pane_id)
 
-    # An empty box is NOT proof of submission. Right after typing it means either
-    # "submitted" or "not drawn yet", and a snapshot cannot tell those apart — so
-    # the old `if not landed and not _box_holds(): return True` reported success
-    # for a prompt that had simply not rendered inside `settle`. It then rendered,
-    # sat unsubmitted, and the run stalled with the supervisor believing a master
-    # was driving it (a master sat idle for hours with its prompt in the
-    # box, while heavy builds made the pane slow to draw).
-    #
-    # Verify by persistence instead: the box must be empty and STAY empty. If the
-    # text turns up late, Enter goes again. Retrying is always safe — Enter on a
-    # full box is the submit we wanted, on an empty box a no-op.
+    if not _has_prompt_box(pane_id):
+        return True  # not a claude TUI: nothing here applies
+
+    ever_seen = landed
     for _ in range(tries):
         if _poll(lambda: not _box_holds(pane_id, head), 2.0):
             time.sleep(0.6)  # let a late render appear before believing it
             if not _box_holds(pane_id, head):
-                return True
+                if ever_seen or _pane_has(pane_id, head):
+                    return True
+                # Box empty AND the text is nowhere: the keystrokes never
+                # arrived. Reporting success here is the original bug in its
+                # other form, so type it again rather than assume.
+                send_literal(pane_id, text)
+                time.sleep(0.3)
+        if _box_holds(pane_id, head):
+            ever_seen = True
         run(["send-keys", "-t", pane_id, "Enter"])
     return False
 

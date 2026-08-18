@@ -116,3 +116,54 @@ def test_non_claude_pane_reports_success(monkeypatch, fast):
     pane = _Bare()
     _install(monkeypatch, pane)
     assert tmux.send_submit("%1", PROMPT) is True
+
+
+class _DropsTyping(_Pane):
+    """A pane that ignores the first ``drops`` literal sends (TUI not ready).
+
+    This is the OTHER way injection fails, and the reason an empty input box
+    proves nothing: text that never arrived looks exactly like text that was
+    submitted.
+    """
+
+    def __init__(self, *, drops: int = 1, **kw) -> None:
+        super().__init__(**kw)
+        self.drops = drops
+        self.literal_sends = 0
+
+    def run(self, args, check=False):
+        if args[0] == "send-keys" and "-l" in args:
+            self.literal_sends += 1
+            self.sent.append(list(args))
+            if self.literal_sends <= self.drops:
+                return subprocess.CompletedProcess(args, 0, "", "")  # swallowed
+        return super().run(args, check)
+
+
+def test_dropped_keystrokes_are_retyped(monkeypatch, fast):
+    """Text that never arrived must be typed again, not called a success.
+
+    Without the `_pane_has` check this returns True with nothing ever sent —
+    the same false success as the original bug, reached the other way.
+    """
+    pane = _DropsTyping(drops=1, enters_needed=1)
+    _install(monkeypatch, pane)
+    assert tmux.send_submit("%1", PROMPT) is True
+    assert pane.literal_sends >= 2, "never retyped after the keystrokes vanished"
+    assert pane.submitted
+
+
+def test_reports_failure_when_typing_never_lands(monkeypatch, fast):
+    pane = _DropsTyping(drops=99, enters_needed=1)
+    _install(monkeypatch, pane)
+    assert tmux.send_submit("%1", PROMPT) is False
+    assert not pane.submitted
+
+
+def test_does_not_retype_once_the_text_has_been_seen(monkeypatch, fast):
+    """A transcript that scrolls away must not cause a duplicate submission."""
+    pane = _Pane(enters_needed=2)
+    _install(monkeypatch, pane)
+    assert tmux.send_submit("%1", PROMPT) is True
+    literal = [a for a in pane.sent if a[0] == "send-keys" and "-l" in a]
+    assert len(literal) == 1, f"retyped an already-seen prompt: {len(literal)}x"

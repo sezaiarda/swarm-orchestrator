@@ -19,3 +19,9 @@ wheels/
 
 # local-only working notes (plan / lessons) — never tracked
 /tasks/
+
+# Telegram bot credentials — local only, NEVER tracked.
+# The swarm's notifier reads this file (see telegram.py); it holds a live bot
+# token, so a commit of it would be a credential leak in a repo that is pushed.
+.env
+.env.*

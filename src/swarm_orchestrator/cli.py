@@ -410,6 +410,23 @@ def _pane_alive(pane: str | None) -> bool:
     return bool(pane) and bool(tmux.list_panes(str(pane)))
 
 
+def _resolver_window(phase: str) -> str | None:
+    """Find a live resolver window by NAME, independent of recorded state.
+
+    `_hold` records `windows["resolve:<phase>"]`, but that key can be absent while
+    the window is plainly there. Reporting "none
+    open" then sends the owner to resolve a conflict by hand that a resolver is
+    already working on — two editors in one repo. The window is named
+    `resolve-<phase>` at creation, so ask tmux rather than trusting bookkeeping.
+    """
+    out = tmux.run(["list-windows", "-a", "-F", "#{window_id} #{window_name}"])
+    for line in out.stdout.splitlines():
+        wid, _, name = line.partition(" ")
+        if name.strip() == f"resolve-{phase}":
+            return wid
+    return None
+
+
 def cmd_why(cfg: Config) -> int:
     """Explain why the swarm is — or is not — making progress, and how to clear it.
 
@@ -484,7 +501,7 @@ def cmd_why(cfg: Config) -> int:
             if files:
                 shown = ", ".join(files[:8]) + (" …" if len(files) > 8 else "")
                 body.append(f"unmerged: {shown}")
-            pane = st.windows.get(f"resolve:{phase}")
+            pane = st.windows.get(f"resolve:{phase}") or _resolver_window(phase)
             if pane is None:
                 body.append("resolver: none open — resolve it yourself")
             elif _pane_alive(pane):

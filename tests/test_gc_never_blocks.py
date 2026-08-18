@@ -108,3 +108,45 @@ def test_gc_is_silent_when_nothing_goes_wrong(cfg, repo, monkeypatch):
     log = _Log()
     gitq._gc(cfg, repo, "P1", log)
     assert not any("GC-FAILED" in ln for ln in log.lines), log.lines
+
+
+# -- resolver folder-trust ------------------------------------------------
+def test_resolver_pretrusts_its_repo_before_starting(tmp_path, monkeypatch):
+    """The resolver must pre-accept the folder-trust dialog for its repo.
+
+    Workers never hit this: they run inside a per-phase worktree that
+    `launch.pretrust_dir` seeds. The resolver is the ONE pane that runs in a
+    canonical repo directory, and those are trusted only if the owner has opened
+    claude there personally. A resolver spawned in a canonical repo directory, the
+    trust dialog swallowed its injected prompt, and the entire integration queue
+    sat blocked behind a dialog nobody was watching — invisibly, because the
+    dialog also hides the `❯` box, so the submit check had nothing to re-send to
+    and reported success.
+    """
+    from swarm_orchestrator import config as config_mod
+    from swarm_orchestrator import resolver as resolver_mod
+    from swarm_orchestrator import tmux
+
+    project = tmp_path / "project"
+    (project / "frontend").mkdir(parents=True)
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_SLUG", "trusttest")
+    monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(tmp_path / "claude.json"))
+    cfg = config_mod.load(project_dir=str(project))
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    object.__setattr__(cfg, "driver", "tmux") if hasattr(cfg, "__setattr__") else None
+
+    monkeypatch.setattr(tmux, "new_window", lambda *a, **k: "@9")
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: ["%9"])
+    monkeypatch.setattr(tmux, "respawn_pane", lambda *a, **k: None)
+    monkeypatch.setattr(resolver_mod, "_deliver", lambda *a, **k: None)
+
+    repo = project / "frontend"
+    log = _Log()
+    resolver_mod.spawn(cfg, "P1", repo, log)
+
+    import json
+
+    data = json.loads((tmp_path / "claude.json").read_text())
+    entry = (data.get("projects") or {}).get(str(repo.resolve())) or {}
+    assert entry.get("hasTrustDialogAccepted") is True, data

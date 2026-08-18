@@ -356,6 +356,20 @@ def _has_prompt_box(pane_id: str) -> bool:
     return "\u276f" in capture_joined(pane_id)
 
 
+#: How long the input box must stay empty before a submit is believed.
+CONFIRM_WINDOW_S = 3.0
+
+
+def _stays_empty(pane_id: str, head: str, window: float, interval: float = 0.3) -> bool:
+    """True only if the box holds no trace of ``head`` for the whole ``window``."""
+    deadline = time.monotonic() + window
+    while time.monotonic() < deadline:
+        if _box_holds(pane_id, head):
+            return False
+        time.sleep(interval)
+    return not _box_holds(pane_id, head)
+
+
 def send_submit(pane_id: str, text: str, settle: float = 0.5, tries: int = 4) -> bool:
     """Type ``text`` then submit it — and verify the submit actually took.
 
@@ -401,8 +415,13 @@ def send_submit(pane_id: str, text: str, settle: float = 0.5, tries: int = 4) ->
     ever_seen = landed
     for _ in range(tries):
         if _poll(lambda: not _box_holds(pane_id, head), 2.0):
-            time.sleep(0.6)  # let a late render appear before believing it
-            if not _box_holds(pane_id, head):
+            # Watch the box STAY empty rather than sampling it once. A single
+            # delayed sample can land in a gap: a resolver pane once
+            # reported success and its prompt was still sitting there afterwards,
+            # because the text rendered later than the one 0.6 s check. Sampling
+            # across a window costs seconds on a rare spawn and removes a class
+            # of silent stall that costs hours.
+            if _stays_empty(pane_id, head, CONFIRM_WINDOW_S):
                 if ever_seen or _pane_has(pane_id, head):
                     return True
                 # Box empty AND the text is nowhere: the keystrokes never

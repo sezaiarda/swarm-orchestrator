@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import gitq
 from . import ledger as ledger_mod
-from . import opqueue
+from . import meters, opqueue
 from . import state as state_mod
 from . import statuses
 from . import telegram, tmux
@@ -104,8 +104,10 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path) -> str:
     if cfg.worker_settings:
         # Force in-process teammates: a worker's own subagents then never open
         # extra tmux panes in the workers window. Merges over the user's
-        # settings, so bypassPermissions etc. are preserved.
-        cmd += f" --settings {shlex.quote(cfg.worker_settings)}"
+        # settings, so bypassPermissions etc. are preserved. The status line is
+        # swapped for the meters tap, which still draws the owner's own bar.
+        settings = meters.settings_with_tap(cfg.worker_settings, cfg.state_dir, phase)
+        cmd += f" --settings {shlex.quote(settings)}"
     if cfg.worker_effort:
         cmd += f" --effort {shlex.quote(cfg.worker_effort)}"
     return f"cd {shlex.quote(str(cwd))} && exec {cmd}"

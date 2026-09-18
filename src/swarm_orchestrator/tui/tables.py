@@ -50,15 +50,18 @@ from textual.widgets import DataTable
 from . import data
 from .campaign import campaign_of
 from .data import (
+    CONTEXT_BUDGET,
     Notification,
     PhaseRun,
     SlotView,
     fmt_ago,
     fmt_clock,
     fmt_duration,
+    fmt_phase_eta,
     fmt_stamp,
     load_attempts,
     load_notes,
+    phase_eta,
 )
 from .theme import (
     ACCENT,
@@ -163,6 +166,7 @@ WORKER_COLUMNS: tuple[tuple[str, int], ...] = (
     ("phase", 20),
     ("live", 9),
     ("elapsed", 8),
+    ("eta", 12),
     ("context", 15),
     ("+", 4),
     ("~", 4),
@@ -210,7 +214,19 @@ def worker_key(entry) -> str:
     return f"slot-{slot.id}"
 
 
-def worker_row(entry, repo=None) -> tuple[str, ...]:
+def context_cell(ctx: float | None, m=None) -> str:
+    """Context as tokens against the ~300K budget when measured, else the pane's %."""
+    tokens = getattr(m, "context_tokens", None)
+    if tokens:
+        share = tokens / CONTEXT_BUDGET
+        state = BAD if share >= 1 else (WARN if share >= 0.8 else OK)
+        return paint(f"{tokens / 1000:>4.0f}k {bar(min(1.0, share), 1, 8)}", state)
+    if ctx is None:
+        return paint("—", MUTED)
+    return paint(f"{ctx:3.0f}% {bar(ctx, 100, 8)}", meter_state(ctx))
+
+
+def worker_row(entry, repo=None, meter=None, history=None) -> tuple[str, ...]:
     """One Workers row, one cell per :data:`WORKER_COLUMNS` entry.
 
     ``gone`` gets three separate tells — the marker glyph, the phase turning red
@@ -226,10 +242,9 @@ def worker_row(entry, repo=None) -> tuple[str, ...]:
         live = "waiting"
     state = token(live)
 
-    if ctx is None:
-        context = paint("—", MUTED)
-    else:
-        context = paint(f"{ctx:3.0f}% {bar(ctx, 100, 8)}", meter_state(ctx))
+    context = context_cell(ctx, meter)
+    over = phase_eta(history or [], slot.elapsed_s if slot.busy else None)[1]
+    left = fmt_phase_eta(history or [], slot.elapsed_s) if slot.busy else "—"
 
     commits = getattr(repo, "commits", None)
     dirty = getattr(repo, "dirty", 0) or 0
@@ -240,6 +255,7 @@ def worker_row(entry, repo=None) -> tuple[str, ...]:
         paint(live, state),
         cell(fmt_duration(slot.elapsed_s) if slot.busy else "—", 8,
              elapsed_state(slot.elapsed_s if slot.busy else None)),
+        cell(left, 12, WARN if over else MUTED),
         context,
         paint("—" if commits is None else str(commits), MUTED if not commits else OK),
         paint(str(dirty) if dirty else "—", WARN if dirty else MUTED),
@@ -281,10 +297,30 @@ def worker_detail(entry, dash) -> str:
     lines.append(field("branch", escape(slot.branch or "—")))
     lines.append(field("worktree", escape(slot.worktree or "—")))
     lines.append(field("started", fmt_ago(slot.started_at)))
-    if ctx is not None:
+    history = getattr(dash, "history", None) or []
+    left_s, over = phase_eta(history, slot.elapsed_s)
+    if left_s is not None:
+        lines.append(field("eta", fmt_phase_eta(history, slot.elapsed_s) + " vs the typical phase",
+                           state=WARN if over else None))
+    m = (getattr(dash, "meters", None) or {}).get(slot.phase or "")
+    if m is not None and m.context_tokens:
+        w = m.context_window or 0
+        window = f" of {w / 1e6:.1f}M" if w >= 1e6 else (f" of {w / 1000:.0f}k" if w else "")
+        lines.append(field("context", f"{m.context_tokens / 1000:.0f}k{window}",
+                           state=BAD if m.context_tokens >= CONTEXT_BUDGET else None))
+        if m.peak_tokens:
+            note = " — past the ~300k budget: split candidate" if m.peak_tokens >= CONTEXT_BUDGET else ""
+            lines.append(field("peak", f"{m.peak_tokens / 1000:.0f}k{note}",
+                               state=WARN if note else None))
+    elif ctx is not None:
         lines.append(
             field("context", f"{ctx:.0f}% {bar(ctx, 100, 16)}", state=meter_state(ctx))
         )
+    if m is not None and m.cost_usd is not None:
+        burn = f" · ≈${m.burn_per_h:.2f}/h" if m.burn_per_h is not None else ""
+        lines.append(field("spend", f"≈${m.cost_usd:.2f} API-equivalent{burn}"))
+    if m is not None and m.effort:
+        lines.append(field("effort", m.effort))
     if waiting:
         lines.append(field("waiting for", escape(clip(waiting, 160)), state=WARN))
 
@@ -735,7 +771,12 @@ class Workers(TableTab):
         self.sync(
             rows,
             [worker_key(r) for r in rows],
-            lambda r: worker_row(r, (dash.repos or {}).get(unpack_slot_row(r)[0].phase or "")),
+            lambda r: worker_row(
+                r,
+                (dash.repos or {}).get(unpack_slot_row(r)[0].phase or ""),
+                (getattr(dash, "meters", None) or {}).get(unpack_slot_row(r)[0].phase or ""),
+                dash.history,
+            ),
         )
 
         head = [f"{len(busy)}/{len(rows)} slots busy"]

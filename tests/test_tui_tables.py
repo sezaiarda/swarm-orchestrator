@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from swarm_orchestrator.tui import tables
-from swarm_orchestrator.tui.data import Note, Notification, PhaseRun, Recap, SlotView
+from swarm_orchestrator.tui.data import Meter, Note, Notification, PhaseRun, Recap, SlotView
 from swarm_orchestrator.tui.theme import COLOR, BAD, MUTED, OK, WARN
 
 BASE = datetime(2026, 8, 27, 9, 0, 0).timestamp()
@@ -102,24 +102,46 @@ def test_worker_row_gone_is_unmissable():
     assert COLOR[BAD] in row[0] and COLOR[BAD] in row[2] and COLOR[BAD] in row[3]
 
 
+def col(row, name: str) -> str:
+    """A worker row's cell by column name, so a new column cannot shift the asserts."""
+    return row[[n for n, _ in tables.WORKER_COLUMNS].index(name)]
+
+
 def test_worker_row_context_colours_by_pressure():
     """A context window at 95% is an emergency; at 20% it is not."""
     hot = tables.worker_row((slot(), "busy", "", 95.0, None))
     cool = tables.worker_row((slot(), "busy", "", 20.0, None))
-    assert COLOR[BAD] in hot[5]
-    assert COLOR[OK] in cool[5]
+    assert COLOR[BAD] in col(hot, "context")
+    assert COLOR[OK] in col(cool, "context")
+
+
+def test_measured_context_is_judged_against_the_budget_not_the_window():
+    """420k of a 1M window is 42% — fine by the window, over budget by the audit."""
+    m = Meter(phase="dash-W7", ts=0.0, context_tokens=420_000, context_window=1_000_000)
+    cell = col(tables.worker_row((slot(), "busy", "", 42.0, None), meter=m), "context")
+    assert "420k" in cell and COLOR[BAD] in cell
+
+
+def test_worker_row_eta_flags_a_phase_past_the_typical_one():
+    done = [PhaseRun(phase=f"P{i}", status="ok", started_at=0.0, ended_at=3600.0) for i in range(3)]
+    fresh = col(tables.worker_row((slot(started_at=time.time() - 600), "busy", "", None, None),
+                                  history=done), "eta")
+    late = col(tables.worker_row((slot(started_at=time.time() - 7200), "busy", "", None, None),
+                                 history=done), "eta")
+    assert "left" in fresh and COLOR[WARN] not in fresh
+    assert "over" in late and COLOR[WARN] in late
 
 
 def test_worker_row_idle_slot_shows_nothing_rather_than_stale_values():
     row = tables.worker_row((slot(busy=False, phase=None, started_at=None), "idle", "", None, None))
     assert "—" in row[2] and MUTED_HEX in row[2]
-    assert "—" in row[4] and "—" in row[5]
+    assert "—" in col(row, "elapsed") and "—" in col(row, "eta") and "—" in col(row, "context")
 
 
 def test_worker_row_dirty_files_are_warned_commits_are_not():
     row = tables.worker_row((slot(), "busy", "", None, None), FakeRepo(commits=2, dirty=7))
-    assert "2" in row[6]
-    assert "7" in row[7] and COLOR[WARN] in row[7]
+    assert "2" in col(row, "+")
+    assert "7" in col(row, "~") and COLOR[WARN] in col(row, "~")
 
 
 def test_elapsed_state_thresholds():

@@ -1035,19 +1035,237 @@ def eta(runs: list[PhaseRun], remaining: int, max_workers: int,
     completions is not a sample; and a run with nothing running and nothing ready
     is not slow, it is stalled — an ETA there would be a lie with a clock on it.
     """
-    if remaining <= 0:
-        return "done"
-    if running <= 0 and ready <= 0:
-        return "stalled"
-    seen = [
+    seconds, label = forecast(runs, remaining, max_workers, running=running, ready=ready)
+    return label if seconds is None or remaining <= 0 else f"~{fmt_coarse(seconds)} left"
+
+
+def typical_durations(runs: list[PhaseRun]) -> list[float]:
+    """The recent completed phase durations every forecast is made from."""
+    return [
         r.duration_s
         for r in (runs or [])
         if not r.running and r.duration_s and r.status in COMPLETED_STATUSES
     ][:ETA_WINDOW]
+
+
+def forecast(runs: list[PhaseRun], remaining: int, max_workers: int,
+             running: int = 0, ready: int = 0) -> tuple[float | None, str]:
+    """:func:`eta` as ``(seconds, label)``: seconds when it can be said, else why not."""
+    if remaining <= 0:
+        return 0.0, "done"
+    if running <= 0 and ready <= 0:
+        return None, "stalled"
+    seen = typical_durations(runs)
     if len(seen) < ETA_MIN_SAMPLES:
-        return "estimating…"
+        return None, "estimating…"
     waves = math.ceil(remaining / max(1, min(max_workers or 1, remaining)))
-    return f"~{fmt_coarse(waves * median(seen))} left"
+    return waves * median(seen), ""
+
+
+def phase_eta(runs: list[PhaseRun], elapsed_s: float | None) -> tuple[float | None, bool]:
+    """``(seconds, overrun)`` for one running phase against the typical one.
+
+    Seconds left while it is inside the median, seconds *over* once it is past
+    it — an overrun is the early sign of a stuck worker or a phase that should
+    have been two, and "0m left" for three hours would hide exactly that.
+    """
+    seen = typical_durations(runs)
+    if elapsed_s is None or len(seen) < ETA_MIN_SAMPLES:
+        return None, False
+    typical = median(seen)
+    return (elapsed_s - typical, True) if elapsed_s > typical else (typical - elapsed_s, False)
+
+
+def fmt_phase_eta(runs: list[PhaseRun], elapsed_s: float | None) -> str:
+    seconds, over = phase_eta(runs, elapsed_s)
+    if seconds is None:
+        return "—"
+    return f"+{fmt_coarse(seconds)} over" if over else f"~{fmt_coarse(seconds)} left"
+
+
+def fmt_when(ts: float | None, now: float | None = None) -> str:
+    """A future moment at a forecast's resolution: ``03:40``, ``Thu 03:40``, ``09-25 03:40``."""
+    if ts is None:
+        return "—"
+    now = time.time() if now is None else now
+    try:
+        when, today = datetime.fromtimestamp(ts), datetime.fromtimestamp(now)
+    except (OSError, OverflowError, ValueError):
+        return "—"
+    if when.date() == today.date():
+        return when.strftime("%H:%M")
+    if abs(ts - now) < 6 * 86400:
+        return when.strftime("%a %H:%M")
+    return when.strftime("%m-%d %H:%M")
+
+
+# -- meters: what each worker's status line reported ------------------------
+#: Past this, every turn re-sends a conversation the audit found wasteful: the
+#: phase is a candidate to be split (see prompts/init_master.md, context budget).
+CONTEXT_BUDGET = 300_000
+
+
+@dataclass(frozen=True)
+class Meter:
+    """One worker's latest status-line figures (written by ``swarm_orchestrator.meters``)."""
+
+    phase: str
+    ts: float
+    started_at: float | None = None
+    context_tokens: float | None = None
+    context_window: float | None = None
+    peak_tokens: float | None = None
+    cost_usd: float | None = None
+    duration_ms: float | None = None
+    effort: str | None = None
+    #: The raw ``{"pct", "resets_at"}`` windows; :func:`load_limits` reads them.
+    seven_day: dict | None = field(default=None, compare=False)
+    five_hour: dict | None = field(default=None, compare=False)
+
+    @property
+    def burn_per_h(self) -> float | None:
+        """API-equivalent $/h over the session so far; ``None`` under a minute in."""
+        if self.cost_usd is None or not self.duration_ms or self.duration_ms < 60_000:
+            return None
+        return self.cost_usd / (self.duration_ms / 3_600_000)
+
+
+def load_meters(meters_dir: Path) -> dict[str, Meter]:
+    out: dict[str, Meter] = {}
+    try:
+        paths = sorted(meters_dir.glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict) or not isinstance(raw.get("phase"), str):
+            continue
+        num = {k: _as_float(raw.get(k)) for k in (
+            "ts", "started_at", "context_tokens", "context_window", "peak_tokens",
+            "cost_usd", "duration_ms")}
+        out[raw["phase"]] = Meter(
+            phase=raw["phase"], ts=num["ts"] or 0.0, started_at=num["started_at"],
+            context_tokens=num["context_tokens"], context_window=num["context_window"],
+            peak_tokens=num["peak_tokens"], cost_usd=num["cost_usd"],
+            duration_ms=num["duration_ms"], effort=_as_str(raw.get("effort")),
+            seven_day=raw.get("seven_day") if isinstance(raw.get("seven_day"), dict) else None,
+            five_hour=raw.get("five_hour") if isinstance(raw.get("five_hour"), dict) else None,
+        )
+    return out
+
+
+@dataclass(frozen=True)
+class Limits:
+    """The subscription's usage windows, as last reported by any worker."""
+
+    observed_at: float
+    week_pct: float
+    week_resets_at: float | None = None
+    five_pct: float | None = None
+    five_resets_at: float | None = None
+    #: ``(ts, pct)`` in the current weekly window, oldest first.
+    samples: tuple[tuple[float, float], ...] = ()
+
+
+#: Only the tail of the samples log is read: a pace is a recent slope.
+_LIMIT_TAIL_BYTES = 64 * 1024
+
+
+def load_limits(meters: dict[str, Meter], limits_log: Path, now: float | None = None) -> Limits | None:
+    """The freshest weekly figure across workers, with its samples; ``None`` if unknown.
+
+    A figure whose window has already reset says nothing about the new one.
+    """
+    now = time.time() if now is None else now
+    best = None
+    for m in meters.values():
+        week, five = m.seven_day, m.five_hour
+        if not isinstance(week, dict) or _as_float(week.get("pct")) is None:
+            continue
+        resets = _as_float(week.get("resets_at"))
+        if resets is not None and resets <= now:
+            continue
+        if best is None or m.ts > best[0].ts:
+            best = (m, week, five if isinstance(five, dict) else {})
+    if best is None:
+        return None
+    m, week, five = best
+    resets = _as_float(week.get("resets_at"))
+    samples: list[tuple[float, float]] = []
+    try:
+        with limits_log.open("rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - _LIMIT_TAIL_BYTES))
+            tail = fh.read().decode("utf-8", "replace").splitlines()[1:]
+    except OSError:
+        tail = []
+    for line in tail:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        ts, pct = _as_float(row.get("ts")), _as_float(row.get("pct"))
+        if ts is not None and pct is not None and _as_float(row.get("resets_at")) == resets:
+            samples.append((ts, pct))
+    five_resets = _as_float(five.get("resets_at"))
+    five_live = five_resets is None or five_resets > now
+    return Limits(
+        observed_at=m.ts,
+        week_pct=_as_float(week.get("pct")) or 0.0,
+        week_resets_at=resets,
+        five_pct=_as_float(five.get("pct")) if five_live else None,
+        five_resets_at=five_resets if five_live else None,
+        samples=tuple(sorted(samples)),
+    )
+
+
+#: The weekly pace is the slope over this much recent history...
+PACE_WINDOW_S = 6 * 3600
+#: ...and needs at least this span of it to be a slope rather than noise.
+PACE_MIN_SPAN_S = 30 * 60
+
+
+def week_pace(samples, now: float | None = None) -> float | None:
+    """Weekly-limit percentage points used per hour, recently; ``None`` if unknowable."""
+    now = time.time() if now is None else now
+    recent = [(t, p) for t, p in samples if now - t <= PACE_WINDOW_S]
+    if len(recent) < 2 or recent[-1][0] - recent[0][0] < PACE_MIN_SPAN_S:
+        return None
+    (t0, p0), (t1, p1) = recent[0], recent[-1]
+    return max(0.0, (p1 - p0) / ((t1 - t0) / 3600))
+
+
+def limit_outlook(limits: Limits | None, finish_in_s: float | None,
+                  now: float | None = None) -> tuple[str, str]:
+    """``(text, state)``: where the weekly limit stands, and whether the run beats it.
+
+    The question the owner actually has is not "what percent" but "will this
+    campaign finish before the limit stops it, and if not, when does it resume".
+    """
+    if limits is None:
+        return "weekly limit not reported yet", "muted"
+    now = time.time() if now is None else now
+    pct, resets = limits.week_pct, limits.week_resets_at
+    head = f"week {pct:.0f}% · resets {fmt_when(resets, now)}"
+    if pct >= 100:
+        return f"{head} · limit hit, the run waits for the reset", "bad"
+    pace = week_pace(limits.samples, now)
+    if pace is None:
+        return f"{head} · pace unknown", "info"
+    if pace <= 0:
+        return f"{head} · flat", "ok"
+    full_in = (100 - pct) / pace * 3600
+    rate = f"{pace:.1f}%/h"
+    if resets is not None and now + full_in >= resets:
+        return f"{head} · {rate}, lasts until the reset", "ok"
+    if finish_in_s is not None and finish_in_s <= full_in:
+        return f"{head} · {rate}, run finishes ~{fmt_coarse(full_in - finish_in_s)} before the limit", "ok"
+    if finish_in_s is None:
+        return f"{head} · {rate}, limit in ~{fmt_coarse(full_in)}", "warn"
+    return f"{head} · {rate}, limit in ~{fmt_coarse(full_in)}, before the run finishes", "bad"
 
 
 def integration_holds(events: list[Event]) -> list[tuple[str, float]]:

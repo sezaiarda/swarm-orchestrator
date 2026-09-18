@@ -11,10 +11,13 @@ import time
 from pathlib import Path
 
 from .. import opqueue
+from ..meters import LIMITS_LOG, METERS_DIR
 from . import probes
 from .data import (
     Blocker,
+    Limits,
     LogTail,
+    Meter,
     PhaseRun,
     Snapshot,
     bar,
@@ -30,6 +33,8 @@ from .data import (
     launch_times,
     load_attempts,
     load_all_notes,
+    load_limits,
+    load_meters,
     load_notes,
     load_notifications,
     load_recaps,
@@ -70,6 +75,8 @@ class Dash:
         self.contexts: dict[str, float] = {}  # pane_id -> context percent
         self.tails: dict[str, str] = {}  # pane_id -> last visible lines
         self.repos: dict[str, probes.RepoStat] = {}  # phase -> commits/dirty
+        self.meters: dict[str, Meter] = {}  # phase -> its worker's status-line figures
+        self.limits: Limits | None = None
         self._mtimes: dict[str, float] = {}
         self._graph_mtime: float | None = None
 
@@ -88,6 +95,10 @@ class Dash:
     @property
     def operator_dir(self) -> Path:
         return self.cfg.operator_dir
+
+    @property
+    def meters_dir(self) -> Path:
+        return self.cfg.state_dir / METERS_DIR
 
     @property
     def config_path(self) -> Path:
@@ -131,6 +142,11 @@ class Dash:
         if self._changed("operator", self.operator_dir):
             self.operator = opqueue.load_all(self.cfg)
             changed.add("operator")
+        # The tap replaces its file atomically, so every write moves the dir.
+        if self._changed("meters", self.meters_dir):
+            self.meters = load_meters(self.meters_dir)
+            self.limits = load_limits(self.meters, self.meters_dir / LIMITS_LOG)
+            changed.add("meters")
         if self._changed("ledger", Path(self.cfg.project_dir) / self.cfg.ledger):
             self.graph = load_graph(self.cfg)
             changed.add("ledger")

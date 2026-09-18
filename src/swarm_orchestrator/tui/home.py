@@ -46,7 +46,18 @@ from textual.widgets import Static
 from . import probes
 from .campaign import active, summarise
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
-from .data import completions_series, eta, fmt_clock, fmt_duration
+from .data import (
+    CONTEXT_BUDGET,
+    completions_series,
+    eta,
+    fmt_clock,
+    fmt_coarse,
+    fmt_duration,
+    fmt_when,
+    forecast,
+    limit_outlook,
+    phase_eta,
+)
 from .shell import STALE_BAD_S, STALE_WARN_S
 from .theme import (
     ACCENT,
@@ -179,13 +190,11 @@ def headline(dash, width: int = 76) -> str:
     first = f"{PAD}[b]{escape(cur.name)}[/b]{' ' * gap}{paint(count, MUTED)}"
 
     workers = len(snap.slots) or int(getattr(dash.cfg, "max_workers", 0) or 0)
-    left = eta(
-        dash.history or [],
-        cur.live_total - cur.built,
-        workers,
-        running=len(cur.running),
-        ready=len(cur.ready),
-    )
+    args = (dash.history or [], cur.live_total - cur.built, workers)
+    left = eta(*args, running=len(cur.running), ready=len(cur.ready))
+    finish_in, _ = forecast(*args, running=len(cur.running), ready=len(cur.ready))
+    if finish_in and cur.live_total > cur.built:
+        left += f" · done ~{fmt_when(time.time() + finish_in)}"
     fill = OK if cur.complete else (INFO if cur.running or cur.ready else MUTED)
     second = (
         f"{PAD}{paint(bar(cur.built, max(1, cur.live_total), max(10, inner - len(left) - 2)), fill)}"
@@ -207,10 +216,51 @@ def headline(dash, width: int = 76) -> str:
         )
     if not snap.ok:
         counts.append(paint("run not started — `swarm up`", MUTED))
-    return rows(first, second, PAD + " · ".join(counts))
+    lines = [first, second, PAD + " · ".join(counts)]
+    # Only once a worker's status line has reported: a run launched before the
+    # meters tap existed would otherwise carry a permanent "not reported" line.
+    if getattr(dash, "meters", None):
+        text, state = limit_outlook(getattr(dash, "limits", None), finish_in)
+        lines.append(PAD + paint(clip(text, inner), state))
+    return rows(*lines)
 
 
 # -- working now ----------------------------------------------------------
+#: Cells for a row's ETA: ``~1h 20m`` or ``+1h 20m``.
+ETA_W = 8
+
+
+def eta_cell(history, elapsed_s: float | None) -> str:
+    """Time left in a running phase against the typical one, or how far past it.
+
+    Past the median is flagged, not clamped at zero: a phase an hour over is the
+    first visible sign of a stuck worker or of a phase that should have been two.
+    """
+    seconds, over = phase_eta(history, elapsed_s)
+    if seconds is None:
+        return paint(f"{'—':>{ETA_W}}", MUTED)
+    text = f"{'+' if over else '~'}{fmt_coarse(seconds)}"
+    return paint(f"{text:>{ETA_W}}", WARN if over else MUTED)
+
+
+def context_cells(m, pct: float | None) -> tuple[str, str]:
+    """``(gauge, label)`` for a worker's context.
+
+    Measured against the ~300K budget rather than the window when the meters tap
+    reported tokens: on a 1M window 300K is only 30%, a figure that looks fine
+    while every turn re-sends a conversation the phase should have split.
+    """
+    tokens = getattr(m, "context_tokens", None)
+    if tokens:
+        share = tokens / CONTEXT_BUDGET
+        cstate = BAD if share >= 1 else (WARN if share >= 0.8 else OK)
+        return paint(meter(min(1.0, share), 4), cstate), paint(f"{tokens / 1000:>3.0f}k", cstate)
+    if pct is None:
+        return paint("░" * 4, MUTED), paint("  —", MUTED)
+    cstate = meter_state(pct, warn=70, bad=90)
+    return paint(meter(pct / 100.0, 4), cstate), paint(f"{pct:>3.0f}%", cstate)
+
+
 def worker_note(dash, slot, waiting_for: str) -> str:
     """The one sentence to show under a worker row, best source first.
 
@@ -250,7 +300,8 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         return [(paint(snap.reason or "no slots — has `swarm up` run?", MUTED), None, None)]
 
     blocked = {b.phase: b for b in snap.blockers}
-    phase_w = max(8, min(20, width - 22))
+    phase_w = max(8, min(20, width - 22 - ETA_W))
+    meters = getattr(dash, "meters", None) or {}
     out = []
     for row in slots:
         slot, status, waiting_for, ctx = row[0], row[1], row[2], row[3]
@@ -268,11 +319,7 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
             # nothing contradicts that, so do not grey out a live worker.
             status = "busy"
         state = token(status)
-        if ctx is None:
-            gauge, pct = paint("░" * 4, MUTED), paint("  —", MUTED)
-        else:
-            cstate = meter_state(ctx, warn=70, bad=90)
-            gauge, pct = paint(meter(ctx / 100.0, 4), cstate), paint(f"{ctx:>3.0f}%", cstate)
+        gauge, pct = context_cells(meters.get(slot.phase), ctx)
         tag = ""
         if slot.retiring:
             tag = paint(" retiring", MUTED)
@@ -281,7 +328,8 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         line = (
             f"{mark}[{COLOR[state]}]{slot.id:<2}[/]  "
             f"{clip(escape(slot.phase), phase_w):<{phase_w}} "
-            f"{fmt_duration(slot.elapsed_s):>6}  {gauge} {pct}{tag}"
+            f"{fmt_duration(slot.elapsed_s):>6} {eta_cell(dash.history or [], slot.elapsed_s)}"
+            f"  {gauge} {pct}{tag}"
         )
         note = worker_note(dash, slot, waiting_for)
         if note:

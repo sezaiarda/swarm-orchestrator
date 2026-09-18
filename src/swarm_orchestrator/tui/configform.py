@@ -59,7 +59,7 @@ from textual.widgets import Button, Input, RadioButton, RadioSet, Select, Static
 from textual import work
 
 from .. import reload as reload_mod
-from ..config import load as load_config
+from ..config import EFFORTS, load as load_config
 from ..reload import HOT, NEXT, POLICY, RESTART
 from ..tmux import LAYOUTS
 from . import probes
@@ -402,6 +402,8 @@ FIELDS: tuple[Setting, ...] = (
     Setting("command_file", STR, "slash-command file the init master patches"),
     Setting("worker_cmd", STR, "command each worker pane is launched with"),
     Setting("worker_settings", STR, "settings JSON merged into each worker's `claude`"),
+    Setting("worker_effort", CHOICE, 'claude --effort per worker; "" = inherit yours',
+            choices=("", *EFFORTS)),
     Setting("done_hook", STR, "command a worker runs to signal it finished"),
     Setting("env_marker", STR, "env var carrying the phase name into the worker"),
     Setting("ready_marker", STR,

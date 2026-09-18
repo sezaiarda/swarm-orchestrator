@@ -187,6 +187,8 @@ POLICY: dict[str, Policy] = {
         _p("worker_settings", "[worker]", "worker_settings", NEXT,
            "SWARM_WORKER_SETTINGS",
            "merged into the `claude` invocation at spawn time"),
+        _p("worker_effort", "[worker]", "effort", NEXT, "SWARM_WORKER_EFFORT",
+           "passed as `claude --effort` on the command line a pane is spawned with"),
         _p("done_grace_s", "[worker]", "done_grace_s", NEXT, "SWARM_DONE_GRACE",
            "`swarm done` runs in the worker's cwd — its worktree mirror — so it"
            " reads the .swarm.toml copy branched at launch, not this one",

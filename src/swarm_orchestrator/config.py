@@ -58,6 +58,7 @@ class Config:
     worker_cmd: str
     ready_marker: str
     worker_settings: str
+    worker_effort: str
     done_grace_s: int
     park_after: int
     ledger: str
@@ -212,6 +213,11 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             "SWARM_WORKER_SETTINGS",
             worker.get("worker_settings", '{"teammateMode":"in-process"}'),
         ),
+        # `claude --effort` for every worker. Pinned rather than inherited: a
+        # worker otherwise runs at whatever ~/.claude/settings.json says today,
+        # and an owner who bumps their own sessions to xhigh would silently make
+        # every phase ~35-60% dearer. "" = inherit the user's setting.
+        worker_effort=_effort(os.environ.get("SWARM_WORKER_EFFORT", worker.get("effort", "high"))),
         # Seconds a worker holds its slot after signalling `done` before the
         # supervisor is poked to reclaim it (a "finish buffer" so the worker can
         # flush last work). 0 (the default) = advance immediately, unchanged
@@ -299,6 +305,18 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # Spelled out rather than imported from `recap` -- recap imports us.
         operator_triage_model=str(operator.get("triage_model", "claude-haiku-4-5")),
     )
+
+
+#: What ``claude --effort`` accepts (CLI 2.1.276). "" means pass nothing.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _effort(value: object) -> str:
+    """A validated ``[worker].effort``; a typo fails at load, not in every pane."""
+    level = str(value or "").strip().lower()
+    if level and level not in EFFORTS:
+        raise ValueError(f"[worker].effort must be one of {', '.join(EFFORTS)} or \"\", got {value!r}")
+    return level
 
 
 def _int_env(name: str, value: object, default: int, minimum: int) -> int:

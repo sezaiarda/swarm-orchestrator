@@ -106,6 +106,8 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path) -> str:
         # extra tmux panes in the workers window. Merges over the user's
         # settings, so bypassPermissions etc. are preserved.
         cmd += f" --settings {shlex.quote(cfg.worker_settings)}"
+    if cfg.worker_effort:
+        cmd += f" --effort {shlex.quote(cfg.worker_effort)}"
     return f"cd {shlex.quote(str(cwd))} && exec {cmd}"
 
 

@@ -230,6 +230,7 @@ env_marker      = "SWARM_PHASE"
 done_hook       = 'swarm done "$SWARM_PHASE" ok'   # fallback form; in swarm mode the worker self-classifies ok/operator/fail
 park_after      = 120   # seconds a worker may wait on the owner before its slot is freed + it moves to its own window; 0 disables
 worker_settings = '{"teammateMode":"in-process"}'  # worker teammates run in-process
+effort          = "high"   # claude --effort per worker (low/medium/high/xhigh/max); "" = inherit ~/.claude/settings.json
 
 [tasks]
 ledger  = "docs/PHASE-LEDGER.md"   # the master reads this prose directly

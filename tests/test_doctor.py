@@ -549,11 +549,6 @@ def test_swarm_doctor_on_a_finished_run_is_clean(swarm):
     assert "FAIL" not in out.stdout
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG?: `swarm doctor --json` always exits 0 (cmd_doctor returns _dump's 0), "
-    "so a scripted caller cannot use the documented 0/1 exit convention there.",
-)
 def test_swarm_doctor_json_keeps_the_exit_convention(swarm):
     assert swarm.cli("doctor", "--json", check=False).returncode == 1
 

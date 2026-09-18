@@ -318,8 +318,9 @@ def cmd_doctor(cfg: Config, as_json: bool) -> int:
     """
     checks = doctor_mod.run_checks(cfg)
     if as_json:
-        return _dump([asdict(c) for c in checks])
-    print(doctor_mod.render(checks))
+        _dump([asdict(c) for c in checks])
+    else:
+        print(doctor_mod.render(checks))
     return doctor_mod.exit_code(checks)
 
 

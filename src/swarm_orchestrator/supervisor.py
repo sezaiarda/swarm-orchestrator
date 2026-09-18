@@ -494,7 +494,13 @@ class Supervisor:
                 f" unreachable?); fix it, then `swarm resolved {phase}` to retry"
             )
         self.log.line(f"INTEGRATE-BLOCKED {phase} {kind}")
-        telegram.notify(self.cfg.telegram_notify, msg)
+        telegram.notify(
+            self.cfg.telegram_notify,
+            msg,
+            kind="integrate-hold",
+            phase=phase,
+            source="supervisor._hold",
+        )
 
     # -- resolved: finish a blocked integration, resume the queue ---------
     def _on_resolved(self, phase: str) -> None:
@@ -512,6 +518,9 @@ class Supervisor:
                 self.cfg.telegram_notify,
                 f"swarm: {phase} not finished yet ({repo.name} still has an unfinished"
                 f" merge / dirty tree) -- resolve + commit, then re-run `swarm resolved {phase}`",
+                kind="integrate-hold",
+                phase=phase,
+                source="supervisor._on_resolved",
             )
             return
         with state_mod.transaction(self.cfg) as st:
@@ -816,6 +825,9 @@ class Supervisor:
         telegram.notify(
             self.cfg.telegram_notify,
             f"swarm: {phase} moved to its own window (still waiting on you)",
+            kind="park",
+            phase=phase,
+            source="supervisor._park",
         )
         if paused:
             self.log.line("PARK-PAUSED holding — no launch")
@@ -964,7 +976,9 @@ class Supervisor:
                 f"; {len(operator)} operator hand-off(s) undrained: "
                 f"{', '.join(operator[:8])} -- run `swarm operator <phase>`"
             )
-        telegram.notify(self.cfg.telegram_notify, msg)
+        telegram.notify(
+            self.cfg.telegram_notify, msg, kind="finish", source="supervisor._finish"
+        )
         self.log.line("ACTION finish")
         self._stop = True
 

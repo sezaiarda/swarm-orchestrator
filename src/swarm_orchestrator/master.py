@@ -194,6 +194,8 @@ class Master:
             telegram.notify(
                 self.cfg.telegram_notify,
                 f"swarm: master ({kind}) never became ready -- check the master pane",
+                kind="master-timeout",
+                source="master._deliver_prompt",
             )
             return False
         line = (
@@ -205,6 +207,8 @@ class Master:
             telegram.notify(
                 self.cfg.telegram_notify,
                 f"swarm: master ({kind}) prompt would not submit -- check the master pane",
+                kind="master-timeout",
+                source="master._deliver_prompt",
             )
             return False
         return True

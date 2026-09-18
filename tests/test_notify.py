@@ -350,13 +350,6 @@ def test_call_site_kinds_are_declared():
         assert kind in telegram.KINDS
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: telegram.KINDS declares 'finish' (and 'park', 'integrate-hold' "
-    "from the supervisor, 'master-timeout'), but supervisor._finish and those "
-    "other call sites call telegram.notify with no kind, so the ledger files the "
-    "run-is-over ping as 'other'.",
-)
 def test_the_finish_ping_is_filed_as_finish(swarm):
     swarm.env["FAKE_WORKER_SLEEP"] = "2"  # a full run, as test_lifecycle drives it
     swarm.up()

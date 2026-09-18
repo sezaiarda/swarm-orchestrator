@@ -12,9 +12,6 @@ code to ignore. The lesson is narrow and worth keeping — "best effort" has to
 handle the call not *finishing*, not merely the call failing.
 
 Both fixes this file guards are covered here: the never-raising ``_gc`` and the resolver's folder pre-trust.
-the never-raising ``_gc`` and the resolver's folder pre-trust — were on GitHub
-the tree, so these tests keep both from regressing.
-tests that need them are strict xfails until the fixes are reapplied.
 """
 
 from __future__ import annotations
@@ -22,13 +19,6 @@ from __future__ import annotations
 import pytest
 
 from swarm_orchestrator import gitq
-
-LOST_GC_FIX = pytest.mark.xfail(
-    strict=True,
-    reason="BUG (lost fix, 4ff672d): gitq._gc lets a GitError from a timed-out "
-    "`worktree remove`/`prune` escape, and the supervisor then holds a merged, "
-    "pushed phase as a DIRTY integration that freezes the whole queue.",
-)
 
 
 class _Log:
@@ -59,7 +49,6 @@ def repo(cfg):
     return r
 
 
-@LOST_GC_FIX
 def test_gc_swallows_a_removal_timeout(cfg, repo, monkeypatch):
     """A timed-out `worktree remove` must not propagate — it merely logs."""
     wt = gitq._wt_for(cfg, repo, "P1")
@@ -79,7 +68,6 @@ def test_gc_swallows_a_removal_timeout(cfg, repo, monkeypatch):
     assert any("WORKTREE-GC-FAILED" in ln for ln in log.lines), log.lines
 
 
-@LOST_GC_FIX
 def test_gc_swallows_a_prune_timeout(cfg, repo, monkeypatch):
     """The prune step is equally best-effort."""
 
@@ -96,7 +84,6 @@ def test_gc_swallows_a_prune_timeout(cfg, repo, monkeypatch):
     assert any("WORKTREE-GC-FAILED" in ln for ln in log.lines), log.lines
 
 
-@LOST_GC_FIX
 def test_gc_uses_a_generous_timeout_for_removal(cfg, repo, monkeypatch):
     """Removal is an IO-bound tree walk; the ordinary git timeout is too short."""
     wt = gitq._wt_for(cfg, repo, "P1")
@@ -124,12 +111,6 @@ def test_gc_is_silent_when_nothing_goes_wrong(cfg, repo, monkeypatch):
 
 
 # -- resolver folder-trust ------------------------------------------------
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG (lost fix, 4ff672d): resolver.spawn never calls "
-    "launch.pretrust_dir on the canonical repo, so claude's trust dialog can "
-    "swallow the resolver prompt while the merge queue stays held.",
-)
 def test_resolver_pretrusts_its_repo_before_starting(tmp_path, monkeypatch):
     """The resolver must pre-accept the folder-trust dialog for its repo.
 

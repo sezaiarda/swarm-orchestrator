@@ -52,6 +52,15 @@ def spawn(cfg: Config, phase: str, repo: Path, log: Log) -> str | None:
         log.line(f"RESOLVER-SPAWN-FAIL {phase} no-pane")
         return None
     pane = panes[0]
+    # Pre-accept claude's folder-trust dialog for THIS repo before the pane starts.
+    #
+    # Workers never hit this because they run inside a per-phase worktree that
+    # `launch.pretrust_dir` already seeds. The resolver is the one pane that runs
+    # in a CANONICAL repo directory, and those are trusted only if the owner has
+    # personally opened claude there before — so a resolver spawned
+    # in a repo, the trust dialog swallowed the injected prompt, and the whole
+    # integration queue sat blocked behind a dialog nobody was watching.
+    launch_mod.pretrust_dir(repo, log)
     # [swarm].resolver_cmd, NOT master_cmd. Reusing master_cmd here meant any
     # custom master silently became the resolver too -- and the second branch
     # then skipped priming entirely, leaving an unprompted claude staring at a

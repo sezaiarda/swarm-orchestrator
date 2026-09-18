@@ -60,6 +60,7 @@ _POLL = re.compile(r"\b(?:poll(?:ing)?|repeatedly|every \d+\s*(?:s|sec|seconds|m
 _GIT_STATUS = re.compile(r"\bgit(?:\s+-C\s+\S+)?\s+status\b")
 _HEREDOC_EDIT = re.compile(r"\bsed\s+-i\b|<<\s*['\"]?PY\b.*\.replace\(|\.replace\(.*<<", re.I)
 _PINGING = re.compile(r"^(?:%s)$" % "|".join(map(re.escape, sorted(statuses.PINGS))))
+_RETIRED_NOTE = re.compile(r"\b(?:retired|replaced|legacy|deprecated|upgrade)\b", re.I)
 _SILENT = re.compile(
     r"\b(?:no|never|none|nothing|doesn't|does not|don't|do not|without)\b[^.]*\btelegram",
     re.I,
@@ -113,6 +114,13 @@ def lint(text: str, known_commands: set[str] | frozenset[str] | None = None) -> 
         if _SYNC.search(line) and _DELEGATE.search(context) and not negated:
             add(n, CONTRADICTED, "agent-synchronous",
                 "an Agent spawn returns at once and reports back later; nothing blocks on it", line)
+
+        # A worker told to finish `needs-owner` believes the owner is pinged; it
+        # is recorded as `operator`, whose recap goes to a session instead.
+        if not _RETIRED_NOTE.search(context):
+            for old in sorted({c.strip() for c in code if c.strip() in statuses.RETIRED}):
+                add(n, CONTRADICTED, "retired-status",
+                    f"`{old}` is retired; `swarm done` records it as `{statuses.RETIRED[old]}`", line)
 
         pinging = sorted({c.strip() for c in code if _PINGING.match(c.strip())})
         if pinging and _SILENT.search(line):

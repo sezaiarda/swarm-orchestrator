@@ -31,13 +31,16 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
 - **Completion hook (self-classified)**: at the end of the session, the worker
   classifies its own outcome and runs
   `swarm done "$SWARM_PHASE" <status> "<one-line recap>"`, choosing `<status>`:
-  `ok` = clean success (integrates silently, no ping); `needs-owner` = finished
-  but the owner should review something specific (integrates **exactly** like
-  `ok`, and telegrams the owner the recap); `fail` = could not complete (rolls the
-  phase back and telegrams the owner). The recap is one line — for `ok` it may be
-  omitted. This generalizes `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`):
-  the self-classified form is the contract the worker follows. If a plain
-  completion hook is already present, upgrade it to this classified form.
+  `ok` = clean success (integrates silently, no ping); `operator` = finished and
+  committed, but one concrete action is left that cannot be done from inside the
+  phase (integrates **exactly** like `ok`; the recap becomes the whole brief of an
+  operator session that carries the action out, so it must name the action, the
+  target and how to check it — and it is never a question: questions go through
+  `swarm waiting`); `fail` = could not complete (rolls the phase back and
+  telegrams the owner). The recap is one line — for `ok` it may be omitted. This
+  generalizes `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`): the
+  self-classified form is the contract the worker follows. If a plain completion
+  hook, or the retired `needs-owner` status, is present, upgrade it to this form.
 - **Build gate**: when `SWARM_PHASE` is set, every heavy compile/test command
   (`cargo …`, `bun run build|test`, and the like) must run as `swarm build <cmd>`
   (e.g. `swarm build cargo nextest run`). `swarm build` is a swarm-wide semaphore
@@ -51,6 +54,21 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   returns. The principle: never guess or assume when you truly need the owner — ask,
   and self-report so the swarm can free your grid slot (moving you to your own
   window) while you wait, then finish normally with `swarm done` once answered.
+- **Cost rules** (each line below is a known
+  time or cost sink). Add whichever the file does not already say:
+  - Subagents come back immediately — an `Agent` call returns in a second and
+    reports later; nothing is synchronous. To wait on anything, use `Monitor`;
+    never `sleep` loops and never repeated `git status` polling.
+  - The phase set is not the worker's to compute: `swarm context` already returns
+    `ready`, `done`, `waiting` and `ledger_issues`. A survey subagent may build the
+    phase brief, but must not re-derive which phases are eligible.
+  - The cwd does not persist between Bash calls: root paths at `$SWARM_WORKTREE`
+    (or the project root) and use `git -C <repo>`.
+  - Edit source with `Edit`/`Write`, not heredoc or `sed -i` string-replace.
+  - Context budget: every turn re-sends the whole conversation, so keep the
+    session under ~300K tokens. Hand wide reads, log digs and test-output
+    triage to subagents and take back only their conclusions; never paste whole
+    files or full build logs into the conversation.
 Do NOT restrict the worker from delegating: swarm workers already launch with
 `teammateMode=in-process`, so any teammates they spawn run in-process (no extra
 tmux panes) and cannot clutter the workers window.

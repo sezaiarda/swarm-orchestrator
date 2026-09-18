@@ -66,6 +66,15 @@ def test_a_finish_that_never_telegrams_is_true_and_clean():
     assert rules("The finish that sent you here never telegrams anyone, and that is deliberate.\n") == []
 
 
+def test_a_retired_status_as_an_instruction_is_contradicted():
+    text = "Finish with `needs-owner` when the owner should review something.\n"
+    assert rules(text) == [(1, "contradicted", "retired-status")]
+
+
+def test_naming_a_retired_status_as_retired_is_clean():
+    assert rules("If the retired `needs-owner` status is present, upgrade it.\n") == []
+
+
 # -- wasteful -----------------------------------------------------------------
 def test_a_sleep_loop_is_wasteful():
     text = "Wait for it:\n```bash\nuntil [ -f done ]; do sleep 30; done\n```\n"

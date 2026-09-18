@@ -451,7 +451,9 @@ def _auto_resolve(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
     paths = [p for p in unmerged.stdout.splitlines() if p.strip()]
     if not paths:
         return False
-    staged: list[str] = []
+    # Settle every file in memory first: a decline on a later file must find the
+    # earlier ones still exactly as the failed merge left them on disk.
+    resolved: dict[str, str] = {}
     for rel in paths:
         how = automerge.strategy_for(rel, strategies)
         if how is None:
@@ -468,6 +470,9 @@ def _auto_resolve(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
         if merged is None:
             log.line(f"AUTORESOLVE-DECLINED {phase} {repo.name} {rel} {how}")
             return False
+        resolved[rel] = merged
+    staged: list[str] = []
+    for rel, merged in resolved.items():
         try:
             (repo / rel).write_text(merged, encoding="utf-8")
         except OSError as exc:

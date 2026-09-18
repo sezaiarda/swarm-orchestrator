@@ -151,6 +151,11 @@ def keyed_merge(base: str, ours: str, theirs: str, pattern: str) -> str | None:
     if len(set(o_keys)) != len(o_keys) or len(set(t_keys)) != len(t_keys):
         return None  # duplicate keys: the key is not identifying, don't guess
 
+    for key, b in b_map.items():
+        o, t = o_map.get(key), t_map.get(key)
+        if (o is None) != (t is None) and (o or t) != b:
+            return None  # one side deleted a record the other side edited
+
     if o_keys == t_keys:
         order = o_keys
     elif o_keys == b_keys:
@@ -194,11 +199,13 @@ def keyed_merge(base: str, ours: str, theirs: str, pattern: str) -> str | None:
 
 # -- strategy dispatch -----------------------------------------------------
 def strategy_for(path: str, strategies: dict[str, str]) -> str | None:
-    """The configured strategy for ``path``, matched by glob. None = no strategy."""
+    """The configured strategy for ``path``, matched by glob or by a whole trailing
+    path component (``notes.md`` matches ``docs/notes.md``, never
+    ``docs/release-notes.md``). None = no strategy."""
     from fnmatch import fnmatch
 
     for glob, how in strategies.items():
-        if fnmatch(path, glob) or path.endswith(glob):
+        if fnmatch(path, glob) or path == glob or path.endswith("/" + glob):
             return how
     return None
 

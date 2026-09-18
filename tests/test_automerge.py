@@ -163,13 +163,6 @@ def test_a_one_sided_record_deletion_is_honoured():
     assert automerge.keyed_merge(LEDGER, ours, LEDGER, LEDGER_KEY) == ours
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: keyed_merge takes the deleting side's key order, so a record one "
-    "side deleted and the other side ticked is silently dropped - the tick is "
-    "lost instead of declining to the resolver (the docstring's 'both sides "
-    "changed the same key differently' case).",
-)
 def test_delete_versus_tick_of_one_record_declines():
     ours = LEDGER.replace("- [ ] `P3` codegen\n", "")
     theirs = tick(LEDGER, "P3")
@@ -190,12 +183,6 @@ def test_the_first_matching_entry_wins():
     assert automerge.strategy_for("docs/PHASE-LEDGER.md", table) == KEYED
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: strategy_for's path.endswith(glob) has no '/' boundary, so a "
-    "strategy configured for notes.md also applies to release-notes.md - union "
-    "then splices a genuine conflict in a file nobody configured.",
-)
 def test_a_bare_filename_does_not_match_a_longer_name():
     assert automerge.strategy_for("docs/release-notes.md", {"notes.md": "union"}) is None
 
@@ -311,12 +298,6 @@ def test_a_declined_merge_is_logged_and_nothing_is_staged(tmp_path, monkeypatch)
     assert any(ln.startswith("AUTORESOLVE-DECLINED P1") for ln in log.lines)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: _auto_resolve writes each merged file as it goes, so when a LATER "
-    "file declines, earlier files are already overwritten on disk (unstaged) - "
-    "the resolver inherits exactly the half-fixed tree the docstring forbids.",
-)
 def test_a_late_decline_leaves_earlier_files_as_the_merge_left_them(tmp_path, monkeypatch):
     fake = FakeMerge(
         tmp_path,

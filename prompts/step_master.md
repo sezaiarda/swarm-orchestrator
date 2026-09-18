@@ -13,8 +13,11 @@ Do this, then stop:
    `ready`, so never relaunch them; they simply keep the run alive until they are
    answered and finish). **If `paused` is true (or `launchable` is empty), launch
    nothing — run `swarm master-idle` and stop.** If `ledger_issues` is non-empty
-   (a dependency cycle / self-dep / unknown dep that would silently stall the
-   build), telegram the owner with the issues and stop — do not paper over it.
+   (a dependency cycle / self-dep / unknown dep among phases that have **not**
+   landed — landed phases are already filtered out, so every entry is a real
+   stall), tell the owner with `swarm notify "<the issues>"`, then still launch
+   whatever `launchable` offers: an issue strands the phases behind it, never
+   the ones that are ready. Do not paper over it, and do not stop the run for it.
 2. From the `launchable` set, pick the best phases: critical-path first,
    honouring excludes. Cap at the number of free slots. (Concurrent phases in the
    same repo are fine — each builds in its own isolated worktree.) You cannot
@@ -30,4 +33,9 @@ Do this, then stop:
 Never open an AskUserQuestion — the owner does not want to be questioned. On any
 ambiguity, pick the best option yourself (critical-path first) and proceed;
 launch and idle silently. Only a genuine blocker you cannot decide (e.g.
-`ledger_issues`) gets a telegram — informational, not a question — then STOP.
+`ledger_issues`) gets a message — informational, not a question.
+
+**Messaging the owner has exactly one door: `swarm notify "<text>"`.** It sends
+through the swarm's own bot and records the ping in the run's notification
+ledger. Never use a `notify.sh` or any other
+sender: its pings are not logged, so the swarm cannot see them afterwards.

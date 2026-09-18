@@ -823,6 +823,28 @@ def cmd_free(cfg: Config, target: str) -> int:
     return 0
 
 
+def cmd_notify(cfg: Config, message: str) -> int:
+    """Send ``message`` to the owner through the swarm's own sender.
+
+    The master prompts say "telegram the owner" and, until this existed, gave the
+    master no swarm-side way to do it - so an LLM master reached for whatever it
+    had, and run events then arrived from another sender and never reached
+    ``notifications.jsonl``. This is the
+    one door: the configured ``[telegram] notify`` script, logged like every other
+    swarm ping. Best-effort, like all of them: a failed send is exit 1, never an
+    exception.
+    """
+    ok = telegram.notify(
+        cfg.telegram_notify,
+        message,
+        kind="master-note",
+        source="cli.notify",
+        state_dir=cfg.state_dir,
+    )
+    print("sent" if ok else "not sent")
+    return 0 if ok else 1
+
+
 def cmd_skip(cfg: Config, phase: str) -> int:
     """Mark a phase done without running it — and let go of everything it held.
 
@@ -1040,6 +1062,10 @@ def _build_parser() -> argparse.ArgumentParser:
     fp = sub.add_parser("free", help="manually free a slot (by id or phase)")
     fp.add_argument("target")
     fp.set_defaults(func=lambda cfg, a: cmd_free(cfg, a.target))
+
+    np_ = sub.add_parser("notify", help="message the owner through the swarm's own telegram sender")
+    np_.add_argument("message")
+    np_.set_defaults(func=lambda cfg, a: cmd_notify(cfg, a.message))
 
     kp = sub.add_parser("skip", help="mark a phase done without running it")
     kp.add_argument("phase")

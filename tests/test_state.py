@@ -94,6 +94,27 @@ def test_validate_detects_cycles_self_and_unknown_deps():
     assert ledger.validate(ledger.parse("P0\nP1 needs:P0\n")) == []
 
 
+def test_validate_ignores_a_cycle_that_runs_through_a_landed_phase():
+    """A landed phase can stall nothing, so a cycle through it is not a stall.
+
+    A regression shape: an ordering edge added after the
+    fact makes a CLOSED row "need" a later OPEN one, which already needs it.
+    Unfiltered that reads as a live cycle, and a master told to stop on
+    ``ledger_issues`` halted a run that had nothing wrong with it.
+    """
+    graph = ledger.parse("OLD needs:NEW\nNEW needs:OLD\nC needs:C\nD needs:Z\n")
+    assert any("OLD" in i and "cycle" in i for i in ledger.validate(graph))
+    # OLD has landed: that cycle is gone (C's self-dependency still reads as one).
+    assert not any("OLD" in i for i in ledger.validate(graph, {"OLD"}))
+    # A landed phase's own faults are history too; an open phase's are not.
+    landed = ledger.validate(graph, {"OLD", "C"})
+    assert not any("self-dependency: C" in i for i in landed)
+    assert any("unknown dependency: D needs Z" in i for i in landed)
+    # A cycle made only of phases that have NOT landed still reports.
+    live = ledger.parse("A needs:B\nB needs:A\nDONE\n")
+    assert any("cycle" in i for i in ledger.validate(live, {"DONE"}))
+
+
 # -- slot accounting (in-memory) ------------------------------------------
 def test_claim_and_free_slots():
     st = State.fresh(4)

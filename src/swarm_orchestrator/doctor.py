@@ -692,7 +692,7 @@ def _check_owner(cfg: Config, st: State) -> Check:
     )
 
 
-def _check_ledger(cfg: Config) -> Check:
+def _check_ledger(cfg: Config, st: State | None = None) -> Check:
     """Structural ledger faults — a cycle or an unknown dep silently strands
     every phase behind it, and reads exactly like a clean finish."""
     try:
@@ -701,7 +701,8 @@ def _check_ledger(cfg: Config) -> Check:
         return Check("ledger", WARN, f"ledger unreadable: {exc}")
     if not graph:
         return Check("ledger", OK, f"no machine-readable phases in {cfg.ledger}")
-    issues = ledger_mod.validate(graph)
+    landed = {p for p, status in st.done.items() if status in ledger_mod.SATISFIES_DEPS} if st is not None else set()
+    issues = ledger_mod.validate(graph, landed)
     if issues:
         return Check(
             "ledger",
@@ -998,7 +999,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_nudge(st, ready, free))
     checks.append(_check_stall(cfg, st))
     checks.append(_check_owner(cfg, st))
-    checks.append(_check_ledger(cfg))
+    checks.append(_check_ledger(cfg, st))
     checks.extend(_check_telegram(cfg))
     checks.extend(_check_disk(cfg))
     checks.append(_check_sentinels(cfg, st))

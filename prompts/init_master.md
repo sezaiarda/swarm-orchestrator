@@ -9,8 +9,10 @@ otherwise.
 Do all of this in this pane, then stop:
 
 ## 1. Telegram preflight
-Verify the notifier's own `.env` exists with both `TELEGRAM_BOT_TOKEN`
-and `TELEGRAM_CHAT_ID`, and that the configured `notify` script is executable.
+Run `swarm doctor` and read its `telegram.config` line: it checks the configured
+`[telegram] notify` script and that script's **own** credentials. Do not look anywhere else for them. If you ever need to message the owner,
+the one door is `swarm notify "<text>"`; never a `notify.sh` or any other
+sender.
 If anything is missing, do NOT ask the owner — proceed in degraded mode (the
 swarm still runs; telegram pings are best-effort no-ops) and just note it in this
 pane. Never block the swarm on telegram setup.

@@ -100,7 +100,9 @@ def explain(cfg: Config, phase: str, st: State | None = None) -> Explanation:
     exp.unmet = _unmet(graph, st.done, phase)
     exp.roots = _roots(graph, st.done, phase, {phase})
     exp.tree = _tree(cfg, st, graph, phase, set(exp.roots), {phase})
-    exp.issues = _issues_for(graph, _tree_phases(exp.tree))
+    exp.issues = _issues_for(
+        graph, _tree_phases(exp.tree), {p for p, status in st.done.items() if status in ledger_mod.SATISFIES_DEPS}
+    )
     if len(exp.roots) == 1:
         exp.root_cause = exp.roots[0]
         exp.root_detail = _classify(cfg, exp.root_cause, st, graph).detail
@@ -404,12 +406,14 @@ def _tree_phases(node: Node) -> set[str]:
     return {node.phase}.union(*(_tree_phases(c) for c in node.children)) if node.children else {node.phase}
 
 
-def _issues_for(graph: dict[str, set[str]], phases: set[str]) -> list[str]:
+def _issues_for(
+    graph: dict[str, set[str]], phases: set[str], landed: set[str] | frozenset[str] = frozenset()
+) -> list[str]:
     """Structural ledger problems (cycles / unknown / self deps) that touch this
     tree. ``validate`` reports the whole ledger; a phase-token intersection keeps
     a large project's unrelated problems out of one ``swarm why``."""
     out = []
-    for issue in ledger_mod.validate(graph):
+    for issue in ledger_mod.validate(graph, landed):
         if set(issue.replace("->", " ").split()) & phases:
             out.append(issue)
     return out

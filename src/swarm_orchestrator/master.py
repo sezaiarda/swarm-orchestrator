@@ -81,7 +81,9 @@ def build_context(cfg: Config, st: State) -> dict:
         # Structural ledger problems (cycles / self-deps / unknown deps) that
         # would otherwise silently stall the run — surfaced so the master/owner
         # can see them instead of a phase never becoming ready.
-        "ledger_issues": ledger_mod.validate(graph),
+        "ledger_issues": ledger_mod.validate(
+            graph, {p for p, status in st.done.items() if status in ledger_mod.SATISFIES_DEPS}
+        ),
     }
 
 

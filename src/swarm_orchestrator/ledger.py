@@ -152,8 +152,16 @@ def load(path: Path) -> dict[str, set[str]]:
     return parse(path.read_text(encoding="utf-8"))
 
 
-def validate(graph: dict[str, set[str]]) -> list[str]:
+def validate(graph: dict[str, set[str]], landed: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Return human-readable structural problems that would silently stall a run.
+
+    ``landed`` is the set of phases whose work is already merged (a
+    :data:`SATISFIES_DEPS` status). A landed phase can stall nothing: nobody
+    waits on it, and its own ``needs:`` are history. So its edges are not
+    walked and a cycle that runs through it is not a cycle anyone can be stuck
+    in. Without this, ordering edges added to a long-lived ledger after the fact
+    (a closed row made to "need" a later open one) read as live cycles, and a master
+    told to stop on ``ledger_issues`` halted a run that had nothing wrong with it.
 
     A self-dependency, a dependency on an unknown phase, or a dependency cycle
     all make the affected phases *never* become ready — an invisible stall that
@@ -162,6 +170,7 @@ def validate(graph: dict[str, set[str]]) -> list[str]:
     """
     issues: list[str] = []
     known = set(graph)
+    graph = {p: deps for p, deps in graph.items() if p not in landed}
     for phase, deps in graph.items():
         for d in sorted(deps):
             if d == phase:

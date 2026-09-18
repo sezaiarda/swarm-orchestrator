@@ -40,6 +40,7 @@ KINDS = (
     "integrate-hold",  # supervisor: merge conflict / dirty tree / push failed
     "finish",  # supervisor: the run is over
     "master-timeout",  # master: never became ready / prompt would not submit
+    "master-note",  # cli.notify: the master telling the owner about a blocker it cannot decide
     "worktree-fail",  # launch: the phase mirror could not be created
     "spawn-fail",  # launch: the worker process/pane would not start
     "other",  # unclassified (the default)

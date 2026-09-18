@@ -240,12 +240,6 @@ def test_a_row_carries_the_slot_only_while_a_worker_holds_the_phase():
     assert [(r.phase, r.slot) for r in rows] == [("P1", 0), ("P2", None)]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: blocker_rows colours the dot with token(blocker.kind), and 'integ' "
-    "is not in theme.STATE, so a held merge queue - the one blocker FAILED_KINDS "
-    "says is red - renders muted grey while the head line and toast call it an error.",
-)
 def test_a_held_merge_queue_row_is_red():
     rows = drawer.blocker_rows(FakeDash(snap(blocker("P1", kind="integ"))))
     assert rows[0].text.startswith(f"  [{COLOR[BAD]}]●[/]")

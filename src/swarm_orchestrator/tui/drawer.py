@@ -266,7 +266,7 @@ def blocker_rows(dash, width: int = WIDTH - 4, now: float | None = None) -> list
     asked = {n.phase: n.ts for n in notes if n.phase and n.ts}
     out: list[Row] = []
     for blocker in snap.blockers[:MAX_BLOCKERS]:
-        state = token(blocker.kind)
+        state = BAD if blocker.kind in FAILED_KINDS else token(blocker.kind)
         since = blocker.since
         if since is None and blocker.phase in sentinels:
             since = sentinels[blocker.phase].mtime

@@ -164,6 +164,7 @@ class Doctor(Vertical):
         body.update("\n".join(lines) or paint("  no checks returned", MUTED))
 
         worst = BAD if counts.get("fail") else (WARN if counts.get("warn") else OK)
+        panel.remove_class("-ok", "-warn", "-bad")
         panel.add_class(f"-{'bad' if worst is BAD else 'warn' if worst is WARN else 'ok'}")
         panel.set_title(
             "health",

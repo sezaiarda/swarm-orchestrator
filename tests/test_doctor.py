@@ -732,12 +732,6 @@ def test_the_tab_reads_the_real_cli_output(swarm):
     assert "supervisor.pid" in got["body"] and "prompts" in got["body"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: Doctor._repaint only ever add_class()es -ok/-warn/-bad and never "
-    "removes the old one, so after one failing run the panel border stays red "
-    "(-bad is declared last) even once every check passes.",
-)
 def test_the_border_recovers_when_the_swarm_does(cfg):
     got = {}
 

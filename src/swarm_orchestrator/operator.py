@@ -70,7 +70,7 @@ def operator_command(cfg: Config) -> str:
     """Shell command that runs the session, host-direct in the project dir."""
     if cfg.operator_cmd:
         return cfg.operator_cmd
-    model = f" -m {cfg.operator_model}" if cfg.operator_model else ""
+    model = f" --model {cfg.operator_model}" if cfg.operator_model else ""
     return f"cd {shlex.quote(str(cfg.project_dir))} && exec claude{model}"
 
 

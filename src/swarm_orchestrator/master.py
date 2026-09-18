@@ -96,7 +96,7 @@ def master_command(cfg: Config, kind: str) -> str:
     """
     if cfg.master_cmd:
         return cfg.master_cmd
-    model = f" -m {cfg.master_model}" if cfg.master_model else ""
+    model = f" --model {cfg.master_model}" if cfg.master_model else ""
     return f"cd {cfg.project_dir} && exec claude{model}"
 
 

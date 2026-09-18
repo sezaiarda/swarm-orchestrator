@@ -23,3 +23,6 @@ wheels/
 # Swarm bot credentials — never commit
 .env
 .env.*
+
+# per-session handoff baton — never tracked
+HANDOFF.md

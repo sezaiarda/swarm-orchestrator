@@ -5,7 +5,8 @@ Bare driver (no tmux/claude), real supervisor + FIFO + sentinels. Workers park
 itself and inspects the telegram sink:
 
   - `ok`          -> integrate/advance, NO telegram (silent success).
-  - `needs-owner` -> integrate/advance EXACTLY like `ok`, PLUS ping the recap.
+  - `needs-owner` -> retired: recorded as `operator`, which integrates like
+                     `ok` and hands off to an operator session, NO telegram.
   - `fail`        -> ping the recap (rollback path).
 """
 
@@ -34,23 +35,17 @@ def test_done_ok_is_silent(swarm):
     assert not any("P0" in ln for ln in swarm.tg_lines()), swarm.tg_lines()
 
 
-def test_done_needs_owner_pings_recap_and_still_advances(swarm):
-    """`needs-owner` telegrams the recap AND advances the phase like `ok`."""
+def test_done_needs_owner_is_recorded_as_operator_and_still_advances(swarm):
+    """The retired spelling still works: it lands as `operator`, silently, like `ok`."""
     _up_with_parked_p0(swarm)
 
     swarm.cli("done", "P0", "needs-owner", "check", "the", "auth", "change")
 
-    # The recap reaches the owner (the ping is written synchronously by `done`).
-    tg = swarm.tg_lines()
-    ping = [ln for ln in tg if "check the auth change" in ln]
-    assert ping, tg
-    assert "P0" in ping[0] and "needs you" in ping[0]
-
-    # Still advances exactly like ok: slot freed, fan-out launches, phase recorded.
     assert swarm.wait(
         lambda: set(swarm.busy_phases()) == {"P1", "P2", "P3"}, timeout=20
     ), swarm.log_text()
-    assert swarm.state()["done"].get("P0") == "needs-owner"
+    assert swarm.state()["done"].get("P0") == "operator"
+    assert not any("check the auth change" in ln for ln in swarm.tg_lines()), swarm.tg_lines()
 
 
 def test_done_fail_pings_recap(swarm):

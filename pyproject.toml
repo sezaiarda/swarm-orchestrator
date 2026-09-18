@@ -7,7 +7,9 @@ authors = [
     { name = "Arda Sezai" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "textual>=8.2.8",
+]
 
 [project.scripts]
 swarm = "swarm_orchestrator.cli:main"

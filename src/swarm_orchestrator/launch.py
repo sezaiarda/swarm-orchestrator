@@ -5,7 +5,9 @@ pane (real driver) or spawns a detached process (bare driver used by the
 hermetic logic tests). Readiness is *detected* (polling ``capture-pane`` for the
 idle marker) rather than slept for. ``done`` is the only thing a worker does to
 signal completion: write a durable sentinel, then a best-effort non-blocking
-FIFO poke that must never hang the worker if the supervisor is down.
+FIFO poke that must never hang the worker if the supervisor is down. It reports
+what it did (:class:`DoneResult`) rather than returning in silence — silence is
+what made workers re-run it, clobber their own recaps and re-ping the owner.
 """
 
 from __future__ import annotations
@@ -16,17 +18,35 @@ import os
 import shlex
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import gitq
 from . import ledger as ledger_mod
+from . import opqueue
 from . import state as state_mod
+from . import statuses
 from . import telegram, tmux
 from .config import Config, ready_needle
 from .logutil import Log
 
 READY_TIMEOUT_S = 30.0
 POLL_INTERVAL_S = 0.25
+
+# `swarm done` statuses that SATISFY a dependent phase's `needs:`. A `fail` is a
+# *recorded outcome*, not a completed dependency — its work was rolled back, so
+# anything that needed it must stay blocked (before this, membership alone
+# counted and a failed phase silently unblocked everything downstream of it).
+# Byte-identical to the resolver's set, so it IS the resolver's set now.
+DEP_SATISFYING = statuses.SATISFIES_DEPS
+
+# What counts as a recap someone can act on. It guarded the owner's phone, where
+# probe-grade notes — "test", "recheck" — arrived as real alerts; it now guards
+# the operator session, whose entire brief is this one note. Below either floor
+# the call still writes its sentinel (durability is never traded for politeness);
+# it just does not dispatch.
+MIN_RECAP_CHARS = 20
+MIN_RECAP_WORDS = 4
 # Substrings that identify claude's workspace-trust dialog (matched
 # case-insensitively against joined pane text, so wrapping never hides them).
 TRUST_MARKERS = ("do you trust", "trust the files", "trust the authors")
@@ -100,8 +120,15 @@ def _worker_env(
     ``SWARM_MAIN`` (the integration target branch) and ``SWARM_PROJECT`` (the
     canonical project path). The worker just works inside the mirror as if it
     were the real project; the integrator merges whatever repos it changed.
+
+    ``CARGO_INCREMENTAL=0`` because incremental state is pure dead weight here:
+    every phase builds a *different* source tree against one shared ``target/``,
+    so no phase can ever reuse another's incremental cache — it only fills the disk
+    with dead weight. An explicit ``CARGO_INCREMENTAL`` in the environment still
+    wins (``setdefault`` over the inherited value).
     """
     env = {cfg.env_marker: phase, "SWARM_STATE_DIR": str(cfg.state_dir)}
+    env.setdefault("CARGO_INCREMENTAL", os.environ.get("CARGO_INCREMENTAL") or "0")
     for key in ("SWARM_SLUG", "SWARM_TG_SINK", "SWARM_BIN", "SWARM_DRIVER"):
         val = os.environ.get(key)
         if val is not None:
@@ -123,7 +150,11 @@ def _worker_env(
 
 
 def _unmet_deps(cfg: Config, phase: str, done: dict[str, str]) -> list[str]:
-    """Known-phase deps of ``phase`` not yet in ``done`` (launch-time backstop).
+    """Known-phase deps of ``phase`` not satisfied by ``done`` (launch backstop).
+
+    A dep counts only when its recorded *status* is in :data:`DEP_SATISFYING` —
+    membership in ``done`` is not enough. A ``fail`` recorded the phase's work as
+    rolled back, so a dependent built on top of it would be building on nothing.
 
     Resolves the same ledger the master reasons over (``cfg.project_dir /
     cfg.ledger``). Best-effort: an empty list — never a block — is returned when
@@ -134,7 +165,7 @@ def _unmet_deps(cfg: Config, phase: str, done: dict[str, str]) -> list[str]:
     graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
     if phase not in graph:
         return []
-    return sorted(d for d in graph[phase] if d not in done)
+    return sorted(d for d in graph[phase] if done.get(d) not in DEP_SATISFYING)
 
 
 def launch(cfg: Config, phase: str, log: Log) -> bool:
@@ -180,7 +211,14 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
         except gitq.GitError as exc:
             with state_mod.transaction(cfg) as st:
                 st.free_slot_for(phase)
-            telegram.notify_event("worktree-failed", f"worktree {phase} failed: {exc}", log)
+            telegram.notify(
+                cfg.telegram_notify,
+                f"swarm: worktree {phase} failed: {exc}",
+                kind="worktree-fail",
+                phase=phase,
+                source="launch.launch",
+                state_dir=cfg.state_dir,
+            )
             log.line(f"WORKTREE-FAIL {phase} {exc}")
             return False
         # Pre-trust the fresh worktree so claude never pops the folder-trust dialog.
@@ -201,7 +239,14 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
             st.free_slot_for(phase)
         if worktree is not None:
             gitq.discard(cfg, phase, log)  # don't leak the worktree on start failure
-        telegram.notify_event("worker-start-failed", f"worker {phase} failed to start", log)
+        telegram.notify(
+            cfg.telegram_notify,
+            f"swarm: worker {phase} failed to start",
+            kind="spawn-fail",
+            phase=phase,
+            source="launch.launch",
+            state_dir=cfg.state_dir,
+        )
         log.line(f"LAUNCH-FAIL {phase} slot={sid}")
         return False
     log.line(f"LAUNCH {phase} slot={sid}")
@@ -282,12 +327,72 @@ _await_ready = await_ready
 TRUST_PROMPT = TRUST_MARKERS[1]
 
 
-def _write_sentinel(cfg: Config, phase: str, status: str, note: str) -> None:
+def _collapse(note: str) -> str:
+    """Trim + collapse a free-text recap to its comparable, sendable form."""
+    return " ".join(note.split())
+
+
+def _sentinel_note(cfg: Config, phase: str, status: str) -> str | None:
+    """The recap already recorded for ``phase``/``status``, or ``None`` if there
+    is no sentinel yet. A sentinel is one line: ``<phase> <status> <note>``."""
+    try:
+        body = (cfg.done_dir / f"{phase}.{status}").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    parts = body.strip("\n").split(" ", 2)
+    return parts[2] if len(parts) > 2 else ""
+
+
+def _write_sentinel(
+    cfg: Config, phase: str, status: str, note: str, force: bool = False
+) -> str:
+    """Write ``done/<phase>.<status>``; return the verdict.
+
+    ``written`` (nothing there, or the incoming recap is at least as informative),
+    ``refused`` (a fuller recap is already on disk and was kept), or ``forced``
+    (``--force`` deliberately replaced a fuller recap).
+
+    This was an unconditional ``os.replace``, so a second ``swarm done`` carrying
+    a throwaway note (a one-word probe, say) destroyed the real recap the owner
+    needed. Only a *downgrade*
+    is refused: an equal-or-fuller note always overwrites, and an empty recorded
+    note is never fuller than anything, so a first real recap always lands. The
+    full history of every attempt goes to ``done/<phase>.jsonl`` either way, so
+    even a refused note is recoverable.
+    """
     cfg.done_dir.mkdir(parents=True, exist_ok=True)
+    recorded = _sentinel_note(cfg, phase, status)
+    if recorded is not None and len(_collapse(note)) < len(_collapse(recorded)):
+        if not force:
+            return "refused"
+        verdict = "forced"
+    else:
+        verdict = "written"
     dest = cfg.done_dir / f"{phase}.{status}"
     tmp = cfg.done_dir / f".{phase}.{status}.tmp"
     tmp.write_text(f"{phase} {status} {note}\n", encoding="utf-8")
     os.replace(tmp, dest)
+    return verdict
+
+
+def _append_history(
+    cfg: Config, phase: str, status: str, note: str, verdict: str
+) -> None:
+    """Append this ``swarm done`` attempt to ``done/<phase>.jsonl``.
+
+    Every invocation, whatever the verdict — the sentinel keeps one recap, this
+    keeps them all (including the ones the refusal above rejected), so nothing a
+    worker ever reported is truly lost and downstream tooling can see how many
+    times a phase signalled done. Best-effort: a diagnostics file must never fail
+    the completion signal.
+    """
+    row = {"ts": time.time(), "status": status, "note": note, "verdict": verdict}
+    try:
+        cfg.done_dir.mkdir(parents=True, exist_ok=True)
+        with (cfg.done_dir / f"{phase}.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except OSError:
+        pass
 
 
 def _log_poke_drop(cfg: Config, detail: str) -> None:
@@ -328,22 +433,255 @@ def _poke_fifo(cfg: Config, line: str) -> bool:
 
 
 def _completion_ping(phase: str, status: str, note: str) -> str | None:
-    """The owner telegram for a finishing worker, or ``None`` for a clean success.
+    """The owner telegram for a finishing worker, or ``None`` for no ping.
 
-    The worker self-classifies its outcome (the ``status`` it passes to ``swarm
-    done``): ``ok`` is a silent success (return ``None`` — no ping); ``needs-owner``
-    integrates like ``ok`` but the owner should look at something; ``fail`` rolled
-    back. The last two ping with the worker's one-line ``note`` recap so the owner
-    sees *why* without opening the pane; an empty/whitespace recap just drops the
-    trailing dash.
+    Exactly one status reaches the owner's phone now (:data:`statuses.PINGS`):
+    ``fail``, which rolled its work back and blocks every dependent. ``ok`` was
+    always a silent success, and ``operator`` — the finish that leaves a concrete
+    action behind — opens a session for it instead, which is the whole point of
+    replacing ``needs-owner``: a phone ping is easy to miss, a session is not. The
+    ping carries the worker's one-line ``note`` recap so the owner sees *why*
+    without opening the pane; an empty/whitespace recap just drops the dash.
     """
-    if status == "ok":
+    if status not in statuses.PINGS:
         return None
-    recap = " ".join(note.split())  # trim + collapse the free-text recap
+    recap = _collapse(note)
     tail = f" — {recap}" if recap else ""
-    if status == "needs-owner":
-        return f"swarm: {phase} needs you{tail}"
     return f"swarm: {phase} FAILED{tail}"
+
+
+def _thin_recap(note: str) -> bool:
+    """Is this note too thin to brief an operator session on? (see MIN_RECAP_*)"""
+    recap = _collapse(note)
+    return len(recap) < MIN_RECAP_CHARS or len(recap.split()) < MIN_RECAP_WORDS
+
+
+@dataclass
+class Outcome:
+    """The two things a finish can trigger, decided on two separate axes.
+
+    They used to be one question — "does this reach the owner?" — because every
+    status that carried an action for a human also telegrammed one. ``operator``
+    breaks that: it carries an action and telegrams nobody, handing the action to
+    a session instead. So the ping and the route are decided independently, and
+    a status may answer yes to either, both or neither.
+    """
+
+    ping: str  # send | skipped | deduped
+    ping_detail: str
+    route: str  # dispatch | skipped
+    route_detail: str
+
+
+def _ping_decision(
+    phase: str, status: str, note: str, recorded: str | None, verdict: str, force: bool
+) -> tuple[str, str]:
+    """Whether the owner's phone rings, as ``(plan, detail)``.
+
+    ``plan`` is ``send``/``skipped``/``deduped``; ``detail`` explains a non-send
+    in the words the CLI prints.
+
+    This has to happen here, worker-side. The supervisor's DONE-DUPLICATE guard
+    runs *after* the FIFO poke — downstream of the send — so it is architecturally
+    incapable of suppressing a duplicate ping, and a phase that ran ``swarm done``
+    three times would telegram the owner three times. ``recorded`` is
+    the recap on disk *before* this call rewrote it.
+    """
+    if _completion_ping(phase, status, note) is None:
+        why = (
+            "hands off to a session, not the owner's phone"
+            if status in statuses.ROUTES else "is a silent success"
+        )
+        return "skipped", f"`{status}` {why}"
+    if force:
+        return "send", ""
+    if verdict == "refused":
+        return "deduped", "a fuller recap for this phase was already sent"
+    if recorded is not None and _collapse(recorded) == _collapse(note):
+        return "deduped", "identical recap already recorded — the owner has it"
+    # Whatever survives to here is a `fail`, and a failure ALWAYS pings, however
+    # thin the note: it blocks every dependent and stays filtered out of `ready`
+    # until someone runs `swarm retry`, so silence would turn a bad recap into an
+    # invisible dead run. The recap floor moved to the route axis for that reason.
+    return "send", ""
+
+
+def _route_decision(phase: str, status: str, note: str) -> tuple[str, str]:
+    """Whether this finish opens an operator session, as ``(plan, detail)``.
+
+    Only :data:`statuses.ROUTES` dispatches, and only with a recap worth reading:
+    an ``operator`` recap IS the session's entire brief — nothing else is handed
+    over — so a probe-grade note would start a session that cannot know what it
+    was started for. ``--force`` deliberately does not override that; forcing a
+    thin note replaces a recap, it does not create the missing brief.
+    """
+    if status not in statuses.ROUTES:
+        return "skipped", f"`{status}` leaves nothing for a session to pick up"
+    if _thin_recap(note):
+        return "skipped", (
+            f"recap too thin (needs >= {MIN_RECAP_CHARS} chars and"
+            f" >= {MIN_RECAP_WORDS} words) and it is the session's whole brief —"
+            f' re-run with a real recap: swarm done {phase} {status}'
+            ' "<what you did, what is left to do>"'
+        )
+    return "dispatch", ""
+
+
+def _outcome_plan(
+    phase: str, status: str, note: str, recorded: str | None, verdict: str, force: bool
+) -> Outcome:
+    """Decide, BEFORE anything is sent, what this finish triggers."""
+    ping, ping_detail = _ping_decision(phase, status, note, recorded, verdict, force)
+    route, route_detail = _route_decision(phase, status, note)
+    return Outcome(ping, ping_detail, route, route_detail)
+
+
+@dataclass
+class DoneResult:
+    """What ``swarm done`` actually did, so the CLI can say it out loud.
+
+    ``done`` used to return ``None`` and print nothing — the only state-changing
+    command that said nothing at all. Workers read that silence as success, so some
+    sessions ran it again (some repeatedly), and a refusal, a
+    dropped telegram and a lost poke were all indistinguishable from a clean
+    finish. Every branch is now reportable.
+    """
+
+    phase: str
+    status: str  # canonical; what the sentinel, the history and the poke carry
+    spelling: str  # the status exactly as the caller typed it
+    note: str
+    sentinel: Path
+    history: Path
+    verdict: str  # written | refused | forced
+    ping: str  # sent | failed | skipped | deduped
+    ping_detail: str  # why it was skipped/deduped, or the send error
+    route: str  # dispatch | skipped
+    route_detail: str  # why no session, in the words the CLI prints
+    poke: str  # delivered | detached | no-reader
+    grace_s: int
+
+    def render(self) -> str:
+        """The human-readable multi-line summary; the CLI prints it verbatim."""
+        sentinel = {
+            "written": f"recap written to {self.sentinel}",
+            "forced": f"recap REPLACED in {self.sentinel} (--force)",
+            "refused": (
+                f"kept the fuller recap already in {self.sentinel}"
+                " (--force to replace it)"
+            ),
+        }[self.verdict]
+        ping = {
+            "sent": "owner telegrammed",
+            "failed": f"telegram FAILED: {self.ping_detail}",
+            "skipped": f"no telegram: {self.ping_detail}",
+            "deduped": f"no telegram: {self.ping_detail}",
+        }[self.ping]
+        route = {
+            "dispatch": "operator session due — this recap is its brief",
+            "skipped": f"no operator session: {self.route_detail}",
+        }[self.route]
+        poke = {
+            "delivered": "supervisor poked",
+            "detached": f"supervisor poke detached (lands after {self.grace_s}s grace)",
+            "no-reader": (
+                "supervisor NOT poked (nothing reading the control FIFO) — it will"
+                " pick this up from the sentinel on restart"
+            ),
+        }[self.poke]
+        lines = [
+            f"done {self.phase} {self.status} [{self.verdict}]",
+            f"  {sentinel}",
+            f"  {ping}",
+            f"  {route}",
+            f"  {poke}",
+            f"  history: {self.history}",
+        ]
+        if self.spelling != self.status:
+            lines.append(
+                f"  NOTE: `{self.spelling}` is retired and was recorded as"
+                f" `{self.status}` — say `{self.status}` next time"
+            )
+        return "\n".join(lines)
+
+
+def _detach_recap(cfg: Config, phase: str) -> bool:
+    """Generate this phase's recap in a detached process.
+
+    Detached for the same reason the grace poke is: ``swarm done`` runs inside
+    the worker's bash tool call, and a model round-trip can take a minute or
+    more. Blocking there would put the whole recap on the worker's clock and
+    hand it a timeout to misread as failure.
+
+    Fire-and-forget on purpose. A missing recap is a cosmetic gap in the
+    dashboard; nothing downstream depends on it, so it must never be able to
+    affect whether a phase is recorded done. ``--completion`` reuses an existing
+    successful recap rather than regenerating, so a re-reported sentinel never
+    bills a second model call.
+    """
+    bin_ = os.environ.get("SWARM_BIN", "swarm")
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", f"exec {bin_} recap {shlex.quote(phase)} --completion"],
+            cwd=str(cfg.project_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _detach_triage(cfg: Config, phase: str) -> bool:
+    """Triage a freshly queued operator hand-off in a detached process.
+
+    Same shape and same reason as :func:`_detach_recap`: ``swarm done`` runs
+    inside the worker's bash tool call, and a model round-trip there puts the
+    whole call on the worker's clock and hands it a timeout to misread as a
+    failed finish. Spawned only when an item was actually *created*, so a re-run
+    of ``swarm done`` cannot bill a second triage for a decision already made.
+    """
+    bin_ = os.environ.get("SWARM_BIN", "swarm")
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", f"exec {bin_} operator-triage {shlex.quote(phase)}"],
+            cwd=str(cfg.project_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _queue_operator(
+    cfg: Config, phase: str, status: str, note: str, verdict: str, plan: Outcome
+) -> bool:
+    """Record this finish's operator hand-off, and triage when it is a new one.
+
+    Placed between the sentinel and the poke on purpose. After the sentinel,
+    because :func:`opqueue.reconcile` can rebuild the item from it, so a crash in
+    between costs nothing. Before the poke, because the poke is what makes the
+    supervisor merge the branch and free the slot — an item written after it means
+    a crash in that window leaves the work merged and recorded ``done`` with
+    nothing queued at all.
+
+    A ``refused`` verdict kept a fuller recap that is already on disk, and that
+    recap is the hand-off's whole brief; queueing this thinner one would hand the
+    session the note the sentinel just rejected.
+    """
+    if verdict == "refused" or plan.route != "dispatch":
+        return False
+    branch = f"swarm/{phase}" if cfg.git_isolation == "worktree" else ""
+    item = opqueue.add(cfg, phase, status=status, note=note, branch=branch)
+    if item is None:
+        return False
+    _detach_triage(cfg, phase)
+    return True
 
 
 def _detach_poke(cfg: Config, phase: str, status: str) -> bool:
@@ -373,34 +711,79 @@ def _detach_poke(cfg: Config, phase: str, status: str) -> bool:
         return False
 
 
-def done(cfg: Config, phase: str, status: str, note: str = "") -> None:
-    """Signal phase completion.
+def done(
+    cfg: Config, phase: str, status: str, note: str = "", force: bool = False
+) -> DoneResult:
+    """Signal phase completion; report what happened (see :class:`DoneResult`).
 
-    Order matters: (1) write the durable sentinel; (2) telegram the owner *from
-    the worker itself* — but ONLY when the outcome is not a clean success:
-    ``needs-owner`` and ``fail`` ping with the recap, ``ok`` stays silent; (3) hold
-    the slot for ``done_grace_s`` so the worker has a buffer to flush any last work
-    before the supervisor reclaims it; (4) best-effort poke. The grace does NOT
-    sleep in the worker's process: ``swarm done`` runs inside the worker's bash
-    tool call, whose timeout would kill a long sleep — and the poke with it. A
-    detached child sleeps and delivers the poke instead, so ``swarm done``
-    returns immediately and the worker spends the whole grace closing out its
-    session. Falls back to the old in-process sleep if the detach can't spawn;
-    ``done_grace_s = 0`` (the default) keeps the immediate path.
+    A retired input spelling is canonicalised HERE and nowhere else, so the
+    sentinel, the history row and the poke all carry the current status while a
+    worker whose prompt still says ``needs-owner`` keeps working. It must never
+    happen on a read path: ``doctor._check_sentinels`` compares the status in a
+    sentinel's filename against the one in ``state.json``, so canonicalising
+    either side as it is read would report a healthy state dir as four mismatches.
+
+    Order matters: (1) write the durable sentinel — refusing to overwrite a fuller
+    recap unless ``force`` — and append the attempt to the per-phase history;
+    (2) telegram the owner *from the worker itself*, but ONLY for a ``fail``, and
+    only when that ping is not a duplicate of one already sent; (3) hold the slot
+    for ``done_grace_s`` so the worker has a buffer to flush any last work before
+    the supervisor reclaims it; (4) best-effort poke. The grace does NOT sleep in
+    the worker's process: ``swarm done`` runs inside the worker's bash tool call,
+    whose timeout would kill a long sleep — and the poke with it. A detached child
+    sleeps and delivers the poke instead, so ``swarm done`` returns immediately and
+    the worker spends the whole grace closing out its session. Falls back to the
+    old in-process sleep if the detach can't spawn; ``done_grace_s = 0`` (the
+    default) keeps the immediate path.
+
+    Durability is never traded for politeness: the sentinel is written (and the
+    history appended) even when the recap is too thin to brief a session on.
     """
-    _write_sentinel(cfg, phase, status, note)
-    ping = _completion_ping(phase, status, note)
-    if ping is not None:
-        # Not pushed. A per-phase outcome is not a question — `needs-owner` was a
-        # source of pings that needed nothing from the owner, and a
-        # `fail` is reported in the run's FINISHED summary instead, where it arrives
-        # with the rest of the picture rather than as an interruption.
-        telegram.notify_event(f"done-{status}", ping)
-    if cfg.done_grace_s > 0:
-        if _detach_poke(cfg, phase, status):
-            return
-        time.sleep(cfg.done_grace_s)
-    _poke_fifo(cfg, f"done {phase} {status}\n")
+    spelling, status = status, statuses.canonical(status)
+    recorded = _sentinel_note(cfg, phase, status)  # before we rewrite it
+    verdict = _write_sentinel(cfg, phase, status, note, force=force)
+    _append_history(cfg, phase, status, note, verdict)
+
+    plan = _outcome_plan(phase, status, note, recorded, verdict, force)
+    ping, detail = plan.ping, plan.ping_detail
+    if ping == "send":
+        sent = telegram.notify_detail(
+            cfg.telegram_notify,
+            _completion_ping(phase, status, note) or "",
+            kind="worker-done",
+            phase=phase,
+            source="launch.done",
+            state_dir=cfg.state_dir,
+        )
+        ping, detail = ("sent", "") if sent.delivered else ("failed", sent.error or "")
+
+    _queue_operator(cfg, phase, status, note, verdict, plan)
+
+    poke = "no-reader"
+    if not os.environ.get("SWARM_TG_SINK"):
+        _detach_recap(cfg, phase)  # hermetic tests must not spawn a model call
+    if cfg.done_grace_s > 0 and _detach_poke(cfg, phase, status):
+        poke = "detached"
+    else:
+        if cfg.done_grace_s > 0:
+            time.sleep(cfg.done_grace_s)
+        if _poke_fifo(cfg, f"done {phase} {status}\n"):
+            poke = "delivered"
+    return DoneResult(
+        phase=phase,
+        status=status,
+        spelling=spelling,
+        note=note,
+        sentinel=cfg.done_dir / f"{phase}.{status}",
+        history=cfg.done_dir / f"{phase}.jsonl",
+        verdict=verdict,
+        ping=ping,
+        ping_detail=detail,
+        route=plan.route,
+        route_detail=plan.route_detail,
+        poke=poke,
+        grace_s=cfg.done_grace_s,
+    )
 
 
 def waiting(cfg: Config, phase: str, note: str = "") -> None:
@@ -412,14 +795,14 @@ def waiting(cfg: Config, phase: str, note: str = "") -> None:
     Never hangs the worker if the supervisor is down. The note is NOT sent over the
     FIFO — only ``waiting <phase>`` — since parking keys on the phase alone.
     """
-    recap = " ".join(note.split())  # trim + collapse the free-text question
+    recap = _collapse(note)  # trim + collapse the free-text question
     tail = f" — {recap}" if recap else ""
-    # THE one question notification. It is sent here, from the worker, because only
-    # here is the question text in hand. Nothing downstream (park, done) may ping
-    # about the same question again — one question, one message.
-    telegram.notify_owner(
+    telegram.notify(
         cfg.telegram_notify,
-        telegram.QUESTION,
         f"swarm: {phase} is waiting on you{tail}",
+        kind="waiting",
+        phase=phase,
+        source="launch.waiting",
+        state_dir=cfg.state_dir,
     )
     _poke_fifo(cfg, f"waiting {phase}\n")

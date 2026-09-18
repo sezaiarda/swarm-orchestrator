@@ -1,204 +1,348 @@
-"""`swarm why` — the stall explainer.
+"""``swarm why <phase>`` — one answer per phase, and the root cause behind it.
 
-Hermetic: builds a Config against the demo project with an isolated state dir,
-writes a State by hand, and captures stdout. No supervisor, no tmux server, no
-fake claude — `cmd_why` is a pure read of state + ledger, and that is exactly
-what makes it safe to run at any moment during a live swarm.
+``swarm context`` reports ``ready: []`` with no explanation, which is how a run
+that is actually stuck looks identical to one that has simply finished. These
+tests pin the classification order (the order a human asks the questions in) and,
+for a blocked phase, the walk to the **root cause** — the deepest unmet ancestor
+that has nothing unmet itself.
 
-What is under test is not formatting but *coverage of the stall reasons*: every
-condition that can stop a run must produce a finding that names the remedy,
-because the pure-injection design has no auto-retry and the owner is therefore
-the recovery path.
+The dependency semantics matter more than the prose: a dependency is satisfied
+only when its status is in :data:`ledger.SATISFIES_DEPS`. A ``fail`` had its
+branch discarded, so a dependent built on top of it would be built against a main
+that provably lacks it — and a whole subtree stalling on one ``fail`` is exactly
+the case ``swarm why`` exists to name.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
 from pathlib import Path
 
-import pytest
-
-from swarm_orchestrator import cli
-from swarm_orchestrator import config as config_mod
 from swarm_orchestrator import state as state_mod
-from swarm_orchestrator.state import Slot, State
+from swarm_orchestrator import why as why_mod
+from swarm_orchestrator.config import load
 
-REPO = Path(__file__).resolve().parents[1]
-DEMO = REPO / "examples" / "demo"
+CHAIN = (
+    "- [ ] `P0` · needs:—\n"
+    "- [ ] `P1` · needs:`P0`\n"
+    "- [ ] `P2` · needs:`P1`\n"
+    "- [ ] `P3` · needs:`P1` `P2`\n"
+    "- [ ] `solo` · needs:—\n"
+)
 
 
-@pytest.fixture
-def cfg(tmp_path: Path, monkeypatch):
+def _cfg(tmp_path: Path, monkeypatch, ledger: str = CHAIN, toml: str = ""):
+    """A bare-driver Config over a throwaway project with the given ledger."""
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_DRIVER", "bare")
+    monkeypatch.delenv("SWARM_GIT_ISOLATION", raising=False)
     project = tmp_path / "project"
-    shutil.copytree(DEMO, project)
-    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("SWARM_SLUG", "whytest")
-    monkeypatch.setenv("SWARM_DRIVER", "none")
-    c = config_mod.load(project_dir=str(project))
-    c.state_dir.mkdir(parents=True, exist_ok=True)
-    return c
+    (project / "docs").mkdir(parents=True, exist_ok=True)
+    (project / "docs" / "PHASE-LEDGER.md").write_text(ledger, encoding="utf-8")
+    if toml:
+        (project / ".swarm.toml").write_text(toml, encoding="utf-8")
+    return load(project_dir=str(project))
 
 
-def _why(cfg, st: State, capsys) -> str:
-    state_mod._save(cfg, st)
-    assert cli.cmd_why(cfg) == 0
-    return capsys.readouterr().out
+def _state(cfg, slots=2, **kw):
+    """Reset the run to a clean ``slots``-wide state with the given overrides."""
+    with state_mod.transaction(cfg) as st:
+        st.__dict__.update(state_mod.State.fresh(slots).__dict__)
+        for key, val in kw.items():
+            setattr(st, key, val)
+        return st
 
 
-def _base(**kw) -> State:
-    kw.setdefault("supervisor_pid", None)
-    return State(slots=[Slot(id=0), Slot(id=1)], **kw)
+# -- classification --------------------------------------------------------
+def test_unknown_phase_names_the_ledger_it_looked_in(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg)
+
+    exp = why_mod.explain(cfg, "P9")
+
+    assert exp.reason == why_mod.UNKNOWN
+    assert "PHASE-LEDGER.md" in exp.detail and "5 phases" in exp.detail
 
 
-def test_why_reports_dead_supervisor(cfg, capsys):
-    out = _why(cfg, _base(), capsys)
-    assert "STALLED" in out
-    assert "swarm up" in out
+def test_excluded_phase_quotes_the_config_comment(tmp_path, monkeypatch):
+    # `exclude = ["P0"]` on its own says nothing; the reason is written beside it
+    # as a comment, and that comment IS the answer to "why isn't P0 running".
+    cfg = _cfg(
+        tmp_path, monkeypatch,
+        toml='[tasks]\nexclude = [\n  "P0",  # owner is doing this one by hand\n]\n',
+    )
+    _state(cfg)
+
+    exp = why_mod.explain(cfg, "P0")
+
+    assert exp.reason == why_mod.EXCLUDED
+    assert "owner is doing this one by hand" in exp.detail
 
 
-def test_why_reports_paused(cfg, capsys):
-    out = _why(cfg, _base(paused=True, supervisor_pid=os.getpid()), capsys)
-    assert "PAUSED" in out
-    assert "swarm resume" in out
+def test_excluded_falls_back_to_the_comment_block_above(tmp_path, monkeypatch):
+    cfg = _cfg(
+        tmp_path, monkeypatch,
+        toml='[tasks]\n# waiting on the upstream release\nexclude = ["P0"]\n',
+    )
+    _state(cfg)
+    assert "waiting on the upstream release" in why_mod.explain(cfg, "P0").detail
 
 
-def test_why_leads_with_a_blocked_integration(cfg, capsys):
-    st = _base(supervisor_pid=os.getpid())
-    st.integ_blocked = "P1"
-    st.integ_blocked_kind = "conflict"
-    st.integ_blocked_repo = str(cfg.project_dir)
-    out = _why(cfg, st, capsys)
-    assert "BLOCKED" in out
-    # The remedy must be spelled out — a hold nobody knows how to clear is the
-    # failure this command exists to prevent.
-    assert "swarm resolved P1" in out
-    # A conflict with no resolver pane recorded must say so, not stay silent.
-    assert "resolver: none open" in out
+def test_the_comment_block_is_narrowed_to_the_phase_it_names(tmp_path, monkeypatch):
+    # A real block covers every excluded phase at once (a multi-phase entry names three);
+    # handing all of it back as the answer for one phase buries that phase's line.
+    cfg = _cfg(
+        tmp_path, monkeypatch,
+        toml=(
+            "[tasks]\n"
+            "# Phases the swarm must never launch:\n"
+            "#   P0 — owner-run: it needs the live stack and a long session.\n"
+            "#   P1 — standing additive-only policy, never a scheduled phase.\n"
+            'exclude = ["P0", "P1"]\n'
+        ),
+    )
+    _state(cfg)
+
+    detail = why_mod.explain(cfg, "P0").detail
+
+    assert "owner-run: it needs the live stack" in detail
+    assert "additive-only" not in detail  # P1's line stays with P1
 
 
-def test_why_names_a_missing_resolver_pane(cfg, capsys):
-    st = _base(supervisor_pid=os.getpid())
-    st.integ_blocked = "P1"
-    st.integ_blocked_kind = "conflict"
-    st.integ_blocked_repo = str(cfg.project_dir)
-    st.windows["resolve:P1"] = "%999"  # never existed / already died
-    out = _why(cfg, st, capsys)
-    assert "GONE" in out
+def test_a_wrapped_comment_entry_keeps_its_continuation_lines(tmp_path, monkeypatch):
+    # A ledger wraps each entry over several `#` lines; stopping at the first one
+    # cuts the reason off mid-sentence, which is worse than saying nothing.
+    cfg = _cfg(
+        tmp_path, monkeypatch,
+        toml=(
+            "[tasks]\n"
+            "#   P0 — owner-run: it needs the live stack\n"
+            "#        and a real day to prove out.\n"
+            "#   P1 — standing additive-only policy.\n"
+            'exclude = ["P0", "P1"]\n'
+        ),
+    )
+    _state(cfg)
+
+    detail = why_mod.explain(cfg, "P0").detail
+
+    assert "and a real day to prove out." in detail
+    assert "additive-only" not in detail
 
 
-def test_why_surfaces_a_worker_waiting_on_the_owner(cfg, capsys):
-    st = _base(supervisor_pid=os.getpid())
-    st.waiting["P1"] = 0.0
-    out = _why(cfg, st, capsys)
-    assert "WAITING" in out
-    assert "P1" in out
+def test_a_cross_reference_to_another_excluded_phase_does_not_truncate(
+    tmp_path, monkeypatch
+):
+    # A ledger entry ends "exactly like <another phase>", which is itself
+    # excluded. Matching a bare mention would cut the reason off mid-sentence, so
+    # entry boundaries are anchored to the START of a comment line.
+    cfg = _cfg(
+        tmp_path, monkeypatch,
+        toml=(
+            "[tasks]\n"
+            "#   P0 — owner-run, exactly like P1.\n"
+            "#        Added so no master launches it.\n"
+            "#   P1 — standing additive-only policy.\n"
+            'exclude = ["P0", "P1"]\n'
+        ),
+    )
+    _state(cfg)
+
+    detail = why_mod.explain(cfg, "P0").detail
+
+    assert "exactly like P1" in detail
+    assert "Added so no master launches it." in detail
+    assert "additive-only" not in detail
 
 
-def test_why_does_not_claim_a_parked_phase_is_still_unanswered(cfg, capsys):
-    """Parked means off-grid, NOT unanswered.
+def test_a_very_long_comment_is_clipped(tmp_path, monkeypatch):
+    cfg = _cfg(
+        tmp_path, monkeypatch,
+        toml=f'[tasks]\n# {"blah " * 200}\nexclude = ["P0"]\n',
+    )
+    _state(cfg)
 
-    `swarm resumed` cancels the park timer, but a phase that was already parked
-    stays in `parked` until it reports done. Calling that "waiting on YOU" sends
-    the owner to answer a question they may have answered an hour ago while the
-    worker is busy building — the same cry-wolf failure as the DECIDING case.
-    """
-    st = _base(supervisor_pid=os.getpid(), master_alive=True)
-    st.parked = ["P1"]  # answered: no longer in `waiting`
-    out = _why(cfg, st, capsys)
-    assert "PARKED" in out and "P1" in out
-    assert "waiting on YOU" not in out
-    assert "WAITING" not in out
+    assert len(why_mod.explain(cfg, "P0").detail) < 320
 
 
-def test_why_flags_the_lost_nudge_race(cfg, capsys):
-    """Free slots + ready phases + NO master is the one accepted race."""
-    st = _base(supervisor_pid=os.getpid(), master_alive=False)
-    out = _why(cfg, st, capsys)
-    assert "IDLE" in out
-    assert "swarm launch" in out
+def test_excluded_with_no_comment_still_answers(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch, toml='[tasks]\nexclude = ["P0"]\n')
+    _state(cfg)
+    exp = why_mod.explain(cfg, "P0")
+    assert exp.reason == why_mod.EXCLUDED and "says:" not in exp.detail
 
 
-def test_why_does_not_cry_wolf_while_a_master_is_deciding(cfg, capsys):
-    """A live master with free slots is mid-decision, not a lost nudge.
+def test_busy_phase_is_not_stuck(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, slots=2)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("P0")
 
-    Regression: the first cut of `why` omitted the `master_alive` check and
-    reported IDLE during the ~30 s between a resume poke and the master's claim.
-    That sent the owner to `swarm launch`, whose launch was then refused by the
-    atomic slot claim — correct behaviour that looks like a broken swarm. A
-    diagnostic that cries wolf during normal operation is worse than none.
-    """
-    st = _base(supervisor_pid=os.getpid(), master_alive=True)
-    out = _why(cfg, st, capsys)
-    assert "DECIDING" in out
-    assert "IDLE" not in out
-    assert "swarm launch" not in out
+    exp = why_mod.explain(cfg, "P0")
+
+    assert exp.reason == why_mod.BUSY and "slot 0" in exp.detail
 
 
-def test_why_shows_running_work_while_a_master_fills_the_other_slot(cfg, capsys):
-    """DECIDING must ADD to the picture, not replace it.
+def test_parked_and_waiting_point_at_the_owner(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, parked=["P0"], waiting={"solo": 9e9})
 
-    One slot building and one being filled is the normal mid-campaign shape; a
-    reader who is told only "master is deciding" has lost the more useful fact,
-    which is what is currently building.
-    """
-    # Advance past the root so more than one phase is eligible at once, then put
-    # exactly one of them in a slot — leaving a free slot AND a ready phase.
-    root = cli.build_context(cfg, _base())["ready"][0]
-    st = _base(supervisor_pid=os.getpid(), master_alive=True)
-    st.done[root] = "ok"
-    unlocked = cli.build_context(cfg, st)["ready"]
-    if len(unlocked) < 2:
-        pytest.skip("demo ledger has no two-wide frontier to exercise this shape")
-    st.slots[0].busy = True
-    st.slots[0].phase = unlocked[0]
-    out = _why(cfg, st, capsys)
-    assert "WORKING" in out and unlocked[0] in out
-    assert "DECIDING" in out
+    assert why_mod.explain(cfg, "P0").reason == why_mod.PARKED
+    waiting = why_mod.explain(cfg, "solo")
+    assert waiting.reason == why_mod.WAITING and "waiting on YOU" in waiting.detail
 
 
-def test_why_explains_a_healthy_serial_run(cfg, capsys):
-    """No findings: say what it is waiting ON, never just 'fine'."""
-    graph_root = next(iter(sorted(cli.build_context(cfg, _base()).get("ready", []))), None)
-    st = _base(supervisor_pid=os.getpid())
-    st.slots[0].busy = True
-    st.slots[0].phase = graph_root
-    out = _why(cfg, st, capsys)
-    assert "WORKING" in out
-    assert graph_root in out
-    # Idle-but-not-stuck must be explained, not left to look like a stall.
-    assert "depends on one still building" in out or "ready" in out
+def test_merge_queue_states_are_distinguished(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, integ_queue=["P0", "P1"], integ_blocked="P0",
+           integ_blocked_kind="conflict", integ_blocked_repo="/repos/pricing")
+
+    blocked = why_mod.explain(cfg, "P0")
+    queued = why_mod.explain(cfg, "P1")
+
+    assert blocked.reason == why_mod.INTEG_BLOCKED
+    assert "conflict" in blocked.detail and "pricing" in blocked.detail
+    assert queued.reason == why_mod.INTEGRATING and "1 ahead of it" in queued.detail
 
 
-def test_why_never_mutates_state(cfg, capsys):
-    st = _base(supervisor_pid=os.getpid())
-    _why(cfg, st, capsys)
-    before = state_mod.read(cfg)
-    cli.cmd_why(cfg)
-    capsys.readouterr()
-    after = state_mod.read(cfg)
-    assert before.done == after.done
-    assert before.integ_queue == after.integ_queue
-    assert [s.phase for s in before.slots] == [s.phase for s in after.slots]
+def test_done_ok_versus_done_fail(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, done={"P0": "ok", "solo": "fail"})
+
+    ok = why_mod.explain(cfg, "P0")
+    failed = why_mod.explain(cfg, "solo")
+
+    assert ok.reason == why_mod.DONE and ok.status == "ok"
+    assert failed.reason == why_mod.DONE and failed.status == "fail"
+    assert "not re-offered" in failed.detail  # it will never come back on its own
 
 
-def test_why_names_a_wrong_directory_instead_of_faking_a_stall(tmp_path, monkeypatch, capsys):
-    """Running from the wrong directory must not look like a broken swarm.
+def test_ready_reports_pause_and_slot_pressure(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
 
-    The slug is derived from the cwd, so `swarm why` in a sibling repo invents an
-    empty project and reports "no supervisor is alive — swarm up", which is true
-    of that phantom slug and deeply misleading about the actual state.
-    """
-    project = tmp_path / "somewhere-else"
-    shutil.copytree(DEMO, project)
-    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.delenv("SWARM_SLUG", raising=False)
-    monkeypatch.setenv("SWARM_DRIVER", "none")
-    c = config_mod.load(project_dir=str(project))
-    c.state_dir.mkdir(parents=True, exist_ok=True)  # dir exists, state.json does not
+    _state(cfg, slots=2)
+    assert "ready NOW" in why_mod.explain(cfg, "P0").detail
 
-    assert cli.cmd_why(c) == 0
-    out = capsys.readouterr().out
-    assert "NO RUN" in out
-    assert "--project-dir" in out
-    assert "STALLED" not in out
+    _state(cfg, slots=2, paused=True)
+    assert "PAUSED" in why_mod.explain(cfg, "P0").detail
+
+    _state(cfg, slots=1)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("solo")
+    assert "all 1 slots are busy" in why_mod.explain(cfg, "P0").detail
+
+
+# -- the root cause --------------------------------------------------------
+def test_a_fail_at_the_root_stalls_the_whole_subtree(tmp_path, monkeypatch):
+    # The case this exists to name: `fail` is in the done map, so a resolver
+    # that tests bare membership calls P1 ready and builds it on a main that
+    # never got P0.
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, done={"P0": "fail"})
+
+    exp = why_mod.explain(cfg, "P3")
+
+    assert exp.reason == why_mod.BLOCKED
+    assert exp.root_cause == "P0"
+    assert exp.roots == ["P0"]
+    assert "`fail`" in exp.root_detail
+    text = why_mod.render(exp, show_tree=True)
+    assert "root cause: P0" in text
+    assert "everything below waits on one phase." in text
+
+
+def test_skip_and_needs_owner_do_satisfy_a_dependency(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, done={"P0": "skip", "P1": "needs-owner"})
+
+    assert why_mod.explain(cfg, "P2").reason == why_mod.READY
+
+
+def test_root_cause_is_the_deepest_unmet_ancestor(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, slots=1)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("P0")  # P0 is building; P1/P2/P3 all wait on it
+
+    exp = why_mod.explain(cfg, "P3")
+
+    assert exp.root_cause == "P0"
+    assert exp.unmet == ["P1", "P2"]  # its DIRECT unmet deps, not the root
+    assert "slot 0" in exp.root_detail
+
+
+def test_multiple_independent_roots_are_all_reported(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch, "- [ ] `A` · needs:—\n"
+                                      "- [ ] `B` · needs:—\n"
+                                      "- [ ] `C` · needs:`A` `B`\n")
+    _state(cfg)
+
+    exp = why_mod.explain(cfg, "C")
+
+    assert exp.roots == ["A", "B"]
+    assert exp.root_cause is None  # there is no single phase to point at
+    assert "root causes: A, B" in why_mod.render(exp)
+
+
+def test_a_missing_dependency_surfaces_as_its_own_root(tmp_path, monkeypatch):
+    # A typo'd `needs:` is a dep no phase will ever satisfy. It has no deps of its
+    # own, so the walk stops there -- which is precisely the diagnosis.
+    cfg = _cfg(tmp_path, monkeypatch, "- [ ] `A` · needs:`ghost`\n")
+    _state(cfg)
+
+    graph = {"A": {"ghost"}}
+    assert why_mod._roots(graph, {}, "A", {"A"}) == ["ghost"]
+
+
+def test_a_dependency_cycle_is_named_not_mistaken_for_a_root(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch, "A needs:B\nB needs:A\n")
+    _state(cfg)
+
+    exp = why_mod.explain(cfg, "A")
+
+    assert exp.roots == []  # nothing in a cycle is actionable
+    assert "dependency cycle" in exp.detail
+    assert any("dependency cycle" in i for i in exp.issues)
+
+
+def test_the_tree_expands_only_what_is_still_owed(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, done={"P0": "ok"})
+
+    exp = why_mod.explain(cfg, "P3")
+    labels = {n.phase: n.state for n in exp.tree.children}
+
+    assert labels["P1"] == why_mod.READY  # P0 landed, so P1 can start
+    assert labels["P2"] == why_mod.BLOCKED  # still owed: expanded
+    # P0 already landed: one satisfied leaf, not another level of history.
+    p0 = next(n for n in exp.tree.children[0].children if n.phase == "P0")
+    assert p0.state == why_mod._SATISFIED and p0.children == []
+
+
+def test_a_done_node_is_labelled_with_its_status(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, done={"P0": "fail"})
+
+    exp = why_mod.explain(cfg, "P1")
+    assert exp.tree.children[0].state == "done:fail"
+
+
+def test_explanation_is_json_serialisable(tmp_path, monkeypatch):
+    import json
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg, done={"P0": "fail"})
+
+    payload = json.loads(json.dumps(why_mod.explain(cfg, "P3").to_dict()))
+
+    assert payload["reason"] == why_mod.BLOCKED
+    assert payload["root_cause"] == "P0"
+    assert payload["tree"]["phase"] == "P3"
+
+
+def test_render_without_tree_stays_one_short_answer(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    _state(cfg)
+
+    assert why_mod.render(why_mod.explain(cfg, "solo")) == (
+        "solo: ready NOW — nothing is blocking it (`swarm launch solo`)"
+    )

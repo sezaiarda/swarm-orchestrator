@@ -98,6 +98,42 @@ class Swarm:
         return False
 
 
+def _kill_orphan_fakes(state_dir: Path) -> None:
+    """SIGKILL any fake master/worker still alive that belongs to THIS test.
+
+    Insurance net for an orphaned fake (e.g. a master left in
+    `exec sleep infinity`) once `down()` and the supervisor SIGKILL have run.
+
+    Scoped by the `SWARM_STATE_DIR` every fake carries in its environment (the
+    launcher exports it onto each worker and master) -- NOT by a global
+    `pkill -f fake-*.sh`. The unscoped match assumed the suite is the only one on
+    the box, so whenever two runs overlapped -- several agents working the repo at
+    once, or `pytest -n` -- each teardown killed the OTHER run's live fakes. The
+    victim test then saw its workers CLAIMed and LAUNCHed and then simply stop,
+    and failed on its `swarm.wait` timeout: the phantom Tier A flakiness.
+
+    A process must match BOTH the state dir and a fake script name, so nothing
+    outside this fixture is ever signalled. Reading `/proc` is Linux-only, as is
+    the rest of the harness (mkfifo + flock); where it is missing the `down()` +
+    supervisor-kill path stands on its own.
+    """
+    want = f"SWARM_STATE_DIR={state_dir}".encode()
+    try:
+        entries = [p for p in Path("/proc").iterdir() if p.name.isdigit()]
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+            if b"fake-master.sh" not in cmdline and b"fake-worker.sh" not in cmdline:
+                continue
+            if want not in (entry / "environ").read_bytes().split(b"\0"):
+                continue
+            os.kill(int(entry.name), signal.SIGKILL)
+        except (OSError, ValueError):
+            continue  # exited mid-scan, or not ours to read
+
+
 @pytest.fixture
 def swarm(tmp_path: Path):
     project = tmp_path / "project"
@@ -140,9 +176,4 @@ def swarm(tmp_path: Path):
                 os.kill(st["supervisor_pid"], signal.SIGKILL)
             except OSError:
                 pass
-        # Insurance net for any orphaned fake (e.g. a master left in
-        # `exec sleep infinity`). Workers `exec bash ./fake-*.sh` after a `cd`,
-        # so their argv is the relative script name -- match on that. The suite
-        # runs serially, so a global match cannot cross-kill another live test.
-        subprocess.run(["pkill", "-9", "-f", "fake-master.sh"], check=False)
-        subprocess.run(["pkill", "-9", "-f", "fake-worker.sh"], check=False)
+        _kill_orphan_fakes(state_dir)  # insurance net, scoped to THIS run

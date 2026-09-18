@@ -1,0 +1,415 @@
+"""``swarm why <phase>`` — why is this phase not running?
+
+``swarm context`` answers "what is ready" with a bare list. When that list is
+empty — the single most common way a run looks stuck — it says nothing at all
+about *why*, and the master (whose ``/prime`` already tells workers ``swarm why``
+exists) has no way to tell "the ledger never mentioned this phase" from "it
+finished an hour ago" from "one ancestor eight levels down failed and took the
+whole subtree with it".
+
+:func:`explain` classifies one phase against the ledger + live state, and when it
+is blocked it walks the dependency graph to the **root cause**: the deepest
+unmet ancestor that itself has nothing unmet. That is the single phase you can
+actually act on; every other name in the tree is just waiting on it.
+
+Dependency satisfaction here is :data:`ledger.SATISFIES_DEPS` — imported, never
+re-declared, so the resolver and this explanation cannot drift into disagreeing
+about what "blocked" means. It is not bare
+membership in the ``done`` map: a phase recorded ``fail`` was *attempted* but its
+branch was discarded, so it releases nothing. That distinction is the whole point
+of the tree — a ``fail`` root reads as "one phase failed", not "these six phases
+are mysteriously not ready".
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from . import ledger as ledger_mod
+from . import state as state_mod
+from .config import Config
+from .state import State
+
+# Classification keys. Stable — ``--json`` consumers (and the master) key on them.
+UNKNOWN = "not-in-ledger"
+EXCLUDED = "excluded"
+BUSY = "busy"
+INTEGRATING = "integrating"
+INTEG_BLOCKED = "integ-blocked"
+PARKED = "parked"
+WAITING = "waiting"
+DONE = "done"
+BLOCKED = "blocked"
+READY = "ready"
+
+# Node labels used only in the rendered tree (a superset of the keys above:
+# a dep can also be an already-landed ancestor we do not recurse into).
+_SATISFIED = "satisfied"
+_CYCLE = "cycle"
+
+
+@dataclass
+class Node:
+    """One phase in the rendered dependency tree."""
+
+    phase: str
+    state: str
+    detail: str = ""
+    root: bool = False
+    children: list["Node"] = field(default_factory=list)
+
+
+@dataclass
+class Explanation:
+    """Why ``phase`` is not running, and what to do about it."""
+
+    phase: str
+    reason: str
+    detail: str
+    status: str | None = None  # the recorded `done` status, when reason == DONE
+    unmet: list[str] = field(default_factory=list)  # direct deps not yet landed
+    deps: list[str] = field(default_factory=list)  # every declared dep
+    roots: list[str] = field(default_factory=list)  # actionable root causes
+    root_cause: str | None = None  # the single root, when there is exactly one
+    root_detail: str = ""  # that root's own one-line classification
+    tree: Node | None = None
+    issues: list[str] = field(default_factory=list)  # ledger cycles / unknown deps
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def explain(cfg: Config, phase: str, st: State | None = None) -> Explanation:
+    """Classify ``phase`` against the ledger and the live run.
+
+    ``st`` is read under the shared state lock when not supplied. The order of
+    the checks is the order a human would ask them in — "does this phase even
+    exist" before "is it done" before "what is it waiting for" — so the first
+    answer that fits is also the most useful one.
+    """
+    if st is None:
+        st = state_mod.read(cfg)
+    graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
+    exp = _classify(cfg, phase, st, graph)
+    if exp.reason != BLOCKED:
+        return exp
+
+    exp.deps = sorted(graph.get(phase, set()))
+    exp.unmet = _unmet(graph, st.done, phase)
+    exp.roots = _roots(graph, st.done, phase, {phase})
+    exp.tree = _tree(cfg, st, graph, phase, set(exp.roots), {phase})
+    exp.issues = _issues_for(graph, _tree_phases(exp.tree))
+    if len(exp.roots) == 1:
+        exp.root_cause = exp.roots[0]
+        exp.root_detail = _classify(cfg, exp.root_cause, st, graph).detail
+    elif not exp.roots:
+        # Every unmet dep was already on the stack: the phase sits in a cycle and
+        # can never become ready. `validate` names the cycle; say so plainly.
+        exp.detail = (
+            f"{exp.detail}; every unmet dependency is part of a dependency cycle,"
+            " so it can never become ready — fix the ledger"
+        )
+    return exp
+
+
+# -- classification (non-recursive: one phase, one answer) ----------------
+def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) -> Explanation:
+    """The single best one-line answer for ``phase``, without walking deps."""
+    if phase not in graph:
+        known = len(graph)
+        where = cfg.project_dir / cfg.ledger
+        hint = (
+            f" — {where} parsed {known} phases; check the spelling or add a"
+            " checklist line for it"
+            if known
+            else f" — {where} parsed no phases at all (missing, or all prose)"
+        )
+        return Explanation(phase, UNKNOWN, f"not in the ledger{hint}")
+
+    if phase in set(cfg.exclude):
+        note = _exclude_comment(cfg, phase)
+        tail = f' — [tasks].exclude says: "{note}"' if note else ""
+        already = f" (already recorded `{st.done[phase]}`)" if phase in st.done else ""
+        return Explanation(
+            phase, EXCLUDED, f"excluded by [tasks].exclude{already}{tail}"
+        )
+
+    slot = next((s for s in st.busy_slots() if s.phase == phase), None)
+    if slot is not None:
+        return Explanation(
+            phase, BUSY, f"running right now in slot {slot.id} — it is not stuck"
+        )
+
+    if st.integ_blocked == phase:
+        kind = st.integ_blocked_kind or "held"
+        where = Path(st.integ_blocked_repo).name if st.integ_blocked_repo else "?"
+        return Explanation(
+            phase,
+            INTEG_BLOCKED,
+            f"its worker finished, but integration is HELD ({kind} in {where}) —"
+            f" clear it, then `swarm resolved {phase}`",
+        )
+    if phase in st.integ_queue:
+        pos = st.integ_queue.index(phase)
+        ahead = f", {pos} ahead of it" if pos else ", at the head"
+        held = f" (queue held on {st.integ_blocked})" if st.integ_blocked else ""
+        return Explanation(
+            phase,
+            INTEGRATING,
+            f"its worker finished; waiting in the merge queue{ahead}{held}",
+        )
+
+    if phase in st.parked:
+        return Explanation(
+            phase,
+            PARKED,
+            "parked — its worker asked you a question, freed its slot and is"
+            f" still alive in its own `wait:{phase}` window; answer it there",
+        )
+    if phase in st.waiting:
+        return Explanation(
+            phase,
+            WAITING,
+            "waiting on YOU — its worker asked a question and still holds its"
+            f" slot (it parks in {max(0, int(st.waiting[phase] - time.time()))}s)",
+        )
+
+    if phase in st.done:
+        status = st.done[phase]
+        if status in ledger_mod.SATISFIES_DEPS:
+            tail = "" if status == "ok" else f" ({status})"
+            detail = f"already done{tail} — nothing left to run"
+        else:
+            detail = (
+                f"recorded `{status}`: it was attempted and its branch discarded,"
+                f" so it is not re-offered — `swarm retry {phase}` to try again"
+            )
+        return Explanation(phase, DONE, detail, status=status)
+
+    unmet = _unmet(graph, st.done, phase)
+    if unmet:
+        total = len(graph[phase])
+        return Explanation(
+            phase, BLOCKED, f"blocked: {len(unmet)} of {total} dependencies not landed"
+        )
+
+    if st.paused:
+        return Explanation(
+            phase, READY, "ready — but the swarm is PAUSED (`swarm resume`)"
+        )
+    if not st.free_slots():
+        return Explanation(
+            phase,
+            READY,
+            f"ready — but all {len(st.slots)} slots are busy; it starts as soon as"
+            " one frees",
+        )
+    return Explanation(
+        phase, READY, f"ready NOW — nothing is blocking it (`swarm launch {phase}`)"
+    )
+
+
+# -- dependency walk ------------------------------------------------------
+def _unmet(graph: dict[str, set[str]], done: dict[str, str], phase: str) -> list[str]:
+    """Declared deps of ``phase`` whose work has not landed on main.
+
+    ``fail`` is deliberately *not* satisfying (see :data:`ledger.SATISFIES_DEPS`):
+    a failed phase's branch was discarded, so building on it would build against
+    a main that provably lacks it.
+    """
+    return sorted(
+        d
+        for d in graph.get(phase, set())
+        if done.get(d) not in ledger_mod.SATISFIES_DEPS
+    )
+
+
+def _roots(
+    graph: dict[str, set[str]], done: dict[str, str], phase: str, seen: set[str]
+) -> list[str]:
+    """The deepest unmet ancestors of ``phase`` that have nothing unmet themselves.
+
+    Those are the only phases anyone can act on. A dep that is not in the graph at
+    all (a typo'd ``needs:``) has no deps and so surfaces as its own root, which is
+    exactly the diagnosis. ``seen`` breaks cycles: a phase already on the stack
+    contributes no root, so a fully cyclic subtree returns ``[]`` and the caller
+    reports the cycle instead of a bogus root.
+    """
+    unmet = _unmet(graph, done, phase)
+    if not unmet:
+        return [phase]  # nothing left below it: this is where the waiting ends
+    out: list[str] = []
+    for dep in unmet:
+        if dep in seen:
+            continue  # a cycle edge yields no actionable root
+        out.extend(_roots(graph, done, dep, seen | {dep}))
+    return list(dict.fromkeys(out))
+
+
+def _tree(
+    cfg: Config,
+    st: State,
+    graph: dict[str, set[str]],
+    phase: str,
+    roots: set[str],
+    seen: set[str],
+) -> Node:
+    """The blocking sub-tree under ``phase``.
+
+    Only *unmet* deps are expanded — a landed dep is shown as one satisfied leaf
+    rather than dragging its whole history in, so the tree is exactly the set of
+    phases still owed.
+    """
+    exp = _classify(cfg, phase, st, graph)
+    # A `done` node's *status* is the whole diagnosis (`fail` vs `ok`), so it goes
+    # in the label rather than hiding one level down in the detail text.
+    label = f"{DONE}:{exp.status}" if exp.reason == DONE else exp.reason
+    node = Node(phase, label, exp.detail, root=phase in roots)
+    for dep in sorted(graph.get(phase, set())):
+        if st.done.get(dep) in ledger_mod.SATISFIES_DEPS:
+            node.children.append(
+                Node(dep, _SATISFIED, f"landed (`{st.done[dep]}`)")
+            )
+        elif dep in seen:
+            node.children.append(Node(dep, _CYCLE, "already above in this tree"))
+        else:
+            node.children.append(_tree(cfg, st, graph, dep, roots, seen | {dep}))
+    return node
+
+
+# -- the `[tasks].exclude` comment ---------------------------------------
+def _exclude_comment(cfg: Config, phase: str) -> str | None:
+    """The config comment explaining why ``phase`` is excluded, if there is one.
+
+    ``exclude = ["P7"]`` on its own tells you nothing; the reason is almost always
+    written next to it as a comment, and that comment is the actual answer to
+    "why isn't P7 running". Best-effort textual scrape of the project's
+    ``.swarm.toml`` (``Config`` does not keep the file it loaded): the trailing
+    comment on the phase's own line wins, else the comment block directly above
+    the ``exclude =`` assignment.
+    """
+    path = cfg.project_dir / ".swarm.toml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.split("#")[0].strip().startswith("exclude")
+         and "=" in ln.split("#")[0]),
+        None,
+    )
+    if start is None:
+        return None
+
+    depth, end = 0, start
+    for i in range(start, len(lines)):
+        depth += lines[i].count("[") - lines[i].count("]")
+        end = i
+        if depth <= 0:  # the list closed (same line for a one-line exclude)
+            break
+    for i in range(start, end + 1):
+        pos = lines[i].find(f'"{phase}"')
+        if pos < 0:
+            pos = lines[i].find(f"'{phase}'")
+        if pos < 0:
+            continue
+        hash_at = lines[i].find("#", pos)
+        if hash_at >= 0:
+            return lines[i][hash_at + 1 :].strip() or None
+
+    above: list[str] = []
+    for i in range(start - 1, -1, -1):
+        stripped = lines[i].strip()
+        if not stripped.startswith("#"):
+            break
+        above.insert(0, stripped.lstrip("#").strip())
+    above = [ln for ln in above if ln]
+    # A real project's block covers every excluded phase at once (a typical one
+    # names three, each wrapped over several lines), so returning all of it as the
+    # answer for one phase buries that phase's own entry. Capture from the line
+    # that *begins* this phase's entry until the line that begins the next one:
+    # anchoring on the start of the line is what stops a prose cross-reference to
+    # another excluded phase ("exactly like jade-W14") from truncating the entry
+    # it appears in.
+    others = [p for p in cfg.exclude if p != phase]
+    heads = [i for i, ln in enumerate(above) if _entry_for(ln, phase)]
+    if heads:
+        mine = [above[heads[0]]]
+        for line in above[heads[0] + 1 :]:
+            if any(_entry_for(line, other) for other in others):
+                break
+            mine.append(line)
+    else:
+        mine = [ln for ln in above if phase in ln]
+    joined = " ".join(mine or above)
+    return _clip(joined) or None
+
+
+def _entry_for(line: str, phase: str) -> bool:
+    """Whether this comment line *begins* ``phase``'s entry (rather than merely
+    mentioning it), after any list bullet."""
+    return line.lstrip("#-*• \t").startswith(phase)
+
+
+def _clip(text: str, width: int = 240) -> str:
+    """A config comment long enough to need scrolling is not a one-line answer."""
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+# -- rendering ------------------------------------------------------------
+def render(exp: Explanation, show_tree: bool = False) -> str:
+    """The human answer. ``show_tree`` adds the indented dependency tree."""
+    out = [f"{exp.phase}: {exp.detail}"]
+    if exp.reason != BLOCKED:
+        return "\n".join(out)
+
+    if exp.unmet:
+        out.append(f"  unmet: {' '.join(exp.unmet)}")
+    if show_tree and exp.tree is not None:
+        out.append("")
+        out.extend(_tree_lines(exp.tree, "", True, top=True))
+        out.append("")
+    if exp.root_cause:
+        out.append(
+            f"root cause: {exp.root_cause} — {exp.root_detail}"
+        )
+        out.append("everything below waits on one phase.")
+    elif exp.roots:
+        out.append(f"root causes: {', '.join(exp.roots)}")
+    for issue in exp.issues:
+        out.append(f"ledger issue: {issue}")
+    return "\n".join(out)
+
+
+def _tree_lines(node: Node, prefix: str, last: bool, top: bool = False) -> list[str]:
+    mark = "  <- root cause" if node.root else ""
+    if top:
+        head = f"{node.phase}  [{node.state}]{mark}"
+        child_prefix = ""
+    else:
+        head = f"{prefix}{'`- ' if last else '|- '}{node.phase}  [{node.state}]{mark}"
+        child_prefix = prefix + ("   " if last else "|  ")
+    lines = [head]
+    for i, child in enumerate(node.children):
+        lines.extend(
+            _tree_lines(child, child_prefix, i == len(node.children) - 1)
+        )
+    return lines
+
+
+def _tree_phases(node: Node) -> set[str]:
+    return {node.phase}.union(*(_tree_phases(c) for c in node.children)) if node.children else {node.phase}
+
+
+def _issues_for(graph: dict[str, set[str]], phases: set[str]) -> list[str]:
+    """Structural ledger problems (cycles / unknown / self deps) that touch this
+    tree. ``validate`` reports the whole ledger; a phase-token intersection keeps
+    a large project's unrelated problems out of one ``swarm why``."""
+    out = []
+    for issue in ledger_mod.validate(graph):
+        if set(issue.replace("->", " ").split()) & phases:
+            out.append(issue)
+    return out

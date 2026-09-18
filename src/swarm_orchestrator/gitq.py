@@ -30,9 +30,12 @@ import os
 import shutil
 import subprocess
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from . import automerge
+from . import statuses
 from .config import Config
 from .logutil import Log
 
@@ -42,10 +45,10 @@ DIRTY = "dirty"
 PUSH_FAILED = "push_failed"
 
 # `swarm done` completion statuses that INTEGRATE (merge into main) rather than
-# roll back. ``needs-owner`` lands exactly like ``ok``; it differs only in that
-# the finishing worker telegrams the owner its recap (done worker-side in
-# :func:`launch.done`). ``fail`` (anything else) rolls back with no merge.
-DONE_INTEGRATE = ("ok", "needs-owner")
+# roll back. The owner-facing ones land exactly like ``ok``; they differ only in
+# that the owner gets told (done worker-side in :func:`launch.done`). ``fail``
+# (anything else) rolls back with no merge.
+DONE_INTEGRATE = statuses.INTEGRATES
 
 _GIT_TIMEOUT_S = 120.0
 _PUSH_ATTEMPTS = 5
@@ -115,6 +118,13 @@ def _branch_exists(repo: Path, branch: str) -> bool:
         _git(repo, "rev-parse", "--verify", "--quiet", branch, check=False).returncode
         == 0
     )
+
+
+def branch_exists(project_dir: Path, branch: str) -> bool:
+    """Whether ``branch`` exists in ``project_dir``. Public face of
+    :func:`_branch_exists`, for callers that must verify a phase's branch is
+    really gone (or really there) before acting on it."""
+    return _branch_exists(project_dir, branch)
 
 
 def _ref_exists(repo: Path, ref: str) -> bool:
@@ -224,46 +234,17 @@ def _wt_for(cfg: Config, repo: Path, phase: str) -> Path:
 
 
 # -- cleanup --------------------------------------------------------------
-#: Worktree removal walks the whole tree on disk, so it is IO-bound and scales
-#: with the checkout — a large dependency tree is hundreds of thousands of
-#: files. Under a loaded box (parallel builds) it can far exceed the
-#: ordinary git timeout, so it gets its own, generous one.
-_GC_TIMEOUT_S = 900.0
-
-
 def _gc(cfg: Config, repo: Path, phase: str, log: Log) -> None:
     """Remove one repo's ``swarm/<phase>`` worktree then delete its branch.
-
     Caller holds the repo lock. Uniform across umbrella and components (every
-    repo has a per-phase worktree now).
-
-    **Never raises.** This is housekeeping that runs *after* a merge has already
-    succeeded, so its failure must not fail the integration — a
-    `worktree remove` on a large repo could time out at 120 s and the merged, pushed
-    A phase could be reported to the owner as a blocked, dirty integration holding
-    the whole queue. `check=False` was not enough: a timeout raises regardless of
-    `check`. A leftover worktree is harmless and is reconciled on the next
-    `swarm up`; a blocked queue is not.
-    """
+    repo has a per-phase worktree now)."""
     branch = f"swarm/{phase}"
     wt = _wt_for(cfg, repo, phase)
-    try:
-        if wt.exists():
-            _git(
-                repo,
-                "worktree",
-                "remove",
-                "--force",
-                str(wt),
-                check=False,
-                timeout=_GC_TIMEOUT_S,
-            )
-        _git(repo, "worktree", "prune", check=False, timeout=_GC_TIMEOUT_S)
-        if _branch_exists(repo, branch):
-            _git(repo, "branch", "-D", branch, check=False)
-    except GitError as exc:
-        # Loud in the log, invisible to the queue.
-        log.line(f"WORKTREE-GC-FAILED {phase} {repo.name}: {exc}")
+    if wt.exists():
+        _git(repo, "worktree", "remove", "--force", str(wt), check=False)
+    _git(repo, "worktree", "prune", check=False)
+    if _branch_exists(repo, branch):
+        _git(repo, "branch", "-D", branch, check=False)
 
 
 def _rmtree_mirror(cfg: Config, phase: str) -> None:
@@ -416,6 +397,76 @@ def push_with_retry(repo: Path, main: str, log: Log) -> bool:
 
 
 # -- integration ----------------------------------------------------------
+def _auto_resolve(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
+    """Try to settle a failed merge mechanically. True = resolved and committed.
+
+    Runs inside the caller's per-repo flock, on the real mid-merge tree, so a
+    refusal costs nothing: the index is left exactly as the failed merge left it
+    and the resolver session takes over unchanged.
+
+    All-or-nothing on purpose. If ANY conflicted file has no configured strategy,
+    or a strategy declines (both sides edited the same record, both reordered),
+    nothing is staged and this returns False. A partial mechanical resolve would
+    hand the resolver a half-fixed tree, which is worse than handing it the
+    original.
+
+    Every conflict these campaigns produced was of exactly two shapes -- two
+    phases ticking their own adjacent one-line ledger entry, and two phases
+    prepending a dated block to a journal -- and both are settled here for free.
+    Repeated resolver sessions burn many tokens to do that.
+    """
+    strategies = getattr(cfg, "git_auto_resolve", {}) or {}
+    if not strategies:
+        return False
+    unmerged = _git(repo, "diff", "--name-only", "--diff-filter=U", check=False)
+    paths = [p for p in unmerged.stdout.splitlines() if p.strip()]
+    if not paths:
+        return False
+    staged: list[str] = []
+    for rel in paths:
+        how = automerge.strategy_for(rel, strategies)
+        if how is None:
+            log.line(f"AUTORESOLVE-SKIP {phase} {repo.name} {rel} no-strategy")
+            return False
+        stages = {}
+        for num in (1, 2, 3):  # base, ours, theirs
+            got = _git(repo, "show", f":{num}:{rel}", check=False)
+            if got.returncode != 0:
+                log.line(f"AUTORESOLVE-SKIP {phase} {repo.name} {rel} stage{num}-missing")
+                return False
+            stages[num] = got.stdout
+        merged = automerge.resolve_text(stages[1], stages[2], stages[3], how)
+        if merged is None:
+            log.line(f"AUTORESOLVE-DECLINED {phase} {repo.name} {rel} {how}")
+            return False
+        try:
+            (repo / rel).write_text(merged, encoding="utf-8")
+        except OSError as exc:
+            log.line(f"AUTORESOLVE-WRITE-FAIL {phase} {repo.name} {rel} {exc}")
+            return False
+        staged.append(rel)
+    for rel in staged:
+        _git(repo, "add", "--", rel)
+    committed = _git(repo, "commit", "--no-edit", check=False)
+    if committed.returncode != 0:
+        log.line(f"AUTORESOLVE-COMMIT-FAIL {phase} {repo.name}")
+        return False
+    # Name every file the merge touched, not just the ones repaired. The one
+    # thing a resolver session caught that no merge driver can was a file that
+    # merged CLEANLY and was thereafter semantically false; that class stays
+    # visible only if the whole merge is on the record.
+    # --diff-merges=first-parent: a merge commit lists no files under a plain
+    # --name-only, which silently emptied this line and defeated the whole point.
+    touched = _git(
+        repo, "log", "-1", "--name-only", "--format=",
+        "--diff-merges=first-parent", check=False,
+    )
+    files = " ".join(t for t in touched.stdout.split() if t)[:400]
+    log.line(f"INTEGRATE-AUTORESOLVED {phase} {repo.name} fixed={','.join(staged)}")
+    log.line(f"AUTORESOLVE-TOUCHED {phase} {repo.name} {files}")
+    return True
+
+
 def _integrate_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> str:
     """Land ``swarm/<phase>`` into ``main`` for a single repo. Serialized.
 
@@ -448,12 +499,12 @@ def _integrate_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> 
                 repo, main, f"origin/{main}"
             ) > 0:
                 base = _git(repo, "merge", "--no-edit", f"origin/{main}", check=False)
-                if base.returncode != 0:
+                if base.returncode != 0 and not _auto_resolve(cfg, repo, phase, log):
                     log.line(f"INTEGRATE-BASE-CONFLICT {phase} {repo.name}")
                     return CONFLICT
         if has_branch and _commits_ahead(repo, main, branch) > 0:
             merge = _git(repo, "merge", "--no-ff", "--no-edit", branch, check=False)
-            if merge.returncode != 0:
+            if merge.returncode != 0 and not _auto_resolve(cfg, repo, phase, log):
                 log.line(f"INTEGRATE-CONFLICT {phase} {repo.name}")
                 return CONFLICT
         if _has_remote(repo):
@@ -517,7 +568,7 @@ def sentinel_done(cfg: Config) -> dict[str, str]:
         if entry.name.startswith(".") or "." not in entry.name:
             continue
         phase, _, status = entry.name.rpartition(".")
-        if not phase or status not in ("ok", "needs-owner", "fail", "skip"):
+        if not phase or status not in statuses.ALL:
             continue
         if out.get(phase) in DONE_INTEGRATE:
             continue  # a completed build (ok/needs-owner) wins over fail/skip
@@ -540,19 +591,46 @@ def _all_swarm_phases(cfg: Config) -> set[str]:
     return phases
 
 
-def reconcile_orphans(
+@dataclass(frozen=True)
+class Held:
+    """A phase whose restart-time integration did NOT complete."""
+
+    phase: str
+    kind: str  # MERGED is impossible here: CONFLICT | DIRTY | PUSH_FAILED
+    repo: Path | None  # the repo to clear (None for PUSH_FAILED)
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    """Outcome of :func:`reconcile`: what landed, and what is still stuck."""
+
+    integrated: list[str] = field(default_factory=list)
+    held: list[Held] = field(default_factory=list)
+
+
+def reconcile(
     cfg: Config, done_phases: dict[str, str], log: Log
-) -> list[str]:
+) -> ReconcileResult:
     """Reconcile leftover ``swarm/*`` branches at ``swarm up`` (sentinel-driven).
 
     A phase already recorded done is cleaned up. A phase with a completed sentinel
     (``ok``/``needs-owner`` — worker finished, supervisor died before integrating)
     has its integration completed. A leftover branch with **no** completed sentinel
     was interrupted mid-build — discarded and left NOT done so the master rebuilds
-    it, never declared complete off branch topology. Returns the phases integrated.
+    it, never declared complete off branch topology.
+
+    Reports the HELD phases as well as the integrated ones, because they are not
+    the same thing and the caller cannot tell them apart from the integrated list
+    alone. ``swarm up`` seeds ``done`` from the sentinels regardless of whether the
+    integration actually completed, so a phase held here was recorded done while
+    its branch was still unmerged — with nothing blocked, no resolver and no ping.
+    The NEXT ``swarm up`` then sees it in ``done_phases``, takes the branch below,
+    and ``discard``s the completed work outright. Surfacing the hold is what lets
+    the caller block/park/notify instead of silently destroying it.
     """
     sentinels = sentinel_done(cfg)
     integrated: list[str] = []
+    held: list[Held] = []
     for phase in sorted(_all_swarm_phases(cfg)):
         if phase in done_phases:
             discard(cfg, phase, log)
@@ -563,8 +641,16 @@ def reconcile_orphans(
                 integrated.append(phase)
                 log.line(f"RECONCILE-INTEGRATED {phase}")
             else:
-                log.line(f"RECONCILE-HELD {phase} {result}")
+                repo = blocked_repo(cfg, phase) if result in (CONFLICT, DIRTY) else None
+                held.append(Held(phase=phase, kind=result, repo=repo))
+                log.line(f"RECONCILE-HELD {phase} {result} repo={repo}")
         else:
             discard(cfg, phase, log)
             log.line(f"RECONCILE-DISCARD {phase} interrupted")
-    return integrated
+    return ReconcileResult(integrated=integrated, held=held)
+
+
+def reconcile_orphans(cfg: Config, done_phases: dict[str, str], log: Log) -> list[str]:
+    """The integrated phases only — :func:`reconcile`'s original return shape,
+    kept for callers that do not (yet) act on held phases."""
+    return reconcile(cfg, done_phases, log).integrated

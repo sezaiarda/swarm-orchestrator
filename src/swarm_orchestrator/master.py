@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import launch as launch_mod
 from . import ledger as ledger_mod
-from . import telegram, tmux
+from . import resolver, telegram, tmux
 from .config import Config, ready_needle
 from .logutil import Log
 from .state import State
@@ -110,9 +110,25 @@ class Master:
         self.pane: str | None = None
 
     def is_alive(self) -> bool:
+        """Is a master actually running right now?
+
+        Under tmux this asks the pane, rather than trusting that we once recorded
+        an id for it. ``self.pane is not None`` stays true forever after the first
+        spawn, so a master whose pane has since died reported alive and every
+        nudge was typed into nothing — and callers that skip work when a master is
+        alive (the relaunch path, the settled-run finish) skipped it silently.
+        A vanished pane makes ``display-message`` exit non-zero; a pane whose
+        command exited reports ``pane_dead`` = 1 (we set ``remain-on-exit on``, so
+        it lingers visibly instead of disappearing).
+        """
         if self.cfg.driver == "bare":
             return self.proc is not None and self.proc.poll() is None
-        return self.pane is not None
+        if self.pane is None:
+            return False
+        probe = tmux.run(
+            ["display-message", "-p", "-t", self.pane, "#{pane_dead}"], check=False
+        )
+        return probe.returncode == 0 and probe.stdout.strip() != "1"
 
     def spawn(self, kind: str, master_pane: str | None = None) -> bool:
         """Start a fresh master (``kind`` is ``init`` or ``step``).
@@ -169,18 +185,15 @@ class Master:
         returns False on timeout instead of blindly typing into a not-ready pane.
         The fake-master override never reaches this path.
         """
-        prompt_file = (
-            Path(__file__).resolve().parent.parent.parent
-            / "prompts"
-            / f"{kind}_master.md"
-        )
+        prompt_file = resolver.prompt_path(f"{kind}_master.md")
         if not prompt_file.is_file():
             self.log.line(f"ACTION prompt-missing {prompt_file}")
             return False
         if not launch_mod.await_ready(self.cfg, pane, self.log):
             self.log.line("ACTION master-ready-timeout")
-            telegram.notify_event(
-                "master-not-ready", f"master ({kind}) never became ready", self.log
+            telegram.notify(
+                self.cfg.telegram_notify,
+                f"swarm: master ({kind}) never became ready -- check the master pane",
             )
             return False
         line = (
@@ -189,8 +202,9 @@ class Master:
         )
         if not tmux.send_submit(pane, line):
             self.log.line("ACTION master-submit-lost")
-            telegram.notify_event(
-                "master-submit-lost", f"master ({kind}) prompt would not submit", self.log
+            telegram.notify(
+                self.cfg.telegram_notify,
+                f"swarm: master ({kind}) prompt would not submit -- check the master pane",
             )
             return False
         return True

@@ -41,6 +41,7 @@ def _cfg(monkeypatch, tmp_path: Path, tag: str):
     monkeypatch.setenv("SWARM_SESSION", f"swarm-test-{os.getpid()}-{tag}")
     monkeypatch.setenv("SWARM_SLUG", "tmuxtest")
     monkeypatch.setenv("FAKE_WORKER_SLEEP", "1")
+    monkeypatch.setenv("SWARM_TUI_AUTOSTART", "0")
     for leak in ("SWARM_MASTER_CMD", "SWARM_WORKER_CMD", "SWARM_READY_MARKER"):
         monkeypatch.delenv(leak, raising=False)
     return load(project_dir=str(project))
@@ -52,8 +53,19 @@ def test_session_setup_creates_four_tagged_slots(monkeypatch, tmp_path):
         session_mod.setup(cfg)
         assert tmux.session_exists(cfg.session)
         st = state_mod.read(cfg)
-        assert set(st.windows) == {"master", "workers"}
+        assert set(st.windows) == {"dash", "master", "operator", "workers"}
         assert st.master_pane
+        assert st.dash_pane
+        assert st.operator_pane
+        # Window ORDER is part of the contract the owner works in every day:
+        # 0 = dash (TUI), 1 = supervisor (the LLM master's pane), 2 = operator
+        # (idle until a hand-off opens a session in it), 3 = workers.
+        names = tmux.run(
+            ["list-windows", "-t", cfg.session, "-F", "#{window_index} #{window_name}"]
+        ).stdout.split("\n")
+        assert [n for n in names if n][:4] == [
+            "0 dash", "1 supervisor", "2 operator", "3 workers"
+        ]
         pairs = tmux.list_panes_with_slot(st.windows["workers"])
         assert len(pairs) == 4
         assert sorted(tag for _, tag in pairs) == ["0", "1", "2", "3"]

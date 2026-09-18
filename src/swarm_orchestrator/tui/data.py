@@ -1,0 +1,1178 @@
+"""Everything the dashboard shows, derived from disk by pure functions.
+
+The rendering layer (:mod:`swarm_orchestrator.tui.app`) is deliberately dumb: it
+polls the functions here and paints what comes back. That split exists because
+the dashboard reads *seven* independent sources — ``state.json``, the supervisor
+log, the ``done/`` sentinels, per-phase recaps, ``notifications.jsonl``, the
+ledger, and live ``claude``/``tmux`` probes — every one of which can be missing,
+half-written, or written by a newer version of the code than this file. A panel
+that raises takes the whole always-on cockpit down with it, so **no function in
+this module raises on bad input**; each degrades to an empty/"no data" value and
+the caller renders that. It is also the only part worth unit-testing, and it is,
+in ``tests/test_tui.py``.
+
+Two forward-compatibility decisions are worth spelling out:
+
+* State is normalised to a plain ``dict`` (see :func:`read_state`) rather than
+  passed around as a :class:`~swarm_orchestrator.state.State`. Fields are being
+  added to ``Slot``/``State`` concurrently, and ``State.from_dict`` does
+  ``Slot(**s)`` — a state file written by a build that knows ``Slot.retiring``
+  would raise ``TypeError`` in a dashboard that doesn't. A dict absorbs new keys.
+* ``integ_queue`` is read through :func:`normalize_queue`, which accepts both the
+  historic ``[phase]`` shape and the ``(phase, status)`` pair shape.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from statistics import median
+
+from .. import ledger as ledger_mod
+from .. import opqueue
+from .. import statuses
+from ..logutil import parse_ts
+
+# Same phase-token shape the ledger accepts, so a positional token is only read
+# as a phase when it could actually be one.
+_PHASE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]*$")
+
+DONE_STATUSES = statuses.ALL
+#: Statuses that mean the worker *finished building*; they win over a later
+#: ``fail``/``skip`` sentinel for the same phase (mirrors ``gitq.DONE_INTEGRATE``).
+COMPLETED_STATUSES = statuses.INTEGRATES
+
+
+# -- log events -----------------------------------------------------------
+@dataclass(frozen=True)
+class Event:
+    """One parsed supervisor-log line.
+
+    ``phase`` is a *positional guess*: the first token after the verb, when it
+    looks like a phase id. That is exact for the lines that carry one
+    (``LAUNCH P1 slot=0``, ``EVENT done P1 ok …``) and meaningless noise for the
+    prose ones (``MASTER-IDLE paused — holding``). Consumers filter by ``kind``
+    first, so a phantom phase on an unrelated kind is never read.
+    """
+
+    ts: float | None
+    kind: str
+    phase: str | None
+    status: str | None
+    fields: dict[str, str]
+    raw: str
+
+
+def parse_event(line: str) -> Event:
+    """Parse one log line into an :class:`Event` (never raises).
+
+    ``EVENT`` is a container verb — ``EVENT done …``, ``EVENT waiting …`` — so it
+    is unwrapped and the *inner* verb becomes the kind. Everything else uses its
+    own first token (``LAUNCH``, ``PARK``, ``INTEGRATE-MERGED``), lowercased.
+    ``k=v`` tokens are collected into ``fields`` generically, so a line that
+    grows a new ``k=v`` needs no change here.
+    """
+    ts, message = parse_ts(line)
+    tokens = message.split()
+    if not tokens:
+        return Event(ts, "", None, None, {}, message)
+    kind, rest = tokens[0], tokens[1:]
+    if kind == "EVENT" and rest:
+        kind, rest = rest[0], rest[1:]
+    kind = kind.lower()
+    phase = rest[0] if rest and _PHASE_RE.match(rest[0]) else None
+    fields = {}
+    for tok in rest:
+        if "=" in tok:
+            key, _, value = tok.partition("=")
+            fields.setdefault(key, value)
+    status = None
+    if kind == "done" and len(rest) > 1 and rest[1] in DONE_STATUSES:
+        status = rest[1]
+    return Event(ts, kind, phase, status, fields, message)
+
+
+def parse_events(text: str) -> list[Event]:
+    """Parse a whole log body. Blank lines are dropped."""
+    return [parse_event(ln) for ln in text.splitlines() if ln.strip()]
+
+
+class LogTail:
+    """Incremental reader for one append-only log.
+
+    The supervisor log is the history source for every graph, and re-reading it
+    on each 1s tick is exactly the "redraw everything on a timer" cost the
+    dashboard is supposed to avoid. This keeps a byte offset and only decodes
+    what was appended. A file that shrank (truncated, rotated, or a fresh state
+    dir under the same path) resets the offset instead of returning garbage, and
+    a partial trailing line is left unconsumed until its newline arrives.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.events: list[Event] = []
+        self._offset = 0
+
+    def poll(self) -> list[Event]:
+        """Decode whatever was appended since the last call; returns the new events."""
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return []
+        if size < self._offset:
+            self._offset = 0
+            self.events = []
+        if size == self._offset:
+            return []
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(self._offset)
+                chunk = fh.read()
+        except OSError:
+            return []
+        cut = chunk.rfind("\n")
+        if cut < 0:
+            return []  # no complete line yet — leave the offset where it was
+        complete = chunk[: cut + 1]
+        self._offset += len(complete.encode("utf-8", errors="replace"))
+        fresh = parse_events(complete)
+        self.events.extend(fresh)
+        return fresh
+
+
+# -- state ----------------------------------------------------------------
+def read_state(cfg) -> dict | None:
+    """The run's state as a plain dict, or ``None`` when there is no run yet.
+
+    Goes through ``state_mod.read`` (which takes the shared flock) so a read can
+    never land mid-write, but falls back to a raw ``json.load`` if the typed load
+    fails — a state file written by a build that knows a ``Slot`` field this one
+    doesn't would otherwise ``TypeError`` and blank the whole dashboard. The
+    file is swapped in with ``os.replace``, so the unlocked fallback still sees a
+    whole snapshot.
+
+    A missing state file short-circuits to ``None`` rather than going through
+    ``state_mod.read``: that call would ``ensure_dirs()`` (the dashboard is
+    read-only and must not create a state dir for a project that never ran) and
+    then hand back a *synthetic* fresh state, so a swarm that has never started
+    would render as a healthy run with N idle slots.
+    """
+    from .. import state as state_mod  # deferred: keeps import cost off `swarm --help`
+
+    if not Path(cfg.state_path).is_file():
+        return None
+    try:
+        return state_mod.read(cfg).to_dict()
+    except Exception:  # noqa: BLE001 - any failure degrades to the raw read
+        pass
+    try:
+        return json.loads(Path(cfg.state_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def normalize_queue(raw, statuses: dict | None = None) -> list[tuple[str, str | None]]:
+    """``integ_queue`` as ``(phase, status)`` pairs, whatever shape it was stored in.
+
+    Three shapes are in play across the versions this dashboard has to read: the
+    historic plain ``["P1"]``, an inline pair (``["P1", "ok"]`` /
+    ``{"phase": "P1", "status": "ok"}``), and the shape that actually landed — a
+    plain list beside a sibling ``integ_status`` map, passed here as ``statuses``.
+    An inline status wins over the side map; a phase in neither reads as ``ok``,
+    which is what the queue meant before statuses existed.
+    """
+    out: list[tuple[str, str | None]] = []
+    if not isinstance(raw, (list, tuple)):
+        return out
+    statuses = statuses if isinstance(statuses, dict) else {}
+    for item in raw:
+        phase: str | None = None
+        status: str | None = None
+        if isinstance(item, str):
+            phase = item
+        elif isinstance(item, dict):
+            phase = item.get("phase") if isinstance(item.get("phase"), str) else None
+            status = _as_str(item.get("status"))
+        elif isinstance(item, (list, tuple)) and item:
+            phase = item[0] if isinstance(item[0], str) else None
+            status = _as_str(item[1]) if len(item) > 1 else None
+        if phase is not None:
+            out.append((phase, status or _as_str(statuses.get(phase)) or "ok"))
+    return out
+
+
+def _as_str(value) -> str | None:
+    return value if isinstance(value, str) else (None if value is None else str(value))
+
+
+@dataclass(frozen=True)
+class SlotView:
+    """One worker slot, joined with everything known about what is in it."""
+
+    id: int
+    busy: bool
+    phase: str | None
+    pane_id: str | None
+    branch: str | None
+    worktree: str | None
+    retiring: bool = False
+    started_at: float | None = None
+    last_event_at: float | None = None
+    live_status: str = "unknown"  # busy | idle | waiting | gone | unknown
+    waiting_for: str | None = None
+    context_pct: float | None = None
+    title: str | None = None
+
+    @property
+    def elapsed_s(self) -> float | None:
+        return None if self.started_at is None else max(0.0, time.time() - self.started_at)
+
+
+@dataclass(frozen=True)
+class Blocker:
+    """Something that will sit forever until the owner acts.
+
+    The single most important thing on the dashboard: today the owner only learns
+    about one via a telegram that may have been silently dropped, and a parked
+    worker keeps the whole run ``pending`` until it is answered.
+    """
+
+    phase: str
+    #: waiting | parked | integ | needs-owner | operator-abandoned. Note what is
+    #: NOT here: a live ``operator`` hand-off. It never needs the owner — that is
+    #: the whole point of the status — so it has its own list on the snapshot and
+    #: only reaches this one once the queue has given up on it.
+    kind: str
+    question: str
+    since: float | None = None
+    deadline: float | None = None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class Progress:
+    """Phase-graph accounting for the overview bar."""
+
+    total: int = 0
+    done: int = 0
+    failed: int = 0
+    running: int = 0
+    ready: int = 0
+    blocked: int = 0
+    excluded: int = 0
+    next_up: list[str] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
+
+    @property
+    def pct(self) -> float:
+        return 0.0 if self.total <= 0 else 100.0 * self.done / self.total
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """One coherent read of the whole run, ready to render."""
+
+    ok: bool = False
+    reason: str = "no run yet"
+    slots: list[SlotView] = field(default_factory=list)
+    done: dict[str, str] = field(default_factory=dict)
+    paused: bool = False
+    finished: bool = False
+    master_alive: bool = False
+    supervisor_pid: int | None = None
+    supervisor_alive: bool = False
+    integ_queue: list[tuple[str, str | None]] = field(default_factory=list)
+    integ_blocked: str | None = None
+    integ_blocked_kind: str | None = None
+    integ_blocked_repo: str | None = None
+    blockers: list[Blocker] = field(default_factory=list)
+    #: The operator hand-off queue, oldest first — work the swarm owes itself.
+    operator: list[opqueue.Item] = field(default_factory=list)
+    progress: Progress = field(default_factory=Progress)
+    windows: dict[str, str] = field(default_factory=dict)
+    layout: str | None = None
+    started_at: float | None = None
+    # Epoch of the last event the supervisor handled. "Nothing has happened for
+    # a long time" is the failure this dashboard exists to make visible, and this is
+    # the only field that can say it — a live-looking slot grid says nothing.
+    last_event_at: float | None = None
+
+    @property
+    def uptime_s(self) -> float | None:
+        return None if self.started_at is None else max(0.0, time.time() - self.started_at)
+
+
+def pid_alive(pid: int | None) -> bool:
+    """Whether ``pid`` is a live process (``None``/0 is never alive)."""
+    if not pid:
+        return False
+    try:
+        import os
+
+        os.kill(int(pid), 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def load_graph(cfg) -> dict[str, set[str]]:
+    """The phase graph, or an empty one when the ledger is missing/unparseable."""
+    try:
+        return ledger_mod.load(Path(cfg.project_dir) / cfg.ledger)
+    except Exception:  # noqa: BLE001 - a broken ledger must not blank the dashboard
+        return {}
+
+
+def phase_progress(
+    graph: dict[str, set[str]],
+    done: dict[str, str],
+    busy_phases: set[str],
+    excluded: set[str],
+) -> Progress:
+    """Count the phase graph into done/running/ready/blocked buckets.
+
+    ``blocked`` is the residual — phases that are neither finished, in flight,
+    excluded, nor launchable — which is exactly the set an owner glancing at the
+    bar wants to see shrink. ``ready``/``next_up`` reuse
+    :func:`swarm_orchestrator.ledger.ready` so the dashboard can never disagree
+    with what the master will actually launch.
+    """
+    total = len(graph)
+    ready = ledger_mod.ready(graph, done, busy_phases, excluded) if graph else []
+    running = len([p for p in busy_phases if p in graph]) if graph else len(busy_phases)
+    failed = sum(1 for status in done.values() if status == "fail")
+    excluded_n = len([p for p in excluded if p in graph])
+    done_n = len([p for p in done if p in graph]) if graph else len(done)
+    blocked = max(0, total - done_n - running - len(ready) - excluded_n)
+    return Progress(
+        total=total,
+        done=done_n,
+        failed=failed,
+        running=running,
+        ready=len(ready),
+        blocked=blocked,
+        excluded=excluded_n,
+        next_up=ready[:6],
+        issues=ledger_mod.validate(graph) if graph else [],
+    )
+
+
+def build_snapshot(
+    cfg,
+    state: dict | None,
+    graph: dict[str, set[str]] | None = None,
+    launch_times: dict[str, float] | None = None,
+    questions: dict[str, str] | None = None,
+    started_at: float | None = None,
+    operator: list | None = None,
+) -> Snapshot:
+    """Join state + ledger + log-derived timings into one render-ready snapshot.
+
+    ``launch_times``/``questions`` are injected rather than read here so this stays
+    pure and testable: the caller owns the incremental log tail and the
+    notification index, this owns the joining rules.
+    """
+    if not state:
+        return Snapshot(ok=False, reason="no state yet — has `swarm up` run?")
+    graph = graph if graph is not None else {}
+    launch_times = launch_times or {}
+    questions = questions or {}
+    operator = list(operator or [])
+
+    slots: list[SlotView] = []
+    for raw in state.get("slots") or []:
+        if not isinstance(raw, dict):
+            continue
+        phase = raw.get("phase")
+        slots.append(
+            SlotView(
+                id=int(raw.get("id", len(slots))),
+                busy=bool(raw.get("busy")),
+                phase=phase,
+                pane_id=raw.get("pane_id"),
+                branch=raw.get("branch"),
+                worktree=raw.get("worktree"),
+                retiring=bool(raw.get("retiring", False)),
+                started_at=launch_times.get(phase) if phase else None,
+                last_event_at=_as_float(raw.get("last_event_at")),
+            )
+        )
+
+    done = {k: str(v) for k, v in (state.get("done") or {}).items()}
+    waiting = state.get("waiting") or {}
+    parked = list(state.get("parked") or [])
+    busy_phases = {s.phase for s in slots if s.busy and s.phase}
+    in_flight = busy_phases | set(parked) | {p for p in waiting}
+
+    blockers: list[Blocker] = []
+    for phase, deadline in sorted(waiting.items()):
+        blockers.append(
+            Blocker(
+                phase=phase,
+                kind="waiting",
+                question=questions.get(phase, ""),
+                since=launch_times.get(phase),
+                deadline=_as_float(deadline),
+            )
+        )
+    for phase in parked:
+        blockers.append(
+            Blocker(
+                phase=phase,
+                kind="parked",
+                question=questions.get(phase, ""),
+                since=launch_times.get(phase),
+                detail="off-grid in its own window — blocks finish until answered",
+            )
+        )
+    blocked_phase = state.get("integ_blocked")
+    if blocked_phase:
+        kind = state.get("integ_blocked_kind") or "conflict"
+        repo = state.get("integ_blocked_repo") or "?"
+        blockers.append(
+            Blocker(
+                phase=str(blocked_phase),
+                kind="integ",
+                question=f"merge {kind} in {repo} — the whole merge queue is held",
+                detail=f"`swarm resolved {blocked_phase}` releases it",
+            )
+        )
+    # The retired spelling only, and unconditionally: an older run can still hold
+    # `needs-owner` finishes, and they genuinely still need them. Its successor
+    # `operator` is deliberately absent — it hands its action to a session, so
+    # listing it here would refill "needs you" with the exact thing that status
+    # exists to keep out of it.
+    for phase, status in sorted(done.items()):
+        if status == statuses.NEEDS_OWNER:
+            blockers.append(
+                Blocker(phase=phase, kind=statuses.NEEDS_OWNER,
+                        question=questions.get(phase, ""))
+            )
+    # A terminal hand-off is the one case that does reach the owner, and the two
+    # ways of getting there read very differently to a human: a session asked
+    # them a question, or the queue tried MAX_ATTEMPTS times and gave up.
+    for item in operator:
+        if item.state == opqueue.ABANDONED:
+            blockers.append(
+                Blocker(
+                    phase=item.phase,
+                    kind="operator-ask" if item.asked else "operator-abandoned",
+                    question=item.last_error if item.asked else item.note,
+                    since=item.queued_at or None,
+                    detail=item.note if item.asked
+                    else (item.last_error or "the operator queue gave up on it"),
+                )
+            )
+
+    pid = state.get("supervisor_pid")
+    return Snapshot(
+        ok=True,
+        reason="",
+        slots=slots,
+        done=done,
+        paused=bool(state.get("paused")),
+        finished=bool(state.get("finished")),
+        master_alive=bool(state.get("master_alive")),
+        supervisor_pid=pid if isinstance(pid, int) else None,
+        supervisor_alive=pid_alive(pid),
+        integ_queue=normalize_queue(state.get("integ_queue"), state.get("integ_status")),
+        integ_blocked=_as_str(state.get("integ_blocked")),
+        integ_blocked_kind=_as_str(state.get("integ_blocked_kind")),
+        integ_blocked_repo=_as_str(state.get("integ_blocked_repo")),
+        blockers=blockers,
+        operator=operator,
+        progress=phase_progress(graph, done, in_flight, set(getattr(cfg, "exclude", []) or [])),
+        windows=dict(state.get("windows") or {}),
+        layout=_as_str(state.get("layout")),
+        started_at=started_at,
+        last_event_at=_as_float(state.get("last_event_at")) or None,
+    )
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# -- notifications --------------------------------------------------------
+@dataclass(frozen=True)
+class Notification:
+    """One line of ``notifications.jsonl`` — why the owner's phone buzzed."""
+
+    ts: float | None
+    kind: str
+    phase: str | None
+    source: str
+    text: str
+    delivered: bool
+    error: str
+    raw: dict = field(default_factory=dict)
+
+
+def parse_notification(line: str) -> Notification | None:
+    """One JSONL line, or ``None`` if it isn't a usable object.
+
+    The file is appended to by a live process, so the last line can be a partial
+    write; a half-object simply drops instead of poisoning the table.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    return Notification(
+        ts=coerce_ts(obj.get("ts")),
+        kind=str(obj.get("kind") or ""),
+        phase=_as_str(obj.get("phase")),
+        source=str(obj.get("source") or ""),
+        text=str(obj.get("text") or obj.get("message") or ""),
+        # Absent `delivered` means "not recorded", which is closer to a failure
+        # than a success — never claim a ping landed when nothing said it did.
+        delivered=bool(obj.get("delivered")),
+        error=str(obj.get("error") or ""),
+        raw=obj,
+    )
+
+
+def load_notifications(path: Path, limit: int | None = None) -> list[Notification]:
+    """Parse ``notifications.jsonl`` in file order. Missing file ⇒ ``[]``."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out = [n for n in (parse_notification(ln) for ln in text.splitlines()) if n]
+    return out[-limit:] if limit else out
+
+
+def coerce_ts(value) -> float | None:
+    """Epoch seconds from a float, an int, or an ISO-8601 string. ``None`` if neither.
+
+    The notification writer is a sibling agent's code and may settle on either an
+    epoch or an ISO stamp; accepting both costs three lines and avoids a whole
+    column reading ``—``.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        raw = value.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(raw).timestamp()
+        except ValueError:
+            try:
+                return float(raw)
+            except ValueError:
+                return None
+    return None
+
+
+def question_index(notifications: list[Notification], sentinels: dict) -> dict[str, str]:
+    """Best known "what is this phase asking me?" text, per phase.
+
+    ``swarm waiting`` telegrams the worker's question but deliberately does NOT
+    put it in state or over the FIFO, so the notification log is the only place
+    the text survives. The completion sentinel's note is the fallback for a
+    ``needs-owner`` finish. Later notifications win — a worker may ask twice.
+    """
+    out: dict[str, str] = {}
+    for phase, sentinel in sentinels.items():
+        if sentinel.status == "needs-owner" and sentinel.note:
+            out[phase] = sentinel.note
+    for note in notifications:
+        if note.phase and note.text:
+            out[note.phase] = note.text
+    return out
+
+
+# -- recaps + sentinels ---------------------------------------------------
+@dataclass(frozen=True)
+class Recap:
+    """A phase's generated recap (``recaps/<phase>.json``)."""
+
+    phase: str
+    status: str = ""
+    summary: str = ""
+    raw: str = ""
+    ts: float | None = None
+    source: str = ""
+
+
+def load_recap(recap_dir: Path, phase: str) -> Recap | None:
+    """One phase's recap, or ``None`` when the recap feature hasn't written it."""
+    try:
+        obj = json.loads((Path(recap_dir) / f"{phase}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    return Recap(
+        phase=str(obj.get("phase") or phase),
+        status=str(obj.get("status") or ""),
+        summary=str(obj.get("summary") or ""),
+        raw=str(obj.get("raw") or ""),
+        ts=coerce_ts(obj.get("ts")),
+        source=str(obj.get("source") or ""),
+    )
+
+
+def load_recaps(recap_dir: Path) -> dict[str, Recap]:
+    """Every recap on disk, keyed by phase. Missing directory ⇒ ``{}``."""
+    out: dict[str, Recap] = {}
+    try:
+        entries = sorted(Path(recap_dir).glob("*.json"))
+    except OSError:
+        return out
+    for entry in entries:
+        recap = load_recap(entry.parent, entry.stem)
+        if recap is not None:
+            out[recap.phase] = recap
+    return out
+
+
+@dataclass(frozen=True)
+class Sentinel:
+    """A ``done/<phase>.<status>`` file: the worker's own recap of its run.
+
+    Nothing in the codebase had ever read these back — they existed only so a
+    restart could tell a finished phase from an interrupted one. The note body is
+    the worker's own words about what it did, which is exactly what the History
+    tab wants.
+    """
+
+    phase: str
+    status: str
+    note: str = ""
+    mtime: float | None = None
+
+
+def parse_sentinel(name: str, body: str, mtime: float | None = None) -> Sentinel | None:
+    """Decode one sentinel file. ``None`` if the name isn't ``<phase>.<status>``."""
+    phase, _, status = name.rpartition(".")
+    if not phase or status not in DONE_STATUSES:
+        return None
+    text = body.strip()
+    prefix = f"{phase} {status}"
+    if text.startswith(prefix):
+        text = text[len(prefix) :].strip()
+    return Sentinel(phase=phase, status=status, note=text, mtime=mtime)
+
+
+def load_sentinels(done_dir: Path) -> dict[str, Sentinel]:
+    """Every completion sentinel, keyed by phase.
+
+    A phase can hold several (a ``fail`` attempt then an ``ok`` one); the same
+    precedence ``gitq.sentinel_done`` uses applies — a completed build wins over
+    a ``fail``/``skip``, and among equals the newest file wins.
+    """
+    out: dict[str, Sentinel] = {}
+    try:
+        entries = sorted(Path(done_dir).iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_file():
+                continue
+            body = entry.read_text(encoding="utf-8", errors="replace")
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        sentinel = parse_sentinel(entry.name, body, mtime)
+        if sentinel is None:
+            continue
+        prior = out.get(sentinel.phase)
+        if prior is not None:
+            if prior.status in COMPLETED_STATUSES and sentinel.status not in COMPLETED_STATUSES:
+                continue
+            if (prior.mtime or 0) > (sentinel.mtime or 0) and (
+                prior.status in COMPLETED_STATUSES or sentinel.status not in COMPLETED_STATUSES
+            ):
+                continue
+        out[sentinel.phase] = sentinel
+    return out
+
+
+def load_attempts(done_dir: Path, phase: str) -> list[dict]:
+    """A phase's full attempt history from ``done/<phase>.jsonl`` (``[]`` if absent)."""
+    try:
+        text = (Path(done_dir) / f"{phase}.jsonl").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+# -- worker notes ---------------------------------------------------------
+@dataclass(frozen=True)
+class Note:
+    """One judgement call a worker recorded without pinging anyone.
+
+    ``swarm note`` is the swarm's third register: too small to stop the world
+    for, too important to bury in a recap. The dashboard is its intended reader —
+    a phase that quietly made six unilateral decisions looks identical to a clean
+    one everywhere else.
+    """
+
+    phase: str
+    kind: str = "decision"  # decision | assumption | risk
+    text: str = ""
+    ts: float | None = None
+
+
+def load_notes(notes_dir: Path, phase: str) -> list[Note]:
+    """One phase's notes, oldest first. Missing/torn files yield what parsed."""
+    try:
+        text = (Path(notes_dir) / f"{phase}.jsonl").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[Note] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue  # a torn final line costs that line, not the file
+        if not isinstance(obj, dict):
+            continue
+        out.append(
+            Note(
+                phase=str(obj.get("phase") or phase),
+                kind=str(obj.get("kind") or "decision"),
+                text=str(obj.get("text") or ""),
+                ts=coerce_ts(obj.get("ts")),
+            )
+        )
+    return out
+
+
+def load_all_notes(notes_dir: Path) -> dict[str, list[Note]]:
+    """Every phase's notes, keyed by phase. Absent directory yields ``{}``."""
+    out: dict[str, list[Note]] = {}
+    try:
+        entries = sorted(Path(notes_dir).glob("*.jsonl"))
+    except OSError:
+        return out
+    for entry in entries:
+        notes = load_notes(entry.parent, entry.stem)
+        if notes:
+            out[entry.stem] = notes
+    return out
+
+
+# -- history --------------------------------------------------------------
+@dataclass(frozen=True)
+class PhaseRun:
+    """One attempt at one phase, joined across the log, sentinel and recap."""
+
+    phase: str
+    status: str | None = None
+    started_at: float | None = None
+    ended_at: float | None = None
+    summary: str = ""
+    note: str = ""
+    parked: bool = False
+    slot: str | None = None
+    attempts: int = 0
+    notes: int = 0
+
+    @property
+    def duration_s(self) -> float | None:
+        if self.started_at is None:
+            return None
+        end = self.ended_at if self.ended_at is not None else time.time()
+        return max(0.0, end - self.started_at)
+
+    @property
+    def running(self) -> bool:
+        return self.started_at is not None and self.ended_at is None
+
+    def matches(self, needle: str) -> bool:
+        """Whether a `/` search hits this run (case-insensitive, any field)."""
+        if not needle:
+            return True
+        low = needle.lower()
+        return any(
+            low in (value or "").lower()
+            for value in (self.phase, self.status, self.summary, self.note)
+        )
+
+
+def build_history(
+    events: list[Event],
+    sentinels: dict[str, Sentinel] | None = None,
+    recaps: dict[str, Recap] | None = None,
+    done_dir: Path | None = None,
+    notes: dict[str, list[Note]] | None = None,
+) -> list[PhaseRun]:
+    """Every phase run ever seen, newest first.
+
+    Runs are paired off the log (``LAUNCH`` opens one, ``EVENT done`` closes it),
+    which naturally handles a phase that was retried: each launch opens a fresh
+    run. A phase whose launch has rotated out of the log — or that only ever
+    produced a sentinel — still appears, with whatever times are known. The recap
+    summary and the sentinel note attach to the *last* run of each phase, since
+    both are single-slot per phase on disk.
+    """
+    sentinels = sentinels or {}
+    recaps = recaps or {}
+    ordered = sorted(events, key=lambda e: (e.ts is None, e.ts or 0.0))
+    open_runs: dict[str, dict] = {}
+    runs: list[dict] = []
+    for ev in ordered:
+        if ev.kind in ("launch", "claim") and ev.phase:
+            if ev.kind == "claim" and ev.phase in open_runs:
+                continue  # CLAIM then LAUNCH is one run, not two
+            open_runs[ev.phase] = {
+                "phase": ev.phase,
+                "started_at": ev.ts,
+                "slot": ev.fields.get("slot"),
+            }
+        elif ev.kind == "done" and ev.phase:
+            run = open_runs.pop(ev.phase, {"phase": ev.phase, "started_at": None, "slot": None})
+            run["ended_at"] = ev.ts
+            run["status"] = ev.status
+            run["parked"] = ev.fields.get("parked", "").lower() == "true"
+            runs.append(run)
+    runs.extend(open_runs.values())
+
+    seen = {r["phase"] for r in runs}
+    for phase, sentinel in sentinels.items():
+        if phase not in seen:
+            runs.append(
+                {
+                    "phase": phase,
+                    "started_at": None,
+                    "ended_at": sentinel.mtime,
+                    "status": sentinel.status,
+                    "slot": None,
+                }
+            )
+
+    last_index: dict[str, int] = {}
+    for idx, run in enumerate(runs):
+        last_index[run["phase"]] = idx
+
+    out: list[PhaseRun] = []
+    for idx, run in enumerate(runs):
+        phase = run["phase"]
+        is_last = last_index.get(phase) == idx
+        sentinel = sentinels.get(phase) if is_last else None
+        recap = recaps.get(phase) if is_last else None
+        out.append(
+            PhaseRun(
+                phase=phase,
+                # The SENTINEL wins over the log event, not the other way round.
+                # `EVENT done <phase> ok` is not trustworthy as a status: the
+                # merge queue used to hardcode "ok" when advancing an integrated
+                # phase, so every needs-owner run in an existing log reads as ok
+                # (all of them did). The sentinel filename is what the
+                # worker itself wrote and is the durable record every other
+                # consumer treats as authoritative.
+                status=(sentinel.status if sentinel else None) or run.get("status"),
+                started_at=run.get("started_at"),
+                ended_at=run.get("ended_at"),
+                summary=recap.summary if recap else "",
+                note=sentinel.note if sentinel else "",
+                parked=bool(run.get("parked")),
+                slot=run.get("slot"),
+                attempts=len(load_attempts(done_dir, phase)) if (done_dir and is_last) else 0,
+                notes=len((notes or {}).get(phase, ())) if is_last else 0,
+            )
+        )
+    out.sort(key=lambda r: (r.ended_at or r.started_at or 0.0), reverse=True)
+    return out
+
+
+def launch_times(events: list[Event]) -> dict[str, float]:
+    """Most recent launch timestamp per phase — the basis for every "elapsed"."""
+    out: dict[str, float] = {}
+    for ev in events:
+        if ev.kind in ("launch", "claim") and ev.phase and ev.ts is not None:
+            out[ev.phase] = ev.ts
+    return out
+
+
+def run_started_at(events: list[Event]) -> float | None:
+    """When the current supervisor came up — the header's uptime clock."""
+    for ev in reversed(events):
+        if ev.kind == "supervisor-start" and ev.ts is not None:
+            return ev.ts
+    return None
+
+
+# -- graph series ---------------------------------------------------------
+@dataclass(frozen=True)
+class Series:
+    """A labelled time series: ``(epoch, value)`` points in ascending time."""
+
+    label: str
+    points: list[tuple[float, float]] = field(default_factory=list)
+    maximum: float | None = None
+
+    @property
+    def values(self) -> list[float]:
+        return [v for _, v in self.points]
+
+    @property
+    def span(self) -> tuple[float, float] | None:
+        return (self.points[0][0], self.points[-1][0]) if self.points else None
+
+
+def completions_series(events: list[Event]) -> Series:
+    """Cumulative phases completed over wall-clock time."""
+    points: list[tuple[float, float]] = []
+    total = 0
+    for ev in sorted(events, key=lambda e: e.ts or 0.0):
+        if ev.kind == "done" and ev.ts is not None and ev.status != "fail":
+            total += 1
+            points.append((ev.ts, float(total)))
+    return Series("phases completed", points, maximum=float(total) if total else None)
+
+
+def occupancy_series(events: list[Event], max_workers: int) -> Series:
+    """Busy-slot count over time — the series behind the utilisation number.
+
+    A ``PARK`` frees a slot immediately, and the ``EVENT done`` that follows it
+    carries ``freed_slot=None``, so decrementing on both would double-count. The
+    ``freed_slot`` field is the authority for whether a ``done`` actually freed
+    anything.
+    """
+    points: list[tuple[float, float]] = []
+    busy = 0
+    for ev in sorted(events, key=lambda e: e.ts or 0.0):
+        if ev.ts is None:
+            continue
+        if ev.kind == "launch":
+            busy += 1
+        elif ev.kind == "park":
+            busy -= 1
+        elif ev.kind == "done":
+            if ev.fields.get("freed_slot", "None") == "None":
+                continue  # already freed by an earlier PARK
+            busy -= 1
+        else:
+            continue
+        busy = max(0, min(busy, max_workers) if max_workers > 0 else max(0, busy))
+        points.append((ev.ts, float(busy)))
+    return Series("busy slots", points, maximum=float(max_workers) if max_workers else None)
+
+
+def utilisation(series: Series, max_workers: int, now: float | None = None) -> float:
+    """Time-weighted mean occupancy as a fraction of capacity (0..1).
+
+    Time-weighted, not a point average: a swarm that ran 4 workers for a minute
+    and 1 for an hour is not 62% utilised, and the point average says it is.
+    """
+    if not series.points or max_workers <= 0:
+        return 0.0
+    now = now if now is not None else time.time()
+    total_area = 0.0
+    for (t0, v0), (t1, _) in zip(series.points, series.points[1:]):
+        total_area += v0 * max(0.0, t1 - t0)
+    last_t, last_v = series.points[-1]
+    total_area += last_v * max(0.0, now - last_t)
+    window = max(0.0, now - series.points[0][0])
+    if window <= 0:
+        return 0.0
+    return min(1.0, total_area / (window * max_workers))
+
+
+def phase_durations(runs: list[PhaseRun], limit: int = 20) -> list[tuple[str, float]]:
+    """Finished phases by wall-clock duration, longest first."""
+    out = [
+        (r.phase, r.duration_s)
+        for r in runs
+        if r.duration_s is not None and not r.running
+    ]
+    out.sort(key=lambda item: item[1], reverse=True)
+    return out[:limit]
+
+
+#: Below this many finished phases a median is not a forecast, it is one number
+#: wearing a decoration. The screen says so instead of inventing a time.
+ETA_MIN_SAMPLES = 3
+
+#: Only recent completions predict the next ones — a campaign's scaffolding waves
+#: look nothing like the waves that follow them.
+ETA_WINDOW = 20
+
+
+def eta(runs: list[PhaseRun], remaining: int, max_workers: int,
+        running: int = 0, ready: int = 0) -> str:
+    """How long the rest of the run will take, or why that cannot be said.
+
+    Returns the string the headline prints. Mean duration times phases left is
+    wrong twice over: one three-hour outlier drags the mean for the rest of the
+    run, and the swarm builds ``max_workers`` phases at a time, so what is left
+    on the wall clock is the number of *waves*, not the number of phases. Median
+    times waves is the smallest model that gets both of those right.
+
+    It refuses rather than guesses. Fewer than :data:`ETA_MIN_SAMPLES`
+    completions is not a sample; and a run with nothing running and nothing ready
+    is not slow, it is stalled — an ETA there would be a lie with a clock on it.
+    """
+    if remaining <= 0:
+        return "done"
+    if running <= 0 and ready <= 0:
+        return "stalled"
+    seen = [
+        r.duration_s
+        for r in (runs or [])
+        if not r.running and r.duration_s and r.status in COMPLETED_STATUSES
+    ][:ETA_WINDOW]
+    if len(seen) < ETA_MIN_SAMPLES:
+        return "estimating…"
+    waves = math.ceil(remaining / max(1, min(max_workers or 1, remaining)))
+    return f"~{fmt_coarse(waves * median(seen))} left"
+
+
+def integration_holds(events: list[Event]) -> list[tuple[str, float]]:
+    """How long each merge-queue block held the whole queue, longest first.
+
+    A held queue stops *every* integration, not just the conflicted phase, so
+    this is the one graph where a single tall bar is a direct throughput loss.
+    """
+    opened: dict[str, float] = {}
+    out: list[tuple[str, float]] = []
+    for ev in sorted(events, key=lambda e: e.ts or 0.0):
+        if ev.ts is None or not ev.phase:
+            continue
+        if ev.kind == "integrate-blocked":
+            opened[ev.phase] = ev.ts
+        elif ev.kind == "resolved":
+            start = opened.pop(ev.phase, None)
+            if start is not None:
+                out.append((ev.phase, max(0.0, ev.ts - start)))
+    out.sort(key=lambda item: item[1], reverse=True)
+    return out
+
+
+def completion_density(events: list[Event]) -> list[int]:
+    """24 buckets: how many phases completed in each local hour of the day."""
+    buckets = [0] * 24
+    for ev in events:
+        if ev.kind == "done" and ev.ts is not None:
+            try:
+                buckets[datetime.fromtimestamp(ev.ts).hour] += 1
+            except (OSError, OverflowError, ValueError):
+                continue
+    return buckets
+
+
+# -- rendering primitives -------------------------------------------------
+_BAR_PARTIALS = "▏▎▍▌▋▊▉█"
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def bar(value: float, maximum: float, width: int = 24, empty: str = "·") -> str:
+    """A unicode block bar with 1/8-cell resolution.
+
+    Eighth-blocks instead of whole cells because the overview bars are short: at
+    width 20 a whole-cell bar quantises to 5% steps, which makes "1 of 30 phases
+    done" render identically to zero.
+    """
+    if width <= 0:
+        return ""
+    if maximum <= 0 or value <= 0:
+        return empty * width
+    eighths = int(round(min(1.0, value / maximum) * width * 8))
+    full, rem = divmod(eighths, 8)
+    out = "█" * min(full, width)
+    if len(out) < width and rem:
+        out += _BAR_PARTIALS[rem - 1]
+    return out + empty * (width - len(out))
+
+
+def spark(values: list[float], width: int | None = None, maximum: float | None = None) -> str:
+    """A one-line sparkline. Buckets by *max* when downsampling, so spikes survive."""
+    vals = [float(v) for v in values]
+    if not vals:
+        return ""
+    if width and len(vals) > width and width > 0:
+        size = len(vals) / width
+        vals = [
+            max(vals[int(i * size) : max(int((i + 1) * size), int(i * size) + 1)] or [0.0])
+            for i in range(width)
+        ]
+    lo = 0.0 if maximum is not None else min(vals)
+    hi = maximum if maximum is not None else max(vals)
+    if hi <= lo:
+        return _SPARK[0] * len(vals)
+    return "".join(
+        _SPARK[min(len(_SPARK) - 1, int((v - lo) / (hi - lo) * (len(_SPARK) - 1)))] for v in vals
+    )
+
+
+def fmt_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "—"
+    total = int(max(0.0, seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def fmt_coarse(seconds: float) -> str:
+    """A duration at the resolution a forecast is actually good to.
+
+    Never seconds: ``~1h 50m left`` is a claim about the next two hours, and
+    ``~1h49m58s left`` claims to know which second it lands on.
+    """
+    minutes = int(max(0.0, seconds) // 60)
+    if minutes < 1:
+        return "< 1m"
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h {minutes % 60:02d}m"
+
+
+def fmt_clock(ts: float | None) -> str:
+    if ts is None:
+        return "—"
+    try:
+        return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+    except (OSError, OverflowError, ValueError):
+        return "—"
+
+
+def fmt_stamp(ts: float | None) -> str:
+    if ts is None:
+        return "—"
+    try:
+        return datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return "—"
+
+
+def fmt_ago(ts: float | None, now: float | None = None) -> str:
+    if ts is None:
+        return "—"
+    return f"{fmt_duration((now if now is not None else time.time()) - ts)} ago"

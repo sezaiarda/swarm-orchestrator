@@ -31,25 +31,13 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
 - **Completion hook (self-classified)**: at the end of the session, the worker
   classifies its own outcome and runs
   `swarm done "$SWARM_PHASE" <status> "<one-line recap>"`, choosing `<status>`:
-  `ok` = finished (integrates silently, no ping); `needs-owner` = finished, **and
-  there is a decision only the owner can make or an action only they can take**
-  (integrates **exactly** like `ok`, and telegrams them the recap); `fail` = could
-  not complete (rolls the phase back and telegrams the owner). The recap is one
-  line — for `ok` it may be omitted. This generalizes `[worker].done_hook`
-  (`swarm done "$SWARM_PHASE" ok`): the self-classified form is the contract the
-  worker follows. If a plain completion hook is already present, upgrade it to
-  this classified form.
-
-  **`needs-owner` is not "I found something interesting."** A telegram costs the
-  owner's attention; a commit message, the ledger row, `STATUS.md` and the
-  changelog cost them nothing and are where they already look. So a finding you
-  resolved correctly — a tag that was taken, an exit criterion that was
-  unsatisfiable as written, a spec line you corrected — is a **docs event**, and
-  writing it down *is* the report. `ok` is the right outcome for "done, and here
-  is what I decided on the way", which is what a good phase usually looks like;
-  it is not a lesser grade than `needs-owner`. Ask the same question you would
-  before opening an AskUserQuestion: *is there something only they can do?* If
-  no, write it down and report `ok`.
+  `ok` = clean success (integrates silently, no ping); `needs-owner` = finished
+  but the owner should review something specific (integrates **exactly** like
+  `ok`, and telegrams the owner the recap); `fail` = could not complete (rolls the
+  phase back and telegrams the owner). The recap is one line — for `ok` it may be
+  omitted. This generalizes `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`):
+  the self-classified form is the contract the worker follows. If a plain
+  completion hook is already present, upgrade it to this classified form.
 - **Build gate**: when `SWARM_PHASE` is set, every heavy compile/test command
   (`cargo …`, `bun run build|test`, and the like) must run as `swarm build <cmd>`
   (e.g. `swarm build cargo nextest run`). `swarm build` is a swarm-wide semaphore

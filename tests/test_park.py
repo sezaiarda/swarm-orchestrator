@@ -320,9 +320,15 @@ def test_park_pane_mechanic_live_tmux(monkeypatch):
     """The real ``tmux.park_pane`` on a fully isolated server (own TMUX_TMPDIR).
 
     Asserts the waiting worker survives (same pane id + pid) in a fresh
-    ``wait:<phase>`` window while the slot's window keeps a fresh replacement pane
-    tagged with the slot. The server is killed and its socket dir removed after, so
-    the default server (and any live swarm on it) is never touched."""
+    ``wait:<phase>`` window IN THE SWARM'S OWN SESSION, while the slot's window
+    keeps a fresh replacement pane tagged with the slot. The server is killed and
+    its socket dir removed after, so the default server (and any live swarm on it)
+    is never touched.
+
+    A second, more-recently-used ``decoy`` session exists for the whole park: with
+    only one session on the server, tmux's "most recently used" fallback is always
+    the right answer by accident, so a single-session probe cannot see a
+    ``break-pane`` that names no destination."""
     from swarm_orchestrator import tmux
 
     sockdir = tempfile.mkdtemp(prefix="wtprobe-")  # isolated tmux server socket dir
@@ -347,7 +353,21 @@ def test_park_pane_mechanic_live_tmux(monkeypatch):
         # sanity: split-first avoids the single-pane break edge (window has >= 2)
         assert tmux.window_of(old_pane) == win
 
-        wait_win, replacement = tmux.park_pane(win, old_pane, 0, "wait:demo-P3")
+        # the owner's session, touched last so tmux would drift the waiter into it
+        tmux.new_session("decoy")
+        tmux.run(["select-window", "-t", "=decoy:"])
+
+        wait_win, replacement = tmux.park_pane(
+            win, old_pane, 0, "wait:demo-P3", session
+        )
+
+        # the wait window belongs to the SWARM's session, never the decoy
+        assert (
+            tmux.run(
+                ["display-message", "-p", "-t", wait_win, "#{session_name}"]
+            ).stdout.strip()
+            == session
+        )
 
         # the waiting worker survived in its own wait window: same pane id + same pid
         assert tmux.list_panes(wait_win) == [old_pane]

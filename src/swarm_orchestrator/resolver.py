@@ -52,27 +52,36 @@ def spawn(cfg: Config, phase: str, repo: Path, log: Log) -> str | None:
         log.line(f"RESOLVER-SPAWN-FAIL {phase} no-pane")
         return None
     pane = panes[0]
-    # Pre-accept claude's folder-trust dialog for THIS repo before the pane starts.
-    #
-    # Workers never hit this because they run inside a per-phase worktree that
-    # `launch.pretrust_dir` already seeds. The resolver is the one pane that runs
-    # in a CANONICAL repo directory, and those are trusted only if the owner has
-    # personally opened claude there before — so a resolver spawned
-    # in a repo, the trust dialog swallowed the injected prompt, and the whole
-    # integration queue sat blocked behind a dialog nobody was watching. Worse, the
-    # dialog hides the `❯` box, so `send_submit` saw no prompt to re-send and
-    # reported success.
-    launch_mod.pretrust_dir(repo, log)
-    cmd = cfg.master_cmd or f"cd {repo} && exec claude"
+    # [swarm].resolver_cmd, NOT master_cmd. Reusing master_cmd here meant any
+    # custom master silently became the resolver too -- and the second branch
+    # then skipped priming entirely, leaving an unprompted claude staring at a
+    # conflicted tree while the merge queue stayed held -- and a launch script
+    # that no-ops on resolve-* windows would leave every merge conflict silently
+    # landing on the owner to fix by hand.
+    cmd = cfg.resolver_cmd or f"cd {repo} && exec claude"
     tmux.respawn_pane(pane, cmd, env=_resolver_env(cfg))
-    if not cfg.master_cmd:
+    if not cfg.resolver_cmd:
         _deliver(cfg, pane, phase, repo, log)
     log.line(f"RESOLVER-SPAWN {phase} repo={repo.name} win={win}")
     return win
 
 
+def prompt_path(name: str) -> Path:
+    """Locate a prompt file, packaged copy first.
+
+    ``master.py`` and this module both resolved prompts by walking three
+    directories up from ``__file__``, which only works under an editable install.
+    A normal install has no ``prompts/`` beside the package, so delivery failed,
+    spawn returned False and the run stalled on one log line with no telegram.
+    """
+    packaged = Path(__file__).resolve().parent / "prompts" / name
+    if packaged.is_file():
+        return packaged
+    return Path(__file__).resolve().parent.parent.parent / "prompts" / name
+
+
 def _deliver(cfg: Config, pane: str, phase: str, repo: Path, log: Log) -> None:
-    prompt_file = Path(__file__).resolve().parent.parent.parent / "prompts" / "resolver.md"
+    prompt_file = prompt_path("resolver.md")
     if not prompt_file.is_file():
         log.line(f"RESOLVER-PROMPT-MISSING {prompt_file}")
         return

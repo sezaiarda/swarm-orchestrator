@@ -51,3 +51,17 @@ repos       = ["*"]        # which component repos to mirror: globs relative to 
                            # direct child (this layout). For nested layouts:
                            # e.g. ["*", "packages/*"]. A single-repo project matches
                            # none and gets a one-repo (umbrella-only) mirror.
+
+[operator]
+# A phase that finishes `swarm done <phase> operator "<recap>"` hands concrete
+# leftover work to a SESSION instead of to your phone. The recap is that
+# session's entire brief. Off by default, and it is a positive opt-in on
+# purpose: `true` is what lets the swarm open a session with your full
+# authority, unattended. While it is false the queue is never even written.
+enabled      = false
+cmd          = ""                 # "" = the built-in claude invocation
+model        = ""                 # "" = inherit; else "opus"/"sonnet"/...
+triage_model = "claude-haiku-4-5" # decides now-vs-later per hand-off. An ALIAS,
+                                  # never a dated build: triage runs unattended
+                                  # on every operator finish, so a retired
+                                  # snapshot would silently defer every one.

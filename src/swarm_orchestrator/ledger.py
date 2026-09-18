@@ -24,6 +24,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import statuses
+
+# Re-exported so ``ledger.SATISFIES_DEPS`` keeps meaning what it always has; the
+# definition (and the reasoning) lives in :mod:`statuses` now.
+SATISFIES_DEPS = statuses.SATISFIES_DEPS
+
 _PHASE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]*$")
 # A markdown checklist item: ``- [x] `phase-id` · …`` / ``* [ ] `phase-id```.
 _CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+(.+)$")
@@ -195,15 +201,26 @@ def ready(
 ) -> list[str]:
     """Phases that can be launched right now.
 
-    A phase is ready when it is not done, not currently busy, not excluded, and
-    every dependency is present in ``done``. Order follows the ledger's
-    declaration order for stable, critical-path-ish selection.
+    A phase is ready when it has not been *attempted*, is not currently busy, is
+    not excluded, and every dependency has actually *landed*.
+
+    Those are two different readings of the ``done`` map and conflating them is a
+    correctness bug: a phase recorded ``fail`` has been attempted (so it must not
+    be silently re-offered — an explicit ``swarm retry`` is the reset) but its work
+    was never merged; under ``isolation = worktree`` its branch was discarded
+    outright. Testing dependencies against bare membership therefore declared a
+    dependent ready and let it build against a ``main`` that provably lacks the
+    dependency it needs. Only :data:`SATISFIES_DEPS` statuses release a dependent.
+
+    Order follows the ledger's declaration order for stable, critical-path-ish
+    selection.
     """
-    done_set = set(done)
+    satisfied = {p for p, status in done.items() if status in SATISFIES_DEPS}
+    attempted = set(done)
     result: list[str] = []
     for phase, deps in graph.items():
-        if phase in done_set or phase in busy_phases or phase in excluded:
+        if phase in attempted or phase in busy_phases or phase in excluded:
             continue
-        if deps <= done_set:
+        if deps <= satisfied:
             result.append(phase)
     return result

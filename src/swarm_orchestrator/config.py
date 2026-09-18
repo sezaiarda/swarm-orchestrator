@@ -27,6 +27,9 @@ def _slugify(name: str) -> str:
     return slug or "project"
 
 
+_REPO_NOTIFY = Path(__file__).resolve().parent.parent.parent / "scripts" / "notify.sh"
+
+
 def _default_slug(pdir: Path) -> str:
     """A slug that is unique to the *full* project path, not just its basename.
 
@@ -61,16 +64,25 @@ class Config:
     roadmap: str
     exclude: list[str]
     telegram_notify: str
+    tui_autostart: bool
+    tui_cmd: str
     session: str
     tmux_layout: str
     driver: str
     master_cmd: str
+    resolver_cmd: str
+    watchdog_s: int
     git_isolation: str
     git_main_branch: str
     git_repos: list[str]
+    git_auto_resolve: dict[str, str]
     build_max_concurrent: int
     build_jobs: int
     build_cache: bool
+    operator_enabled: bool
+    operator_cmd: str
+    operator_model: str
+    operator_triage_model: str
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -123,6 +135,11 @@ class Config:
         return self.state_dir / "buildsem"
 
     @property
+    def operator_dir(self) -> Path:
+        """Where the durable operator hand-off queue lives (one JSON per phase)."""
+        return self.state_dir / "operator"
+
+    @property
     def build_cache_dir(self) -> Path:
         """Shared, per-repo cargo ``target`` cache (symlinked into each worktree),
         so unchanged crates aren't recompiled from scratch in every worktree."""
@@ -159,9 +176,11 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     worker = data.get("worker", {})
     tasks = data.get("tasks", {})
     telegram = data.get("telegram", {})
+    tui = data.get("tui", {})
     tmux = data.get("tmux", {})
     git = data.get("git", {})
     build = data.get("build", {})
+    operator = data.get("operator", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
     max_workers = int(swarm.get("max_workers", 4))
@@ -212,10 +231,22 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
         roadmap=str(tasks.get("roadmap", "docs/ROADMAP-MASTER.md")),
         exclude=list(tasks.get("exclude", DEFAULT_EXCLUDE)),
+        tui_autostart=_bool_env("SWARM_TUI_AUTOSTART", tui.get("autostart", True)),
+        tui_cmd=os.environ.get("SWARM_TUI_CMD", str(tui.get("cmd", "swarm tui"))),
         telegram_notify=str(
-            telegram.get("notify", "scripts/notify.sh")
+            # The swarm's OWN sender, resolved from this package: a default
+            # that pointed at some other bot would put two audiences on one
+            # channel.
+            telegram.get("notify", str(_REPO_NOTIFY))
         ),
-        session=os.environ.get("SWARM_SESSION", tmux.get("session", "swarm")),
+        session=os.environ.get(
+            "SWARM_SESSION",
+            # Default to the project's own name (``myproject``), not a generic
+            # ``swarm``: the session name is what you see in `tmux ls` and in the
+            # status bar, and one box can host several runs at once. An explicit
+            # [tmux].session still wins.
+            tmux.get("session", _slugify(pdir.name) or "swarm"),
+        ),
         # How the worker windows arrange their slot panes ("auto" = the historic
         # 1-full / 2-side-by-side / 3-4-tiled rule). `swarm layout <name>` flips
         # it live for the running session; this is the boot default.
@@ -224,11 +255,26 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         ),
         driver=driver,
         master_cmd=os.environ.get("SWARM_MASTER_CMD", swarm.get("master_cmd", "")),
+        resolver_cmd=os.environ.get(
+            "SWARM_RESOLVER_CMD", swarm.get("resolver_cmd", "")
+        ),
+        # Seconds between the supervisor's liveness reconcile sweeps: frees a slot
+        # whose worker pane died, re-nudges an idle master, finishes a settled run.
+        # 0 disables it and restores the purely event-driven loop the module
+        # docstring describes. It defaults ON because the alternative is the
+        # measured failure: a supervisor that exited and stayed down for hours
+        # with two slots marked busy and nothing able to notice.
+        watchdog_s=_int_env("SWARM_WATCHDOG", swarm.get("watchdog_s"), 300, minimum=0),
         git_isolation=os.environ.get(
             # "none" (default) == today's behavior: workers commit main in place.
             # "worktree" opts into isolated worktrees + the serialized merge-queue.
             "SWARM_GIT_ISOLATION", str(git.get("isolation", "none"))
         ),
+        # path-glob -> "union" | "keyed:<regex>". Tried before a resolver session
+        # is spawned; anything unmatched or genuinely conflicting falls through.
+        git_auto_resolve={
+            str(k): str(v) for k, v in (git.get("auto_resolve") or {}).items()
+        },
         git_main_branch=os.environ.get(
             "SWARM_GIT_MAIN", str(git.get("main_branch", "master"))
         ),
@@ -238,6 +284,20 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         ),
         build_jobs=_int_env("SWARM_BUILD_JOBS", build.get("jobs"), 6, minimum=0),
         build_cache=_bool_env("SWARM_BUILD_CACHE", build.get("cache", True)),
+        # Positive opt-in, and the only thing between a test suite and an
+        # autonomous session holding the owner's full authority. False means the
+        # queue is never even written -- a queue nothing will drain is worse than
+        # no queue, because it looks like the hand-off was recorded.
+        operator_enabled=_bool_env("SWARM_OPERATOR", operator.get("enabled", False)),
+        operator_cmd=os.environ.get(
+            "SWARM_OPERATOR_CMD", str(operator.get("cmd", ""))
+        ),
+        operator_model=str(operator.get("model", "")),
+        # An ALIAS, never a dated build (recap.MODEL says why): triage runs
+        # unattended on every operator finish, so pinning it to a snapshot means
+        # the day that snapshot retires every hand-off silently falls to `later`.
+        # Spelled out rather than imported from `recap` -- recap imports us.
+        operator_triage_model=str(operator.get("triage_model", "claude-haiku-4-5")),
     )
 
 

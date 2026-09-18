@@ -38,9 +38,9 @@ the sole writer of `state.json`, and the sole killer of the master pane. It is
 event-driven — no redo, no reconcile pass, no crash watchdog, no auto-retry; its
 only timed wake is a park deadline a `waiting` worker armed (rule 5):
 
-1. **`done <phase> <ok|needs-owner|fail>`** — free the slot; if no master is
+1. **`done <phase> <ok|operator|fail>`** — free the slot; if no master is
    alive, **spawn** one, otherwise **inject** a one-line nudge into the live one.
-   (`ok`/`needs-owner` integrate the work; `fail` rolls it back.)
+   (`ok`/`operator` integrate the work; `fail` rolls it back.)
 2. **`master-idle`** — kill the master pane.
 3. After a kill — **finish** (teardown + telegram) once nothing is `pending`
    *and* nothing is integrating.
@@ -87,8 +87,9 @@ uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PAT
    **skips** the "which phase?" prompt and builds `$SWARM_PHASE` directly; (b) ends
    by **self-classifying** its outcome and running
    `swarm done "$SWARM_PHASE" <status> "<recap>"`, where `<status>` is `ok` (clean
-   success — integrates silently, no ping), `needs-owner` (integrates **exactly**
-   like `ok` but telegrams you the recap to review), or `fail` (rolls the phase
+   success — integrates silently, no ping), `operator` (integrates **exactly**
+   like `ok` but hands the recap to an **operator session** that carries out the
+   action on your behalf — it never pings you), or `fail` (rolls the phase
    back and telegrams you); (c) routes every heavy compile/test through the **build
    gate** (`swarm build cargo …`) so parallel worktrees can't OOM the host; and (d)
    follows the **owner-question contract** — run
@@ -132,12 +133,13 @@ The master never asks — it runs autonomously. Everything else runs unattended.
 | `swarm layout [name]` | re-arrange the live worker panes (`side-by-side`, `top-bottom`, `tiled`, `main-vertical`, `auto`, …); no argument prints the current one and every valid name |
 | `swarm launch <phase>` | claim a free slot and start a phase by hand |
 | `swarm build <cmd…>` | run a heavy build through the swarm-wide concurrency gate — what a worker wraps its gates in |
-| `swarm done <phase> [ok\|needs-owner\|fail] [note]` | signal phase completion (self-classified) — what a worker calls |
+| `swarm done <phase> [ok\|operator\|fail] [note]` | signal phase completion (self-classified) — what a worker calls |
 | `swarm waiting <phase> [question]` | a worker self-reports it is blocked on the owner — pings you and, after `[worker].park_after`, frees its slot and moves it to its own window |
 | `swarm resumed <phase>` | the worker got its answer — cancel the pending park |
 | `swarm skip <phase>` | mark a phase done without building it |
 | `swarm free <slot\|phase>` | free a stuck slot (by id or phase) |
 | `swarm resolved <phase>` | after you clear a held integration (conflict / dirty tree / push failure) |
+| `swarm operator-triage <phase>` | decide whether a queued operator hand-off runs `now` or `later` — spawned for you by `swarm done` |
 | `swarm integrate <phase>` | manually integrate `swarm/<phase>` into main (worktree mode) |
 | `swarm finish` | ask the supervisor to stop now |
 
@@ -225,7 +227,7 @@ master_model = ""                 # "" = inherit; else "opus" / "sonnet" / ...
 command_template = "/prime {phase}"           # sent via send-keys into each slot
 command_file    = ".claude/commands/prime.md" # init master inspects/patches this
 env_marker      = "SWARM_PHASE"
-done_hook       = 'swarm done "$SWARM_PHASE" ok'   # fallback form; in swarm mode the worker self-classifies ok/needs-owner/fail
+done_hook       = 'swarm done "$SWARM_PHASE" ok'   # fallback form; in swarm mode the worker self-classifies ok/operator/fail
 park_after      = 120   # seconds a worker may wait on the owner before its slot is freed + it moves to its own window; 0 disables
 worker_settings = '{"teammateMode":"in-process"}'  # worker teammates run in-process
 
@@ -256,6 +258,14 @@ cache          = true               # shared per-repo cargo target cache across 
 isolation   = "worktree"
 main_branch = "master"
 repos       = ["*"]                 # component repos to mirror; e.g. ["*", "packages/*"]
+
+[operator]                          # what happens after `swarm done <phase> operator`
+enabled      = false                # positive opt-in: true lets the swarm open an
+                                    # autonomous session with your full authority.
+                                    # While false, no hand-off is ever queued.
+cmd          = ""                   # command an operator session runs; "" = built-in
+model        = ""                   # "" inherits; else "opus" / "sonnet" / ...
+triage_model = "claude-haiku-4-5"   # decides now-vs-later; an alias, never a dated build
 ```
 
 The ledger is prose the LLM master reads directly. `swarm context` also parses it,
@@ -265,14 +275,40 @@ phantom phases — with dependency gating left to the master; a **bare** one-lin
 (`P4 needs:P1,P2`) additionally gives deterministic dep-gating and flags a dependency
 cycle, self-dependency, or unknown dependency rather than stalling on it silently.
 
+### Operator hand-offs (`[operator]`)
+
+`swarm done <phase> operator "<recap>"` is the finish that leaves concrete work
+behind — a rebuild to run, a service to restart, a migration to apply. It pings
+nobody: the recap is handed to a *session* instead, and it is that session's
+entire brief, which is why a recap under 20 characters or 4 words is refused the
+hand-off (the sentinel is still written — durability is never traded for
+politeness).
+
+The hand-off is durable. `swarm done` writes one JSON item per phase under
+`<state_dir>/operator/`, **after** the sentinel and **before** the FIFO poke: the
+item is re-derivable from the sentinel, so a crash between them costs nothing,
+while a crash after the poke would leave the work merged and recorded `done` with
+nothing queued. `swarm up` rebuilds any item whose sentinel outlived it and
+requeues anything a dead run left `running`.
+
+It is bounded. Every attempt is counted in the same write that leases the item,
+and after three the item goes terminal `abandoned` and telegrams you once — so a
+note that used to reach a human by definition still does, even when the queue
+cannot do the work.
+
+`swarm operator-triage <phase>` (spawned detached by `swarm done`) asks a cheap
+model whether the session should open `now` or `later`. It fails toward `later`:
+a timeout, prose, or an unrecognised answer never yields `now`, because `now` is
+the branch that opens a session holding your authority.
+
 ## Runtime state
 
 State lives outside the repo, under
 `~/.local/state/swarm-orchestrator/<project-slug>/` — `state.json`,
-`control.fifo`, `done/` (durable completion sentinels), `logs/`, and, in worktree
-mode, `wt/` (the per-phase mirrors) and `git/` (per-repo integration locks). The
-slug includes a hash of the full project path, so two projects that share a folder
-name never share state.
+`control.fifo`, `done/` (durable completion sentinels), `operator/` (the hand-off
+queue), `logs/`, and, in worktree mode, `wt/` (the per-phase mirrors) and `git/`
+(per-repo integration locks). The slug includes a hash of the full project path,
+so two projects that share a folder name never share state.
 
 ## Tests
 

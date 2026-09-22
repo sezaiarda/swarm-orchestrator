@@ -266,7 +266,7 @@ enabled      = false                # positive opt-in: true lets the swarm open 
                                     # While false, no hand-off is ever queued.
 cmd          = ""                   # command an operator session runs; "" = built-in
 model        = ""                   # "" inherits; else "opus" / "sonnet" / ...
-triage_model = "claude-haiku-4-5"   # decides now-vs-later; an alias, never a dated build
+triage_model = "haiku"              # decides now-vs-later; an alias, never a dated build
 ```
 
 The ledger is prose the LLM master reads directly. `swarm context` also parses it,

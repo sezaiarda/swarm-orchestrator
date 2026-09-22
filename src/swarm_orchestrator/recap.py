@@ -61,8 +61,8 @@ from pathlib import Path
 from . import statuses
 from .config import Config
 
-# Never date-suffixed: the alias always points at the current Haiku 4.5 build.
-MODEL = "claude-haiku-4-5"
+# A CLI family alias, never a version: `haiku` always resolves to the newest Haiku.
+MODEL = "haiku"
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 
@@ -419,7 +419,9 @@ def ask(
     """
     if os.environ.get(seam):
         return _seam_summary(cfg, prompt, seam)
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    # A CLI alias (`haiku`) is not a Messages API model id, so only a full
+    # `claude-*` id can take the API path; an alias goes straight to the CLI.
+    if os.environ.get("ANTHROPIC_API_KEY") and model.startswith("claude-"):
         answer, reason = _api_summary(cfg, prompt, model)
         if answer:
             return answer, None

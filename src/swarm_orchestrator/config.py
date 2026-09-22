@@ -303,7 +303,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # unattended on every operator finish, so pinning it to a snapshot means
         # the day that snapshot retires every hand-off silently falls to `later`.
         # Spelled out rather than imported from `recap` -- recap imports us.
-        operator_triage_model=str(operator.get("triage_model", "claude-haiku-4-5")),
+        operator_triage_model=str(operator.get("triage_model", "haiku")),
     )
 
 

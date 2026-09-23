@@ -298,6 +298,11 @@ class Supervisor:
             self._on_operator(parts[1] if len(parts) > 1 else "?")
         elif verb == "operator-done":
             self._on_operator_done(parts[1] if len(parts) > 1 else "?")
+        elif verb == "operator-queued":
+            # `swarm operator-add`: the poke is only a wake — the sweep every
+            # wake runs is what dispatches, oldest first, so a new job can never
+            # jump the queue by being the one that was poked.
+            self.log.line(f"EVENT operator-queued {parts[1] if len(parts) > 1 else '?'}")
         elif verb == "shutdown":
             self._stop = True
         else:
@@ -547,7 +552,12 @@ class Supervisor:
             pushowed.settle(self.cfg, phase, pushes, self.log)
             if result == gitq.MERGED:
                 self._dequeue(phase)
-                self._advance_done(phase, status)
+                if status == operator_mod.INTEG_STATUS:
+                    # An operator job's mirror, not a ledger phase: its work is
+                    # landed, and there is nothing to record done or free.
+                    self.log.line(f"OPERATOR-INTEGRATED {phase}")
+                else:
+                    self._advance_done(phase, status)
                 pushowed.retry(self.cfg, self.log, skip=set(pushes))
                 continue
             # A conflict OR a dirty tree leaves an identifiable repo to clear; a
@@ -654,14 +664,21 @@ class Supervisor:
         operator_mod.dispatch(self.cfg, phase, self.log, reason="poked")
 
     def _on_operator_done(self, phase: str) -> None:
-        """The session signalled it is finished (carried out, or asked the owner).
+        """The session signalled its job is finished.
 
         The item was already settled by the CLI that sent this — durably, before
         the poke, for the same reason ``swarm done`` writes its sentinel first.
-        All that is left is the session itself: drop the lease, idle the pane, and
-        re-check the finish the outstanding hand-off was holding open."""
+        What is left: end the session (drop the lease, idle the pane — BEFORE its
+        mirror is merged and removed, so no live process ever loses its cwd), land
+        whatever it committed in its own mirror through the ordinary merge queue,
+        open the next job, and re-check the finish the job was holding open."""
         released = operator_mod.release(self.cfg, self.log)
         self.log.line(f"EVENT operator-done {phase} released={released}")
+        mirror = operator_mod.integration_for(self.cfg, phase)
+        if mirror is not None:
+            with state_mod.transaction(self.cfg) as st:
+                st.integ_push(mirror, operator_mod.INTEG_STATUS)
+            self._pump_integrations()
         operator_mod.sweep(self.cfg, self.log)  # next hand-off, if one is due
         self._finish_if_settled(state_mod.read(self.cfg))
 

@@ -42,6 +42,7 @@ from pathlib import Path
 
 from . import gitq
 from . import ledger as ledger_mod
+from . import opqueue
 from . import pushowed
 from . import state as state_mod
 from . import statuses
@@ -66,6 +67,9 @@ _IDLE_GRACE_S = 20 * 60
 _BLOCKED_WARN_S = 5 * 60
 # The owner being the blocker is normal for a while, then it is the run stalling.
 _WAIT_WARN_S = 15 * 60
+#: An operator job waiting on the owner longer than this is worth a line. Longer
+#: than a worker's: the operator blocks no phase, only the next operator job.
+_OPERATOR_WAIT_WARN_S = 3600
 # No supervisor event at all for this long, with work still in flight.
 _STALL_WARN_S = 90 * 60
 
@@ -983,6 +987,47 @@ def _check_failed(st: State) -> Check:
     )
 
 
+def _check_operator(cfg: Config) -> Check:
+    """Operator jobs that need the owner: waiting on a decision, or given up on.
+
+    A waiting job holds the single operator lease, so every later job queues
+    behind the owner's answer; an abandoned one will never run again unless
+    someone acts on it. Neither is a fault of the swarm — both are the owner's
+    to clear, which is why they are warnings with the way out spelled out.
+    """
+    items = opqueue.load_all(cfg)
+    now = time.time()
+    slow = [
+        i for i in items
+        if i.state == opqueue.WAITING
+        and now - (i.asked_at or i.queued_at) >= _OPERATOR_WAIT_WARN_S
+    ]
+    dropped = [i for i in items if i.state == opqueue.ABANDONED]
+    if not slow and not dropped:
+        live = sum(1 for i in items if not i.terminal)
+        return Check("operator", OK, f"{live} operator job(s) open, none stuck on you")
+    bits = [
+        f'{i.phase} waiting on you {_human_age(now - (i.asked_at or i.queued_at))}:'
+        f' "{i.question}"'
+        for i in slow
+    ]
+    bits += [
+        f"{i.phase} abandoned" + (" (asked you, older swarm)" if i.asked else "")
+        for i in dropped
+    ]
+    if slow:
+        fix = (
+            f"answer in the operator window; the session then runs"
+            f" `swarm operator-resumed {slow[0].phase}`"
+        )
+    else:
+        fix = (
+            f"carry it out by hand, then delete {opqueue.item_path(cfg, dropped[0].phase)};"
+            f' or re-queue it: swarm operator-add --phase {dropped[0].phase} "<brief>"'
+        )
+    return Check("operator", WARN, "; ".join(bits), fix)
+
+
 def _check_prompts() -> Check:
     """The master/resolver/operator prompt files must be resolvable.
 
@@ -1055,6 +1100,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_sentinels(cfg, st))
     checks.append(_check_recaps(cfg))
     checks.append(_check_failed(st))
+    checks.append(_check_operator(cfg))
     checks.append(_check_prompts())
     return checks
 

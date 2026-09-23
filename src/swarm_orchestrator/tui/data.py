@@ -243,10 +243,11 @@ class Blocker:
     """
 
     phase: str
-    #: waiting | parked | integ | needs-owner | operator-abandoned. Note what is
-    #: NOT here: a live ``operator`` hand-off. It never needs the owner — that is
-    #: the whole point of the status — so it has its own list on the snapshot and
-    #: only reaches this one once the queue has given up on it.
+    #: waiting | parked | integ | needs-owner | operator-ask | operator-abandoned.
+    #: Note what is NOT here: a live ``operator`` hand-off. It never needs the
+    #: owner — that is the whole point of the status — so it has its own list on
+    #: the snapshot and only reaches this one when its session waits on an owner
+    #: decision or the queue has given up on it.
     kind: str
     question: str
     since: float | None = None
@@ -453,11 +454,21 @@ def build_snapshot(
                 Blocker(phase=phase, kind=statuses.NEEDS_OWNER,
                         question=questions.get(phase, ""))
             )
-    # A terminal hand-off is the one case that does reach the owner, and the two
-    # ways of getting there read very differently to a human: a session asked
-    # them a question, or the queue tried MAX_ATTEMPTS times and gave up.
+    # An operator job reaches the owner in two ways that read very differently
+    # to a human: a live session is waiting on their decision (or, from an older
+    # version, asked and ended), or the queue tried MAX_ATTEMPTS times and gave up.
     for item in operator:
-        if item.state == opqueue.ABANDONED:
+        if item.state == opqueue.WAITING:
+            blockers.append(
+                Blocker(
+                    phase=item.phase,
+                    kind="operator-ask",
+                    question=item.question,
+                    since=item.asked_at or item.queued_at or None,
+                    detail=f"answer in the operator window · the job: {item.note}",
+                )
+            )
+        elif item.state == opqueue.ABANDONED:
             blockers.append(
                 Blocker(
                     phase=item.phase,

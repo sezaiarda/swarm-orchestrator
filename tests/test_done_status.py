@@ -36,7 +36,11 @@ def test_done_ok_is_silent(swarm):
 
 
 def test_done_needs_owner_is_recorded_as_operator_and_still_advances(swarm):
-    """The retired spelling still works: it lands as `operator`, silently, like `ok`."""
+    """The retired spelling still works: it lands as `operator`, like `ok`.
+
+    With the operator off (the demo's default) the hand-off reaches the owner as
+    one to-do — never as a FAILED ping, and never not at all.
+    """
     _up_with_parked_p0(swarm)
 
     swarm.cli("done", "P0", "needs-owner", "check", "the", "auth", "change")
@@ -45,7 +49,9 @@ def test_done_needs_owner_is_recorded_as_operator_and_still_advances(swarm):
         lambda: set(swarm.busy_phases()) == {"P1", "P2", "P3"}, timeout=20
     ), swarm.log_text()
     assert swarm.state()["done"].get("P0") == "operator"
-    assert not any("check the auth change" in ln for ln in swarm.tg_lines()), swarm.tg_lines()
+    pings = [ln for ln in swarm.tg_lines() if "check the auth change" in ln]
+    assert len(pings) == 1 and "to-do" in pings[0], swarm.tg_lines()
+    assert "FAILED" not in pings[0]
 
 
 def test_done_fail_pings_recap(swarm):

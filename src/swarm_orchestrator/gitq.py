@@ -842,12 +842,18 @@ class ReconcileResult:
 
     integrated: list[str] = field(default_factory=list)
     held: list[Held] = field(default_factory=list)
+    #: Operator-job mirrors landed here. Kept apart from ``integrated`` because
+    #: the caller marks every name there done, and a job is not a ledger phase.
+    operator_integrated: list[str] = field(default_factory=list)
     # phase -> the pushes its integration attempted; a failed one is owed.
     pushes: dict[str, dict[Path, PushResult]] = field(default_factory=dict)
 
 
 def reconcile(
-    cfg: Config, done_phases: dict[str, str], log: Log
+    cfg: Config,
+    done_phases: dict[str, str],
+    log: Log,
+    operator: dict[str, str] | None = None,
 ) -> ReconcileResult:
     """Reconcile leftover ``swarm/*`` branches at ``swarm up`` (sentinel-driven).
 
@@ -865,20 +871,31 @@ def reconcile(
     The NEXT ``swarm up`` then sees it in ``done_phases``, takes the branch below,
     and ``discard``s the completed work outright. Surfacing the hold is what lets
     the caller block/park/notify instead of silently destroying it.
+
+    ``operator`` (``{mirror: "keep" | "integrate"}``, from
+    :func:`operator.mirror_plan`) covers the one kind of ``swarm/*`` branch that
+    has no sentinel by design: an operator job's mirror. Without it every such
+    mirror reads as an interrupted phase and is discarded — commits and all. A
+    live job's mirror is kept for its next attempt; a finished job's is landed.
     """
     sentinels = sentinel_done(cfg)
+    operator = operator or {}
     integrated: list[str] = []
+    operator_integrated: list[str] = []
     held: list[Held] = []
     pushes: dict[str, dict[Path, PushResult]] = {}
     for phase in sorted(_all_swarm_phases(cfg)):
-        if phase in done_phases:
+        job = operator.get(phase)
+        if job == "keep":
+            log.line(f"RECONCILE-KEEP {phase} operator-job")
+        elif phase in done_phases:
             discard(cfg, phase, log)
             log.line(f"RECONCILE-GC {phase} already-recorded")
-        elif sentinels.get(phase) in DONE_INTEGRATE:
+        elif job == "integrate" or sentinels.get(phase) in DONE_INTEGRATE:
             pushes[phase] = {}
             result = integrate(cfg, phase, log, pushes[phase])
             if result == MERGED:
-                integrated.append(phase)
+                (operator_integrated if job else integrated).append(phase)
                 log.line(f"RECONCILE-INTEGRATED {phase}")
             else:
                 repo = blocked_repo(cfg, phase) if result in (CONFLICT, DIRTY) else None
@@ -888,7 +905,10 @@ def reconcile(
             discard(cfg, phase, log)
             log.line(f"RECONCILE-DISCARD {phase} interrupted")
     return ReconcileResult(
-        integrated=integrated, held=held, pushes={k: v for k, v in pushes.items() if v}
+        integrated=integrated,
+        held=held,
+        pushes={k: v for k, v in pushes.items() if v},
+        operator_integrated=operator_integrated,
     )
 
 

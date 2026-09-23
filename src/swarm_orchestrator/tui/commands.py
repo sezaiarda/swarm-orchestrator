@@ -92,8 +92,7 @@ DESTRUCTIVE: dict[str, tuple[str | None, str]] = {
     "done": (None, "writes the phase's sentinel — the run treats it as finished for good"),
     "retry": (None, "deletes the phase's sentinels and discards swarm/<phase> unless --keep-branch"),
     "integrate": (None, "merges swarm/<phase> into main"),
-    "operator-done": (None, "settles the hand-off and ends its operator session"),
-    "operator-ask": (None, "escalates the hand-off to you and ends its operator session"),
+    "operator-done": (None, "settles the job and ends its operator session"),
     "gc": ("--yes", "deletes files from disk"),
 }
 

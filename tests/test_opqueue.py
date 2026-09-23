@@ -115,9 +115,48 @@ def test_a_disabled_operator_queues_nothing_at_all(off):
     """Not "queues and ignores": a queue nothing drains is worse than none."""
     result = launch_mod.done(off, PHASE, "operator", NOTE)
 
-    assert result.route == "dispatch"  # the decision is still reported
+    assert result.route == "owner"  # the decision is still reported
     assert opqueue.load_all(off) == []
     assert not off.operator_dir.exists()
+
+
+def test_a_disabled_operator_telegrams_the_hand_off_as_an_owner_to_do(off):
+    """Hand-offs used to vanish silently this way: never silent again.
+
+    With nobody to run it the owner is the only one left who can, so the note
+    goes to their phone — and `swarm done` stops promising a session.
+    """
+    result = launch_mod.done(off, PHASE, "operator", NOTE)
+
+    lines = tg_lines(off)
+    assert len(lines) == 1
+    assert PHASE in lines[0] and NOTE in lines[0] and "to-do" in lines[0]
+    rendered = result.render()
+    assert "operator job queued" not in rendered
+    assert "operator is off" in rendered and "to-do" in rendered
+
+
+def test_a_re_run_swarm_done_does_not_send_the_to_do_twice(off):
+    launch_mod.done(off, PHASE, "operator", NOTE)
+    again = launch_mod.done(off, PHASE, "operator", NOTE)
+
+    assert len(tg_lines(off)) == 1
+    assert "already" in again.route_detail
+
+
+def test_a_thin_recap_is_not_telegrammed_as_a_to_do_either(off):
+    """The worker is told to re-run with a real recap; a probe is not a to-do."""
+    result = launch_mod.done(off, PHASE, "operator", THIN)
+
+    assert result.route == "skipped"
+    assert tg_lines(off) == []
+
+
+def test_an_enabled_operator_promises_a_queued_job_and_telegrams_nobody(cfg):
+    result = launch_mod.done(cfg, PHASE, "operator", NOTE)
+
+    assert "operator job queued" in result.render()
+    assert tg_lines(cfg) == []
 
 
 def test_a_recap_too_thin_to_brief_a_session_is_never_queued(cfg):
@@ -327,9 +366,15 @@ def test_an_asked_question_is_not_reported_as_a_give_up(cfg):
     was `abandoned` when a session in fact asked them a civil question is the
     dashboard lying about what happened.
     """
-    opqueue.add(cfg, "W8", status="operator", note="rebuild and recreate the webhooks container")
+    # W8 is the shape an older swarm left on disk: `operator-ask` abandoned the
+    # item with `asked` set and the question in `last_error`. It must still load.
+    cfg.operator_dir.mkdir(parents=True, exist_ok=True)
+    opqueue.item_path(cfg, "W8").write_text(json.dumps({
+        "phase": "W8", "status": "operator", "queued_at": 1.0, "attempts": 1,
+        "note": "rebuild and recreate the webhooks container", "state": "abandoned",
+        "asked": True, "last_error": "which host is webhooks on?",
+    }), encoding="utf-8")
     opqueue.add(cfg, "W9", status="operator", note="rebuild the source-provider image")
-    opqueue.escalate(cfg, "W8", "which host is webhooks on?")
     opqueue.abandon(cfg, "W9", "the session never came back")
 
     asked, gave_up = opqueue.load(cfg, "W8"), opqueue.load(cfg, "W9")
@@ -347,3 +392,123 @@ def test_an_asked_question_is_not_reported_as_a_give_up(cfg):
     assert "webhooks container" in kinds["W8"].detail
     assert kinds["W9"].question == "rebuild the source-provider image"
     assert kinds["W9"].detail == "the session never came back"
+
+
+# -- waiting on the owner -------------------------------------------------
+def test_asking_the_owner_keeps_the_job_alive_and_leased(cfg):
+    """`operator-ask` used to abandon the job; the answer then reached nobody."""
+    opqueue.add(cfg, PHASE, status="operator", note=NOTE)
+    opqueue.lease(cfg, PHASE, now=1_000.0)
+
+    item, fresh = opqueue.wait_on_owner(cfg, PHASE, "  which\n host? ", now=2_000.0)
+
+    assert fresh and item.state == opqueue.WAITING and not item.terminal
+    assert item.question == "which host?" and item.asked_at == 2_000.0
+    assert item.lease_until == 2_000.0 + opqueue.WAIT_LEASE_S
+    assert [i.phase for i in opqueue.pending(cfg)] == [PHASE]
+    assert opqueue.ready(cfg, now=3_000.0) == []  # nobody else may lease it
+    assert opqueue.next_deadline(cfg, now=3_000.0) is None
+
+
+def test_the_same_question_twice_is_not_fresh(cfg):
+    opqueue.add(cfg, PHASE, status="operator", note=NOTE)
+    opqueue.lease(cfg, PHASE, now=1_000.0)
+    opqueue.wait_on_owner(cfg, PHASE, "which host?", now=2_000.0)
+
+    again, fresh = opqueue.wait_on_owner(cfg, PHASE, "which host?", now=5_000.0)
+    other, fresh2 = opqueue.wait_on_owner(cfg, PHASE, "and which port?", now=6_000.0)
+
+    assert fresh is False and again.asked_at == 2_000.0
+    assert fresh2 is True and other.asked_at == 6_000.0
+
+
+def test_only_a_live_job_can_ask(cfg):
+    opqueue.add(cfg, PHASE, status="operator", note=NOTE)
+    assert opqueue.wait_on_owner(cfg, PHASE, "q?") == (None, False)  # never leased
+    opqueue.lease(cfg, PHASE, now=1_000.0)
+    opqueue.complete(cfg, PHASE)
+    assert opqueue.wait_on_owner(cfg, PHASE, "q?") == (None, False)  # finished
+
+
+def test_resuming_records_the_answer_and_restores_an_ordinary_lease(cfg):
+    opqueue.add(cfg, PHASE, status="operator", note=NOTE)
+    opqueue.lease(cfg, PHASE, now=1_000.0)
+    opqueue.wait_on_owner(cfg, PHASE, "which host?", now=2_000.0)
+
+    item = opqueue.resume(cfg, PHASE, "the staging box", now=9_000.0)
+
+    assert item.state == opqueue.RUNNING and item.answer == "the staging box"
+    assert item.lease_until == 9_000.0 + opqueue.LEASE_S
+    assert opqueue.resume(cfg, PHASE, "again") is None  # not waiting any more
+
+
+def test_reconcile_requeues_a_job_whose_waiting_session_died_with_the_run(cfg):
+    opqueue.begin_run(cfg)
+    opqueue.add(cfg, PHASE, status="operator", note=NOTE)
+    opqueue.lease(cfg, PHASE, now=1_000.0)
+    opqueue.wait_on_owner(cfg, PHASE, "which host?", now=2_000.0)
+
+    assert opqueue.reconcile(cfg) == [f"requeued {PHASE}"]
+
+    item = opqueue.load(cfg, PHASE)
+    assert item.state == opqueue.QUEUED
+    assert item.question == "which host?"  # handed to the next session
+
+
+def test_completing_records_the_outcome(cfg):
+    opqueue.add(cfg, PHASE, status="operator", note=NOTE)
+    opqueue.lease(cfg, PHASE, now=1_000.0)
+
+    item = opqueue.complete(cfg, PHASE, "  rolled webhooks;\n healthz green ")
+
+    assert item.outcome == "rolled webhooks; healthz green" and item.done_at > 0
+
+
+def test_an_item_file_from_before_this_version_still_loads(cfg):
+    cfg.operator_dir.mkdir(parents=True, exist_ok=True)
+    opqueue.item_path(cfg, PHASE).write_text(json.dumps({
+        "phase": PHASE, "status": "operator", "note": NOTE, "queued_at": 5.0,
+        "attempts": 0, "state": "queued", "run_after": 0.0, "lease_until": 0.0,
+        "triage": {}, "branch": "", "run_id": "", "last_error": "", "asked": False,
+    }), encoding="utf-8")
+
+    item = opqueue.load(cfg, PHASE)
+
+    assert item.state == opqueue.QUEUED and item.question == "" and item.mirror == ""
+    assert opqueue.ready(cfg) == [item]
+
+
+# -- ad-hoc jobs ----------------------------------------------------------
+def test_an_ad_hoc_job_gets_an_id_no_phase_can_have(cfg):
+    item = opqueue.add_adhoc(cfg, "  re-run the post-deploy smoke\n check ")
+
+    assert item.phase.startswith(opqueue.ADHOC_PREFIX)
+    assert item.note == "re-run the post-deploy smoke check"
+    assert item.source == opqueue.ADDED and item.state == opqueue.QUEUED
+
+
+def test_two_ad_hoc_jobs_in_one_second_do_not_collide(cfg, monkeypatch):
+    monkeypatch.setattr(opqueue.time, "time", lambda: 1_700_000_000.0)
+
+    first = opqueue.add_adhoc(cfg, "job one, a real brief")
+    second = opqueue.add_adhoc(cfg, "job two, a real brief")
+
+    assert first.phase == "op-1700000000" and second.phase == "op-1700000000-2"
+
+
+def test_an_ad_hoc_job_for_a_phase_never_overwrites_its_hand_off(cfg):
+    opqueue.add(cfg, "olive-W3", status="operator", note=NOTE)
+
+    item = opqueue.add_adhoc(cfg, "verify the roll on the box", phase="olive-W3")
+    fresh = opqueue.add_adhoc(cfg, "provision the model cache", phase="coral-W1")
+
+    assert item.phase == "olive-W3-op2"
+    assert opqueue.load(cfg, "olive-W3").note == NOTE
+    assert fresh.phase == "coral-W1"
+
+
+def test_an_ad_hoc_job_is_refused_when_off_empty_or_unsafe(cfg, off):
+    assert opqueue.add_adhoc(off, "a real brief here") is None
+    assert opqueue.add_adhoc(cfg, "   ") is None
+    assert opqueue.add_adhoc(cfg, "a real brief here", phase="../evil") is None
+    assert opqueue.add_adhoc(cfg, "a real brief here", phase="a b") is None

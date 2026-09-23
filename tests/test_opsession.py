@@ -303,29 +303,275 @@ def test_operator_done_on_a_phase_with_no_hand_off_is_refused(cfg):
     assert cli(cfg, "operator-done", PHASE).returncode == 1
 
 
-def test_operator_ask_telegrams_exactly_once(cfg, log):
-    """The single message in this whole flow that reaches the owner."""
+def test_operator_ask_pings_once_and_keeps_the_session_waiting(cfg, log):
+    """The ask is a ping plus a held lease — the session stays and asks in its pane.
+
+    It used to abandon the job and end the session, so the owner's answer arrived
+    to nobody and the groundwork already done was thrown away.
+    """
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
     result = cli(cfg, "operator-ask", PHASE, "which", "host", "is", "the", "gateway")
 
     assert result.returncode == 0, result.stderr
+    assert "AskUserQuestion" in result.stdout and "operator-resumed" in result.stdout
     asked = [ln for ln in tg_lines(cfg) if PHASE in ln]
     assert len(asked) == 1
-    assert "which host is the gateway" in asked[0]
-    # ...and it stops blocking, because an answer may never come.
-    assert opqueue.load(cfg, PHASE).terminal
-    assert Supervisor(cfg)._operator_blocking() == []
+    assert "which host is the gateway" in asked[0] and "waiting on you" in asked[0]
+    item = opqueue.load(cfg, PHASE)
+    assert item.state == opqueue.WAITING and not item.terminal
+    st = state_mod.read(cfg)
+    assert st.operator_phase == PHASE  # the lease is still the session's
+    assert st.operator_lease_until == item.lease_until
+    assert st.operator_lease_until > time.time() + opqueue.LEASE_S
+    # ...and it holds the finish open: ending the run would kill the session.
+    assert Supervisor(cfg)._operator_blocking() == [PHASE]
 
 
 def test_operator_ask_does_not_telegram_a_second_time(cfg, log):
     queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
     cli(cfg, "operator-ask", PHASE, "which host")
     before = len(tg_lines(cfg))
 
-    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 1
+    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
     assert len(tg_lines(cfg)) == before
+
+
+def test_operator_ask_on_a_job_that_is_not_running_is_refused(cfg):
+    queue(cfg, PHASE)  # queued, never dispatched
+
+    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 1
+    assert tg_lines(cfg) == []
+
+
+def test_a_waiting_session_survives_the_sweep_past_its_ordinary_lease(cfg, log):
+    """The owner answers when they reach a keyboard; an hour is not a verdict."""
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+
+    operator_mod.sweep(cfg, log, now=time.time() + opqueue.LEASE_S * 5)
+
+    assert opqueue.load(cfg, PHASE).state == opqueue.WAITING
+    assert state_mod.read(cfg).operator_phase == PHASE
+    assert "OPERATOR-LEASE-EXPIRED" not in cfg.supervisor_log.read_text()
+
+
+def test_a_waiting_session_still_lets_go_after_the_wait_lease(cfg, log):
+    """A week, not forever: a session that truly vanished must free the queue."""
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+
+    operator_mod.sweep(cfg, log, now=time.time() + opqueue.WAIT_LEASE_S + 60)
+
+    assert opqueue.load(cfg, PHASE).state == opqueue.QUEUED
+    assert state_mod.read(cfg).operator_phase is None
+
+
+def test_operator_resumed_puts_the_session_back_on_an_ordinary_lease(cfg, log):
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+
+    result = cli(cfg, "operator-resumed", PHASE, "the", "staging", "box")
+
+    assert result.returncode == 0, result.stderr
+    item = opqueue.load(cfg, PHASE)
+    assert item.state == opqueue.RUNNING and item.answer == "the staging box"
+    st = state_mod.read(cfg)
+    assert st.operator_phase == PHASE
+    assert st.operator_lease_until == item.lease_until
+    assert st.operator_lease_until <= time.time() + opqueue.LEASE_S + 1
+    assert cli(cfg, "operator-resumed", PHASE).returncode == 1  # not waiting now
+
+
+def test_operator_done_records_the_outcome_and_telegrams_one_line(cfg, log):
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+
+    result = cli(cfg, "operator-done", PHASE, "rolled", "webhooks;", "healthz", "green")
+
+    assert result.returncode == 0, result.stderr
+    item = opqueue.load(cfg, PHASE)
+    assert item.state == opqueue.DONE and item.outcome == "rolled webhooks; healthz green"
+    [line] = tg_lines(cfg)
+    assert PHASE in line and "rolled webhooks; healthz green" in line
+
+
+def test_the_brief_carries_the_job_its_exits_and_an_earlier_question(cfg):
+    item = queue(cfg, PHASE)
+    line = operator_mod.brief(cfg, item)
+
+    assert "\n" not in line  # send-keys submits on every newline
+    assert NOTE in line and f"swarm operator-done {PHASE}" in line
+    assert f"swarm operator-ask {PHASE}" in line and "operator-resumed" in line
+    assert "project itself" in line
+
+    item.question, item.answer = "which host?", ""
+    assert "An earlier attempt asked the owner: which host?" in operator_mod.brief(cfg, item)
+
+
+def test_the_session_is_built_like_a_worker_but_with_its_own_model(cfg, monkeypatch):
+    """Full, unrestrained: the worker's settings and effort, the operator's model,
+    and no phase marker — it is not that phase's worker."""
+    cfg.operator_model = "opus"
+    cfg.worker_settings = '{"teammateMode":"in-process"}'
+    cfg.worker_effort = "high"
+    monkeypatch.delenv("SWARM_PHASE", raising=False)
+
+    cmd = operator_mod.operator_command(cfg, PHASE)
+    env = operator_mod._operator_env(cfg, PHASE)
+
+    assert cmd.startswith(f"cd {cfg.project_dir} && exec claude --model opus")
+    assert "--settings" in cmd and "--effort high" in cmd
+    assert f"operator:{PHASE}" in cmd
+    assert env["SWARM_STATE_DIR"] == str(cfg.state_dir)
+    assert env[operator_mod.JOB_ENV] == PHASE
+    assert cfg.env_marker not in env
+
+
+# -- the queue order ------------------------------------------------------
+def test_the_sweep_skips_a_phase_that_is_still_building(cfg, log):
+    """Its hand-off is about work that is not in main yet."""
+    queue(cfg, PHASE)
+    queue(cfg, OTHER, note="restart the unit on the build host")
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot(PHASE)
+
+    assert operator_mod.sweep(cfg, log) is True
+    assert state_mod.read(cfg).operator_phase == OTHER
+
+
+def test_operator_add_queues_a_job_behind_the_existing_ones(cfg, log):
+    queue(cfg, PHASE)
+
+    result = cli(cfg, "operator-add", "re-run", "the", "post-deploy", "smoke", "check")
+
+    assert result.returncode == 0, result.stderr
+    items = opqueue.load_all(cfg)
+    assert [i.phase for i in items][0] == PHASE
+    added = items[1]
+    assert added.phase.startswith("op-") and added.source == opqueue.ADDED
+    assert operator_mod.sweep(cfg, log) is True
+    assert state_mod.read(cfg).operator_phase == PHASE  # oldest first
+
+
+def test_operator_add_with_a_phase_names_the_job_after_it(cfg):
+    result = cli(cfg, "operator-add", "verify the roll", "--phase", "olive-W3e")
+
+    assert result.returncode == 0, result.stderr
+    assert opqueue.load(cfg, "olive-W3e").note == "verify the roll"
+
+
+def test_operator_add_is_refused_while_the_feature_is_off(off):
+    result = cli(off, "operator-add", "verify the roll")
+
+    assert result.returncode == 2 and "enabled" in result.stderr
+    assert opqueue.load_all(off) == []
+
+
+# -- visibility -----------------------------------------------------------
+def test_status_shows_the_queue_counts_and_the_job_waiting_on_you(cfg, log):
+    queue(cfg, PHASE)
+    queue(cfg, OTHER, note="restart the unit on the build host")
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+
+    out = cli(cfg, "status").stdout
+
+    assert "queued=1 running=0 waiting-on-owner=1 done=0 abandoned=0" in out
+    assert f"current: {PHASE} [WAITING ON YOU: which host]" in out
+
+
+def test_status_says_when_the_operator_is_off(off):
+    off.operator_dir.mkdir(parents=True, exist_ok=True)
+    opqueue._write(off, opqueue.Item(phase=PHASE, note=NOTE, queued_at=time.time()))
+
+    assert "operator (OFF" in cli(off, "status").stdout
+
+
+def test_doctor_warns_on_a_job_waiting_on_you_over_an_hour_and_on_abandoned(cfg):
+    from swarm_orchestrator import doctor
+
+    state_mod.init_state(cfg)
+    queue(cfg, PHASE)
+    queue(cfg, OTHER, note="restart the unit on the build host")
+    opqueue.lease(cfg, PHASE)
+    opqueue.wait_on_owner(cfg, PHASE, "which host?", now=time.time() - 7200)
+    opqueue.abandon(cfg, OTHER, "gave up")
+
+    [check] = [c for c in doctor.run_checks(cfg) if c.name == "operator"]
+
+    assert check.status == doctor.WARN
+    assert PHASE in check.detail and "which host?" in check.detail
+    assert f"{OTHER} abandoned" in check.detail
+
+
+def test_doctor_is_quiet_about_a_fresh_question(cfg):
+    from swarm_orchestrator import doctor
+
+    queue(cfg, PHASE)
+    opqueue.lease(cfg, PHASE)
+    opqueue.wait_on_owner(cfg, PHASE, "which host?")
+
+    assert doctor._check_operator(cfg).status == doctor.OK
+
+
+def test_the_drawer_renders_a_waiting_job(cfg):
+    from types import SimpleNamespace
+
+    from swarm_orchestrator.tui import data, drawer
+
+    queue(cfg, PHASE)
+    opqueue.lease(cfg, PHASE)
+    opqueue.wait_on_owner(cfg, PHASE, "which host?")
+    snap = data.build_snapshot(
+        cfg, {"slots": [], "done": {}}, operator=opqueue.load_all(cfg)
+    )
+
+    rows = drawer.operator_rows(SimpleNamespace(snapshot=snap))
+    assert len(rows) == 1 and "waiting" in rows[0].text
+    [blocker] = snap.blockers
+    assert (blocker.kind, blocker.question) == ("operator-ask", "which host?")
+
+
+# -- the replay of the dropped hand-offs ----------------------------------
+def test_enabling_the_operator_replays_legacy_sentinels_one_at_a_time_oldest_first(
+    cfg, log
+):
+    """The hand-offs dropped while the operator was off: each left only
+    its one-line `done/<phase>.operator` sentinel. Turning the operator on and
+    running `swarm up` must queue every one, and drain them one at a time,
+    oldest first."""
+    cfg.done_dir.mkdir(parents=True, exist_ok=True)
+    phases = ["coral-W4", "olive-W2", "api-F9"]
+    for n, phase in enumerate(phases):
+        path = cfg.done_dir / f"{phase}.operator"
+        path.write_text(f"{phase} operator roll {phase} to the live box and verify\n",
+                        encoding="utf-8")
+        stamp = 1_700_000_000 + n * 60
+        import os
+
+        os.utime(path, (stamp, stamp))
+    assert opqueue.load_all(cfg) == []
+
+    rebuilt = opqueue.reconcile(cfg, log)
+
+    assert sorted(rebuilt) == sorted(f"rebuilt {p}" for p in phases)
+    items = opqueue.load_all(cfg)
+    assert [i.phase for i in items] == phases  # oldest sentinel first
+    assert items[0].note == "roll coral-W4 to the live box and verify"
+    for expected in phases:
+        assert operator_mod.sweep(cfg, log) is True
+        assert state_mod.read(cfg).operator_phase == expected
+        assert operator_mod.sweep(cfg, log) is False  # one at a time
+        opqueue.complete(cfg, expected, "done")
+        operator_mod.release(cfg, log)
+    assert opqueue.pending(cfg) == []
 
 
 # -- the owner's escape hatches -------------------------------------------
@@ -450,3 +696,19 @@ def test_operator_done_releases_the_lease_and_lets_the_run_finish(swarm):
     assert sum("swarm finished" in ln for ln in swarm.tg_lines()) == 1
     # Drained, so the finish has nothing to name.
     assert not any("undrained" in ln for ln in swarm.tg_lines())
+
+
+def test_swarm_up_requeues_dropped_hand_offs_under_isolation_none(swarm):
+    """The requeue ran only under worktree isolation, and the swarm also runs
+    with "none" — so turning the operator on would have replayed nothing there."""
+    _operator_run(swarm)
+    done_dir = swarm.state_dir / "done"
+    done_dir.mkdir(parents=True, exist_ok=True)
+    (done_dir / "old-W1.operator").write_text(
+        f"old-W1 operator {NOTE}\n", encoding="utf-8"
+    )
+
+    out = swarm.up().stdout
+
+    assert "operator queue: rebuilt old-W1" in out
+    assert (swarm.state_dir / "operator" / "old-W1.json").is_file()

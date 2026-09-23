@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -59,12 +60,18 @@ from .config import Config
 
 QUEUED = "queued"
 RUNNING = "running"
+#: The session asked the owner a genuine decision and is waiting in its pane for
+#: the answer — lease held, session alive. Not terminal: the answer arrives in the
+#: same session, which then carries on (``swarm operator-resumed``).
+WAITING = "waiting"
 DONE = "done"
 ABANDONED = "abandoned"
 #: Every state an item can be in, in lifecycle order.
-STATES = (QUEUED, RUNNING, DONE, ABANDONED)
+STATES = (QUEUED, RUNNING, WAITING, DONE, ABANDONED)
 #: States nothing will ever pick up again.
 TERMINAL = frozenset({DONE, ABANDONED})
+#: States a live session holds the lease in.
+LEASED = frozenset({RUNNING, WAITING})
 
 #: Attempts an item gets before it is abandoned and the owner told. Three is a
 #: crash loop, not bad luck.
@@ -77,6 +84,21 @@ LEASE_S = 3600.0
 #: instantly still spends its three attempts over a useful span rather than in a
 #: single second.
 RETRY_BACKOFF_S = 300.0
+#: The lease a session holds while it waits on the owner. The owner answers when
+#: they are at a keyboard, which can be a night away, and a lease that expired
+#: meanwhile would let the sweep kill a session that is doing exactly what it
+#: should. A week, not forever: a session that truly vanished must still let go.
+WAIT_LEASE_S = 7 * 24 * 3600.0
+
+#: ``Item.source`` of a job queued by ``swarm operator-add`` rather than left by a
+#: phase's ``swarm done ... operator``. ``""`` (every older item) is the latter.
+ADDED = "added"
+#: Prefix of an ad-hoc job's id when it names no phase — distinct from every
+#: ledger phase id, so the job's file, lease and mirror can never collide with one.
+ADHOC_PREFIX = "op-"
+#: What an item id may contain: the ledger's phase-id alphabet. The id becomes a
+#: file name and a git branch (``swarm/op-<id>``), so nothing wider is safe.
+ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 #: The closed vocabulary a triage may batch phases under; it is the same list the
 #: prompt offers. Anything else is not a group — see :func:`group_of`.
@@ -137,11 +159,23 @@ class Item:
     #: Which run took the lease, so one taken by a run that is gone is knowable.
     run_id: str = ""
     last_error: str = ""
-    #: True when a session asked the owner rather than the queue giving up. Both
-    #: are terminal and both stop blocking, so nothing *scheduling* cares — but
-    #: the owner reading "abandoned" for a question they were properly asked is
-    #: told the wrong thing, so the two are kept apart where a human can see it.
+    #: LEGACY: set on items an older version ended with ``operator-ask``, which
+    #: abandoned the item instead of waiting. Still read — such an item is an
+    #: owner question, not a give-up — but never written any more.
     asked: bool = False
+    #: The owner decision a session is (or was last) waiting on.
+    question: str = ""
+    #: When it asked. 0 = it never has.
+    asked_at: float = 0.0
+    #: The owner's answer, as the session relayed it on resuming.
+    answer: str = ""
+    #: The session's one-line account of what it did, from ``operator-done``.
+    outcome: str = ""
+    done_at: float = 0.0
+    #: The job's own workspace mirror under worktree isolation ("" = project dir).
+    mirror: str = ""
+    #: ``""`` = a phase's ``operator`` finish; :data:`ADDED` = ``swarm operator-add``.
+    source: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -318,7 +352,13 @@ def next_deadline(cfg: Config, now: float | None = None) -> float | None:
 
 # -- the write side -------------------------------------------------------
 def add(
-    cfg: Config, phase: str, *, status: str, note: str, branch: str = ""
+    cfg: Config,
+    phase: str,
+    *,
+    status: str,
+    note: str,
+    branch: str = "",
+    source: str = "",
 ) -> Item | None:
     """Queue one hand-off; ``None`` when nothing was queued.
 
@@ -334,8 +374,52 @@ def add(
         note=" ".join((note or "").split()),
         queued_at=time.time(),
         branch=branch,
+        source=source,
     )
     return item if _create(cfg, item) else None
+
+
+def _adhoc_ids(phase: str | None, now: float):
+    """Candidate ids for an ad-hoc job, first free one wins.
+
+    With ``--phase P`` the job is P's when P has none yet, else ``P-op2``,
+    ``P-op3`` …; without one it is ``op-<epoch>`` (``-2`` … on a same-second
+    clash). Neither shape is a ledger phase id, so a job never takes over a
+    phase's queue file, lease or mirror.
+    """
+    base = phase or f"{ADHOC_PREFIX}{int(now)}"
+    yield base
+    sep = "-op" if phase else "-"
+    for n in range(2, 1000):
+        yield f"{base}{sep}{n}"
+
+
+def add_adhoc(cfg: Config, brief: str, phase: str | None = None) -> Item | None:
+    """Queue a job nobody's ``swarm done`` left: ``swarm operator-add``.
+
+    The same queue, lease and sweep as a phase's hand-off — it is only the way in
+    that differs. ``None`` when the operator is off, the brief is empty or the id
+    is not a safe name.
+    """
+    note = " ".join((brief or "").split())
+    if not cfg.operator_enabled or not note:
+        return None
+    if phase is not None and not ID_RE.match(phase):
+        return None
+    now = time.time()
+    for candidate in _adhoc_ids(phase, now):
+        if load(cfg, candidate) is not None:
+            continue
+        item = Item(
+            phase=candidate,
+            status="operator",
+            note=note,
+            queued_at=now,
+            source=ADDED,
+        )
+        if _create(cfg, item):
+            return item
+    return None
 
 
 def lease(cfg: Config, phase: str, now: float | None = None) -> Item | None:
@@ -386,14 +470,16 @@ def release(
     return item
 
 
-def complete(cfg: Config, phase: str) -> Item | None:
-    """Mark ``phase``'s hand-off carried out."""
+def complete(cfg: Config, phase: str, outcome: str = "") -> Item | None:
+    """Mark ``phase``'s hand-off carried out, with the session's own account."""
     item = load(cfg, phase)
     if item is None or item.terminal:
         return None
     item.state = DONE
     item.run_id = ""
     item.lease_until = 0.0
+    item.outcome = " ".join((outcome or "").split())
+    item.done_at = time.time()
     _write(cfg, item)
     return item
 
@@ -406,38 +492,58 @@ def abandon(cfg: Config, phase: str, reason: str = "") -> Item | None:
     return _abandon(cfg, item, reason)
 
 
-def escalate(cfg: Config, phase: str, question: str) -> Item | None:
-    """The session hit an ambiguity it must not guess at: hand it to the owner.
+def wait_on_owner(
+    cfg: Config, phase: str, question: str, now: float | None = None
+) -> tuple[Item | None, bool]:
+    """The session hit a genuine decision: park the item on the owner, alive.
 
-    Terminal — an item waiting on a human is not something the queue can drain,
-    and leaving it pending would hold ``finish`` open on an answer that may never
-    come. It reuses :data:`ABANDONED` rather than inventing a state, because the
-    only question anything downstream asks is "will this ever be picked up
-    again?", and the answer is the same; ``last_error`` carries which of the two
-    it was.
+    Returns ``(item, fresh)``; ``fresh`` is False when this exact question is
+    already the one being waited on, so a re-run cannot ring the owner twice.
 
-    The telegram is the *question*, not :func:`_abandon`'s attempt count: the
-    owner needs the sentence, and this is the single point in the whole operator
-    flow that reaches their phone.
+    This used to be terminal — the item was abandoned and the session told to
+    stop — which threw away a session that had already done the groundwork and
+    left the owner's answer with nobody to act on it. Now the session asks in its
+    own pane, like a worker does, and the lease is stretched to
+    :data:`WAIT_LEASE_S` so neither the sweep nor a restart-free night reclaims
+    it while the owner sleeps.
     """
     item = load(cfg, phase)
-    if item is None or item.terminal:
-        return None
-    item.state = ABANDONED
-    item.asked = True
-    item.run_id = ""
-    item.lease_until = 0.0
-    item.last_error = " ".join((question or "").split())
+    if item is None or item.state not in LEASED:
+        return None, False
+    now = time.time() if now is None else now
+    text = " ".join((question or "").split())
+    fresh = not (item.state == WAITING and item.question == text)
+    item.state = WAITING
+    item.question = text
+    if fresh:
+        item.asked_at = now
+    item.lease_until = now + WAIT_LEASE_S
     _write(cfg, item)
-    telegram.notify(
-        cfg.telegram_notify,
-        f"swarm: operator session for {item.phase} needs you — {item.last_error}"
-        f" (brief: {item.note or 'none'})",
-        kind="operator-ask",
-        phase=item.phase,
-        source="opqueue.escalate",
-        state_dir=cfg.state_dir,
-    )
+    return item, fresh
+
+
+def resume(
+    cfg: Config, phase: str, answer: str = "", now: float | None = None
+) -> Item | None:
+    """The owner answered: the session carries on under an ordinary lease."""
+    item = load(cfg, phase)
+    if item is None or item.state != WAITING:
+        return None
+    now = time.time() if now is None else now
+    item.state = RUNNING
+    item.answer = " ".join((answer or "").split())
+    item.lease_until = now + LEASE_S
+    _write(cfg, item)
+    return item
+
+
+def set_mirror(cfg: Config, phase: str, mirror: str) -> Item | None:
+    """Record the workspace mirror a job's session runs in."""
+    item = load(cfg, phase)
+    if item is None:
+        return None
+    item.mirror = mirror
+    _write(cfg, item)
     return item
 
 
@@ -494,7 +600,8 @@ def reconcile(cfg: Config, log=None) -> list[str]:
       sentinel with :func:`recap.sentinel` — so the crash window between the two
       writes costs nothing;
     * an item left ``running`` by a run that is gone goes back to ``queued`` with
-      its attempt count intact. Rotating the run id first is what makes "gone"
+      its attempt count intact (``waiting`` too — its session died with the
+      run). Rotating the run id first is what makes "gone"
       decidable: this call happens at ``swarm up``, and a ``swarm up`` IS a new
       run, so every lease predating it belongs to a run that is over.
     """
@@ -503,7 +610,10 @@ def reconcile(cfg: Config, log=None) -> list[str]:
     current = begin_run(cfg)
     changed: list[str] = []
     for item in load_all(cfg):
-        if item.state == RUNNING and item.run_id != current:
+        # A waiting session died with the run too: its question is kept on the
+        # item and handed to the next session, which re-asks it if it still
+        # stands.
+        if item.state in LEASED and item.run_id != current:
             item.state = QUEUED
             item.run_id = ""
             item.lease_until = 0.0

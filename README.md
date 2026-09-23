@@ -135,6 +135,9 @@ The master never asks — it runs autonomously. Everything else runs unattended.
 | `swarm free <slot\|phase>` | free a stuck slot (by id or phase) |
 | `swarm resolved <phase>` | after you clear a held integration (conflict / dirty tree / push failure) |
 | `swarm operator-triage <phase>` | decide whether a queued operator hand-off runs `now` or `later` — spawned for you by `swarm done` |
+| `swarm operator-add "<brief>" [--phase P]` | queue an ad-hoc operator job (id `P`, or `op-<epoch>` without `--phase`) |
+| `swarm operator-done <job> ["<outcome>"]` | the operator session's finish — records and telegrams the one-line outcome |
+| `swarm operator-ask <job> "<question>"` / `swarm operator-resumed <job> ["<answer>"]` | the operator waits on your decision (pinged, lease held) / carries on once you answered |
 | `swarm integrate <phase>` | manually integrate `swarm/<phase>` into main (worktree mode) |
 | `swarm finish` | ask the supervisor to stop now |
 
@@ -258,7 +261,8 @@ repos       = ["*"]                 # component repos to mirror; e.g. ["*", "pac
 [operator]                          # what happens after `swarm done <phase> operator`
 enabled      = false                # positive opt-in: true lets the swarm open an
                                     # autonomous session with your full authority.
-                                    # While false, no hand-off is ever queued.
+                                    # While false nothing is queued: each hand-off
+                                    # is telegrammed to you as a to-do instead.
 cmd          = ""                   # command an operator session runs; "" = built-in
 model        = ""                   # "" inherits; else "opus" / "sonnet" / ...
 triage_model = "haiku"              # decides now-vs-later; an alias, never a dated build
@@ -274,18 +278,32 @@ cycle, self-dependency, or unknown dependency rather than stalling on it silentl
 ### Operator hand-offs (`[operator]`)
 
 `swarm done <phase> operator "<recap>"` is the finish that leaves concrete work
-behind — a rebuild to run, a service to restart, a migration to apply. It pings
-nobody: the recap is handed to a *session* instead, and it is that session's
-entire brief, which is why a recap under 20 characters or 4 words is refused the
-hand-off (the sentinel is still written — durability is never traded for
-politeness).
+behind — a deploy or roll, a check after it, a service to restart, a migration to
+apply. The **operator** is a side worker: a full Claude session that does the
+work a phase worker must not wait on, first checking whether later phases already
+did it. It asks you only genuine decisions (money, taste, irreversible data loss,
+contradicting something you decided in writing) and never answers a worker's
+question. The recap is its entire brief, which is why a recap under 20
+characters or 4 words is refused the hand-off (the sentinel is still written —
+durability is never traded for politeness). With `[operator].enabled = false`
+the hand-off is telegrammed to you as a to-do rather than dropped.
+
+One job runs at a time, oldest first. Under `isolation = "worktree"` a job works
+in its own mirror (`op-<job>`, branch `swarm/op-<job>`) and on `operator-done`
+its branch goes through the ordinary merge queue — auto-resolve, resolver, owed
+push and all — and the mirror is removed; under `"none"` it works in the project.
+`swarm operator-ask` pings you and keeps the session alive (its lease stretched
+to a week) while it asks in its pane; `swarm operator-resumed` puts it back to
+work. `swarm operator-add` queues an ad-hoc job. `swarm status` shows the queue;
+`swarm doctor` warns on a job waiting on you over an hour and on abandoned jobs.
 
 The hand-off is durable. `swarm done` writes one JSON item per phase under
 `<state_dir>/operator/`, **after** the sentinel and **before** the FIFO poke: the
 item is re-derivable from the sentinel, so a crash between them costs nothing,
 while a crash after the poke would leave the work merged and recorded `done` with
-nothing queued. `swarm up` rebuilds any item whose sentinel outlived it and
-requeues anything a dead run left `running`.
+nothing queued. `swarm up` (any isolation) rebuilds any item whose sentinel
+outlived it and requeues anything a dead run left `running` or `waiting`; in
+worktree mode it keeps a live job's mirror and lands a finished job's.
 
 It is bounded. Every attempt is counted in the same write that leases the item,
 and after three the item goes terminal `abandoned` and telegrams you once — so a

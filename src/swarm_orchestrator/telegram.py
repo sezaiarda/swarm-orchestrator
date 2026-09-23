@@ -34,7 +34,9 @@ _TRUNC_MARK = " ...[truncated]"
 KINDS = (
     "worker-done",  # launch.done: a worker finished needs-owner / fail
     "operator-abandoned",  # opqueue: the hand-off queue gave up after MAX_ATTEMPTS
-    "operator-ask",  # opqueue: the operator session hit an ambiguity, not a guess
+    "operator-ask",  # cli: the operator session is waiting on an owner decision
+    "operator-done",  # cli: an operator job finished — its one-line outcome
+    "operator-todo",  # launch.done: a hand-off with no operator to run it
     "waiting",  # launch.waiting: a worker is blocked on the owner
     "park",  # supervisor: a waiting worker moved to its own window
     "integrate-hold",  # supervisor: merge conflict / dirty tree (push failed: legacy)

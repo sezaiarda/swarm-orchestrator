@@ -1,0 +1,180 @@
+"""The operator's own workspace mirror under worktree isolation (real git, no claude).
+
+An operator job is a side worker: under ``isolation = "worktree"`` it gets a
+full-workspace mirror named ``op-<job>`` (branch ``swarm/op-<job>``), commits
+there like a worker, and on ``operator-done`` its branch goes through the same
+merge queue a phase does — then the mirror is gone. What must never happen:
+
+* the mirror is mistaken for an interrupted phase at ``swarm up`` and discarded
+  with the job's commits in it;
+* a retry rebuilds the mirror from scratch over commits a previous attempt made;
+* a landed job is recorded ``done`` as though it were a ledger phase.
+
+Driver is ``bare``, so no session is ever started: only the git side is real.
+"""
+
+from __future__ import annotations
+
+import shutil
+
+import pytest
+
+from swarm_orchestrator import gitq
+from swarm_orchestrator import operator as operator_mod
+from swarm_orchestrator import opqueue
+from swarm_orchestrator import state as state_mod
+from swarm_orchestrator.logutil import Log
+from swarm_orchestrator.supervisor import Supervisor
+from test_worktree import _cfg, _git, _make_project, _out, _tree
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("git") is None, reason="git not available"
+)
+
+JOB = "coral-W4"
+NOTE = "roll the gateway to the new tag on the live box and verify it answers"
+
+
+@pytest.fixture
+def env(monkeypatch, tmp_path):
+    project, origin = _make_project(tmp_path)
+    (project / ".swarm.toml").write_text("[operator]\nenabled = true\n", encoding="utf-8")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "operator on")
+    _git(project, "push", "origin", "master")
+    monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(tmp_path / "claude.json"))  # never the real one
+    cfg = _cfg(monkeypatch, tmp_path, project, driver="bare")
+    assert cfg.operator_enabled and cfg.git_isolation == "worktree"
+    cfg.ensure_dirs()
+    state_mod.init_state(cfg)
+    log = Log(cfg.supervisor_log)
+    yield cfg, project, origin, log
+    log.close()
+
+
+def _queue(cfg, job: str = JOB) -> None:
+    assert opqueue.add(cfg, job, status="operator", note=NOTE) is not None
+
+
+def test_a_job_gets_its_own_mirror_distinct_from_any_phase(env):
+    cfg, project, _origin, log = env
+    _queue(cfg)
+
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+
+    mirror = cfg.wt_dir / f"op-{JOB}"
+    assert (mirror / "README.md").is_file()
+    assert _out(project, "branch", "--list", f"swarm/op-{JOB}").strip()
+    assert not (cfg.wt_dir / JOB).exists()  # never the phase's own mirror name
+    assert opqueue.load(cfg, JOB).mirror == f"op-{JOB}"
+
+
+def test_an_ad_hoc_job_is_not_prefixed_twice():
+    assert operator_mod.mirror_name("op-1700000000") == "op-1700000000"
+    assert operator_mod.mirror_name("olive-W3") == "op-olive-W3"
+
+
+def test_the_session_env_points_swarm_at_this_run_from_the_mirror(env):
+    cfg, _project, _origin, _log = env
+    mirror = cfg.wt_dir / f"op-{JOB}"
+
+    envv = operator_mod._operator_env(cfg, JOB, mirror)
+    cmd = operator_mod.operator_command(cfg, JOB, mirror)
+
+    assert envv["SWARM_WORKTREE"] == str(mirror)
+    assert envv["SWARM_PROJECT"] == str(cfg.project_dir)
+    assert envv["SWARM_STATE_DIR"] == str(cfg.state_dir)
+    assert envv["SWARM_GIT_ISOLATION"] == "worktree"
+    assert cmd.startswith(f"cd {mirror} && exec claude")
+
+
+def test_operator_done_lands_the_mirror_through_the_merge_queue(env):
+    cfg, project, origin, log = env
+    _queue(cfg)
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+    mirror = cfg.wt_dir / f"op-{JOB}"
+    (mirror / "deployed.txt").write_text("gateway on v1.2.3\n")
+    _git(mirror, "add", "-A")
+    _git(mirror, "commit", "-m", "record the roll")
+
+    opqueue.complete(cfg, JOB, "rolled the gateway")
+    Supervisor(cfg)._on_operator_done(JOB)
+
+    _git(project, "checkout", "master")
+    assert (project / "deployed.txt").read_text() == "gateway on v1.2.3\n"
+    assert "deployed.txt" in _tree(origin)  # pushed like any integration
+    assert not mirror.exists()
+    assert _out(project, "branch", "--list", "swarm/*").strip() == ""
+    st = state_mod.read(cfg)
+    assert st.integ_queue == [] and st.integ_blocked is None
+    assert f"op-{JOB}" not in st.done and JOB not in st.done  # not a ledger phase
+    assert st.operator_phase is None
+    assert f"OPERATOR-INTEGRATED op-{JOB}" in cfg.supervisor_log.read_text()
+
+
+def test_a_retry_reuses_the_mirror_and_keeps_the_commits_already_made(env):
+    cfg, project, _origin, log = env
+    _queue(cfg)
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+    mirror = cfg.wt_dir / f"op-{JOB}"
+    (mirror / "half.txt").write_text("first attempt\n")
+    _git(mirror, "add", "-A")
+    _git(mirror, "commit", "-m", "half done")
+    opqueue.release(cfg, JOB, "session died", now=0.0)  # back-off already over
+    operator_mod.release(cfg, log)
+
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+
+    assert (mirror / "half.txt").read_text() == "first attempt\n"
+    assert "OPERATOR-MIRROR-REUSE" in cfg.supervisor_log.read_text()
+
+
+def test_swarm_up_keeps_a_live_jobs_mirror_and_lands_a_finished_one(env):
+    """Without the plan both read as interrupted phases and are discarded."""
+    cfg, project, _origin, log = env
+    _queue(cfg, "live-W1")
+    _queue(cfg, "done-W2")
+    for job, name in (("live-W1", "keep.txt"), ("done-W2", "landed.txt")):
+        with state_mod.transaction(cfg) as st:
+            st.release_operator()
+        assert operator_mod.dispatch(cfg, job, log) is True
+        mirror = cfg.wt_dir / f"op-{job}"
+        (mirror / name).write_text(job)
+        _git(mirror, "add", "-A")
+        _git(mirror, "commit", "-m", job)
+    opqueue.complete(cfg, "done-W2", "done")
+
+    plan = operator_mod.mirror_plan(cfg)
+    result = gitq.reconcile(cfg, {}, log, operator=plan)
+
+    assert plan == {"op-live-W1": operator_mod.KEEP, "op-done-W2": operator_mod.INTEGRATE}
+    assert result.integrated == [] and result.operator_integrated == ["op-done-W2"]
+    assert (cfg.wt_dir / "op-live-W1" / "keep.txt").is_file()  # kept, commits and all
+    _git(project, "checkout", "master")
+    assert (project / "landed.txt").read_text() == "done-W2"
+    assert _out(project, "branch", "--list", "swarm/op-done-W2").strip() == ""
+
+
+def test_swarm_up_still_discards_an_abandoned_jobs_mirror(env):
+    cfg, project, _origin, log = env
+    _queue(cfg)
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+    opqueue.abandon(cfg, JOB, "gave up")
+
+    gitq.reconcile(cfg, {}, log, operator=operator_mod.mirror_plan(cfg))
+
+    assert not (cfg.wt_dir / f"op-{JOB}").exists()
+    assert _out(project, "branch", "--list", "swarm/*").strip() == ""
+
+
+def test_under_isolation_none_the_job_runs_in_the_project(env, monkeypatch):
+    cfg, _project, _origin, log = env
+    cfg.git_isolation = "none"
+    _queue(cfg)
+
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+
+    assert not (cfg.wt_dir / f"op-{JOB}").exists()
+    assert opqueue.load(cfg, JOB).mirror == ""
+    assert operator_mod.integration_for(cfg, JOB) is None
+    assert "project itself" in operator_mod.brief(cfg, opqueue.load(cfg, JOB))

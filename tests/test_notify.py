@@ -323,7 +323,12 @@ def test_the_retired_spelling_pings_nobody(cfg, sink, monkeypatch):
     assert statuses.NEEDS_OWNER in statuses.OWED_PING
     result = launch.done(cfg, "P1", "needs-owner", "check the auth change")
     assert result.status == "operator" and result.ping == "skipped"
-    assert sent(sink) == []
+    # The completion ping stays silent. What reaches the phone with the operator
+    # off (this cfg's default) is the hand-off itself, as a to-do — never silence.
+    assert result.route == "owner"
+    assert sent(sink) == [
+        "swarm: to-do for you from P1 (no operator is running) — check the auth change"
+    ]
 
 
 def test_a_dropped_fail_ping_is_reported_by_done(cfg, tmp_path, monkeypatch):

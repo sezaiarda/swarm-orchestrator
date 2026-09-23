@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import buildsem
 from . import notes as notes_mod
+from . import operator as operator_mod
 from . import opqueue
 from . import tui as tui_mod
 from . import doctor as doctor_mod
@@ -112,13 +113,12 @@ def _reconcile_orphans(cfg: Config) -> None:
     """
     log = Log(cfg.supervisor_log)
     try:
-        rebuilt = opqueue.reconcile(cfg, log)
-        if rebuilt:
-            print(f"operator queue: {', '.join(rebuilt)}")
         seed = gitq.sentinel_done(cfg)
         st = state_mod.read(cfg)
         try:
-            result = gitq.reconcile(cfg, dict(st.done), log)
+            result = gitq.reconcile(
+                cfg, dict(st.done), log, operator=operator_mod.mirror_plan(cfg)
+            )
         except gitq.GitError as exc:
             print(f"reconcile skipped (git error): {exc}", file=sys.stderr)
             log.line(f"RECONCILE-ERROR {exc}")
@@ -137,14 +137,22 @@ def _reconcile_orphans(cfg: Config) -> None:
                     s.mark_done(phase, seed.get(phase, "ok"))
         if result.integrated:
             print(f"reconciled orphan branches: {', '.join(result.integrated)}")
+        if result.operator_integrated:
+            print(f"landed operator mirrors: {', '.join(result.operator_integrated)}")
         for phase, pushes in result.pushes.items():
             pushowed.settle(cfg, phase, pushes, log)  # a failed push is owed, not held
         if result.held:
             first = result.held[0]
+            plan = operator_mod.mirror_plan(cfg)
             with state_mod.transaction(cfg) as s:
                 s.integ_blocked = first.phase
                 s.integ_blocked_kind = first.kind
                 s.integ_blocked_repo = str(first.repo) if first.repo else None
+                for h in result.held:
+                    if plan.get(h.phase) == operator_mod.INTEGRATE:
+                        # Queued too, so `swarm resolved` re-lands it; a job has
+                        # no sentinel for the next `swarm up` to find it by.
+                        s.integ_push(h.phase, operator_mod.INTEG_STATUS)
             names = ", ".join(f"{h.phase} ({h.kind})" for h in result.held)
             print(f"integration HELD: {names}", file=sys.stderr)
             print("  these phases are NOT marked done — their branches never merged.")
@@ -198,6 +206,15 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         )
         return 1
     state_mod.init_state(cfg)
+    # Every up, whatever the isolation: it is what re-queues a hand-off whose
+    # sentinel outlived its item — and the swarm also runs with isolation "none".
+    log = Log(cfg.supervisor_log)
+    try:
+        rebuilt = opqueue.reconcile(cfg, log)
+    finally:
+        log.close()
+    if rebuilt:
+        print(f"operator queue: {', '.join(rebuilt)}")
     if cfg.git_isolation == "worktree":
         _reconcile_orphans(cfg)
     if not cfg.fifo_path.exists():
@@ -437,35 +454,110 @@ def cmd_operator(cfg: Config, phase: str) -> int:
     return 0
 
 
-def cmd_operator_done(cfg: Config, phase: str) -> int:
-    """The session signals its hand-off is carried out."""
-    if opqueue.complete(cfg, phase) is None:
-        print(f"swarm operator-done: no live hand-off for {phase}", file=sys.stderr)
+def cmd_operator_done(cfg: Config, phase: str, outcome: str = "") -> int:
+    """The session signals its job is finished, with a one-line outcome.
+
+    The outcome is recorded on the item and telegrammed as one short line: the
+    owner delegated the job, so they hear how it ended without opening a pane.
+    """
+    item = opqueue.complete(cfg, phase, outcome)
+    if item is None:
+        print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
         return 1
+    tail = f" — {item.outcome}" if item.outcome else " (no outcome given)"
+    telegram.notify(
+        cfg.telegram_notify,
+        f"swarm: operator job {phase} done{tail}",
+        kind="operator-done",
+        phase=phase,
+        source="cli.operator-done",
+        state_dir=cfg.state_dir,
+    )
     # The item is settled whatever happens next; only the session's own lease
-    # rides on the poke, and a lost one holds it until it expires. Say so.
+    # (and, under worktree isolation, the merge of its mirror) rides on the
+    # poke, and a lost one holds the lease until it expires. Say so.
     heard = _poke(cfg, f"operator-done {phase}")
     print(f"operator-done {phase}")
     print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
     return 0
 
 
-def cmd_operator_ask(cfg: Config, phase: str, question: str) -> int:
-    """Escalate an ambiguous brief to the owner instead of guessing at it.
+def _job_brief(note: str, limit: int = 160) -> str:
+    """A job's brief cut to what fits beside a question on a phone screen."""
+    return note if len(note) <= limit else note[: limit - 1].rstrip() + "…"
 
-    The one telegram in the whole operator flow. The session runs after its
-    worker is gone and cannot ask what the recap meant, so a guess here is a
-    guess made with the owner's authority on the host — this is the cheaper
-    branch by a wide margin.
+
+def cmd_operator_ask(cfg: Config, phase: str, question: str) -> int:
+    """The session hit a genuine decision: ping the owner and wait for them.
+
+    The session stays alive and asks in its own pane (AskUserQuestion), exactly
+    as a worker does after ``swarm waiting``; this call is the ping that gets the
+    owner to that pane, plus the lease that keeps the session alive until they
+    arrive (:data:`opqueue.WAIT_LEASE_S`, on the item and in ``state.json``). It
+    used to end the session instead, so every answer arrived to nobody.
     """
     if not question.strip():
         print("swarm operator-ask: empty question", file=sys.stderr)
         return 2
-    if opqueue.escalate(cfg, phase, question) is None:
-        print(f"swarm operator-ask: no live hand-off for {phase}", file=sys.stderr)
+    item, fresh = opqueue.wait_on_owner(cfg, phase, question)
+    if item is None:
+        print(f"swarm operator-ask: no running operator job {phase}", file=sys.stderr)
         return 1
-    _poke(cfg, f"operator-done {phase}")  # the session is over either way
-    print(f"operator-ask {phase}: the owner has the question; stop here")
+    operator_mod.hold_lease(cfg, phase, item.lease_until)
+    if fresh:
+        telegram.notify(
+            cfg.telegram_notify,
+            f"swarm: operator job {phase} is waiting on you — {item.question}"
+            f" (the job: {_job_brief(item.note or 'no brief')})",
+            kind="operator-ask",
+            phase=phase,
+            source="cli.operator-ask",
+            state_dir=cfg.state_dir,
+        )
+    told = "has been pinged" if fresh else "already has this question"
+    print(f"operator-ask {phase}: the owner {told}")
+    print("  now ask it with AskUserQuestion in this pane and wait for the answer;")
+    print(f'  then run: swarm operator-resumed {phase} "<the answer>"')
+    return 0
+
+
+def cmd_operator_resumed(cfg: Config, phase: str, answer: str = "") -> int:
+    """The owner answered: record it and put the session back on a normal lease."""
+    item = opqueue.resume(cfg, phase, answer)
+    if item is None:
+        print(f"swarm operator-resumed: {phase} is not waiting on the owner", file=sys.stderr)
+        return 1
+    operator_mod.hold_lease(cfg, phase, item.lease_until)
+    print(f"operator-resumed {phase}: carry on")
+    return 0
+
+
+def cmd_operator_add(cfg: Config, brief: str, phase: str | None = None) -> int:
+    """Queue an ad-hoc operator job — the Overseer's (and the owner's) way in.
+
+    It joins the same queue as a phase's hand-off and is dispatched by the same
+    sweep, oldest first; the poke only wakes the supervisor to look.
+    """
+    if not cfg.operator_enabled:
+        print(
+            "swarm operator-add: `[operator].enabled` is false — no operator would"
+            " ever run it, so nothing was queued",
+            file=sys.stderr,
+        )
+        return 2
+    if not brief.strip():
+        print("swarm operator-add: empty brief", file=sys.stderr)
+        return 2
+    if phase is not None and not opqueue.ID_RE.match(phase):
+        print(f"swarm operator-add: {phase!r} is not a phase id", file=sys.stderr)
+        return 2
+    item = opqueue.add_adhoc(cfg, brief, phase)
+    if item is None:
+        print("swarm operator-add: could not queue the job", file=sys.stderr)
+        return 1
+    heard = _poke(cfg, f"operator-queued {item.phase}")
+    print(f"queued operator job {item.phase}: {item.note}")
+    print(f"  supervisor: {'poked' if heard else 'NOT RUNNING — it runs on the next swarm up'}")
     return 0
 
 
@@ -949,6 +1041,31 @@ def cmd_layout(cfg: Config, name: str | None) -> int:
     return 0
 
 
+def _operator_lines(cfg: Config, st: state_mod.State) -> list[str]:
+    """The operator queue for ``swarm status``: counts, then the current job."""
+    items = opqueue.load_all(cfg)
+    if not items and not st.operator_phase:
+        return []
+    counts = {k: sum(1 for i in items if i.state == k) for k in opqueue.STATES}
+    head = "operator" + ("" if cfg.operator_enabled else " (OFF — nothing drains it)")
+    lines = [
+        f"{head}: queued={counts[opqueue.QUEUED]} running={counts[opqueue.RUNNING]}"
+        f" waiting-on-owner={counts[opqueue.WAITING]} done={counts[opqueue.DONE]}"
+        f" abandoned={counts[opqueue.ABANDONED]}"
+    ]
+    current = next((i for i in items if i.phase == st.operator_phase), None)
+    if current is not None:
+        what = (
+            f"WAITING ON YOU: {current.question}"
+            if current.state == opqueue.WAITING
+            else current.state
+        )
+        lines.append(f"  current: {current.phase} [{what}] — {_job_brief(current.note)}")
+    elif st.operator_phase:
+        lines.append(f"  current: {st.operator_phase} (no queue item)")
+    return lines
+
+
 def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> int:
     st = state_mod.read(cfg)
     lines = [
@@ -965,14 +1082,9 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     if st.waiting or st.parked:
         lines.append(f"waiting={sorted(st.waiting)} parked={st.parked}")
     # A live operator session holds the owner's own authority on the host. It has
-    # no slot and no pane probe can find it, so this line is the only place the
+    # no slot and no pane probe can find it, so these lines are the only place the
     # text UI can say one is running at all.
-    owed = opqueue.pending(cfg)
-    if st.operator_phase or owed:
-        lines.append(
-            f"operator={st.operator_phase} queued="
-            f"{[f'{i.phase}:{i.state}' for i in owed]}"
-        )
+    lines.extend(_operator_lines(cfg, st))
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.append(f"done={st.done}")
@@ -1164,17 +1276,34 @@ def _build_parser() -> argparse.ArgumentParser:
     opp.set_defaults(func=lambda cfg, a: cmd_operator(cfg, a.phase))
 
     odp = sub.add_parser(
-        "operator-done", help="report this operator hand-off is carried out")
-    odp.add_argument("phase")
-    odp.set_defaults(func=lambda cfg, a: cmd_operator_done(cfg, a.phase))
+        "operator-done", help="report this operator job is finished")
+    odp.add_argument("phase", help="the operator job id")
+    odp.add_argument("outcome", nargs="*", help="one line: what was done or skipped")
+    odp.set_defaults(
+        func=lambda cfg, a: cmd_operator_done(cfg, a.phase, " ".join(a.outcome)))
 
     oap = sub.add_parser(
         "operator-ask",
-        help="ask the owner instead of guessing at an ambiguous hand-off")
-    oap.add_argument("phase")
+        help="ping the owner with a genuine decision; the session waits for the answer")
+    oap.add_argument("phase", help="the operator job id")
     oap.add_argument("question", nargs="+", help="what you need to know")
     oap.set_defaults(
         func=lambda cfg, a: cmd_operator_ask(cfg, a.phase, " ".join(a.question)))
+
+    orp = sub.add_parser(
+        "operator-resumed",
+        help="the owner answered an operator question; the session carries on")
+    orp.add_argument("phase", help="the operator job id")
+    orp.add_argument("answer", nargs="*", help="the owner's answer, as given")
+    orp.set_defaults(
+        func=lambda cfg, a: cmd_operator_resumed(cfg, a.phase, " ".join(a.answer)))
+
+    oad = sub.add_parser(
+        "operator-add", help="queue an ad-hoc operator job")
+    oad.add_argument("brief", nargs="+", help="the job, as the session will read it")
+    oad.add_argument("--phase", help="the phase this job belongs to (default: a fresh op-<ts> id)")
+    oad.set_defaults(
+        func=lambda cfg, a: cmd_operator_add(cfg, " ".join(a.brief), a.phase))
 
     ckp = sub.add_parser("check", help="preflight config, ledger, telegram, prompts")
     ckp.add_argument("--strict", action="store_true", help="warnings are fatal")

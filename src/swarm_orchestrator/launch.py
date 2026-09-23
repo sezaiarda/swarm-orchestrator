@@ -111,8 +111,15 @@ def pretrust_dir(path: Path, log: Log) -> None:
         log.line(f"PRETRUST-FAIL {key} {exc}")
 
 
-def _worker_shell(cfg: Config, phase: str, cwd: Path) -> str:
-    cmd = cfg.worker_cmd.format(phase=phase)
+def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None) -> str:
+    """``cd <cwd> && exec <claude ...>`` for one session, worker-configured.
+
+    ``cmd`` overrides the ``worker_cmd`` base for a session that is not a phase
+    worker — the operator runs its own model — while keeping everything else a
+    worker gets: in-process teammates, the meters tap and the effort level. One
+    builder, so the two sessions can never drift apart on those.
+    """
+    cmd = cmd or cfg.worker_cmd.format(phase=phase)
     if cfg.worker_settings:
         # Force in-process teammates: a worker's own subagents then never open
         # extra tmux panes in the workers window. Merges over the user's
@@ -128,7 +135,17 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path) -> str:
 def _worker_env(
     cfg: Config, phase: str, worktree: Path | None = None
 ) -> dict[str, str]:
-    """Env vars a worker (and its ``swarm done``) need to find this run.
+    """Env vars a worker (and its ``swarm done``) need to find this run: the
+    phase marker plus everything :func:`session_env` gives any session."""
+    return {cfg.env_marker: phase, **session_env(cfg, worktree)}
+
+
+def session_env(cfg: Config, worktree: Path | None = None) -> dict[str, str]:
+    """Env vars any swarm session needs so ``swarm`` inside it finds this run.
+
+    Shared by workers and the operator. The phase marker is deliberately NOT
+    here: it names the phase a *worker* builds, and an operator carrying it
+    would look like that phase's worker to anything keyed on it.
 
     Under ``isolation = worktree`` the worker also gets ``SWARM_WORKTREE`` (its
     cwd — a full isolated mirror of the whole workspace on branch
@@ -143,7 +160,7 @@ def _worker_env(
     with dead weight. An explicit ``CARGO_INCREMENTAL`` in the environment still
     wins (``setdefault`` over the inherited value).
     """
-    env = {cfg.env_marker: phase, "SWARM_STATE_DIR": str(cfg.state_dir)}
+    env = {"SWARM_STATE_DIR": str(cfg.state_dir)}
     env.setdefault("CARGO_INCREMENTAL", os.environ.get("CARGO_INCREMENTAL") or "0")
     for key in ("SWARM_SLUG", "SWARM_TG_SINK", "SWARM_BIN", "SWARM_DRIVER"):
         val = os.environ.get(key)
@@ -553,14 +570,25 @@ def _ping_decision(
     return "send", ""
 
 
-def _route_decision(phase: str, status: str, note: str) -> tuple[str, str]:
-    """Whether this finish opens an operator session, as ``(plan, detail)``.
+def _route_decision(
+    phase: str, status: str, note: str, enabled: bool = True
+) -> tuple[str, str]:
+    """Where this finish's hand-off goes, as ``(plan, detail)``.
 
-    Only :data:`statuses.ROUTES` dispatches, and only with a recap worth reading:
-    an ``operator`` recap IS the session's entire brief — nothing else is handed
-    over — so a probe-grade note would start a session that cannot know what it
-    was started for. ``--force`` deliberately does not override that; forcing a
-    thin note replaces a recap, it does not create the missing brief.
+    ``dispatch`` queues it for an operator session, ``owner`` telegrams it to the
+    owner as a to-do, ``skipped`` sends it nowhere.
+
+    Only :data:`statuses.ROUTES` routes at all, and only with a recap worth
+    reading: an ``operator`` recap IS the session's entire brief — nothing else is
+    handed over — so a probe-grade note would start a session that cannot know
+    what it was started for. ``--force`` deliberately does not override that;
+    forcing a thin note replaces a recap, it does not create the missing brief.
+
+    ``enabled`` is ``[operator].enabled``. It is honoured here because ignoring it
+    would drop hand-offs silently: the queue would refuse to store them, nothing
+    would telegram anyone, and ``swarm done`` would still promise each worker an
+    operator session. With no operator to run it, the owner is the only one left who can, so the
+    note goes to their phone instead of nowhere.
     """
     if status not in statuses.ROUTES:
         return "skipped", f"`{status}` leaves nothing for a session to pick up"
@@ -571,16 +599,56 @@ def _route_decision(phase: str, status: str, note: str) -> tuple[str, str]:
             f' re-run with a real recap: swarm done {phase} {status}'
             ' "<what you did, what is left to do>"'
         )
+    if not enabled:
+        return "owner", "the operator is off ([operator].enabled = false)"
     return "dispatch", ""
 
 
 def _outcome_plan(
-    phase: str, status: str, note: str, recorded: str | None, verdict: str, force: bool
+    phase: str,
+    status: str,
+    note: str,
+    recorded: str | None,
+    verdict: str,
+    force: bool,
+    enabled: bool = True,
 ) -> Outcome:
     """Decide, BEFORE anything is sent, what this finish triggers."""
     ping, ping_detail = _ping_decision(phase, status, note, recorded, verdict, force)
-    route, route_detail = _route_decision(phase, status, note)
+    route, route_detail = _route_decision(phase, status, note, enabled)
     return Outcome(ping, ping_detail, route, route_detail)
+
+
+def _todo_ping(phase: str, note: str) -> str:
+    """The owner's to-do for a hand-off no operator will run. Plain words: which
+    phase, and the action — the recap is already written as one."""
+    return f"swarm: to-do for you from {phase} (no operator is running) — {_collapse(note)}"
+
+
+def _send_todo(
+    cfg: Config, phase: str, note: str, recorded: str | None, verdict: str
+) -> tuple[str, str]:
+    """Telegram an ``owner``-routed hand-off; ``(route, detail)`` for the report.
+
+    Deduplicated on the same evidence as the completion ping: a refused verdict
+    kept a fuller recap that already went out, and an identical recorded one
+    means this is a re-run of a ``swarm done`` the owner has already heard.
+    """
+    if verdict == "refused" or (
+        recorded is not None and _collapse(recorded) == _collapse(note)
+    ):
+        return "owner", "already telegrammed to the owner as a to-do"
+    sent = telegram.notify_detail(
+        cfg.telegram_notify,
+        _todo_ping(phase, note),
+        kind="operator-todo",
+        phase=phase,
+        source="launch.done",
+        state_dir=cfg.state_dir,
+    )
+    if not sent.delivered:
+        return "owner", f"the to-do telegram FAILED: {sent.error or 'unknown error'}"
+    return "owner", "telegrammed to the owner as a to-do"
 
 
 @dataclass
@@ -603,7 +671,7 @@ class DoneResult:
     verdict: str  # written | refused | forced
     ping: str  # sent | failed | skipped | deduped
     ping_detail: str  # why it was skipped/deduped, or the send error
-    route: str  # dispatch | skipped
+    route: str  # dispatch | owner | skipped
     route_detail: str  # why no session, in the words the CLI prints
     poke: str  # delivered | detached | no-reader
     grace_s: int
@@ -625,7 +693,8 @@ class DoneResult:
             "deduped": f"no telegram: {self.ping_detail}",
         }[self.ping]
         route = {
-            "dispatch": "operator session due — this recap is its brief",
+            "dispatch": "operator job queued — this recap is its brief",
+            "owner": f"no operator session (operator is off): {self.route_detail}",
             "skipped": f"no operator session: {self.route_detail}",
         }[self.route]
         poke = {
@@ -791,7 +860,9 @@ def done(
     verdict = _write_sentinel(cfg, phase, status, note, force=force)
     _append_history(cfg, phase, status, note, verdict)
 
-    plan = _outcome_plan(phase, status, note, recorded, verdict, force)
+    plan = _outcome_plan(
+        phase, status, note, recorded, verdict, force, cfg.operator_enabled
+    )
     ping, detail = plan.ping, plan.ping_detail
     if ping == "send":
         sent = telegram.notify_detail(
@@ -804,6 +875,8 @@ def done(
         )
         ping, detail = ("sent", "") if sent.delivered else ("failed", sent.error or "")
 
+    if plan.route == "owner":
+        plan.route, plan.route_detail = _send_todo(cfg, phase, note, recorded, verdict)
     _queue_operator(cfg, phase, status, note, verdict, plan)
 
     poke = "no-reader"

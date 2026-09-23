@@ -98,7 +98,7 @@ def test_reconciled_phase_keeps_its_sentinel_status(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
     monkeypatch.setattr(gitq, "sentinel_done", lambda c: {"P0": "needs-owner"})
     monkeypatch.setattr(
-        gitq, "reconcile", lambda c, d, l: gitq.ReconcileResult(integrated=["P0"])
+        gitq, "reconcile", lambda c, d, l, **kw: gitq.ReconcileResult(integrated=["P0"])
     )
 
     cli._reconcile_orphans(cfg)

@@ -25,6 +25,7 @@ from . import tui as tui_mod
 from . import doctor as doctor_mod
 from . import gc as gc_mod
 from . import promptlint
+from . import pushowed
 from . import recap as recap_mod
 from . import reload as reload_mod
 from . import report as report_mod
@@ -136,6 +137,8 @@ def _reconcile_orphans(cfg: Config) -> None:
                     s.mark_done(phase, seed.get(phase, "ok"))
         if result.integrated:
             print(f"reconciled orphan branches: {', '.join(result.integrated)}")
+        for phase, pushes in result.pushes.items():
+            pushowed.settle(cfg, phase, pushes, log)  # a failed push is owed, not held
         if result.held:
             first = result.held[0]
             with state_mod.transaction(cfg) as s:
@@ -970,6 +973,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
             f"operator={st.operator_phase} queued="
             f"{[f'{i.phase}:{i.state}' for i in owed]}"
         )
+    for line in pushowed.describe(st.push_owed):
+        lines.append(f"push owed: {line}")
     lines.append(f"done={st.done}")
     print("\n".join(lines))
     return 0

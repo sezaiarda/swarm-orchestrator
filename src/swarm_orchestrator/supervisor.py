@@ -42,6 +42,7 @@ from . import gitq
 from . import master as master_mod
 from . import operator as operator_mod
 from . import opqueue
+from . import pushowed
 from . import resolver as resolver_mod
 from . import state as state_mod
 from . import reload as reload_mod
@@ -419,7 +420,13 @@ class Supervisor:
         recorded in ``done``. Hardcoding ``"ok"`` here silently rewrote every
         ``needs-owner`` as a clean success the moment it merged — so ``swarm
         status`` could never tell the owner which phases were waiting on them
-        (every sentinel said ``needs-owner``; state.json said ``ok``)."""
+        (every sentinel said ``needs-owner``; state.json said ``ok``).
+
+        A push failure never holds the queue: :func:`gitq.integrate` reports it
+        in ``pushes`` and the phase counts as integrated (its merges are on local
+        main, which is all the next worker branches from). The debt is settled
+        by :mod:`pushowed` — recorded, pinged once, and retried here after every
+        integration for the repos this one did not already push."""
         while True:
             with state_mod.transaction(self.cfg) as st:
                 if st.integ_blocked is not None or not st.integ_queue:
@@ -431,17 +438,23 @@ class Supervisor:
                 self._dequeue(phase)
                 self._advance_done(phase, status)  # duplicate -> DONE-DUPLICATE no-op
                 continue
+            pushes: dict[Path, gitq.PushResult] = {}
             try:
-                result = gitq.integrate(self.cfg, phase, self.log)
+                result = gitq.integrate(self.cfg, phase, self.log, pushes)
             except gitq.GitError as exc:
                 # A git failure must never kill the sole FIFO reader. Hold the
                 # queue for the owner instead of unwinding the loop.
                 self.log.line(f"INTEGRATE-ERROR {phase} {exc}")
+                pushowed.settle(self.cfg, phase, pushes, self.log)
                 self._hold(phase, gitq.DIRTY, None, f"git error integrating {phase}: {exc}")
                 return
+            # Before the hold/advance: a repo that merged and failed to push owes
+            # it even when a later repo of the same phase then conflicts.
+            pushowed.settle(self.cfg, phase, pushes, self.log)
             if result == gitq.MERGED:
                 self._dequeue(phase)
                 self._advance_done(phase, status)
+                pushowed.retry(self.cfg, self.log, skip=set(pushes))
                 continue
             # A conflict OR a dirty tree leaves an identifiable repo to clear; a
             # push failure leaves the tree clean (nothing to resolve — retry).
@@ -467,7 +480,10 @@ class Supervisor:
         has nothing to *resolve* — the owner cleans the tree / restores
         connectivity and re-runs ``swarm resolved <phase>`` to retry — so no
         resolver is opened for those (avoiding a resolver staring at a clean tree
-        with nothing to fix).
+        with nothing to fix). :data:`gitq.PUSH_FAILED` no longer reaches here
+        from the queue (it is an owed push, :mod:`pushowed`); the branch is a
+        fallback. A ``push_failed`` hold an older supervisor recorded is cleared
+        by :meth:`_on_resolved` like any other, and re-integrates as owed.
         """
         with state_mod.transaction(self.cfg) as st:
             st.integ_blocked = phase
@@ -490,8 +506,8 @@ class Supervisor:
             )
         else:  # PUSH_FAILED
             msg = (
-                f"swarm: {phase} merged locally but the push failed (remote"
-                f" unreachable?); fix it, then `swarm resolved {phase}` to retry"
+                f"swarm: {phase} merged locally but the push failed; fix it, then"
+                f" `swarm resolved {phase}` to retry"
             )
         self.log.line(f"INTEGRATE-BLOCKED {phase} {kind}")
         telegram.notify(
@@ -658,7 +674,10 @@ class Supervisor:
         * settled with nothing left to do -> finish (rule 3), because the
           ``master-idle`` that would normally notice was already refused while a
           since-reaped worker still held its slot, and none will arrive again;
-        * ``finished`` with phases still ready -> tell the owner they were dropped.
+        * ``finished`` with phases still ready -> tell the owner they were dropped;
+        * a repo owing a push -> retry it, at most every
+          :data:`pushowed.TICK_RETRY_S` (the owner may have fixed its check or
+          pushed by hand while nothing integrated to notice).
 
         Everything is gated on ``idle >= watchdog_s`` (bar the pane check, which is
         confirmed across two sweeps instead), so a swarm that is making progress is
@@ -678,6 +697,8 @@ class Supervisor:
         )
         if self._reap_dead_panes(st):
             st = state_mod.read(self.cfg)  # slots changed under us
+        if st.push_owed:
+            pushowed.retry(self.cfg, self.log, min_gap=pushowed.TICK_RETRY_S)
         if idle < self.watchdog_s:
             return  # something moved recently -- leave a live swarm alone
         ready = master_mod.build_context(self.cfg, st)["ready"]

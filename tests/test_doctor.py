@@ -496,7 +496,8 @@ def test_run_checks_reads_in_a_fixed_order_and_never_raises(cfg, monkeypatch):
     names = [c.name for c in doctor.run_checks(cfg)]
     assert names == [
         "supervisor.pid", "supervisor.fifo", "supervisor.stray", "slots.panes",
-        "run.watchdog", "slots.activity", "integration.blocked", "run.finished",
+        "run.watchdog", "slots.activity", "integration.blocked", "integration.push",
+        "run.finished",
         "run.nudge", "run.stall", "owner.blocking", "ledger", "telegram.config",
         "telegram.sends", "disk.state", "disk.incremental", "sentinels",
         "recaps.history", "phases.failed", "prompts",

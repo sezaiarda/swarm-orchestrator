@@ -20,7 +20,9 @@ rollback. Every repo mutation is serialized by an ``flock`` keyed per repo.
 Statuses: :data:`MERGED` (all repos clean, pushed, pruned), :data:`CONFLICT` (a
 repo left mid-merge for a resolver), :data:`DIRTY` (a repo's canonical tree had
 uncommitted changes — held), :data:`PUSH_FAILED` (merged locally, push failed —
-retryable).
+retryable). A caller that passes ``pushes`` to :func:`integrate` never sees
+:data:`PUSH_FAILED`: the merge is on local main, which is all the next worker
+branches from, so the push is recorded as *owed* and the integration counts.
 """
 
 from __future__ import annotations
@@ -387,42 +389,172 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
 
 
 # -- push (optimistic, merge-based reconcile — never rebases a merge) ------
-def _push(repo: Path, main: str, log: Log) -> str:
+@dataclass(frozen=True)
+class PushResult:
+    """One push of a repo's main: how it ended, and in the push's own words why.
+
+    ``refused`` separates a push something *decided* against — a pre-push hook
+    (or a server-side one) said no — from one that could not happen at all
+    (unreachable remote, auth, a timeout). Both leave the merge on local main;
+    they differ in what the owner has to fix, so the reason travels with them.
+    """
+
+    status: str  # MERGED | CONFLICT | PUSH_FAILED
+    reason: str = ""
+    refused: bool = False
+
+
+#: The tail of a push's own output worth showing the owner; git's
+#: ``error: failed to push some refs`` and its hints say nothing a person needs.
+_REASON_LINES = 3
+_REASON_CHARS = 300
+
+
+def _non_ff(err: str) -> bool:
+    """A genuine non-fast-forward rejection, the only failure a merge can fix.
+
+    Git reports it as ``! [rejected] main -> main (fetch first)`` or ``(non-
+    fast-forward)``. A LOCAL pre-push hook that exits non-zero prints its own
+    output and then the same ``error: failed to push some refs`` line — with NO
+    ``[rejected]`` line (verified against git 2.53) — so matching on that error
+    line, as this used to, read every hook refusal as a race with another pusher
+    and fetched, merged and re-ran the hook five times for nothing.
+    """
+    return any(
+        "[rejected]" in ln and ("non-fast-forward" in ln or "fetch first" in ln)
+        for ln in err.splitlines()
+    )
+
+
+def _push_reason(out: str, err: str) -> str:
+    """The last few meaningful lines of a failed push, capped for a phone.
+
+    A hook's own stdout is preferred: that is where a check says *what* failed
+    (a repo's gate: ``node_modules/dep is 0.16.0 but package.json pins
+    0.17.0``), while its stderr tends to be the generic ``FAILED — the push was
+    refused``. Git's own ``error:``/``hint:``/``To <url>`` lines are dropped.
+    """
+
+    def meaningful(text: str) -> list[str]:
+        keep: list[str] = []
+        for ln in (text or "").splitlines():
+            ln = ln.strip()
+            if ln.startswith("error:") and "failed to push" in ln:
+                break  # git's own summary; everything after it is hints
+            if not ln or ln.startswith(("hint:", "To ", "== ")):
+                continue
+            keep.append(ln)
+        return keep
+
+    lines = meaningful(out) or meaningful(err)
+    reason = " ".join(lines[-_REASON_LINES:]) or (err or out or "").strip()
+    if len(reason) > _REASON_CHARS:
+        reason = reason[: _REASON_CHARS - 3].rstrip() + "..."
+    return reason or "push failed with no output"
+
+
+def _push_result(
+    repo: Path, main: str, log: Log, *, reconcile: bool = True, abort_conflict: bool = False
+) -> PushResult:
     """Push local ``main``; on a non-ff rejection, MERGE origin/main in and retry.
 
     Reconciling by **merge** (never rebase) means a concurrent external commit is
     integrated without flattening our merge commit, and a reconcile that itself
     conflicts leaves a *real* mid-merge state a resolver can finish — instead of a
-    clean-tree wedge. A push that fails for a non-rejection reason (unreachable
-    remote, auth) returns :data:`PUSH_FAILED` (retryable), not a conflict.
+    clean-tree wedge. ``abort_conflict`` is for a push that no phase owns (an
+    owed push being retried): there is nobody to hold, so the merge is backed
+    out and reported as a failure instead. ``reconcile=False`` pushes without
+    ever merging, for a repo not sitting cleanly on ``main``.
+
+    Only a genuine non-ff rejection is retried (:func:`_non_ff`). A hook refusal
+    returns at once with the hook's reason: re-running a check that just failed
+    against the same commits cannot pass. Anything else (unreachable remote,
+    auth, a timeout) is :data:`PUSH_FAILED`, never a :class:`GitError`, so no
+    push can hold the merge queue.
     """
     if not _has_remote(repo):
-        return MERGED
+        return PushResult(MERGED)
     for attempt in range(1, _PUSH_ATTEMPTS + 1):
-        push = _git(repo, "push", "origin", main, check=False)
+        try:
+            push = _git(repo, "push", "origin", main, check=False)
+        except GitError as exc:  # a timeout: a hung remote, or a hook that runs long
+            log.line(f"PUSH-FAIL {main} {exc}")
+            return PushResult(PUSH_FAILED, _push_reason("", str(exc)))
         if push.returncode == 0:
-            return MERGED
-        err = (push.stderr or "").lower()
-        rejected = any(
-            k in err
-            for k in ("non-fast-forward", "fetch first", "rejected", "failed to push some refs")
-        )
-        if not rejected:
-            log.line(f"PUSH-FAIL {main} {push.stderr.strip()[:120]}")
-            return PUSH_FAILED
+            return PushResult(MERGED)
+        err = push.stderr or ""
+        reason = _push_reason(push.stdout or "", err)
+        if not _non_ff(err):
+            refused = "failed to push some refs" in err
+            log.line(f"PUSH-{'REFUSED' if refused else 'FAIL'} {main} {reason}")
+            return PushResult(PUSH_FAILED, reason, refused=refused)
+        if not reconcile:
+            log.line(f"PUSH-FAIL {main} non-ff, not on a clean {main} to merge origin")
+            return PushResult(
+                PUSH_FAILED,
+                f"origin/{main} has moved on and the repo is not on a clean {main}"
+                " to merge it into",
+            )
         _git(repo, "fetch", "origin", check=False)
         if _ref_exists(repo, f"origin/{main}"):
             merge = _git(repo, "merge", "--no-edit", f"origin/{main}", check=False)
             if merge.returncode != 0:
                 log.line(f"PUSH-RECONCILE-CONFLICT {main}")
-                return CONFLICT
+                if abort_conflict:
+                    _git(repo, "merge", "--abort", check=False)
+                    return PushResult(
+                        PUSH_FAILED, f"merging origin/{main} conflicts; reconcile by hand"
+                    )
+                return PushResult(CONFLICT)
         log.line(f"PUSH-RETRY {attempt} {main}")
-    return PUSH_FAILED
+    return PushResult(PUSH_FAILED, f"still rejected after {_PUSH_ATTEMPTS} merge-and-retry rounds")
+
+
+def _push(repo: Path, main: str, log: Log) -> str:
+    """:func:`_push_result`'s status alone — the shape older callers expect."""
+    return _push_result(repo, main, log).status
 
 
 def push_with_retry(repo: Path, main: str, log: Log) -> bool:
     """Compat wrapper: push ``main`` with optimistic merge-reconcile. True == pushed."""
     return _push(repo, main, log) == MERGED
+
+
+def _push_owed(repo: Path, main: str, log: Log) -> PushResult:
+    """Push a ``main`` that is ahead of origin with no phase to hold. Never raises.
+
+    Caller holds the repo lock. A merge-reconcile is only attempted when the repo
+    sits cleanly on ``main`` — the owner may be mid-fix in exactly this checkout
+    (fixing the check that refused the last push), and that tree must never be
+    merged into or held as DIRTY on behalf of a phase that did not touch it.
+    """
+    try:
+        _git(repo, "fetch", "origin", check=False)
+        if not _local_ahead_of_origin(repo, main):
+            return PushResult(MERGED)  # already on origin (pushed by hand, or level)
+        clean = (
+            _current_branch(repo) == main
+            and not _merge_in_progress(repo)
+            and not _rebase_in_progress(repo)
+            and not _dirty(repo)
+        )
+        return _push_result(repo, main, log, reconcile=clean, abort_conflict=True)
+    except GitError as exc:
+        return PushResult(PUSH_FAILED, _push_reason("", str(exc)))
+
+
+def retry_push(cfg: Config, repo: Path, log: Log) -> PushResult:
+    """Retry an owed push of ``repo``'s main (see :func:`_push_owed`).
+
+    :data:`MERGED` means origin now has everything local main has — whether this
+    push did it or someone pushed by hand — so the debt is settled either way.
+    """
+    try:
+        main = _repo_main(cfg, repo)
+        with repo_lock(cfg, repo):
+            return _push_owed(repo, main, log)
+    except (GitError, OSError) as exc:
+        return PushResult(PUSH_FAILED, _push_reason("", str(exc)))
 
 
 # -- integration ----------------------------------------------------------
@@ -501,7 +633,14 @@ def _auto_resolve(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
     return True
 
 
-def _integrate_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> str:
+def _integrate_one(
+    cfg: Config,
+    repo: Path,
+    main: str,
+    phase: str,
+    log: Log,
+    pushes: dict[Path, PushResult] | None = None,
+) -> str:
     """Land ``swarm/<phase>`` into ``main`` for a single repo. Serialized.
 
     Untouched-by-this-phase repos are the common case in a big workspace: the
@@ -510,6 +649,16 @@ def _integrate_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> 
     full merge+push. Idempotent/resumable: a dirty canonical tree is held
     (:data:`DIRTY`), a merge/push conflict returns :data:`CONFLICT` leaving a
     resolvable mid-merge, a pure push failure returns :data:`PUSH_FAILED`.
+
+    With ``pushes`` given, every push attempted is recorded there and a push
+    failure is NOT a failure of the integration: the merge is already on local
+    main, which is what every later worker branches from, so the repo is pruned
+    and reported merged with its push owed. Holding the queue for it instead
+    froze every later phase behind a check nobody downstream needed (a repo's
+    pre-push gate that runs for hours while no worker launches). An untouched repo
+    that is merely ahead of origin — an owed push, or an owner commit — gets a
+    push attempt that can never hold (:func:`_push_owed`), rather than the full
+    path's DIRTY check against a tree the owner may be fixing.
     """
     branch = f"swarm/{phase}"
     with repo_lock(cfg, repo):
@@ -520,6 +669,13 @@ def _integrate_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> 
         # Untouched: branch adds nothing to a main that is level with origin.
         if has_branch and not ahead_origin and _commits_ahead(repo, main, branch) == 0:
             _gc(cfg, repo, phase, log)
+            return MERGED
+        if pushes is not None and not (
+            has_branch and _commits_ahead(repo, main, branch) > 0
+        ):
+            if has_branch:
+                _gc(cfg, repo, phase, log)
+            pushes[repo] = _push_owed(repo, main, log)
             return MERGED
         if _merge_in_progress(repo) or _rebase_in_progress(repo):
             return CONFLICT  # a prior op is still mid-resolution
@@ -542,23 +698,34 @@ def _integrate_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> 
                 log.line(f"INTEGRATE-CONFLICT {phase} {repo.name}")
                 return CONFLICT
         if _has_remote(repo):
-            pushed = _push(repo, main, log)
-            if pushed != MERGED:
-                log.line(f"INTEGRATE-PUSH-{pushed.upper()} {phase} {repo.name}")
-                return pushed
+            pushed = _push_result(repo, main, log)
+            if pushes is not None and pushed.status != CONFLICT:
+                pushes[repo] = pushed
+                if pushed.status != MERGED:
+                    log.line(f"INTEGRATE-PUSH-OWED {phase} {repo.name} {pushed.reason}")
+            elif pushed.status != MERGED:
+                log.line(f"INTEGRATE-PUSH-{pushed.status.upper()} {phase} {repo.name}")
+                return pushed.status
         _gc(cfg, repo, phase, log)
         log.line(f"INTEGRATE-MERGED {phase} {repo.name}")
         return MERGED
 
 
-def integrate(cfg: Config, phase: str, log: Log) -> str:
+def integrate(
+    cfg: Config, phase: str, log: Log, pushes: dict[Path, PushResult] | None = None
+) -> str:
     """Land ``swarm/<phase>`` across every repo the phase mirrored, components
     first then umbrella. Returns :data:`MERGED` only when all repos are clean;
     the first non-merged repo's status short-circuits and is returned so the
     supervisor can hold the queue and (for a conflict) point a resolver at the
-    exact repo (:func:`blocked_repo`)."""
+    exact repo (:func:`blocked_repo`).
+
+    ``pushes`` (when given) collects every push this attempted, keyed by repo; a
+    failed one there is an owed push, not a hold (see :func:`_integrate_one`).
+    It is filled even when a later repo conflicts — the earlier repos' merges are
+    on local main regardless."""
     for repo, main in _repos(cfg):
-        result = _integrate_one(cfg, repo, main, phase, log)
+        result = _integrate_one(cfg, repo, main, phase, log, pushes)
         if result != MERGED:
             return result
     _rmtree_mirror(cfg, phase)  # all repos merged -> drop the empty mirror shell
@@ -640,6 +807,8 @@ class ReconcileResult:
 
     integrated: list[str] = field(default_factory=list)
     held: list[Held] = field(default_factory=list)
+    # phase -> the pushes its integration attempted; a failed one is owed.
+    pushes: dict[str, dict[Path, PushResult]] = field(default_factory=dict)
 
 
 def reconcile(
@@ -665,12 +834,14 @@ def reconcile(
     sentinels = sentinel_done(cfg)
     integrated: list[str] = []
     held: list[Held] = []
+    pushes: dict[str, dict[Path, PushResult]] = {}
     for phase in sorted(_all_swarm_phases(cfg)):
         if phase in done_phases:
             discard(cfg, phase, log)
             log.line(f"RECONCILE-GC {phase} already-recorded")
         elif sentinels.get(phase) in DONE_INTEGRATE:
-            result = integrate(cfg, phase, log)
+            pushes[phase] = {}
+            result = integrate(cfg, phase, log, pushes[phase])
             if result == MERGED:
                 integrated.append(phase)
                 log.line(f"RECONCILE-INTEGRATED {phase}")
@@ -681,7 +852,9 @@ def reconcile(
         else:
             discard(cfg, phase, log)
             log.line(f"RECONCILE-DISCARD {phase} interrupted")
-    return ReconcileResult(integrated=integrated, held=held)
+    return ReconcileResult(
+        integrated=integrated, held=held, pushes={k: v for k, v in pushes.items() if v}
+    )
 
 
 def reconcile_orphans(cfg: Config, done_phases: dict[str, str], log: Log) -> list[str]:

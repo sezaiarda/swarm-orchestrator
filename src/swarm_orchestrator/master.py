@@ -78,6 +78,9 @@ def build_context(cfg: Config, st: State) -> dict:
         # keep the run `pending` until the worker is answered and runs `swarm done`.
         "waiting": sorted(st.waiting),
         "parked": list(st.parked),
+        # Repos merged locally but not yet on origin. Informational: nothing a
+        # worker builds waits on origin, so these never gate `ready`.
+        "push_owed": {k: v.get("phase") for k, v in st.push_owed.items()},
         # Structural ledger problems (cycles / self-deps / unknown deps) that
         # would otherwise silently stall the run — surfaced so the master/owner
         # can see them instead of a phase never becoming ready.

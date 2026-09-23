@@ -1,0 +1,344 @@
+"""A failed push is owed, not a hold (real git, no tmux, no claude).
+
+A pre-push gate refusing a push used to make the supervisor hold the
+whole merge queue on it and no worker launched, while the push was
+also misread as a non-ff race (fetch+merge+re-run the hook, repeatedly) and
+reported as "remote unreachable?". These tests pin the replacement: the hook
+refusal is classified and its reason captured, the phase integrates anyway, the
+repo owes a push that is retried and cleared, and the owner hears once each way.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from swarm_orchestrator import doctor, gitq, pushowed
+from swarm_orchestrator import state as state_mod
+from swarm_orchestrator.config import load
+from swarm_orchestrator.logutil import Log
+
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+
+REASON = "node_modules/orders is 0.16.0 but package.json pins 0.17.0: install the pin"
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _identity(repo: Path) -> None:
+    _git(repo, "config", "user.email", "swarm@test")
+    _git(repo, "config", "user.name", "swarm")
+    _git(repo, "config", "commit.gpgsign", "false")
+
+
+def _make_project(tmp_path: Path) -> tuple[Path, Path]:
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "master", str(origin)], check=True, capture_output=True)
+    project = tmp_path / "project"
+    subprocess.run(["git", "init", "-b", "master", str(project)], check=True, capture_output=True)
+    _identity(project)
+    (project / "PHASE-LEDGER.md").write_text("P1\nP2\nP3\n")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "init")
+    _git(project, "remote", "add", "origin", str(origin))
+    _git(project, "push", "-u", "origin", "master")
+    return project, origin
+
+
+def _cfg(monkeypatch, tmp_path: Path, project: Path):
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
+    monkeypatch.setenv("SWARM_GIT_ISOLATION", "worktree")
+    monkeypatch.setenv("SWARM_GIT_MAIN", "master")
+    monkeypatch.setenv("SWARM_DRIVER", "bare")
+    monkeypatch.setenv("SWARM_MASTER_CMD", "true")
+    monkeypatch.setenv("SWARM_SLUG", "pushowed")
+    for leak in ("SWARM_WORKER_CMD", "SWARM_READY_MARKER", "SWARM_GIT_REPOS"):
+        monkeypatch.delenv(leak, raising=False)
+    return load(project_dir=str(project))
+
+
+def _refusing_hook(repo: Path, runs: Path) -> None:
+    """A pre-push hook shaped like frontend's gate: the check's reason on stdout,
+    the generic refusal on stderr, exit 1. Every run is counted in ``runs``."""
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"echo run >> '{runs}'\n"
+        "echo '== typecheck'\n"
+        f"echo '{REASON}'\n"
+        "echo 'push-gate: FAILED — the push was refused.' >&2\n"
+        "exit 1\n"
+    )
+    hook.chmod(0o755)
+
+
+def _drop_hook(repo: Path) -> None:
+    (repo / ".git" / "hooks" / "pre-push").unlink()
+
+
+def _worker(cfg, phase: str, edits: dict[str, str], log: Log) -> None:
+    wt = gitq.worktree_add(cfg, phase, log)
+    for rel, content in edits.items():
+        (wt / rel).write_text(content)
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-m", f"{phase} work")
+
+
+def _runs(path: Path) -> int:
+    return len(path.read_text().splitlines()) if path.exists() else 0
+
+
+def _sent(tmp_path: Path) -> list[str]:
+    sink = tmp_path / "tg.log"
+    return sink.read_text().splitlines() if sink.exists() else []
+
+
+# -- Fix 2: classification ------------------------------------------------
+def test_non_ff_is_recognised_only_by_its_rejected_line():
+    assert gitq._non_ff(" ! [rejected]        master -> master (fetch first)\nerror: failed to push some refs to 'x'")
+    assert gitq._non_ff(" ! [rejected]        master -> master (non-fast-forward)\n")
+    # A local hook refusal carries the same error line but no [rejected] line.
+    assert not gitq._non_ff("push-gate: FAILED\nerror: failed to push some refs to 'x'")
+    assert not gitq._non_ff(" ! [remote rejected] master -> master (pre-receive hook declined)")
+
+
+def test_a_hook_refusal_is_not_retried_and_carries_its_reason(monkeypatch, tmp_path):
+    project, _origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    runs = tmp_path / "runs"
+    _refusing_hook(project, runs)
+    (project / "local.txt").write_text("L")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "local")
+    log = Log(cfg.supervisor_log)
+    try:
+        res = gitq._push_result(project, "master", log)
+    finally:
+        log.close()
+    assert res.status == gitq.PUSH_FAILED and res.refused
+    assert REASON in res.reason and "error:" not in res.reason and "== " not in res.reason
+    assert len(res.reason) <= 300
+    assert _runs(runs) == 1  # the hook ran once: no fetch+merge+retry rounds
+    text = cfg.supervisor_log.read_text()
+    assert "PUSH-REFUSED" in text and "PUSH-RETRY" not in text
+
+
+def test_a_non_ff_rejection_still_reconciles(monkeypatch, tmp_path):
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    (project / "local.txt").write_text("L")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "local")
+    ext = tmp_path / "ext"
+    subprocess.run(["git", "clone", str(origin), str(ext)], check=True, capture_output=True)
+    _identity(ext)
+    (ext / "ext.txt").write_text("E")
+    _git(ext, "add", "-A")
+    _git(ext, "commit", "-m", "external")
+    _git(ext, "push", "origin", "master")
+    log = Log(cfg.supervisor_log)
+    try:
+        res = gitq._push_result(project, "master", log)
+    finally:
+        log.close()
+    assert res.status == gitq.MERGED
+    names = _git(origin, "ls-tree", "-r", "--name-only", "master")
+    assert "local.txt" in names and "ext.txt" in names
+    assert "PUSH-RETRY 1" in cfg.supervisor_log.read_text()
+
+
+def test_an_unreachable_remote_is_a_failure_not_a_refusal(monkeypatch, tmp_path):
+    project, _origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    (project / "local.txt").write_text("L")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "local")
+    _git(project, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    log = Log(cfg.supervisor_log)
+    try:
+        res = gitq._push_result(project, "master", log)
+    finally:
+        log.close()
+    assert res.status == gitq.PUSH_FAILED and not res.refused
+    assert "Could not read from remote repository" in res.reason
+
+
+# -- Fix 1: a push failure does not hold the queue -------------------------
+def _seed_slots(cfg, *phases: str) -> None:
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.resize(len(phases))
+        for phase in phases:
+            st.claim_slot(phase)
+
+
+def test_a_refused_push_is_owed_and_the_queue_keeps_moving(monkeypatch, tmp_path):
+    from swarm_orchestrator.supervisor import Supervisor
+
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    runs = tmp_path / "runs"
+    log = Log(cfg.supervisor_log)
+    try:
+        _worker(cfg, "P1", {"p1.txt": "1"}, log)
+        _worker(cfg, "P2", {"p2.txt": "2"}, log)
+        _worker(cfg, "P3", {"p3.txt": "3"}, log)
+    finally:
+        log.close()
+    _refusing_hook(project, runs)
+    _seed_slots(cfg, "P1", "P2", "P3")
+    sup = Supervisor(cfg)
+    try:
+        sup._on_done("P1", "ok")
+        st = state_mod.read(cfg)
+        assert st.integ_blocked is None and st.integ_queue == []
+        assert st.done.get("P1") == "ok"
+        assert not any(s.phase == "P1" for s in st.busy_slots())  # slot freed
+        assert "p1.txt" in _git(project, "ls-tree", "-r", "--name-only", "master")
+        assert "p1.txt" not in _git(origin, "ls-tree", "-r", "--name-only", "master")
+        rec = st.push_owed[str(project)]
+        assert rec["phase"] == "P1" and rec["refused"] and REASON in rec["reason"]
+        assert _runs(runs) == 1
+
+        # The next phase integrates straight through; still one ping.
+        sup._on_done("P2", "ok")
+        st = state_mod.read(cfg)
+        assert st.done.get("P2") == "ok" and st.integ_blocked is None
+        assert st.push_owed[str(project)]["phase"] == "P1"  # first phase kept
+        assert _runs(runs) == 2  # one hook run per integration, no extra retry
+        owed = [m for m in _sent(tmp_path) if "pre-push check" in m]
+        assert owed == [
+            f"swarm: project push refused by its pre-push check after merging P1 — "
+            f"{rec['reason']}. Merges continue; the push retries after each"
+            " integration. Fix the check, or push by hand."
+        ]
+        assert not any("unreachable" in m for m in _sent(tmp_path))
+
+        # The owner fixes the check; the next integration's push carries all three.
+        _drop_hook(project)
+        sup._on_done("P3", "ok")
+        st = state_mod.read(cfg)
+        assert st.push_owed == {} and st.done.get("P3") == "ok"
+        names = _git(origin, "ls-tree", "-r", "--name-only", "master")
+        assert {"p1.txt", "p2.txt", "p3.txt"} <= set(names.split())
+        cleared = [m for m in _sent(tmp_path) if "is pushed" in m]
+        assert len(cleared) == 1 and "P1" in cleared[0]
+        assert "PUSH-OWED-CLEARED project" in cfg.supervisor_log.read_text()
+    finally:
+        sup.log.close()
+
+
+def test_an_owed_push_is_retried_and_cleared_without_an_integration(monkeypatch, tmp_path):
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    runs = tmp_path / "runs"
+    state_mod.init_state(cfg)
+    (project / "local.txt").write_text("L")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "local")
+    _refusing_hook(project, runs)
+    log = Log(cfg.supervisor_log)
+    try:
+        pushowed.settle(cfg, "P1", {project: gitq.retry_push(cfg, project, log)}, log)
+        assert str(project) in state_mod.read(cfg).push_owed
+        pushowed.retry(cfg, log)  # still refused: refreshed, not re-pinged
+        assert str(project) in state_mod.read(cfg).push_owed
+        pushowed.retry(cfg, log, min_gap=3600)  # spaced out: not even attempted
+        assert _runs(runs) == 2
+        assert len([m for m in _sent(tmp_path) if "pre-push check" in m]) == 1
+
+        _drop_hook(project)
+        pushowed.retry(cfg, log)
+        assert state_mod.read(cfg).push_owed == {}
+        assert "local.txt" in _git(origin, "ls-tree", "-r", "--name-only", "master")
+        assert len([m for m in _sent(tmp_path) if "is pushed" in m]) == 1
+    finally:
+        log.close()
+
+
+def test_a_push_made_by_hand_clears_the_debt(monkeypatch, tmp_path):
+    project, _origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    state_mod.init_state(cfg)
+    (project / "local.txt").write_text("L")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "local")
+    runs = tmp_path / "runs"
+    _refusing_hook(project, runs)
+    log = Log(cfg.supervisor_log)
+    try:
+        pushowed.settle(cfg, "P1", {project: gitq.retry_push(cfg, project, log)}, log)
+        _git(project, "push", "--no-verify", "origin", "master")  # the owner, by hand
+        pushowed.retry(cfg, log)
+        assert state_mod.read(cfg).push_owed == {}
+        assert _runs(runs) == 1  # nothing left to push: the hook never ran again
+    finally:
+        log.close()
+
+
+def test_an_old_push_failed_hold_still_resolves(monkeypatch, tmp_path):
+    """A running older supervisor could have left ``push_failed`` as the hold."""
+    from swarm_orchestrator.supervisor import Supervisor
+
+    project, _origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        _worker(cfg, "P1", {"p1.txt": "1"}, log)
+    finally:
+        log.close()
+    _refusing_hook(project, tmp_path / "runs")
+    _seed_slots(cfg, "P1")
+    with state_mod.transaction(cfg) as st:
+        st.integ_push("P1", "ok")
+        st.integ_blocked, st.integ_blocked_kind = "P1", gitq.PUSH_FAILED
+    sup = Supervisor(cfg)
+    try:
+        sup._on_resolved("P1")
+        st = state_mod.read(cfg)
+        assert st.integ_blocked is None and st.integ_queue == []
+        assert st.done.get("P1") == "ok" and str(project) in st.push_owed
+    finally:
+        sup.log.close()
+
+
+# -- surfaces + compatibility ---------------------------------------------
+def test_doctor_warns_with_repo_phase_age_and_reason(monkeypatch, tmp_path):
+    st = state_mod.State.fresh(1)
+    assert doctor._check_push_owed(st).status == doctor.OK
+    st.push_owed = {
+        "/w/frontend": {"phase": "pearl-W14", "reason": REASON, "since": 0.0, "refused": True}
+    }
+    check = doctor._check_push_owed(st)
+    assert check.status == doctor.WARN
+    assert "frontend" in check.detail and "pearl-W14" in check.detail and REASON in check.detail
+    assert "h)" in check.detail  # an age, in hours for a debt this old
+    assert "push" in check.fix_hint
+
+
+def test_state_without_push_owed_loads_and_round_trips(monkeypatch, tmp_path):
+    project, _origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    cfg.ensure_dirs()
+    old = state_mod.State.fresh(2).to_dict()
+    old.pop("push_owed")
+    old["done"] = {"P0": "ok"}
+    cfg.state_path.write_text(json.dumps(old))
+    st = state_mod.read(cfg)
+    assert st.push_owed == {} and st.done == {"P0": "ok"}
+    assert state_mod.State.from_dict({**old, "push_owed": None}).push_owed == {}
+    # A restart keeps the debt, as it keeps `done`.
+    with state_mod.transaction(cfg) as live:
+        live.push_owed = {"/w/frontend": {"phase": "P1", "reason": "r", "since": 1.0}}
+    assert state_mod.init_state(cfg).push_owed == {
+        "/w/frontend": {"phase": "P1", "reason": "r", "since": 1.0}
+    }

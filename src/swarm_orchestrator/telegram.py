@@ -37,7 +37,8 @@ KINDS = (
     "operator-ask",  # opqueue: the operator session hit an ambiguity, not a guess
     "waiting",  # launch.waiting: a worker is blocked on the owner
     "park",  # supervisor: a waiting worker moved to its own window
-    "integrate-hold",  # supervisor: merge conflict / dirty tree / push failed
+    "integrate-hold",  # supervisor: merge conflict / dirty tree (push failed: legacy)
+    "push-owed",  # pushowed: a repo merged locally but its push failed / was cleared
     "finish",  # supervisor: the run is over
     "master-timeout",  # master: never became ready / prompt would not submit
     "master-note",  # cli.notify: the master telling the owner about a blocker it cannot decide

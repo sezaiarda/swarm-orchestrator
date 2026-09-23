@@ -66,7 +66,15 @@ class State:
     integ_status: dict[str, str] = field(default_factory=dict)
     integ_blocked: str | None = None
     integ_blocked_repo: str | None = None  # repo path a CONFLICT/DIRTY hold is in
-    integ_blocked_kind: str | None = None  # conflict | dirty | push_failed
+    integ_blocked_kind: str | None = None  # conflict | dirty | push_failed (legacy)
+    # Repos whose main is merged locally but not yet on origin, keyed by repo
+    # path: ``{"phase", "reason", "since", "refused", "tried"}``. A failed push no
+    # longer holds the queue (workers branch from local main, so nothing waits on
+    # origin); it is owed instead, retried after each integration and on the
+    # watchdog, and cleared the moment origin has it. Optional on both sides of a
+    # version skew: an older state file loads with none, and an older supervisor
+    # drops the key on its next write — the next failed push records it again.
+    push_owed: dict[str, dict] = field(default_factory=dict)
     # A worker that needs the owner self-reports via `swarm waiting`. Its phase is
     # recorded in ``waiting`` with a park DEADLINE (epoch seconds, so it survives a
     # supervisor restart); when the deadline fires the supervisor ``park``s it —
@@ -301,6 +309,7 @@ class State:
             integ_blocked=data.get("integ_blocked"),
             integ_blocked_repo=data.get("integ_blocked_repo"),
             integ_blocked_kind=data.get("integ_blocked_kind"),
+            push_owed=dict(data.get("push_owed") or {}),
             waiting=dict(data.get("waiting", {})),
             parked=list(data.get("parked", [])),
             layout=data.get("layout"),
@@ -364,7 +373,8 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
     way to resize a swarm), but carries the ``done`` record over from any existing
     state file. Reboot is the documented way to change the slot count, so it must
     not re-run already-finished phases. A genuinely clean slate = delete the state
-    dir. First boot has no prior file, so ``done`` starts empty as before.
+    dir. First boot has no prior file, so ``done`` starts empty as before. Owed
+    pushes carry over for the same reason: the unpushed commits are still there.
     """
     with transaction(cfg) as state:
         prior_done = dict(state.done)
@@ -372,6 +382,8 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
         fresh.windows = windows or {}
         fresh.supervisor_pid = None
         fresh.done = prior_done
+        # A restart does not push anything, so a debt survives it like `done` does.
+        fresh.push_owed = dict(state.push_owed)
         state.__dict__.update(fresh.__dict__)
         return state
 

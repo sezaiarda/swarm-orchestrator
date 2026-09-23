@@ -42,6 +42,7 @@ from pathlib import Path
 
 from . import gitq
 from . import ledger as ledger_mod
+from . import pushowed
 from . import state as state_mod
 from . import statuses
 from . import telegram
@@ -583,6 +584,25 @@ def _check_integration(cfg: Config, st: State) -> Check:
     )
 
 
+def _check_push_owed(st: State) -> Check:
+    """Repos merged locally whose push has not reached origin.
+
+    A WARN, never a FAIL: the queue keeps moving (workers branch from local main)
+    and the supervisor retries after each integration. What it costs is origin
+    — and so the other machines and GitHub's scheduled runs — falling behind,
+    silently, until someone looks.
+    """
+    if not st.push_owed:
+        return Check("integration.push", OK, "no push owed")
+    return Check(
+        "integration.push",
+        WARN,
+        "push owed — " + "; ".join(pushowed.describe(st.push_owed)),
+        "fix the repo's pre-push check (or the remote), or `git -C <repo> push` by"
+        " hand; the swarm retries after each integration and clears it itself",
+    )
+
+
 def _check_finish_race(st: State, ready: list[str]) -> Check:
     """``finished`` while phases are still ready — the FINISH-WITH-READY race."""
     if st.finished and ready:
@@ -995,6 +1015,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_watchdog(cfg, probe))
     checks.append(_check_activity(cfg, st))
     checks.append(_check_integration(cfg, st))
+    checks.append(_check_push_owed(st))
     checks.append(_check_finish_race(st, ready))
     checks.append(_check_nudge(st, ready, free))
     checks.append(_check_stall(cfg, st))

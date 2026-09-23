@@ -328,7 +328,7 @@ def test_needs_owner_survives_integration(tmp_path, monkeypatch):
     state_mod.init_state(cfg)
     with state_mod.transaction(cfg) as st:
         st.claim_slot("P0")
-    monkeypatch.setattr(gitq, "integrate", lambda c, p, l: gitq.MERGED)
+    monkeypatch.setattr(gitq, "integrate", lambda c, p, l, *_: gitq.MERGED)
 
     sup = Supervisor(cfg)
     monkeypatch.setattr(sup.master, "is_alive", lambda: True)
@@ -489,7 +489,7 @@ def test_reconcile_reports_held_phases(tmp_path, monkeypatch):
     monkeypatch.setattr(gitq, "_all_swarm_phases", lambda c: {"P0", "P1"})
     monkeypatch.setattr(gitq, "sentinel_done", lambda c: {"P0": "ok", "P1": "needs-owner"})
     monkeypatch.setattr(
-        gitq, "integrate", lambda c, p, l: gitq.MERGED if p == "P0" else gitq.CONFLICT
+        gitq, "integrate", lambda c, p, l, *_: gitq.MERGED if p == "P0" else gitq.CONFLICT
     )
     monkeypatch.setattr(gitq, "blocked_repo", lambda c, p: repo)
 

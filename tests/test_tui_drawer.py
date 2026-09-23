@@ -28,7 +28,7 @@ from textual.content import Content
 
 from swarm_orchestrator import opqueue
 from swarm_orchestrator.tui import data, drawer
-from swarm_orchestrator.tui.theme import BAD, COLOR, MUTED, WARN
+from swarm_orchestrator.tui.theme import BAD, COLOR, MUTED, WARN, YOU
 
 NOW = 1_700_000_000.0
 
@@ -242,12 +242,14 @@ def test_a_row_carries_the_slot_only_while_a_worker_holds_the_phase():
 
 def test_a_held_merge_queue_row_is_red():
     rows = drawer.blocker_rows(FakeDash(snap(blocker("P1", kind="integ"))))
-    assert rows[0].text.startswith(f"  [{COLOR[BAD]}]●[/]")
+    assert rows[0].text.startswith(f"  [{COLOR[BAD]}]✗[/]")
 
 
-def test_a_question_row_is_amber():
+def test_a_question_row_is_the_needs_you_colour_not_a_warning():
+    """A question needs a person; it is not something going wrong."""
     rows = drawer.blocker_rows(FakeDash(snap(blocker("P1", kind="waiting"))))
-    assert rows[0].text.startswith(f"  [{COLOR[WARN]}]●[/]")
+    assert rows[0].text.startswith(f"  [{COLOR[YOU]}]◆[/]")
+    assert COLOR[YOU] != COLOR[WARN]
 
 
 # -- operator rows -----------------------------------------------------------------
@@ -308,7 +310,7 @@ def test_the_pings_heading_counts_the_drops():
     ("snapshot", "state", "count"),
     [
         (snap(), MUTED, 0),
-        (snap(blocker("P1")), WARN, 1),
+        (snap(blocker("P1")), YOU, 1),
         (snap(blocker("P1"), blocker("P2", kind="integ")), BAD, 2),
         (snap(supervisor_alive=False), BAD, 0),
         (snap(done={"P1": "fail"}), MUTED, 0),  # history is not an emergency
@@ -408,7 +410,7 @@ def test_n_opens_it_painted_and_escape_hands_focus_back():
     drive(steps)
     assert got["open"] and got["focused"]
     assert got["head"] == "needs you (2)"
-    assert got["first"].startswith("▸ ● P1")
+    assert got["first"].startswith("▸ ◆ P1")
     assert got["pings"] == "pings"
     assert got["closed"] and got["back"] == "pad"
 

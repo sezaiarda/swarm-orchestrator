@@ -1,34 +1,39 @@
-"""The home screen: watch it run.
+"""The home screen: watch it run, and see what it decided.
 
-The previous home was five bordered panels — ``WORKERS``, ``PROGRESS``, ``NEEDS
-YOU``, ``HEALTH``, ``RECENT`` — and three of them were a box drawn around a
-single line of text. A border is a promise that what is inside is worth stopping
-for; spending one on "nothing is waiting on you" teaches the eye to skip boxes,
-which is the exact opposite of what borders are for.
+The previous home was five bordered panels, three of them a box around a single
+line of text. A border is a promise that what is inside is worth stopping for,
+so this screen spends them on content that moves or matters: ``working now``,
+``phases done`` (``what's next`` until there is something to chart), the
+**feed**, and — only while something waits on the owner — **needs you**.
 
-So this screen spends two. ``working now`` and ``phases done`` are live content
-that changes while you watch and needs a frame to hold its shape. Everything else
-is a line: the headline strip is the page title, ``just finished`` is three rows
-in a gutter, and health collapses into one footer line that says ``all clear`` or
-names only what is not.
+The feed is the reason for this version. What each phase did and the decisions
+its worker took are the most useful thing the dashboard has, so home now leads
+with it: phases
+finishing with their recap, the calls workers made on their own, the owner's own
+answers (highlighted), operator outcomes and what the Overseer did or left for
+them, newest first. Selecting a row opens that phase's History detail, or the
+pass/job record for rows that have no phase. The data is
+:mod:`~swarm_orchestrator.tui.timeline`; this module only paints it.
 
-``NEEDS YOU`` is gone entirely. Blockers surface as a toast and a drawer now, so
-the one thing that must interrupt the owner does, instead of sitting in a box
-that has to be remembered.
+``needs you`` sits above everything when it is on screen at all, with how long
+each thing has waited and how many phases sit behind it. The toast and the
+``n`` drawer still exist; the strip is what makes a waiting question impossible
+to miss on the screen the owner actually leaves open.
 
 Two structural rules hold the rest together:
 
 * **Rows are widgets, not lines of a Static.** A click has to land on the row
   under the pointer, and turning a click's y-offset back into a row index is a
   guess that breaks the first time a worker note wraps. Each row carries its own
-  phase and posts :class:`Home.OpenPhase`.
+  kind and key and posts :class:`Home.OpenPhase` / :class:`Home.OpenText`.
 * **A tick costs nothing.** :meth:`Home.update` runs every 2s for the life of the
   run on a small host where a "freeze" can be the OOM killer, so it does no
-  I/O at all — it renders what ``Dash`` already holds, the chart is recomputed
-  only when the log actually grew, and every assignment goes through
-  :func:`set_text` so a tick where nothing changed writes nothing.
+  I/O at all — it renders what ``Dash`` already holds, the feed is re-sorted
+  only when one of its sources was replaced, the chart is recomputed only when
+  the log actually grew, and every assignment goes through :func:`set_text` so a
+  tick where nothing changed writes nothing.
 
-Free text (recap summaries, pane tails) is written by workers and routinely
+Free text (recaps, notes, pane tails) is written by workers and routinely
 contains ``[``; every one of those strings goes through ``rich.markup.escape``
 before it is painted, or a stray bracket eats the line.
 """
@@ -39,11 +44,12 @@ import time
 
 from rich.markup import escape
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
 from . import probes
+from . import timeline as tl
 from .campaign import active, summarise
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
 from .data import (
@@ -54,6 +60,7 @@ from .data import (
     fmt_clock,
     fmt_coarse,
     fmt_duration,
+    fmt_stamp,
     fmt_when,
     forecast,
     phase_eta,
@@ -61,19 +68,28 @@ from .data import (
 )
 from .shell import STALE_BAD_S, STALE_WARN_S
 from .theme import (
-    ACCENT,
     BAD,
+    BLOCKED,
+    BRIGHT,
     COLOR,
+    GLYPH,
+    IDLE,
     INFO,
     MUTED,
     OK,
+    OPERATOR,
+    OVERSEER,
+    READY,
+    SOFT,
     WARN,
+    YOU,
     Body,
     Panel,
     bar,
     meter_state,
     paint,
     rows,
+    section,
     token,
 )
 
@@ -82,26 +98,28 @@ try:  # the disk tab is its own module and may not be there yet
 except Exception:  # noqa: BLE001 - home renders with or without a disk figure
     _disk = None
 
-#: The homepage shows only the last few completions; the rest live on the
-#: History tab.
-MAX_FINISHED = 3
+#: Rows the feed card shows. Its data keeps :data:`timeline.FEED_MAX`; the card
+#: scrolls, and the History tab holds the rest.
+FEED_ROWS = 40
+
+#: Things waiting on the owner listed on home before the rest become "+n more".
+MAX_NEEDS = 4
 
 #: Below this many columns the two-up row stacks instead of squeezing. A 40-cell
 #: panel cannot hold a phase name, an elapsed and a meter without lying.
-NARROW_COLS = 96
+NARROW_COLS = 100
+
+#: A terminal shorter than this drops the chart panel and compacts the headline:
+#: at 80x24 and 100x30 the chart pushed the feed — the part most worth
+#: seeing first — off the bottom of the screen.
+SHORT_ROWS = 36
 
 #: Left gutter for the borderless sections, so they line up under the panels.
 PAD = "  "
 
-#: The `just finished` label column. Kept in step with ``#done-label``'s width
-#: in ``Home.DEFAULT_CSS``, which cannot read a Python constant.
-LABEL_W = 15
-
 #: How often the disk line may be re-asked. With no scan yet ``disk.summary``
 #: falls back to one statvfs, and a repaint tick must stay free.
 DISK_EVERY_S = 30.0
-
-_SHORT = {"ok": "ok", "fail": "fail", "skip": "skip", "needs-owner": "you"}
 
 #: The footer's right-aligned pointer at the tab that holds the detail.
 _HINT = "5 disk →"
@@ -168,11 +186,13 @@ def set_text(widget, text: str) -> None:
 
 
 # -- headline -------------------------------------------------------------
-def headline(dash, width: int = 76) -> str:
+def headline(dash, width: int = 76, compact: bool = False) -> str:
     """The page title: what is being built, how far along, how long left.
 
     Unbordered on purpose. A box around the title of the page is a box for its
     own sake, and this screen only spends borders on things that move.
+    ``compact`` (a short terminal) drops the campaign's description and puts the
+    usage windows on one line, so the feed still fits on an 80x24 screen.
     """
     snap = dash.snapshot
     busy = {s.phase for s in snap.slots if s.busy and s.phase}
@@ -189,6 +209,9 @@ def headline(dash, width: int = 76) -> str:
     count = f"{cur.built} / {cur.live_total} phases · {cur.pct:.0f}%"
     gap = max(2, inner - len(cur.name) - len(count))
     first = f"{PAD}[b]{escape(cur.name)}[/b]{' ' * gap}{paint(count, MUTED)}"
+    # What the campaign *is*, in the ledger's own words — a name like `look`
+    # says nothing to someone who did not write the ledger.
+    what = (getattr(dash, "campaign_what", None) or {}).get(cur.name, "")
 
     workers = len(snap.slots) or int(getattr(dash.cfg, "max_workers", 0) or 0)
     args = (eta_runs_of(dash), cur.live_total - cur.built, workers)
@@ -209,9 +232,9 @@ def headline(dash, width: int = 76) -> str:
     if cur.running:
         counts.append(paint(f"{len(cur.running)} running", INFO))
     if cur.ready:
-        counts.append(paint(f"{len(cur.ready)} ready", ACCENT))
+        counts.append(paint(f"{len(cur.ready)} ready", READY))
     if cur.blocked:
-        counts.append(paint(f"{cur.blocked} blocked", MUTED))
+        counts.append(paint(f"{cur.blocked} blocked", BLOCKED))
     if cur.failed:
         counts.append(paint(f"{cur.failed} failed", BAD))
     if not counts:
@@ -220,13 +243,23 @@ def headline(dash, width: int = 76) -> str:
         )
     if not snap.ok:
         counts.append(paint("run not started — `swarm up`", MUTED))
-    lines = [first, second, PAD + " · ".join(counts)]
+    lines = [first]
+    if what and not compact:
+        lines.append(PAD + paint(escape(clip(what, inner)), MUTED))
+    lines += [second, PAD + " · ".join(counts)]
     # Only once a worker's status line has reported: a run launched before the
     # meters tap existed would otherwise carry a permanent "not reported" line.
     if getattr(dash, "meters", None):
-        for text, state in usage_outlook(getattr(dash, "limits", None),
-                                         getattr(dash, "usage", None), finish_in):
-            lines.append(PAD + paint(clip(text, inner), state))
+        outlook = usage_outlook(getattr(dash, "limits", None),
+                                getattr(dash, "usage", None), finish_in)
+        if compact and outlook:
+            # One line: the verdicts, most severe colour, cut to fit.
+            worst = next((st for st in (BAD, WARN) if any(o[1] == st for o in outlook)),
+                         outlook[0][1])
+            lines.append(PAD + paint(clip(" · ".join(t for t, _ in outlook), inner), worst))
+        else:
+            for text, state in outlook:
+                lines.append(PAD + paint(clip(text, inner), state))
     return rows(*lines)
 
 
@@ -308,11 +341,13 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
     phase_w = max(8, min(20, width - 22 - ETA_W))
     meters = getattr(dash, "meters", None) or {}
     out = []
+    # Free slots share one line: four rows of "free" said one thing four times
+    # and pushed the feed down the screen to say it.
+    free = [str(row[0].id) for row in slots if not row[0].busy or not row[0].phase]
     for row in slots:
         slot, status, waiting_for, ctx = row[0], row[1], row[2], row[3]
         mark = "▸ " if selected is not None and selected == slot.id else "  "
         if not slot.busy or not slot.phase:
-            out.append((f"{mark}{slot.id:<2}  " + paint("free", MUTED), None, slot.id))
             continue
         if slot.phase in blocked:
             status = "waiting"
@@ -340,10 +375,53 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         if note:
             line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}", MUTED)
         out.append((line, slot.phase, slot.id))
+    if free:
+        label = "all free" if len(free) == len(slots) else "free"
+        out.append((f"  {' '.join(free)}  " + paint(f"{GLYPH[IDLE]} {label}", IDLE), None, None))
     return out
 
 
 # -- phases done ----------------------------------------------------------
+def can_plot(dash) -> bool:
+    """Whether the run has finished enough phases, over enough time, to chart."""
+    events = getattr(getattr(dash, "tail", None), "events", None) or []
+    series = completions_series(events)
+    span = series.span
+    return len(series.points) >= 2 and span is not None and span[1] > span[0]
+
+
+def next_lines(dash, width: int = 44, limit: int = 6) -> list[str]:
+    """What runs next — the chart panel's content until there is a chart.
+
+    "Not enough finished phases to plot" was true and told the owner nothing on
+    the one day they most wanted to know what the swarm was about to do. The
+    queue is known on day one: ready phases in ledger order, then the nearest
+    blocked ones with what they are waiting for.
+    """
+    snap = dash.snapshot
+    busy = {s.phase for s in snap.slots if s.busy and s.phase}
+    excluded = set(getattr(dash.cfg, "exclude", None) or [])
+    graph = dash.graph or {}
+    camps = summarise(graph, snap.done, busy, excluded)
+    cur = active(camps)
+    waiting = {b.phase for b in snap.blockers}
+    items = tl.upcoming(graph, snap.done, busy, excluded, waiting,
+                        prefer=cur.name if cur else None, limit=limit)
+    if not items:
+        return [paint("nothing left to run — the ledger is built", OK if graph else MUTED)]
+    phase_w = max(8, min(18, width // 3))
+    out = []
+    for u in items:
+        state = READY if u.ready else BLOCKED
+        tail = "ready" if u.ready else "waits on " + ", ".join(u.needs[:3]) + (
+            f" +{len(u.needs) - 3}" if len(u.needs) > 3 else "")
+        out.append(
+            f"{paint(GLYPH[state], state)} {clip(escape(u.phase), phase_w):<{phase_w}} "
+            + paint(escape(clip(tail, max(6, width - phase_w - 3))), state if u.ready else MUTED)
+        )
+    return out
+
+
 def chart_lines(dash, width: int = 44, height: int = 5) -> list[str]:
     """Cumulative completions against the run's wall clock.
 
@@ -353,11 +431,11 @@ def chart_lines(dash, width: int = 44, height: int = 5) -> list[str]:
     completions in a minute the same width as a six-hour stall, and the axis
     under it would be a lie.
     """
+    if not can_plot(dash):
+        return [paint("not enough finished phases to plot", MUTED)]
     events = getattr(getattr(dash, "tail", None), "events", None) or []
     series = completions_series(events)
     span = series.span
-    if len(series.points) < 2 or span is None or span[1] <= span[0]:
-        return [paint("not enough finished phases to plot", MUTED)]
 
     body = area(hold_last(series.points, time_grid(span[0], span[1], width)), width, height)
     if not body:
@@ -371,37 +449,177 @@ def chart_lines(dash, width: int = 44, height: int = 5) -> list[str]:
     return body + [paint(" " * gutter + axis(labels, max(1, width - gutter)), MUTED)]
 
 
-# -- just finished --------------------------------------------------------
-def finished_rows(dash, width: int = 60, selected: int | None = None,
-                  limit: int = MAX_FINISHED) -> list[tuple]:
-    """``(markup, phase, index)`` for the last few completions.
+# -- needs you -----------------------------------------------------------
+def need_rows(needs: list, width: int = 76, selected: str | None = None,
+              now: float | None = None) -> list[tuple]:
+    """``(markup, key, need)`` per thing waiting on the owner, two lines each.
 
-    Three of them: the whole point of this
-    strip is the glance, and the History tab is where a list belongs.
+    The header carries the two numbers that decide whether to get up — how long
+    it has waited and how many phases sit behind it — and the question itself
+    goes on the line under it, because the question is what gets answered.
     """
-    runs = [r for r in (dash.history or []) if not r.running][:limit]
-    if not runs:
-        # The two spaces are the cursor gutter every real row carries. Without
-        # them this butts straight against the label column, which is exactly
-        # as wide as its own text.
-        return [(paint("  nothing has finished yet", MUTED), None, None)]
-    phase_w = max(8, min(18, width - 28))
+    now = time.time() if now is None else now
     out = []
-    for index, run in enumerate(runs):
-        state = token(run.status)
-        status = _SHORT.get(run.status or "", (run.status or "—")[:4])
-        mark = "▸ " if selected is not None and selected == index else "  "
-        summary = clip(escape(run.summary or run.note), max(10, width - phase_w - 16))
-        out.append(
-            (
-                f"{mark}[{COLOR[MUTED]}]{fmt_clock(run.ended_at)[:5]}[/]  "
-                f"{clip(escape(run.phase), phase_w):<{phase_w}} "
-                f"{paint(f'{status:<4}', state)}  {summary or paint('—', MUTED)}",
-                run.phase,
-                index,
-            )
-        )
+    for need in needs[:MAX_NEEDS]:
+        held = need.kind in (tl.NEED_LABEL["integ"], tl.NEED_LABEL["operator-abandoned"])
+        state = BAD if held else YOU
+        shape = GLYPH[OVERSEER] if need.kind == tl.NEED_LABEL[tl.OVERSEER] else GLYPH[state]
+        mark = "▸ " if selected is not None and selected == need.key else "  "
+        facts = [need.kind]
+        if need.since is not None:
+            facts.append(f"waited {fmt_coarse(max(0.0, now - need.since))}")
+        if need.blocks:
+            facts.append(f"blocks {need.blocks} phase{'s' if need.blocks != 1 else ''}")
+        name = need.ref if need.phase is None else (need.ref or need.phase)
+        tail = " · ".join(facts)
+        name_w = max(8, min(24, width - len(tail) - 6))
+        head = (f"{mark}{paint(shape, state)} [b]{clip(escape(name or '?'), name_w)}[/b]  "
+                + paint(escape(clip(tail, max(8, width - name_w - 6))), state))
+        question = clip(need.question, max(10, width - 6)) or "no question text was captured"
+        out.append((head + "\n" + paint(f"    {escape(question)}", BRIGHT), need.key, need))
     return out
+
+
+# -- the feed -------------------------------------------------------------
+#: ``kind -> (label, token)`` for the feed's non-finish rows.
+_FEED_KIND = {
+    tl.OWNER: ("you decided", YOU),
+    "decision": ("decided", INFO),
+    "assumption": ("assumed", WARN),
+    "risk": ("risk", WARN),
+    tl.OVERSEER: ("overseer", OVERSEER),
+}
+#: A finish's label by status.
+_FINISH = {
+    "ok": "finished",
+    "fail": "failed",
+    "operator": "handed off",
+    "skip": "skipped",
+    "needs-owner": "needs you",
+}
+LABEL_W = 11
+
+
+def feed_key(item) -> str:
+    """Stable across ticks, so the cursor stays on the row it was on."""
+    return f"{item.kind}:{item.ts:.3f}:{item.phase or item.ref}"
+
+
+def when(ts: float | None, now: float) -> str:
+    """``HH:MM`` for today's rows, ``MM-DD`` past a day — five cells either way."""
+    if ts is None:
+        return "  —  "
+    return fmt_clock(ts)[:5] if now - ts < 20 * 3600 else fmt_stamp(ts)[:5]
+
+
+def feed_style(item) -> tuple[str, str, str]:
+    """``(label, token, glyph)`` for one feed row."""
+    if item.kind == tl.FINISH:
+        state = token(item.status)
+        return _FINISH.get(item.status, item.status or "finished"), state, GLYPH.get(state, "·")
+    if item.kind == tl.OPERATOR:
+        if item.status == "done":
+            return "operator ✓", OPERATOR, GLYPH[OPERATOR]
+        return "op gave up", BAD, GLYPH[BAD]
+    label, state = _FEED_KIND.get(item.kind, (item.kind, MUTED))
+    shape = GLYPH[OVERSEER] if item.kind == tl.OVERSEER else (
+        GLYPH[YOU] if item.kind == tl.OWNER else ("!" if item.kind == "risk" else "›"))
+    return label, state, shape
+
+
+def feed_rows(items: list, width: int = 76, selected: str | None = None,
+              now: float | None = None, limit: int = FEED_ROWS) -> list[tuple]:
+    """``(markup, key, item)`` per feed entry, newest first.
+
+    A finish gets two lines when its recap needs them — the recap is the 1-2
+    sentences worth reading, and cutting it at 40 cells threw away
+    the half that said *why*. Everything else is one line. The owner's own
+    decisions are painted in the needs-you colour and bright text: of all the
+    calls in the feed they are the ones the owner will look for.
+    """
+    now = time.time() if now is None else now
+    compact = width < 70  # the label column goes first: the glyph already says it
+    phase_w = max(8, min(16, width // 5))
+    out = []
+    for item in items[:limit]:
+        key = feed_key(item)
+        label, state, shape = feed_style(item)
+        mark = "▸ " if selected is not None and selected == key else "  "
+        name = item.phase or (item.ref if item.kind != tl.OVERSEER else "pass")
+        lead = (f"{mark}{paint(when(item.ts, now), MUTED)}  {paint(shape, state)} "
+                f"{clip(escape(name or '—'), phase_w):<{phase_w}} ")
+        used = 2 + 5 + 2 + 2 + phase_w + 1
+        if not compact:
+            bold = "[b]" if item.kind == tl.OWNER else ""
+            lead += f"{bold}{paint(f'{label:<{LABEL_W}}', state)}{'[/b]' if bold else ''} "
+            used += LABEL_W + 1
+        room = max(10, width - used)
+        text = " ".join((item.text or "").split())
+        if item.kind == tl.OVERSEER and item.left:
+            text = f"{text} — left for you: {' '.join(item.left.split())}" if text else (
+                f"left for you: {' '.join(item.left.split())}")
+        body_state = BRIGHT if item.kind in (tl.OWNER, tl.FINISH) else SOFT
+        if not text:
+            out.append((lead + paint("—", MUTED), key, item))
+            continue
+        if item.kind == tl.FINISH and len(text) > room:
+            cut = text.rfind(" ", 0, room)
+            cut = cut if cut > room // 2 else room
+            first, rest = text[:cut], text[cut:].strip()
+            line = (lead + paint(escape(first), body_state) + "\n" + " " * used
+                    + paint(escape(clip(rest, room)), body_state))
+        else:
+            line = lead + paint(escape(clip(text, room)), body_state)
+        out.append((line, key, item))
+    return out
+
+
+def empty_feed_lines(dash, width: int = 76) -> list[str]:
+    """The feed before anything has happened: what is about to."""
+    lines = [paint("  nothing has happened yet — up next:", MUTED)]
+    lines += ["  " + line for line in next_lines(dash, width - 2, limit=5)]
+    return lines
+
+
+# -- opening what the feed points at --------------------------------------
+def pass_detail(rec) -> str:
+    """One Overseer pass in full: why it ran, what it saw, did, and left."""
+    lines = [
+        f"{paint(GLYPH[OVERSEER], OVERSEER)} [b]overseer pass {escape(rec.id)}[/b]  "
+        + paint(escape(rec.status), token(rec.status) if rec.status != "running" else INFO),
+        paint(f"{fmt_stamp(rec.started_at or None)} → {fmt_stamp(rec.ended_at or None)}", MUTED),
+    ]
+    reasons = [str(r.get("text") or r.get("key") or "") for r in (rec.reasons or [])
+               if isinstance(r, dict)]
+    for title, body, state in (
+        ("why it ran", "\n".join(f"  · {r}" for r in reasons if r), None),
+        ("summary", rec.summary, None),
+        ("what it saw", rec.saw, None),
+        ("what it did", rec.did, None),
+        ("left for you", rec.left, YOU),
+        ("it asked you", rec.question, YOU),
+        ("your answer", rec.answer, None),
+    ):
+        if body and body.strip():
+            lines += [section(title, state=state), escape(body.strip())]
+    return "\n".join(lines)
+
+
+def job_detail(item) -> str:
+    """One operator job in full — for jobs no ledger phase owns."""
+    state = token(item.state)
+    lines = [
+        f"{paint(GLYPH.get(state, '·'), state)} [b]operator job {escape(item.phase)}[/b]  "
+        + paint(escape(item.state), state),
+        paint(f"queued {fmt_stamp(item.queued_at or None)} · done "
+              f"{fmt_stamp(item.done_at or None)} · {item.attempts} attempt(s)", MUTED),
+    ]
+    for title, body, st in (("the job", item.note, None), ("outcome", item.outcome, None),
+                            ("last error", item.last_error, BAD),
+                            ("it asked you", item.question, YOU), ("your answer", item.answer, None)):
+        if body and body.strip():
+            lines += [section(title, state=st), escape(body.strip())]
+    return "\n".join(lines)
 
 
 # -- footer ---------------------------------------------------------------
@@ -495,7 +713,8 @@ class Row(Static):
 
     DEFAULT_CSS = """
     Row { height: auto; }
-    Row.-on { background: #161b22; }
+    Row:hover { background: #1c2330; }
+    Row.-on { background: #1f2a3a; }
     """
 
     class Clicked(Message):
@@ -518,22 +737,33 @@ class Row(Static):
 
 
 class Home(Vertical):
-    """The default tab: a headline, two live panels, three rows and a line.
+    """The default tab: headline, what needs you, what is running, what happened.
 
-    Holds a cursor over everything selectable — every busy slot, then the last
-    three finishes — so the global ``w``/``r``/``t``/``f`` keys act on a chosen
-    phase rather than on whatever happens to be first. The cursor clamps itself
-    on every update, because the list it indexes changes underneath it.
+    Holds one cursor over everything selectable — what waits on the owner, every
+    busy slot, then the feed — so ``enter`` (and the global actions) act on a
+    chosen row rather than on whatever happens to be first. The cursor is keyed,
+    not indexed, so a new feed row arriving on top does not slide it onto a
+    different entry; it clamps itself when its row goes away.
     """
 
     DEFAULT_CSS = """
-    Home { height: 1fr; overflow-y: auto; }
+    Home { height: 1fr; overflow-y: auto; padding: 0 1; scrollbar-gutter: stable; }
+    Home > #headline { margin: 0 0 1 0; }
+    Home.-short #p-chart { display: none; }
+    Home.-short #p-work { margin-right: 0; }
+    Home.-short > #headline, Home.-short #p-needs { margin-bottom: 0; }
+    Home.-short #p-feed { min-height: 6; margin-top: 0; }
     Home > Horizontal { height: auto; }
     Home Panel { width: 1fr; }
+    Home #p-work { margin-right: 1; }
     Home.-narrow > #home-row { layout: vertical; }
-    #work-rows { height: auto; }
-    #done-label { width: 15; height: 1; color: #8b949e; }
-    #done-rows { width: 1fr; height: auto; }
+    Home.-narrow #p-work { margin-right: 0; }
+    #p-needs { display: none; margin-bottom: 1; }
+    #p-needs.-on { display: block; }
+    #p-feed { height: 1fr; min-height: 10; margin-top: 1; }
+    #work-rows, #need-rows { height: auto; }
+    #feed-rows { height: 1fr; }
+    Home > #footer { margin-top: 1; }
     """
 
     BINDINGS = [
@@ -548,7 +778,7 @@ class Home(Vertical):
         """Open the detail for one phase — a click or ``enter`` on a row.
 
         ``slot`` is the worker slot the phase is running in, or ``None`` when the
-        row came from ``just finished`` and there is no live pane to jump to.
+        row came from the feed and there is no live pane to jump to.
         """
 
         def __init__(self, phase: str, slot: int | None = None) -> None:
@@ -556,27 +786,45 @@ class Home(Vertical):
             self.phase = phase
             self.slot = slot
 
+    class OpenText(Message):
+        """Show a composed record — an Overseer pass, an ad-hoc operator job.
+
+        Those have no History row to jump to, so home composes the text and the
+        app decides where it appears.
+        """
+
+        def __init__(self, title: str, body: str) -> None:
+            super().__init__()
+            self.title = title
+            self.body = body
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._targets: list[tuple[str, int, str]] = []
+        #: ``(kind, key, phase, item)`` in reading order.
+        self._targets: list[tuple] = []
         self._cursor = 0
+        self._cursor_key = None
         self._dash = None
         self._chart_key = None
         self._chart: list[str] = []
         self._disk_key = None
         self._disk_text = ""
         self._disk_at = 0.0
+        self._feed_key = None
+        self._feed: list = []
+        self._needs: list = []
 
     def compose(self):
         yield Body(id="headline")
+        with Panel("needs you", id="p-needs", state="you"):
+            yield Vertical(id="need-rows")
         with Horizontal(id="home-row"):
             with Panel("working now", id="p-work"):
                 yield Vertical(id="work-rows")
             with Panel("phases done", id="p-chart"):
                 yield Body(id="b-chart")
-        with Horizontal(id="done-strip"):
-            yield Static(f"{PAD}just finished", id="done-label")
-            yield Vertical(id="done-rows")
+        with Panel("feed", id="p-feed"):
+            yield VerticalScroll(id="feed-rows")
         yield Body(id="footer")
 
     # -- selection --------------------------------------------------------
@@ -596,28 +844,53 @@ class Home(Vertical):
     def action_open(self) -> None:
         got = self._target()
         if got:
-            kind, key, phase = got
-            self.post_message(self.OpenPhase(phase, key if kind == "work" else None))
+            self._open(*got)
+
+    def _open(self, kind: str, key, phase: str | None, item) -> None:
+        """Open a row: a phase's History (or its live worker), or a record."""
+        dash = self._dash
+        if kind == "work":
+            self.post_message(self.OpenPhase(phase, key))
+            return
+        ref = getattr(item, "ref", "")
+        is_pass = (kind == "feed" and item.kind == tl.OVERSEER) or (
+            kind == "need" and item.phase is None)
+        if is_pass:
+            rec = next((r for r in (getattr(dash, "passes", None) or []) if r.id == ref), None)
+            if rec is not None:
+                self.post_message(self.OpenText(f"overseer pass {rec.id}", pass_detail(rec)))
+            return
+        known = {r.phase for r in (getattr(dash, "history", None) or [])}
+        if kind == "feed" and item.kind == tl.OPERATOR and phase not in known:
+            job = next((j for j in (getattr(dash, "operator", None) or []) if j.phase == ref),
+                       None)
+            if job is not None:
+                self.post_message(self.OpenText(f"operator job {job.phase}", job_detail(job)))
+            return
+        if phase:
+            self.post_message(self.OpenPhase(phase, getattr(item, "slot", None)))
 
     def move(self, delta: int) -> None:
         """Move the cursor, clamped. Public so a rebuilt ``j``/``k`` can drive it."""
         if not self._targets:
             return
         self._cursor = max(0, min(len(self._targets) - 1, self._cursor + delta))
+        self._cursor_key = self._targets[self._cursor][:2]
         if self._dash is not None:
             self.update(self._dash)  # a cursor that lags a tick reads as broken
 
     def on_row_clicked(self, event: Row.Clicked) -> None:
         event.stop()
         row = event.row
-        if row.row_phase is None:
-            return
-        for index, (kind, key, _phase) in enumerate(self._targets):
-            if kind == row.row_kind and key == row.row_key:
+        for index, target in enumerate(self._targets):
+            if target[0] == row.row_kind and target[1] == row.row_key:
                 self._cursor = index
+                self._cursor_key = target[:2]
+                self.focus()  # so j/k carry on from wherever the mouse landed
+                self._open(*target)
                 break
-        self.focus()  # so j/k carry on from wherever the mouse landed
-        self.post_message(self.OpenPhase(row.row_phase, row.row_key if row.row_kind == "work" else None))
+        else:
+            return
         if self._dash is not None:
             self.update(self._dash)
 
@@ -625,43 +898,92 @@ class Home(Vertical):
     def update(self, dash) -> None:
         """Repaint. Never raises — a dead section is not a dead cockpit."""
         self._dash = dash
-        width = self.size.width or 100
-        narrow = width < NARROW_COLS
+        # Stack by the space home really has (a docked drawer takes 44 of it);
+        # paint to the width inside the padding *and* the scrollbar gutter, which
+        # is reserved (``scrollbar-gutter: stable``) so the width cannot change
+        # under lines already cut to it when the content first overflows.
+        narrow = (self.region.width or 120) < NARROW_COLS
+        short = 0 < self.app.size.height < SHORT_ROWS
         self.set_class(narrow, "-narrow")
-        # `size` is already the content width, so the borderless lines get all of
-        # it; a Panel spends 2 columns on its border and 2 on its padding.
+        self.set_class(short, "-short")
+        width = self.scrollable_content_region.width or 100
+        # A Panel spends 2 columns on its border and 2 on its padding.
         full = max(40, width)
-        half = max(24, (full if narrow else full // 2) - 4)
+        inner = full - 4
+        half = max(24, (full if narrow else (full - 1) // 2) - 4)
 
         try:
             self._retarget(dash)
         except Exception:  # noqa: BLE001 - a bad snapshot must not lose the cursor
             self._targets = []
-        kind, key = (self._target() or ("", None, ""))[:2]
+        kind, key = (self._target() or ("", None))[:2]
+
+        needs = self._build(lambda: need_rows(self._needs, inner, key if kind == "need" else None))
+        self._rows("#need-rows", [(t, None, k) for t, k, _ in needs], "need")
+        panel = self._panel("#p-needs")
+        if panel is not None:
+            panel.set_class(bool(self._needs), "-on")
+            extra = len(self._needs) - MAX_NEEDS
+            panel.set_title(f"needs you ({len(self._needs)})",
+                            f"+{extra} more · n lists them" if extra > 0 else "enter opens")
 
         work = self._build(lambda: worker_rows(dash, half, key if kind == "work" else None))
-        self._rows("#work-rows", work, "work", key if kind == "work" else None)
+        self._rows("#work-rows", work, "work")
 
-        height = max(4, sum(text.count("\n") + 1 for text, _, _ in work) - 1)
-        self._set("#b-chart", "\n".join(self._chart_rows(dash, half, height)))
+        work_lines = sum(text.count("\n") + 1 for text, _, _ in work)
+        height = max(4, work_lines - 1)
+        plot = self._build_flag(lambda: can_plot(dash))
+        chart = self._panel("#p-chart")
+        if chart is not None:
+            chart.set_title("phases done" if plot else "what's next")
+        body = (self._chart_rows(dash, half, height) if plot
+                else self._build_lines(lambda: next_lines(dash, half, max(3, height))))
+        self._set("#b-chart", "\n".join(body))
+        # Side by side, the two cards are one row: give them one height, or the
+        # row reads as two things that happen to be adjacent.
+        self._pair_height(None if narrow or short else max(work_lines, len(body)) + 2)
 
-        done = self._build(
-            lambda: finished_rows(dash, full - LABEL_W, key if kind == "done" else None)
-        )
-        self._rows("#done-rows", done, "done", key if kind == "done" else None)
+        if self._feed:
+            feed = self._build(lambda: feed_rows(self._feed, inner - 2,
+                                                 key if kind == "feed" else None))
+            self._rows("#feed-rows", [(t, None, k) for t, k, _ in feed], "feed")
+        else:
+            lines = self._build_lines(lambda: empty_feed_lines(dash, inner))
+            self._rows("#feed-rows", [("\n".join(lines), None, None)], "feed")
+        feed_panel = self._panel("#p-feed")
+        if feed_panel is not None:
+            feed_panel.set_title("feed", "newest first · enter opens" if self._feed else "")
 
-        self._set("#headline", self._build_text(lambda: headline(dash, full)))
+        self._set("#headline", self._build_text(lambda: headline(dash, full, short)))
         self._set("#footer", self._build_text(
             lambda: footer_line(dash, full, self._disk_line(dash, full // 2))
         ))
 
     def _retarget(self, dash) -> None:
-        """Everything selectable, in the order the eye reads it."""
+        """Everything selectable, in the order the eye reads it.
+
+        The feed is rebuilt only when one of its sources was replaced — the dash
+        swaps in a new list or dict whenever a file moved, so identity is an
+        exact and free change test — and the cursor follows its key.
+        """
         snap = dash.snapshot
-        runs = [r for r in (dash.history or []) if not r.running][:MAX_FINISHED]
-        self._targets = [
-            ("work", s.id, s.phase) for s in snap.slots if s.busy and s.phase
-        ] + [("done", i, r.phase) for i, r in enumerate(runs)]
+        sources = (getattr(dash, "history", None), getattr(dash, "notes", None),
+                   getattr(dash, "operator", None), getattr(dash, "passes", None))
+        fkey = tuple(id(x) for x in sources)
+        if fkey != self._feed_key:
+            self._feed_key = fkey
+            self._feed = tl.build_feed(*sources)
+        self._needs = tl.needs_you(dash)
+        self._targets = (
+            [("need", n.key, n.phase, n) for n in self._needs[:MAX_NEEDS]]
+            + [("work", s.id, s.phase, None) for s in snap.slots if s.busy and s.phase]
+            + [("feed", feed_key(f), f.phase, f) for f in self._feed[:FEED_ROWS]]
+        )
+        if self._cursor_key is not None:
+            for index, target in enumerate(self._targets):
+                if target[:2] == self._cursor_key:
+                    self._cursor = index
+                    break
         self._cursor = min(self._cursor, max(0, len(self._targets) - 1))
 
     def _chart_rows(self, dash, width: int, height: int) -> list[str]:
@@ -722,28 +1044,55 @@ class Home(Vertical):
         except Exception:  # noqa: BLE001 - not mounted yet; nothing to show it in
             pass
 
-    def _rows(self, selector: str, entries: list[tuple], kind: str, selected) -> None:
+    def _pair_height(self, rows: int | None) -> None:
+        """Pin both top cards to ``rows`` tall (``None``: size to content)."""
+        if rows == getattr(self, "_pair_rows", None):
+            return
+        self._pair_rows = rows
+        for selector in ("#p-work", "#p-chart"):
+            panel = self._panel(selector)
+            if panel is not None:
+                panel.styles.height = rows if rows is not None else "auto"
+
+    def _panel(self, selector: str):
+        try:
+            return self.query_one(selector, Panel)
+        except Exception:  # noqa: BLE001 - not mounted yet
+            return None
+
+    def _build_flag(self, make) -> bool:
+        try:
+            return bool(make())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _rows(self, selector: str, entries: list[tuple], kind: str) -> None:
         """Paint ``entries`` into a pool of :class:`Row` widgets under ``selector``.
 
         The pool only ever grows. Slot counts move on a config reload at most,
-        and tearing widgets down on a repaint tick is exactly the churn this
-        screen exists to not create.
+        the feed is capped, and tearing widgets down on a repaint tick is exactly
+        the churn this screen exists to not create.
         """
         try:
-            container = self.query_one(selector, Vertical)
+            container = self.query_one(selector)
             pool = list(container.query(Row))
             if len(pool) < len(entries):
                 fresh = [Row() for _ in range(len(entries) - len(pool))]
                 container.mount(*fresh)
                 pool = pool + fresh
+            current = self._target()
+            on = current[:2] if current else None
+            targets = {(t[0], t[1]): t for t in self._targets if t[0] == kind}
             for index, row in enumerate(pool):
                 if index >= len(entries):
                     if row.display:
                         row.display = False
                     continue
                 text, phase, key = entries[index]
-                row.row_phase, row.row_kind, row.row_key = phase, kind, key
-                row.set_class(phase is not None and key == selected, "-on")
+                target = targets.get((kind, key))
+                row.row_phase = target[2] if target else phase
+                row.row_kind, row.row_key = kind, key
+                row.set_class(target is not None and on == (kind, key), "-on")
                 if not row.display:
                     row.display = True
                 set_text(row, text)

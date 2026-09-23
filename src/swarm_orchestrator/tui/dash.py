@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .. import opqueue
+from .. import opqueue, ovrecord
 from .. import runs as runs_mod
 from .. import usage as usage_mod
 from ..meters import LIMITS_LOG, METERS_DIR
@@ -63,6 +63,10 @@ REPO_PROBE_S = 30.0
 #: every render of every worker), and at once when a limit sample or the run moves.
 USAGE_EVERY_S = 60.0
 
+#: Overseer pass records kept for the home feed and the needs-you strip (the web
+#: board shows the same dozen).
+PASSES = 12
+
 
 class Dash:
     """Everything on disk, re-read only when it changed.
@@ -99,6 +103,12 @@ class Dash:
         self.usage: dict | None = None
         #: Closed runs' stored summaries, newest first — the runs tab.
         self.past_runs: list[dict] = []
+        #: Recent Overseer passes, newest first — the feed and the needs-you strip.
+        self.passes: list = []
+        #: Campaign name -> its one-line "what it is", from the ledger headings.
+        self.campaign_what: dict[str, str] = {}
+        self._live_pass: str | None = None
+        self._passes_live: object = ()
         self._samples = usage_mod.SampleTail(cfg.state_dir / METERS_DIR / LIMITS_LOG)
         self._all_meters: dict[str, Meter] = {}
         self._usage_at = 0.0
@@ -186,10 +196,15 @@ class Dash:
             self.limits = load_limits(self.meters, self.meters_dir / LIMITS_LOG)
         if self._changed("ledger", Path(self.cfg.project_dir) / self.cfg.ledger):
             self.graph = load_graph(self.cfg)
+            self.campaign_what = campaign_lines(self.cfg)
             changed.add("ledger")
         if changed & {"state", "log", "notifications", "done", "recaps", "ledger",
                       "notes", "operator", "run"}:
             self._rebuild()
+        if self._overseer_moved():
+            self.passes = ovrecord.load_passes(self.cfg, limit=PASSES, live=self._live_pass)
+            self._passes_live = self._live_pass
+            changed.add("overseer")
         grew = self._samples.poll()
         now = time.time()
         if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
@@ -218,11 +233,29 @@ class Dash:
         except Exception:  # noqa: BLE001 - a usage figure must never take the dash down
             return None
 
+    def _overseer_moved(self) -> bool:
+        """Whether the Overseer's records moved, or which pass is live did.
+
+        A pass rewrites its JSON by atomic replace (which moves the directory)
+        but its session edits the ``.md`` mirror in place (which does not), so
+        the newest mirror is stat'ed too — one listdir, and only while the
+        directory exists at all.
+        """
+        odir = ovrecord.overseer_dir(self.cfg)
+        moved = self._changed("overseer", odir)
+        if odir.is_dir():
+            newest = max(odir.glob("*.md"), default=None)
+            if newest is not None:
+                moved |= self._changed("overseer-md", newest)
+        return moved or self._live_pass != self._passes_live
+
     def _rebuild(self) -> None:
         events = self.tail.events
+        state = read_state(self.cfg)
+        self._live_pass = (state or {}).get("overseer_pass") if isinstance(state, dict) else None
         self.snapshot = build_snapshot(
             self.cfg,
-            read_state(self.cfg),
+            state,
             graph=self.graph,
             launch_times=launch_times(events),
             questions=question_index(self.notifications, self.sentinels),
@@ -288,6 +321,26 @@ class Dash:
                 )
             )
         return rows
+
+
+def campaign_lines(cfg) -> dict[str, str]:
+    """``campaign -> what it is`` from the ledger headings, the web board's way.
+
+    Borrowed from :mod:`~swarm_orchestrator.web.campaigns` rather than written
+    twice, so the TUI's headline and the board's campaign card say the same
+    sentence. Runs only when the ledger moves (~20 ms on a 5,000-line ledger).
+    """
+    try:
+        from ..web import campaigns, rows
+
+        path = Path(cfg.project_dir) / cfg.ledger
+        parsed, _ = rows.parse(path.read_text(encoding="utf-8", errors="replace"))
+        adr = campaigns.adr_titles(path.parent / "adr") or campaigns.adr_titles(
+            Path(cfg.project_dir) / "docs" / "adr")
+        return {name: meta.what for name, meta in campaigns.describe(parsed, adr).items()
+                if meta.what}
+    except Exception:  # noqa: BLE001 - a missing sentence is not worth a dead dash
+        return {}
 
 
 # -- modal screens --------------------------------------------------------

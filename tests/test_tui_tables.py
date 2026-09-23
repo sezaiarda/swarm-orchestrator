@@ -370,3 +370,51 @@ def test_builders_only_ever_emit_real_colours(tmp_path):
     for text in samples:
         for tag in MARKUP_TAG.findall(text):
             assert tag in VALID_TAGS, f"{tag!r} is not a colour the theme defines"
+
+
+# -- fitting columns to the width ----------------------------------------------
+def _need(widths, shown, flex=None, flex_w=None, pad=tables.CELL_PAD):
+    return sum((flex_w if i == flex else widths[i]) + pad for i in shown)
+
+
+def test_fit_columns_keeps_everything_when_it_fits():
+    shown, flex_w = tables.fit_columns([4, 10, 6], [0, 1, 2], 100)
+    assert shown == (0, 1, 2) and flex_w is None
+
+
+def test_fit_columns_drops_the_least_useful_first_and_never_a_zero():
+    widths, prios = [4, 10, 6, 8], [0, 1, 2, 2]
+    # 2+8 dropped first (rightmost of the priority-2 pair), then 6, then 10.
+    assert tables.fit_columns(widths, prios, 33)[0] == (0, 1, 2)
+    assert tables.fit_columns(widths, prios, 20)[0] == (0, 1)
+    assert tables.fit_columns(widths, prios, 3)[0] == (0,)  # 0 stays even if it cannot fit
+
+
+def test_fit_columns_gives_the_flex_column_every_cell_left_over():
+    widths, prios = [2, 20, 11, 58], [0, 0, 0, 0]
+    shown, flex_w = tables.fit_columns(widths, prios, 120, flex=3)
+    assert shown == (0, 1, 2, 3)
+    assert _need(widths, shown, 3, flex_w) == 120
+
+
+def test_fit_columns_drops_before_starving_the_prose_column():
+    widths, prios = [2, 20, 12, 11, 13, 8, 58], list(tables.HISTORY_PRIORITY)
+    shown, flex_w = tables.fit_columns(widths, prios, 76, flex=6, flex_min=16)
+    assert 6 in shown and 1 in shown and 3 in shown
+    assert 2 not in shown  # campaign goes first
+    assert flex_w >= 16 and _need(widths, shown, 6, flex_w) <= 76
+
+
+@pytest.mark.parametrize("avail", [60, 76, 96, 136])
+def test_every_table_degrades_to_fit_without_losing_its_key_columns(avail):
+    for columns, prios, flex in (
+        (tables.WORKER_COLUMNS, tables.WORKER_PRIORITY, None),
+        (tables.HISTORY_COLUMNS, tables.HISTORY_PRIORITY, tables.HISTORY_FLEX),
+        (tables.NOTIFICATION_COLUMNS, tables.NOTIFICATION_PRIORITY, tables.NOTIFICATION_FLEX),
+        (tables.RUN_COLUMNS, tables.RUN_PRIORITY, None),
+    ):
+        assert len(prios) == len(columns)
+        widths = [w for _, w in columns]
+        shown, flex_w = tables.fit_columns(widths, prios, avail, flex, 16)
+        assert all(i in shown for i, p in enumerate(prios) if p == 0)
+        assert _need(widths, shown, flex, flex_w) <= avail

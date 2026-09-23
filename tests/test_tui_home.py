@@ -28,6 +28,8 @@ import pytest
 from textual.content import Content
 
 from swarm_orchestrator.tui import data, home
+from swarm_orchestrator.tui import timeline as tl
+from swarm_orchestrator.tui.theme import BAD, COLOR, YOU
 
 NOW = 1_700_000_000.0
 
@@ -260,7 +262,7 @@ def test_worker_rows_carry_their_phase_and_slot():
 def test_worker_rows_free_slot_has_no_phase_to_open():
     free = [(slot(1, None, busy=False), "idle", "", None, None)]
     text, phase, key = home.worker_rows(FakeDash(data.Snapshot(ok=True), free), 44)[0]
-    assert phase is None and key == 1
+    assert phase is None and key is None
     assert "free" in plain(text)
 
 
@@ -284,6 +286,16 @@ def test_worker_rows_mark_the_selected_slot():
     assert plain(out[1][0]).startswith("▸")
 
 
+def test_worker_rows_fold_the_free_slots_into_one_line():
+    """Four rows of "free" said one thing four times and pushed the feed down."""
+    rows_ = [(slot(i, None, busy=False), "idle", "", None, None) for i in range(4)]
+    rows_.insert(1, (slot(9, "P1"), "busy", "", None, None))
+    out = home.worker_rows(FakeDash(data.Snapshot(ok=True), rows_), 60)
+    assert len(out) == 2
+    assert out[0][1] == "P1"
+    assert "0 1 2 3" in plain(out[1][0]) and "free" in plain(out[1][0])
+
+
 def test_worker_rows_repaint_a_blocked_slot_as_waiting():
     """The row and the blocker drawer must never disagree about who is stuck."""
     s = slot(0, "dash-W10")
@@ -291,9 +303,8 @@ def test_worker_rows_repaint_a_blocked_slot_as_waiting():
         ok=True, slots=[s], blockers=[data.Blocker(phase="dash-W10", kind="parked", question="?")]
     )
     text = home.worker_rows(FakeDash(snap, [(s, "busy", "", 10.0, None)]), 44)[0][0]
-    from swarm_orchestrator.tui.theme import COLOR, WARN
 
-    assert COLOR[WARN] in text
+    assert COLOR[YOU] in text
     assert "waiting: ?" in plain(text)
 
 
@@ -350,49 +361,112 @@ def test_chart_lines_ignore_a_failure():
     assert "not enough" in plain(home.chart_lines(FakeDash(events=events), 40, 5)[0])
 
 
-# -- just finished --------------------------------------------------------
-def test_finished_rows_stop_at_three():
-    """Exactly three are shown; the rest is what the History tab is for."""
-    runs = [
-        data.PhaseRun(phase=f"P{i}", status="ok", ended_at=NOW - i, summary="s")
-        for i in range(20)
+# -- the feed -------------------------------------------------------------
+def feed_of(*items):
+    return list(items)
+
+
+def test_feed_rows_show_what_each_phase_said_and_decided():
+    items = [
+        tl.FeedItem(NOW - 60, tl.FINISH, "dash-W2", "ok", "cgroup collector built"),
+        tl.FeedItem(NOW - 120, "decision", "dash-W2", "", "kept the v1 schema"),
+        tl.FeedItem(NOW - 180, tl.OWNER, "dash-W1", "", "ship it without the graph"),
     ]
-    out = home.finished_rows(FakeDash(history=runs), 60)
-    assert len(out) == home.MAX_FINISHED == 3
-    assert [phase for _, phase, _ in out] == ["P0", "P1", "P2"]
+    rows = home.feed_rows(items, 100, now=NOW)
+    text = " ".join(plain(row) for row, _, _ in rows)
+    assert "cgroup collector built" in text and "finished" in text
+    assert "kept the v1 schema" in text and "decided" in text
+    assert "ship it without the graph" in text and "you decided" in text
 
 
-def test_finished_rows_show_what_each_phase_said():
-    runs = [
-        data.PhaseRun(phase="dash-W2", status="ok", started_at=NOW - 600, ended_at=NOW - 60,
-                      summary="cgroup collector built"),
-        data.PhaseRun(phase="dash-W10", status="needs-owner", started_at=NOW - 900,
-                      ended_at=NOW - 300, note="swap policy — ceiling bounds RAM"),
-    ]
-    text = " ".join(plain(row) for row, _, _ in home.finished_rows(FakeDash(history=runs), 76))
-    assert "dash-W2" in text and "cgroup collector built" in text
-    assert "swap policy" in text and "you" in text
+def test_feed_rows_highlight_the_owners_own_decisions():
+    """Of every call in the feed, the owner's are the ones they look for."""
+    row = home.feed_rows([tl.FeedItem(NOW, tl.OWNER, "P1", "", "yes")], 100, now=NOW)[0][0]
+    assert COLOR[YOU] in row and "[b]" in row
 
 
-def test_finished_rows_key_on_position_not_phase():
-    """A retried phase appears twice; the cursor still has to tell them apart."""
-    runs = [data.PhaseRun(phase="P1", status="fail", ended_at=NOW),
-            data.PhaseRun(phase="P1", status="ok", ended_at=NOW - 60)]
-    out = home.finished_rows(FakeDash(history=runs), 60, selected=1)
-    assert [key for _, _, key in out] == [0, 1]
-    assert plain(out[1][0]).startswith("▸")
-    assert not plain(out[0][0]).startswith("▸")
+def test_feed_rows_give_a_long_recap_a_second_line_and_notes_one():
+    long = "word " * 60
+    rows = home.feed_rows([tl.FeedItem(NOW, tl.FINISH, "P1", "ok", long),
+                           tl.FeedItem(NOW, "decision", "P1", "", long)], 90, now=NOW)
+    assert plain(rows[0][0]).count("\n") == 1
+    assert plain(rows[1][0]).count("\n") == 0
+    for row, _, _ in rows:
+        assert all(len(line) <= 90 for line in plain(row).splitlines())
 
 
-def test_finished_rows_ignore_what_is_still_running():
-    runs = [data.PhaseRun(phase="dash-W3", started_at=NOW - 60)]
-    assert "nothing has finished yet" in plain(home.finished_rows(FakeDash(history=runs), 60)[0][0])
+def test_feed_rows_drop_the_label_column_when_narrow():
+    item = tl.FeedItem(NOW, "decision", "P1", "", "a call")
+    assert "decided" in plain(home.feed_rows([item], 90, now=NOW)[0][0])
+    assert "decided" not in plain(home.feed_rows([item], 60, now=NOW)[0][0])
 
 
-def test_finished_rows_escape_worker_text():
+def test_feed_rows_mark_the_selected_key_only():
+    items = [tl.FeedItem(NOW - i, tl.FINISH, "P1", "ok", "x") for i in range(2)]
+    key = home.feed_key(items[1])
+    rows = home.feed_rows(items, 80, selected=key, now=NOW)
+    assert [plain(r).startswith("▸") for r, _, _ in rows] == [False, True]
+    assert rows[0][1] != rows[1][1]  # a retried phase still gets two keys
+
+
+def test_feed_rows_escape_worker_text():
     """Worker prose routinely contains ``[``; unescaped it would eat the line."""
-    runs = [data.PhaseRun(phase="P1", status="ok", ended_at=NOW, summary="fixed [bold]cfg[/] parse")]
-    assert "[bold]cfg[/]" in plain(home.finished_rows(FakeDash(history=runs), 76)[0][0])
+    item = tl.FeedItem(NOW, tl.FINISH, "P1", "ok", "fixed [bold]cfg[/] parse")
+    assert "[bold]cfg[/]" in plain(home.feed_rows([item], 90, now=NOW)[0][0])
+
+
+def test_feed_rows_say_what_the_overseer_left_for_the_owner():
+    item = tl.FeedItem(NOW, tl.OVERSEER, None, "done", "filed two rows", left="decide W12",
+                       ref="20260923T100000Z")
+    text = plain(home.feed_rows([item], 120, now=NOW)[0][0])
+    assert "filed two rows" in text and "left for you: decide W12" in text
+
+
+def test_empty_feed_lists_what_runs_next():
+    dash = FakeDash(data.Snapshot(ok=True, done={"P0": "ok"}),
+                    graph={"P0": set(), "P1": {"P0"}, "P2": {"P9"}})
+    text = "\n".join(plain(x) for x in home.empty_feed_lines(dash, 80))
+    assert "up next" in text
+    assert "P1" in text and "ready" in text
+    assert "P2" in text and "waits on P9" in text
+    assert text.index("P1") < text.index("P2")  # ready before blocked
+
+
+def test_next_lines_when_the_ledger_is_built():
+    dash = FakeDash(data.Snapshot(ok=True, done={"P0": "ok"}), graph={"P0": set()})
+    assert "nothing left to run" in plain(home.next_lines(dash, 40)[0])
+
+
+# -- needs you ------------------------------------------------------------
+def test_need_rows_say_how_long_and_how_much_waits_behind_it():
+    need = tl.Need(key="waiting:P1", kind="worker asks", phase="P1", question="which schema?",
+                   since=NOW - 2460, blocks=7)
+    head, question = plain(home.need_rows([need], 100, now=NOW)[0][0]).splitlines()
+    assert "P1" in head and "worker asks" in head
+    assert "waited 41m" in head and "blocks 7 phases" in head
+    assert "which schema?" in question
+
+
+def test_need_rows_stop_at_the_cap():
+    needs = [tl.Need(key=f"k{i}", kind="worker asks", phase=f"P{i}", question="q", since=NOW)
+             for i in range(9)]
+    assert len(home.need_rows(needs, 80, now=NOW)) == home.MAX_NEEDS
+
+
+def test_a_held_merge_queue_is_red_in_the_strip():
+    need = tl.Need(key="integ:P1", kind=tl.NEED_LABEL["integ"], phase="P1", question="q",
+                   since=None)
+    assert COLOR[BAD] in home.need_rows([need], 80, now=NOW)[0][0]
+
+
+def test_pass_detail_reads_as_sections():
+    rec = SimpleNamespace(id="20260923T100000Z", status="done", started_at=NOW - 60,
+                          ended_at=NOW, reasons=[{"text": "3 phases finished"}], summary="s",
+                          saw="saw it", did="did it", left="your call", question="", answer="")
+    text = plain(home.pass_detail(rec))
+    for heading in ("why it ran", "what it saw", "what it did", "left for you"):
+        assert heading in text
+    assert "3 phases finished" in text and "your call" in text
 
 
 # -- footer ---------------------------------------------------------------
@@ -481,7 +555,10 @@ def test_every_builder_survives_an_empty_dash(width):
     assert home.headline(dash, width) is not None
     assert home.worker_rows(dash, width) is not None
     assert home.chart_lines(dash, width, 5) is not None
-    assert home.finished_rows(dash, width) is not None
+    assert home.next_lines(dash, width) is not None
+    assert home.feed_rows(tl.build_feed(), width) == []
+    assert home.empty_feed_lines(dash, width)
+    assert home.need_rows(tl.needs_you(dash), width) == []
     assert home.footer_line(dash, width, now=NOW) is not None
 
 
@@ -541,11 +618,11 @@ def test_home_paints_every_row_on_the_first_update():
         screen.update(busy_dash())
         await pilot.pause()
         seen["work"] = [r._swarm_text for r in app.query("#work-rows Row")]
-        seen["done"] = [r._swarm_text for r in app.query("#done-rows Row")]
+        seen["feed"] = [r._swarm_text for r in app.query("#feed-rows Row")]
 
     drive(steps)
     assert len(seen["work"]) == 3 and all(seen["work"])
-    assert len(seen["done"]) == home.MAX_FINISHED and all(seen["done"])
+    assert len(seen["feed"]) == 4 and all(seen["feed"])
 
 
 def test_home_writes_nothing_when_nothing_changed():
@@ -592,20 +669,20 @@ def test_clicking_a_worker_row_opens_that_phase_and_moves_the_cursor():
     assert app.opened == [("dash-W13", 1)]
 
 
-def test_clicking_a_finished_row_opens_it_with_no_slot():
+def test_clicking_a_feed_row_opens_it_with_no_slot():
     """Nothing is running it any more, so there is no pane to jump to."""
 
     async def steps(app, screen, pilot):
         screen.update(busy_dash())
         await pilot.pause()
-        await pilot.click(list(app.query("#done-rows Row"))[2])
+        await pilot.click(list(app.query("#feed-rows Row"))[2])
         await pilot.pause()
 
     app = drive(steps)
     assert app.opened == [("dash-W9", None)]
 
 
-def test_cursor_walks_the_workers_then_the_finishes():
+def test_cursor_walks_the_workers_then_the_feed():
     """``j``/``k`` cross the two lists, because the owner reads them as one."""
     seen = []
 

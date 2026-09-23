@@ -72,14 +72,16 @@ from .theme import (
     MUTED,
     OK,
     WARN,
+    YOU,
     Body,
     Panel,
     bar,
-    dot,
     field,
+    glyph,
     meter_state,
     paint,
     rows as join_rows,
+    section,
     token,
 )
 
@@ -160,6 +162,44 @@ def set_border(widget, *, title: str | None = None, subtitle: str | None = None)
         widget.border_subtitle = subtitle
 
 
+# -- fitting columns to the width ------------------------------------------
+#: Cells ``DataTable`` spends around every column (one padding cell each side).
+CELL_PAD = 2
+#: Kept back for the vertical scrollbar, so a full table never scrolls sideways.
+SCROLLBAR = 2
+
+
+def fit_columns(widths, priorities, avail: int, flex: int | None = None,
+                flex_min: int = 16, pad: int = CELL_PAD) -> tuple[tuple[int, ...], int | None]:
+    """``(shown column indexes, flex column width)`` for ``avail`` cells.
+
+    Horizontal scrolling in a terminal table is where information goes to die:
+    the columns off the right edge are never looked at, and the one that says
+    what happened is usually the last. So columns are *dropped*, least useful
+    first — a higher ``priorities`` number goes earlier, ``0`` never goes, and
+    among equals the rightmost goes first — until the rest fit. ``flex`` (the
+    prose column) is then given every cell left over, never fewer than
+    ``flex_min``: at 80 columns a recap should get 30 cells, not be cut to the
+    58 it was designed for at 140 and pushed off screen.
+    """
+    widths = list(widths)
+    prios = list(priorities) + [0] * (len(widths) - len(priorities))
+    shown = list(range(len(widths)))
+
+    def need(cols) -> int:
+        return sum((flex_min if i == flex else widths[i]) + pad for i in cols)
+
+    for i in sorted((i for i in shown if prios[i] > 0), key=lambda i: (-prios[i], -i)):
+        if need(shown) <= avail:
+            break
+        shown.remove(i)
+    flex_w = None
+    if flex is not None and flex in shown:
+        fixed = sum(widths[i] + pad for i in shown if i != flex)
+        flex_w = max(flex_min, avail - fixed - pad)
+    return tuple(shown), flex_w
+
+
 # -- workers ---------------------------------------------------------------
 WORKER_COLUMNS: tuple[tuple[str, int], ...] = (
     ("", 2),
@@ -173,6 +213,10 @@ WORKER_COLUMNS: tuple[tuple[str, int], ...] = (
     ("~", 4),
     ("branch", 26),
 )
+#: What goes first when the terminal narrows: the branch name (it is the phase
+#: name again), then the git counts, the ETA and the elapsed clock. Slot, phase,
+#: liveness and context are the row.
+WORKER_PRIORITY = (0, 0, 0, 0, 2, 3, 1, 4, 4, 5)
 
 #: Statuses that mean "state.json still thinks this slot is working". A pane that
 #: died leaves the run looking perfectly healthy everywhere else, which is why it
@@ -250,7 +294,7 @@ def worker_row(entry, repo=None, meter=None, history=None) -> tuple[str, ...]:
     commits = getattr(repo, "commits", None)
     dirty = getattr(repo, "dirty", 0) or 0
     return (
-        paint("✖" if gone else "●", state),
+        paint("✖", state) if gone else glyph(live),
         str(slot.id) if slot.id >= 0 else "—",
         cell(slot.phase or "—", 20, BAD if gone else (None if slot.busy else MUTED)),
         paint(live, state),
@@ -277,20 +321,19 @@ def _note_block(notes: list, limit: int, width: int, stamp) -> list[str]:
     out: list[str] = []
     owner = [n for n in notes if n.kind == OWNER_DECISION]
     own = [n for n in notes if n.kind != OWNER_DECISION]
-    for title, group, colour in (
-        (f"owner decisions ({len(owner)})", owner, lambda k: OK),
-        (f"decisions it made on its own ({len(own)})", own,
+    for title, group, head, colour in (
+        ("owner decisions", owner, YOU, lambda k: YOU),
+        ("decisions it made on its own", own, None,
          lambda k: WARN if k in ("risk", "assumption") else INFO),
     ):
         if not group:
             continue
-        out.append("")
-        out.append(paint(title, ACCENT))
+        out.append(section(title, len(group), head))
         for note in group[-limit:]:
-            label = "owner" if note.kind == OWNER_DECISION else note.kind
+            label = "you" if note.kind == OWNER_DECISION else note.kind
             out.append(
-                f"  [{COLOR[MUTED]}]{stamp(note.ts)}[/] "
-                f"{paint(escape(label), colour(note.kind))}  {escape(clip(note.text, width))}"
+                f"  [{COLOR[MUTED]}]{stamp(note.ts)}[/]  "
+                f"{paint(f'{escape(label):<10}', colour(note.kind))} {escape(clip(note.text, width))}"
             )
     return out
 
@@ -306,9 +349,8 @@ def worker_detail(entry, dash) -> str:
     slot, status, waiting, ctx, pane = unpack_slot_row(entry)
     gone = status == GONE
     head = (
-        f"{dot(status, f'slot {slot.id}')}  "
-        f"[bold]{escape(slot.phase or 'free')}[/]  "
-        f"{paint(status, token(status))}"
+        f"{glyph(status)} [bold]{escape(slot.phase or 'free')}[/]  "
+        f"{paint(status, token(status))}  [{COLOR[MUTED]}]slot {slot.id}[/]"
     )
     lines = [head]
     if gone:
@@ -363,8 +405,7 @@ def worker_detail(entry, dash) -> str:
 
     recap = (dash.recaps or {}).get(slot.phase or "")
     if recap is not None and recap.summary:
-        lines.append("")
-        lines.append(paint("recap", ACCENT))
+        lines.append(section("recap"))
         lines.append(escape(clip(recap.summary, 600)))
 
     notes = (dash.notes or {}).get(slot.phase or "") or []
@@ -373,8 +414,7 @@ def worker_detail(entry, dash) -> str:
     tail = (dash.tails or {}).get(slot.pane_id or "", "")
     body = [ln for ln in tail.splitlines() if ln.strip()][-6:]
     if body:
-        lines.append("")
-        lines.append(paint("last lines in its pane", ACCENT))
+        lines.append(section("last lines in its pane"))
         lines.extend(f"  [{COLOR[MUTED]}]{escape(clip(ln, 160))}[/]" for ln in body)
     return join_rows(*lines)
 
@@ -389,6 +429,10 @@ HISTORY_COLUMNS: tuple[tuple[str, int], ...] = (
     ("took", 8),
     ("what it did", 58),
 )
+#: The recap is the reason this tab exists, so it is the column that flexes and
+#: never goes; the campaign (it is the phase's prefix) and the start time go first.
+HISTORY_PRIORITY = (0, 0, 3, 0, 2, 1, 0)
+HISTORY_FLEX = 6
 
 
 def history_key(run: PhaseRun) -> str:
@@ -406,19 +450,19 @@ def history_status(run: PhaseRun) -> str:
     return "running" if run.running else (run.status or "?")
 
 
-def history_row(run: PhaseRun) -> tuple[str, ...]:
+def history_row(run: PhaseRun, recap_w: int = 58) -> tuple[str, ...]:
     """One History row. The last column is why this tab exists: the recap."""
     status = history_status(run)
     state = INFO if status == "running" else token(status)
     recap = run.summary or run.note
     return (
-        paint("●", state),
+        glyph("running" if status == "running" else status),
         cell(run.phase, 20),
         cell(campaign_of(run.phase or ""), 12, MUTED),
         paint(clip(status, 11), state),
         cell(fmt_stamp(run.started_at), 13, MUTED),
         cell(fmt_duration(run.duration_s), 8),
-        cell(recap or "— no recap recorded —", 58, None if recap else MUTED),
+        cell(recap or "— no recap recorded —", recap_w, None if recap else MUTED),
     )
 
 
@@ -432,28 +476,28 @@ def history_detail(run: PhaseRun, dash) -> str:
     """
     status = history_status(run)
     lines = [
-        f"{dot(status, escape(run.phase))}  {paint(status, token(status))}  "
-        f"[{COLOR[MUTED]}]{fmt_stamp(run.started_at)} → {fmt_stamp(run.ended_at)}[/]  "
-        f"{fmt_duration(run.duration_s)}"
+        f"{glyph(status)} [bold]{escape(run.phase)}[/]  {paint(status, token(status))}"
+        f"  [{COLOR[MUTED]}]took[/] {fmt_duration(run.duration_s)}",
     ]
-    meta = [f"campaign {campaign_of(run.phase or '')}"]
+    camp = campaign_of(run.phase or "")
+    meta = [f"{fmt_stamp(run.started_at)} → {fmt_stamp(run.ended_at)}", f"campaign {camp}"]
     if run.slot:
         meta.append(f"slot {run.slot}")
     if run.parked:
         meta.append("parked")
-    lines.append(paint(" · ".join(meta), MUTED))
+    lines.append(paint(escape(" · ".join(meta)), MUTED))
+    what = (getattr(dash, "campaign_what", None) or {}).get(camp)
+    if what:
+        lines.append(paint(escape(clip(what, 100)), MUTED))
 
     if run.summary:
-        lines.append("")
-        lines.append(paint("recap", ACCENT))
+        lines.append(section("recap"))
         lines.append(escape(run.summary.strip()))
     if run.note:
-        lines.append("")
-        lines.append(paint("what it wrote when it finished", ACCENT))
+        lines.append(section("what it wrote when it finished"))
         lines.append(escape(run.note.strip()))
     if not run.summary and not run.note:
-        lines.append("")
-        lines.append(paint("no recap on disk — press r to ask a live worker for one", MUTED))
+        lines.append("\n" + paint("no recap on disk — press r to ask a live worker for one", MUTED))
 
     try:
         notes = load_notes(dash.notes_dir, run.phase)
@@ -466,14 +510,14 @@ def history_detail(run: PhaseRun, dash) -> str:
     except Exception:  # noqa: BLE001
         attempts = []
     if attempts:
-        lines.append("")
-        lines.append(paint(f"attempts ({len(attempts)})", ACCENT))
+        lines.append(section("attempts", len(attempts)))
         for att in attempts[-8:]:
             status_ = str(att.get("status") or "?")
             body = str(att.get("note") or att.get("summary") or "")
             lines.append(
-                f"  [{COLOR[MUTED]}]{fmt_stamp(data.coerce_ts(att.get('ts')))}[/] "
-                f"{paint(escape(status_), token(status_))}  {escape(clip(body, 160))}"
+                f"  [{COLOR[MUTED]}]{fmt_stamp(data.coerce_ts(att.get('ts')))}[/]  "
+                f"{glyph(status_)} {paint(f'{escape(status_):<9}', token(status_))} "
+                f"{escape(clip(body, 160))}"
             )
     return join_rows(*lines)
 
@@ -487,6 +531,8 @@ NOTIFICATION_COLUMNS: tuple[tuple[str, int], ...] = (
     ("source", 20),
     ("message", 56),
 )
+NOTIFICATION_PRIORITY = (0, 1, 2, 0, 3, 0)
+NOTIFICATION_FLEX = 5
 
 #: Cycled with `F`. "failed" is first after "all" because a dropped ping is the
 #: reason to ever open this tab: it is how an unattended run goes wrong silently.
@@ -498,7 +544,7 @@ def notification_key(index: int) -> str:
     return f"n{index}"
 
 
-def notification_row(note: Notification) -> tuple[str, ...]:
+def notification_row(note: Notification, message_w: int = 56) -> tuple[str, ...]:
     """One Notifications row. A failed delivery is red in three columns."""
     state = OK if note.delivered else BAD
     return (
@@ -507,7 +553,7 @@ def notification_row(note: Notification) -> tuple[str, ...]:
         cell(note.kind or "—", 14, None if note.delivered else BAD),
         cell(note.phase or "—", 16),
         cell(note.source or "unknown", 20, MUTED),
-        cell(note.text or "—", 56, None if note.delivered else BAD),
+        cell(note.text or "—", message_w, None if note.delivered else BAD),
     )
 
 
@@ -537,11 +583,9 @@ def notification_detail(note: Notification) -> str:
         field("sent by", escape(note.source or "unknown code path")),
     ]
     if note.error:
-        lines.append("")
-        lines.append(paint("error", BAD))
+        lines.append(section("error", state=BAD))
         lines.append(paint(escape(note.error), BAD))
-    lines.append("")
-    lines.append(paint("message", ACCENT))
+    lines.append(section("message"))
     lines.append(escape(note.text or "(empty)"))
     return join_rows(*lines)
 
@@ -572,6 +616,12 @@ class TableTab(Vertical):
     """
 
     COLUMNS: tuple[tuple[str, int], ...] = ()
+    #: Per column: ``0`` never dropped, higher numbers dropped first as the tab
+    #: narrows (:func:`fit_columns`). Empty means every column stays.
+    PRIORITY: tuple[int, ...] = ()
+    #: The prose column that takes whatever width is left, or ``None``.
+    FLEX: int | None = None
+    FLEX_MIN = 16
     DETAIL_TITLE = "detail"
 
     BINDINGS = [
@@ -581,11 +631,20 @@ class TableTab(Vertical):
         Binding("escape", "clear_filter", "clear filter", show=False),
     ]
 
+    # The table sizes to its rows and the detail takes the rest. It used to be
+    # the other way round, so four workers sat in a screen-tall table over a
+    # detail pane squeezed to a scrolling slit — while the detail is the part
+    # with the words in it.
     DEFAULT_CSS = """
     TableTab { layout: vertical; height: 1fr; }
-    TableTab > .tab-head { height: 1; padding: 0 1; }
-    TableTab > DataTable { height: 1fr; min-height: 5; }
-    TableTab > .detail-pane { height: auto; max-height: 45%; overflow-y: auto; }
+    TableTab > .tab-head { height: 1; padding: 0 1; color: #8b949e; }
+    TableTab > DataTable {
+        height: auto; max-height: 50%; min-height: 3;
+        background: #161b22; margin: 0 1;
+    }
+    TableTab > DataTable > .datatable--header { background: #1c2330; color: #e6edf3; }
+    TableTab > DataTable > .datatable--even-row { background: #182029; }
+    TableTab > .detail-pane { height: 1fr; min-height: 5; overflow-y: auto; margin: 1 1 0 1; }
     """
 
     def __init__(self, **kwargs) -> None:
@@ -595,6 +654,8 @@ class TableTab(Vertical):
         self._keys: list[str] = []
         self._cells: list[tuple[str, ...]] = []
         self._dash = None
+        self._shown: tuple[int, ...] = tuple(range(len(self.COLUMNS)))
+        self._flex_w: int | None = None
 
     # -- composition ------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -613,6 +674,50 @@ class TableTab(Vertical):
     @property
     def detail_panel(self) -> Panel:
         return self.query_one(Panel)
+
+    # -- width ------------------------------------------------------------
+    @property
+    def flex_width(self) -> int:
+        """The prose column's width right now (its designed width until laid out)."""
+        if self._flex_w is not None:
+            return self._flex_w
+        return self.COLUMNS[self.FLEX][1] if self.FLEX is not None else 0
+
+    def on_resize(self, event) -> None:
+        self.relayout(event.size.width)
+
+    def relayout(self, width: int) -> None:
+        """Re-pick the columns for ``width``; rebuild the table only if they moved.
+
+        A hidden tab has no width, and laying it out at zero would drop every
+        droppable column until it is next shown — so zero is ignored.
+        """
+        if width <= 0 or not self.COLUMNS:
+            return
+        widths = [w for _, w in self.COLUMNS]
+        # The table's 1-cell side margins, then the scrollbar.
+        shown, flex_w = fit_columns(widths, self.PRIORITY or (), width - 2 - SCROLLBAR,
+                                    self.FLEX, self.FLEX_MIN)
+        if (shown, flex_w) == (self._shown, self._flex_w):
+            return
+        self._shown, self._flex_w = shown, flex_w
+        try:
+            table = self.table
+        except Exception:  # noqa: BLE001 - not mounted yet
+            return
+        # Clearing the columns resets the cursor, and a tab's first resize comes
+        # *after* a drill-in has put it on a row — so carry the row across.
+        row = table.cursor_row
+        keep = self._keys[row] if 0 <= row < len(self._keys) else None
+        table.clear(columns=True)
+        for i in shown:
+            label, w = self.COLUMNS[i]
+            table.add_column(label, width=flex_w if i == self.FLEX and flex_w else w)
+        self._keys, self._cells = [], []  # force the rebuild path
+        if self._dash is not None:
+            self.update(self._dash)
+        if keep in self._keys:
+            table.move_cursor(row=self._keys.index(keep))
 
     # -- the contract -----------------------------------------------------
     def update(self, dash) -> None:
@@ -641,7 +746,11 @@ class TableTab(Vertical):
         """
         self.rows = rows
         keys = unique_keys(keys)
-        rendered = [tuple(str(value) for value in cells(row)) for row in rows]
+        shown = self._shown
+        rendered = []
+        for row in rows:
+            full = tuple(str(value) for value in cells(row))
+            rendered.append(tuple(full[i] for i in shown if i < len(full)))
         table = self.table
 
         if keys == self._keys:
@@ -775,6 +884,7 @@ class Workers(TableTab):
     """
 
     COLUMNS = WORKER_COLUMNS
+    PRIORITY = WORKER_PRIORITY
     DETAIL_TITLE = "slot"
     EMPTY_DETAIL = "no slots yet — has `swarm up` run?"
 
@@ -829,13 +939,17 @@ class History(TableTab):
     """
 
     COLUMNS = HISTORY_COLUMNS
+    PRIORITY = HISTORY_PRIORITY
+    FLEX = HISTORY_FLEX
     DETAIL_TITLE = "phase"
     EMPTY_DETAIL = "no phase history yet — nothing has run in this state dir"
 
     def _update(self, dash) -> None:
         history = list(dash.history or [])
         rows = [run for run in history if run.matches(self.filter)]
-        self.sync(rows, [history_key(run) for run in rows], history_row)
+        width = self.flex_width
+        self.sync(rows, [history_key(run) for run in rows],
+                  lambda run: history_row(run, width))
 
         failed = sum(1 for run in history if run.status == "fail")
         running = sum(1 for run in history if run.running)
@@ -876,6 +990,8 @@ RUN_COLUMNS: tuple[tuple[str, int], ...] = (
     ("wk %/h", 7),
     ("$/h", 7),
 )
+#: Identity, size and outcome stay; the per-hour rates and config go first.
+RUN_PRIORITY = (0, 0, 2, 0, 3, 4, 0, 1, 2, 5, 3, 3)
 
 
 def _rate(value, width: int) -> str:
@@ -942,6 +1058,7 @@ class Runs(TableTab):
     """
 
     COLUMNS = RUN_COLUMNS
+    PRIORITY = RUN_PRIORITY
     DETAIL_TITLE = "run"
     EMPTY_DETAIL = "no runs recorded yet — the next `swarm up` or `R` starts one"
 
@@ -972,6 +1089,8 @@ class Notifications(TableTab):
     """
 
     COLUMNS = NOTIFICATION_COLUMNS
+    PRIORITY = NOTIFICATION_PRIORITY
+    FLEX = NOTIFICATION_FLEX
     DETAIL_TITLE = "notification"
     MODES = NOTIFICATION_MODES
 
@@ -1001,10 +1120,11 @@ class Notifications(TableTab):
         pairs = [(i, n) for i, n in pairs if notification_matches(n, self.filter)]
         pairs.reverse()  # newest first; the file is append-only
 
+        width = self.flex_width
         self.sync(
             [note for _, note in pairs],
             [notification_key(index) for index, _ in pairs],
-            notification_row,
+            lambda note: notification_row(note, width),
         )
 
         dropped = sum(1 for note in everything if not note.delivered)

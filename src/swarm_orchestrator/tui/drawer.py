@@ -33,7 +33,8 @@ from textual.message import Message
 from textual.widgets import Static
 
 from .data import fmt_ago, fmt_clock, question_index
-from .theme import BAD, COLOR, MUTED, OK, WARN, paint, token
+from .theme import BAD, COLOR, GLYPH, MUTED, OK, YOU, paint, token
+from .timeline import blocker_since
 
 #: Rows the drawer holds. Past this it stops being a nudge and starts being the
 #: alerts tab, which already exists and is better at it.
@@ -267,18 +268,14 @@ def blocker_rows(dash, width: int = WIDTH - 4, now: float | None = None) -> list
     out: list[Row] = []
     for blocker in snap.blockers[:MAX_BLOCKERS]:
         state = BAD if blocker.kind in FAILED_KINDS else token(blocker.kind)
-        since = blocker.since
-        if since is None and blocker.phase in sentinels:
-            since = sentinels[blocker.phase].mtime
-        if since is None:
-            since = asked.get(blocker.phase)
+        since = blocker_since(blocker, sentinels, asked)
         # The age is what decides whether the owner gets up, so it survives whole
         # and the phase name yields first. `source-provider-Pkg` plus a kind and
         # an age is 48 columns against a 40-column drawer.
         room = width - _BLOCKER_GUTTER
         tail = clip(f"{blocker.kind} · {fmt_ago(since, now)}", max(8, room - 6))
         name = clip(escape(blocker.phase), max(6, room - len(tail)))
-        lines = [f"  [{COLOR[state]}]●[/] [bold]{name}[/]  " + paint(tail, state)]
+        lines = [f"  [{COLOR[state]}]{GLYPH[state]}[/] [bold]{name}[/]  " + paint(tail, state)]
         text = blocker_text(blocker, questions)
         for line in wrap(escape(text) or "no question text was captured", max(10, width - 6)):
             lines.append(f"      {line}")
@@ -316,7 +313,7 @@ def operator_rows(dash, width: int = WIDTH - 4, now: float | None = None) -> lis
         name = clip(escape(item.phase), max(6, room - len(tail)))
         out.append(
             Row(
-                f"  [{COLOR[token(item.state)]}]●[/] [bold]{name}[/]  "
+                f"  [{COLOR[token(item.state)]}]{GLYPH[token(item.state)]}[/] [bold]{name}[/]  "
                 + paint(escape(tail), token(item.state)),
                 item.phase,
                 slot_of(dash.snapshot, item.phase),
@@ -387,7 +384,7 @@ def head_line(dash) -> tuple[str, str]:
         and not snap.finished
         and not snap.supervisor_alive
     )
-    state = BAD if loud else (WARN if blockers else MUTED)
+    state = BAD if loud else (YOU if blockers else MUTED)
     return state, paint(f"needs you ({len(blockers)})", state)
 
 
@@ -416,7 +413,7 @@ class DrawerRow(Static):
 
     DEFAULT_CSS = """
     DrawerRow { height: auto; }
-    DrawerRow:hover { background: #161b22; }
+    DrawerRow:hover { background: #1c2330; }
     """
 
     def __init__(self, **kwargs) -> None:
@@ -444,6 +441,9 @@ class Drawer(Vertical):
     enough (11 rows) that the waste is nil.
     """
 
+    # Below ~110 columns (``-overlay``, set by the app) the drawer moves to its
+    # own layer: docks only inset widgets on their own layer, so it then floats
+    # over the tab instead of squeezing a 36-column tab into unreadable columns.
     DEFAULT_CSS = """
     Drawer {
         display: none;
@@ -451,10 +451,11 @@ class Drawer(Vertical):
         width: 44;
         height: 1fr;
         padding: 0 1;
-        background: #0d1117;
+        background: #161b22;
         border-left: thick #30363d;
     }
     Drawer.-open { display: block; }
+    Drawer.-overlay { layer: overlay; border-left: thick #f0883e; width: 46; max-width: 90%; }
     Drawer > #drawer-head { height: 1; }
     Drawer > #drawer-body { height: 1fr; }
     Drawer .-off { display: none; }

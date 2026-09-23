@@ -12,8 +12,8 @@ What is watched, and how often:
 * Through the TUI's :class:`~swarm_orchestrator.tui.dash.Dash` (mtime-gated
   re-reads, the same code the dashboard runs): ``state.json``, the supervisor
   log, ``done/``, ``notes/``, ``recaps/``, the operator queue, the run record,
-  ``meters/`` and ``limits.jsonl``, the ledger.
-* Here: the Overseer's pass records, ``history/``, ``.swarm.toml`` (the exclude
+  ``meters/`` and ``limits.jsonl``, the ledger, the Overseer's pass records.
+* Here: ``history/``, ``.swarm.toml`` (the exclude
   list lives there — it is re-loaded like ``swarm reload`` would) and the last
   captured turn of each busy worker.
 
@@ -34,7 +34,6 @@ import time
 from pathlib import Path
 
 from .. import config as config_mod
-from .. import ovrecord
 from .. import recap as recap_mod
 from ..tui.dash import Dash
 from ..tui.data import read_state
@@ -49,11 +48,10 @@ SLOW_S = 15.0
 #: A rebuild at least this often regardless — the supervisor dying changes no
 #: file, and "is it running" must still turn red on its own.
 FORCE_S = 20.0
-PASSES = 12
 
 #: Dash sources whose change always rebuilds; the rest are the slow ones.
 _FAST = {"state", "log", "notifications", "done", "recaps", "notes", "operator", "run",
-         "ledger"}
+         "ledger", "overseer"}
 
 
 class Feed:
@@ -149,15 +147,11 @@ class Feed:
         if self._moved("ledger", Path(self.cfg.project_dir) / self.cfg.ledger) or not self._built_at:
             self._load_ledger()
             fast = True
-        odir = ovrecord.overseer_dir(self.cfg)
-        newest = max(odir.glob("*.md"), default=None) if odir.is_dir() else None
-        if self._moved("overseer", odir) | (newest is not None and self._moved("pass-md", newest)):
-            fast = True
         if self._moved("history", Path(self.cfg.state_dir) / "history"):
             fast = True
-        if fast or not self._passes:
-            live = (self._state or {}).get("overseer_pass")
-            self._passes = ovrecord.load_passes(self.cfg, limit=PASSES, live=live)
+        # The dash re-reads the Overseer's records when they (or the live pass)
+        # move — the TUI's feed needs them too, so they are read once, there.
+        self._passes = self.dash.passes
         slow = bool(changed - _FAST) | self._poll_turns()
         due = (fast or force or not self._built_at or now - self._built_at >= FORCE_S
                or (slow and now - self._built_at >= SLOW_S))

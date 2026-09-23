@@ -31,7 +31,7 @@ from __future__ import annotations
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Label, Static, TabbedContent, TabPane
 
@@ -41,6 +41,10 @@ from .theme import BAD, COLOR, MUTED, OK
 
 TICK_S = 2.0
 PROBE_S = 10.0
+
+#: Below this many columns the needs-you drawer floats over the tab instead of
+#: docking beside it: 44 columns taken out of 100 leaves a tab too narrow to read.
+DRAWER_OVERLAY_COLS = 110
 
 
 def _missing(name: str, err: Exception):
@@ -149,6 +153,36 @@ class HelpScreen(ModalScreen[None]):
             yield Static(self.HELP)
 
 
+class DetailScreen(ModalScreen[None]):
+    """A record in full, over whatever tab opened it — an Overseer pass, a job.
+
+    Modal rather than another tab: it answers "what was that?" about one row and
+    should get out of the way the moment it has, with the tab still where it was.
+    """
+
+    BINDINGS = [Binding("escape,q,enter", "dismiss", "close")]
+    DEFAULT_CSS = """
+    DetailScreen { align: center middle; background: #0d1117 60%; }
+    DetailScreen > Vertical {
+        width: 96; max-width: 96%; height: auto; max-height: 90%;
+        border: round #30363d; border-title-color: #e6edf3; padding: 0 1;
+        background: #161b22;
+    }
+    DetailScreen VerticalScroll { height: auto; max-height: 100%; }
+    """
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self._title, self._body = title, body
+
+    def compose(self) -> ComposeResult:
+        with Vertical() as box:
+            box.border_title = self._title
+            box.border_subtitle = "esc closes"
+            with VerticalScroll():
+                yield Static(self._body)
+
+
 class SwarmApp(App):
     """The dashboard application."""
 
@@ -157,7 +191,10 @@ class SwarmApp(App):
     Screen { background: #0d1117; }
     TabbedContent { height: 1fr; }
     Tabs { background: #0d1117; }
-    #body { height: 1fr; }
+    Tabs Tab { color: #8b949e; }
+    Tabs Tab.-active { color: #e6edf3; text-style: bold; }
+    Footer { background: #161b22; }
+    #body { height: 1fr; layers: default overlay; }
     #body > TabbedContent { width: 1fr; }
     .hidden { display: none; }
     """
@@ -216,6 +253,7 @@ class SwarmApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._fit_drawer(self.size.width)
         self.refresh_all()
         self.set_interval(TICK_S, self._tick)
         self.set_interval(PROBE_S, self._probe)
@@ -276,6 +314,17 @@ class SwarmApp(App):
         # it is seen, or the first refresh after a switch shows stale numbers.
         self.call_after_refresh(lambda: self._repaint(self.active_tab))
 
+    def on_resize(self, event) -> None:
+        self._fit_drawer(event.size.width)
+
+    def _fit_drawer(self, width: int) -> None:
+        if Drawer is None:
+            return
+        try:
+            self.query_one(Drawer).set_class(0 < width < DRAWER_OVERLAY_COLS, "-overlay")
+        except Exception:  # noqa: BLE001 - not composed yet
+            pass
+
     # -- helpers ----------------------------------------------------------
     @property
     def active_tab(self):
@@ -332,6 +381,9 @@ class SwarmApp(App):
         """
         tab, node = ("workers", "#tab-workers") if slot is not None else ("history", "#tab-history")
         self.action_tab(tab)
+        # Paint it now: a tab that was never shown has no rows yet, and the
+        # cursor cannot land on a row that is not there.
+        self._repaint(self.query_one(node))
         focus = getattr(self.query_one(node), "focus_row", None)
         if focus is not None:
             self.call_after_refresh(lambda: focus(phase))
@@ -343,6 +395,15 @@ class SwarmApp(App):
     def on_home_open_phase(self, event) -> None:
         event.stop()
         self.open_phase(event.phase, event.slot)
+
+    def on_home_open_text(self, event) -> None:
+        event.stop()
+        self.push_screen(DetailScreen(event.title, event.body))
+
+    def on_open_detail(self, event) -> None:
+        """``enter`` on a table row: the tab's detail, full height, readable."""
+        event.stop()
+        self.push_screen(DetailScreen(event.title, event.body))
 
     def action_doctor(self) -> None:
         """Run the health checks and show them, from whichever tab you were on."""

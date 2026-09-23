@@ -1,8 +1,8 @@
 """Bring up / tear down the ``swarm`` tmux topology.
 
-Layout: window 0 ``dash`` (the always-on TUI dashboard), window 1 ``supervisor``
-(the LLM master's pane — the supervisor process itself is detached and has no
-tty), window 2 ``operator`` (idle until a hand-off opens a session in it), then
+Layout: window 0 ``dash`` (the always-on TUI dashboard), window 1 ``overseer``
+(the master pane: the init pass, then Overseer passes — the supervisor process
+itself is detached and has no tty), window 2 ``operator`` (idle until a hand-off opens a session in it), then
 one or more worker windows tagged
 ``@swarm_slot 0..N-1`` across a GLOBAL slot index. Slots paginate into windows of
 at most :data:`PANES_PER_WINDOW` (``workers``, ``workers-2``, …), each laid out by
@@ -55,7 +55,7 @@ def setup(cfg: Config) -> dict[str, str]:
     tmux.rename_window(dash_win, "dash")
     dash_pane = tmux.list_panes(dash_win)[0]
 
-    master_win = tmux.new_window(cfg.session, "supervisor")
+    master_win = tmux.new_window(cfg.session, "overseer")
     master_pane = tmux.list_panes(master_win)[0]
 
     # The operator's window, created here rather than on demand so it sits beside
@@ -66,9 +66,9 @@ def setup(cfg: Config) -> dict[str, str]:
     operator_pane = tmux.list_panes(operator_win)[0]
 
     # "master" is the durable key every downstream consumer already uses for the
-    # LLM master's window; the *display* name is "supervisor" because that is
-    # what the owner reads in the status bar. Renaming the key would invalidate
-    # st.windows for any run mid-flight.
+    # LLM master's window; the *display* name is "overseer" because that is what
+    # runs in it for all but the first minute (the init pass, then Overseer
+    # passes). Renaming the key would invalidate st.windows for any run mid-flight.
     windows = {"dash": dash_win, "master": master_win, "operator": operator_win}
     slot_panes: dict[int, str] = {}
     base = 0

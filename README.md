@@ -13,7 +13,7 @@ language**, configured by a per-project `.swarm.toml`.
 
 ## How it works
 
-`swarm up` builds a tmux session with a **master** window (one pane) and one or
+`swarm up` builds a tmux session with an **overseer** window (the master pane) and one or
 more **workers** windows holding `[swarm].max_workers` slots, paginated into
 windows of at most four (`workers`, `workers-2`, …), arranged by `[tmux].layout`
 — the default `"auto"` gives a lone slot its whole window, splits two LEFT|RIGHT,
@@ -24,7 +24,9 @@ commit the worker command). Then the supervisor itself launches the ledger's
 ready phases, in ledger order, into the free slots — each a real `claude` running
 `/prime <phase>`. When a worker finishes it calls `swarm done`; the supervisor
 launches the next ready phase into the freed slot at once, with no model in the
-loop. It loops until nothing is left, then telegrams you.
+loop. Every so often an **Overseer** pass runs in the master pane to review the
+whole swarm and act on it (see below). It loops until nothing is left, then
+telegrams you.
 
 Slot accounting is **state-based**, not pane-counting: `max_workers` pane ids
 tagged `@swarm_slot N` across a global index, claimed check-and-set under
@@ -138,6 +140,9 @@ The master never asks — it runs autonomously. Everything else runs unattended.
 | `swarm operator-add "<brief>" [--phase P]` | queue an ad-hoc operator job (id `P`, or `op-<epoch>` without `--phase`) |
 | `swarm operator-done <job> ["<outcome>"]` | the operator session's finish — records and telegrams the one-line outcome |
 | `swarm operator-ask <job> "<question>"` / `swarm operator-resumed <job> ["<answer>"]` | the operator waits on your decision (pinged, lease held) / carries on once you answered |
+| `swarm overseer [--now] [--json] [-n N]` | recent Overseer passes (trigger, status, summary, what each left for you) and the pending reasons; `--now` asks for a pass straight away |
+| `swarm overseer-done "<summary>"` | the Overseer's sign-off — records the pass and frees the pane |
+| `swarm overseer-ask "<question>"` / `swarm overseer-resumed ["<answer>"]` | the Overseer waits on an owner-level call (pinged, timeout stretched) / carries on |
 | `swarm integrate <phase>` | manually integrate `swarm/<phase>` into main (worktree mode) |
 | `swarm finish` | ask the supervisor to stop now |
 
@@ -315,12 +320,57 @@ model whether the session should open `now` or `later`. It fails toward `later`:
 a timeout, prose, or an unrecognised answer never yields `now`, because `now` is
 the branch that opens a session holding your authority.
 
+### The Overseer (`[overseer]`)
+
+The master pane runs the init pass once, then **Overseer** passes for the rest of
+the run: a full Claude session (`[overseer].model`, default the master's) that
+reads a digest of the whole swarm and acts on it — retries a failed phase once,
+frees a stuck slot, resolves a hold it fixed, edits the ledger so free slots have
+work (splitting serial chains, filing follow-up rows from workers' risks and
+decisions), queues operator jobs, runs `swarm gc`, pauses the swarm when RAM or
+disk is dangerous, and sends you a six-line digest. Owner-level calls (money,
+taste, scope, deleting work, reversing your decisions) go to you via
+`swarm overseer-ask`; it never answers a worker's question and never restrains a
+worker. The prompt is `prompts/overseer.md`.
+
+A pass is triggered by events — a phase finishing `fail`, an integration hold, a
+new owed push, a cheap doctor check (`ledger`, `run.nudge`) turning FAIL, a phase
+waiting on you past `owner_wait_s`, starvation (free slots, nothing launchable,
+backlog left) sustained past `starve_s` — and by counters: every
+`every_finished` finished phases and every `every_s`. Reasons coalesce into one
+pending pass; only one runs at a time; passes are `min_gap_s` apart unless a
+reason is urgent (a hold, a doctor FAIL, starvation, `swarm overseer --now`). A
+pass owed or running holds the finish, and one past `timeout_s` is killed and
+logged. Launching never waits on it.
+
+Before each pass the supervisor writes `<state>/overseer/digest-<id>.md` (and a
+`.json` twin): the trigger, the swarm now, the phases finished since the last
+pass with recap, completion note and notes, failures, questions waiting on you, a
+**starvation map** (each root blocker — excluded, failed, parked, building,
+unknown — and how many open phases stand behind it) and a resource snapshot. Each
+pass leaves `<state>/overseer/<id>.md` (Saw / Did / Left for the owner) and
+`<id>.json`; `ovrecord.load_passes()` is the loader the CLI, the TUI and the web
+board read. Under `isolation = "worktree"` a pass works in its own mirror
+(`ovs-<id>`), merged through the ordinary queue when it ends.
+
+```toml
+[overseer]
+enabled        = true    # false = launch and integrate only
+model          = ""      # "" = [swarm].master_model
+min_gap_s      = 600     # between non-urgent passes (start to start)
+every_finished = 3       # a pass every N finished phases (0 = off)
+every_s        = 10800   # and at least this often (0 = off)
+owner_wait_s   = 3600    # a phase waiting on you this long triggers one
+starve_s       = 600     # idle slots with backlog this long triggers one
+timeout_s      = 2700    # a pass past this is killed
+```
+
 ## Runtime state
 
 State lives outside the repo, under
 `~/.local/state/swarm-orchestrator/<project-slug>/` — `state.json`,
 `control.fifo`, `done/` (durable completion sentinels), `operator/` (the hand-off
-queue), `logs/`, and, in worktree mode, `wt/` (the per-phase mirrors) and `git/`
+queue), `overseer/` (trigger memory, digests, pass records), `logs/`, and, in worktree mode, `wt/` (the per-phase mirrors) and `git/`
 (per-repo integration locks). The slug includes a hash of the full project path,
 so two projects that share a folder name never share state.
 

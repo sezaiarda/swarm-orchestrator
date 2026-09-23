@@ -58,13 +58,14 @@ def test_session_setup_creates_four_tagged_slots(monkeypatch, tmp_path):
         assert st.dash_pane
         assert st.operator_pane
         # Window ORDER is part of the contract the owner works in every day:
-        # 0 = dash (TUI), 1 = supervisor (the LLM master's pane), 2 = operator
+        # 0 = dash (TUI), 1 = overseer (the master pane: init pass, then Overseer
+        # passes; it was "supervisor" before the master became the Overseer), 2 = operator
         # (idle until a hand-off opens a session in it), 3 = workers.
         names = tmux.run(
             ["list-windows", "-t", cfg.session, "-F", "#{window_index} #{window_name}"]
         ).stdout.split("\n")
         assert [n for n in names if n][:4] == [
-            "0 dash", "1 supervisor", "2 operator", "3 workers"
+            "0 dash", "1 overseer", "2 operator", "3 workers"
         ]
         pairs = tmux.list_panes_with_slot(st.windows["workers"])
         assert len(pairs) == 4

@@ -706,6 +706,10 @@ def _waiting_question(cfg: Config, phase: str) -> str:
     return ""
 
 
+#: Public name for the Overseer's digest, which lists the same questions.
+waiting_question = _waiting_question
+
+
 def _check_owner(cfg: Config, st: State) -> Check:
     """``waiting``/``parked`` phases — the cases where the OWNER is the blocker.
 
@@ -1039,7 +1043,7 @@ def _check_prompts() -> Check:
     """
     packaged = Path(__file__).resolve().parent / "prompts"
     source = Path(__file__).resolve().parent.parent.parent / "prompts"
-    wanted = ("init_master.md", "step_master.md", "resolver.md", "operator.md")
+    wanted = ("init_master.md", "step_master.md", "resolver.md", "operator.md", "overseer.md")
     missing = [
         name
         for name in wanted

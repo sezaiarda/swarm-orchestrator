@@ -47,13 +47,18 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from . import doctor as doctor_mod
 from . import gitq
 from . import launch as launch_mod
 from . import master as master_mod
 from . import operator as operator_mod
 from . import opqueue
+from . import overseer as overseer_mod
+from . import ovdigest
+from . import ovrecord
 from . import pushowed
 from . import resolver as resolver_mod
+from . import ledger as ledger_mod
 from . import state as state_mod
 from . import reload as reload_mod
 from . import session as session_mod
@@ -72,6 +77,9 @@ LAUNCH_RETRY_S = 60.0
 #: resume`` puts it back. It stops holding the finish open, and the finish
 #: message names it.
 LAUNCH_GIVE_UP = 3
+#: The cheap doctor checks behind the Overseer's ``doctor`` trigger are probed at
+#: most this often: they parse the ledger, and a FAIL that matters lasts minutes.
+DOCTOR_PROBE_S = 600.0
 
 
 class Supervisor:
@@ -107,6 +115,17 @@ class Supervisor:
         # True while the init master's bootstrap pass runs: the worker command it
         # patches has to be committed before the first worktree branches off main.
         self._bootstrapping = False
+        # The Overseer shares the master pane, and the init pass goes first: no
+        # pass starts before `bootstrap` has been handled (a persisted pending
+        # pass would otherwise take the pane on the very first wake and the init
+        # pass would be ignored as "master alive").
+        self._bootstrapped = False
+        self.overseer = overseer_mod.Policy(cfg, self.log)
+        # The live pass id, from the moment it is reserved (its spawn runs on a
+        # thread) until it ends. Guards "one pass at a time" and holds the finish.
+        self._overseer_live: str | None = None
+        self._overseer_reasons: list[overseer_mod.Reason] = []
+        self._doctor_probed = 0.0
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -154,6 +173,7 @@ class Supervisor:
         # Record the config actually in force, so `swarm reload` has an honest
         # "before" to diff against once the file on disk has been edited.
         self._write_config_snapshot()
+        ovrecord.mark_stale(self.cfg)  # no pass survives a restart
         self.log.line(
             f"SUPERVISOR-START pid={os.getpid()} driver={self.cfg.driver}"
             f" watchdog_s={self.watchdog_s:g}"
@@ -174,6 +194,7 @@ class Supervisor:
                 self._dispatch("operator-queue", self._check_operator_queue)
                 self._dispatch("watchdog", self._watchdog_tick)
                 self._dispatch("launch-retry", self._retry_backed_off)
+                self._dispatch("overseer", self._overseer_tick)
                 if self._fifo_fd not in ready:
                     continue
                 try:
@@ -187,6 +208,10 @@ class Supervisor:
                     self._dispatch(line, self._handle, line)
                     if self._stop:
                         break
+                    # After every event too: the event may be the trigger (a
+                    # `fail`, a hold), and waiting for the next wake to notice
+                    # it could be waiting for nothing.
+                    self._dispatch("overseer", self._overseer_tick)
         except Exception as exc:  # noqa: BLE001 - announce, then re-raise
             self.log.line(f"SUPERVISOR-CRASH {exc!r}")
             self._ping(
@@ -197,10 +222,17 @@ class Supervisor:
             )
             raise
         finally:
+            if self._overseer_live is not None:
+                ovrecord.update(
+                    self.cfg, self._overseer_live,
+                    status=ovrecord.INTERRUPTED, ended_at=time.time(),
+                )
             if self.master.is_alive():
                 self.master.kill()  # never orphan a master on the way out
                 with state_mod.transaction(self.cfg) as st:
                     st.master_alive = False
+                    st.overseer_pass = None
+                    st.overseer_deadline = 0.0
             # Same obligation, and it matters more: an operator session holds the
             # owner's full authority on the host, so leaving one typing into a
             # window nothing owns is worse than leaving a master.
@@ -303,6 +335,17 @@ class Supervisor:
             # wake runs is what dispatches, oldest first, so a new job can never
             # jump the queue by being the one that was poked.
             self.log.line(f"EVENT operator-queued {parts[1] if len(parts) > 1 else '?'}")
+        elif verb == "overseer-done":
+            self._end_overseer_pass(parts[1] if len(parts) > 1 else "?", ovrecord.DONE)
+        elif verb == "overseer-spawned":
+            self._on_overseer_spawned(
+                parts[1] if len(parts) > 1 else "?",
+                parts[2] if len(parts) > 2 else "failed",
+            )
+        elif verb == "overseer-now":
+            self.overseer.request(
+                overseer_mod.MANUAL, "requested by `swarm overseer --now`", urgent=True
+            )
         elif verb == "shutdown":
             self._stop = True
         else:
@@ -317,6 +360,7 @@ class Supervisor:
         that lacks it. So the first launch waits for its ``master-idle`` — or,
         if no master could be started, happens now. A master that hangs cannot
         hold launching for longer than one watchdog interval."""
+        self._bootstrapped = True
         if self.master.is_alive():
             self.log.line("BOOTSTRAP-IGNORED master-alive")
             return
@@ -392,6 +436,7 @@ class Supervisor:
 
         self.cfg = applied
         self.master.cfg = applied
+        self.overseer.cfg = applied
         # watchdog_s is cached on the instance (read per select, not per event),
         # so swapping self.cfg alone would leave the old sweep interval running.
         self.watchdog_s = max(0.0, float(getattr(applied, "watchdog_s", 300) or 0))
@@ -556,6 +601,11 @@ class Supervisor:
                     # An operator job's mirror, not a ledger phase: its work is
                     # landed, and there is nothing to record done or free.
                     self.log.line(f"OPERATOR-INTEGRATED {phase}")
+                elif status == ovrecord.INTEG_STATUS:
+                    # An Overseer pass's mirror: its ledger edits are on main now,
+                    # so the launcher may have new work to pick up.
+                    self.log.line(f"OVERSEER-INTEGRATED {phase}")
+                    self._fill_slots(f"overseer edits landed ({phase})")
                 else:
                     self._advance_done(phase, status)
                 pushowed.retry(self.cfg, self.log, skip=set(pushes))
@@ -752,6 +802,14 @@ class Supervisor:
                 if 0 < n < LAUNCH_GIVE_UP and p not in self._retried
                 and last + LAUNCH_RETRY_S > now
             )
+        # The Overseer: a pending pass's gap running out, a cadence, a wait or a
+        # starvation episode crossing its threshold, a live pass's deadline.
+        ov = self.overseer.next_deadline(now)
+        if ov is not None:
+            stamps.append(ov)
+        deadline = state_mod.read(self.cfg).overseer_deadline
+        if self._overseer_live is not None and deadline > now:
+            stamps.append(deadline)
         if not stamps:
             return None
         return max(0.0, min(stamps) - time.time())
@@ -865,6 +923,8 @@ class Supervisor:
         if st.finished or st.paused or st.pending():
             return
         if st.integ_queue or st.integ_blocked is not None or self.master.is_alive():
+            return
+        if self._overseer_holds_finish(st):
             return
         with self._launch_lock:
             inflight = sorted(self._launching)
@@ -1158,7 +1218,14 @@ class Supervisor:
     # -- rule 2 + 3: master-idle, then launch / maybe finish --------------
     def _on_master_idle(self) -> None:
         """The init master finished its pass: kill it, then launch (the first
-        batch waits for this) and re-check the finish."""
+        batch waits for this) and re-check the finish.
+
+        An Overseer that signals ``master-idle`` instead of ``overseer-done`` has
+        still finished its pass: end it the proper way (record, mirror merge)."""
+        if self._overseer_live is not None:
+            self.log.line(f"OVERSEER-MASTER-IDLE {self._overseer_live}")
+            self._end_overseer_pass(self._overseer_live, ovrecord.DONE)
+            return
         self.master.kill()
         self._bootstrapping = False
         with state_mod.transaction(self.cfg) as st:
@@ -1205,6 +1272,252 @@ class Supervisor:
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = True
         return True
+
+    # -- the Overseer: periodic review passes in the master pane -----------
+    def _overseer_tick(self) -> None:
+        """One look for the Overseer's trigger policy, then maybe a pass.
+
+        Runs on every wake and after every event. A live pass past its deadline
+        is killed first — whatever a hung session is doing, it must never hold
+        the pane or the finish. Launching never waits on any of this: the
+        launcher is the supervisor's own (rule 1)."""
+        now = time.time()
+        st = state_mod.read(self.cfg)
+        live = self._overseer_live
+        if live is not None and st.overseer_deadline and now >= st.overseer_deadline:
+            self._overseer_timeout(live)
+            st = state_mod.read(self.cfg)
+        if st.finished:
+            return
+        if not self.cfg.overseer_enabled:
+            # Nothing is watched while it is off, so nothing seen now is news
+            # later: a reload that turns it on re-baselines instead of reporting
+            # every phase that finished in the meantime.
+            self.overseer.mem.seen_done = None
+            self.overseer.mem.finished_since = 0
+            return
+        self.overseer.observe(
+            st, now, starving=self._starving(st), doctor_fails=self._doctor_probe(st, now)
+        )
+        self._maybe_start_overseer(st, now)
+
+    def _launch_view(self) -> tuple[set[str], set[str], set[str]]:
+        """``(launching, given_up, backing_off)`` under the launch lock."""
+        now = time.time()
+        with self._launch_lock:
+            launching = set(self._launching)
+            given_up = {p for p, (n, _) in self._launch_fails.items() if n >= LAUNCH_GIVE_UP}
+            backing = {p for p in self._launch_fails if self._backing_off(p, now)}
+        return launching, given_up, backing
+
+    def _starving(self, st: state_mod.State) -> bool:
+        """Free slots, nothing the launcher can start, and backlog still open.
+
+        The supervisor's own verdict, because only it knows what is mid-launch,
+        backing off or given up. A phase given up after failed launches is
+        backlog nothing will start — starvation, not progress."""
+        if st.paused or not st.free_slots() or not self._bootstrapped or self.master.is_alive():
+            return False
+        launching, given_up, backing = self._launch_view()
+        if launching:
+            return False
+        ctx = master_mod.build_context(self.cfg, st)
+        if any(p not in given_up and p not in backing for p in ctx["ready"]):
+            return False
+        graph = ledger_mod.load(self.cfg.project_dir / self.cfg.ledger)
+        excluded = set(self.cfg.exclude)
+        return bool(overseer_mod.backlog(graph, st.done, excluded, ovdigest.in_flight(st)))
+
+    def _doctor_probe(self, st: state_mod.State, now: float) -> dict[str, str] | None:
+        """The cheap doctor checks that mean *stuck*, at most every
+        :data:`DOCTOR_PROBE_S`: ``ledger`` (a cycle or unknown dep strands every
+        phase behind it) and ``run.nudge`` (free slots and ready phases, nothing
+        launching — a phase given up after failed launches shows here). Never
+        the full doctor, which shells out to git and du. ``None`` = not probed."""
+        if now - self._doctor_probed < DOCTOR_PROBE_S:
+            return None
+        if not self._bootstrapped or self.master.is_alive():
+            return None
+        launching, _given_up, backing = self._launch_view()
+        if launching:
+            return None  # a launch in flight reads as a lost nudge
+        self._doctor_probed = now
+        ctx = master_mod.build_context(self.cfg, st)
+        ready = [p for p in ctx["ready"] if p not in backing]
+        checks = [
+            doctor_mod._check_ledger(self.cfg, st),
+            doctor_mod._check_nudge(st, ready, ctx["free_slots"]),
+        ]
+        return {c.name: c.detail for c in checks if c.status == doctor_mod.FAIL}
+
+    def _maybe_start_overseer(self, st: state_mod.State, now: float) -> None:
+        if not self._bootstrapped or self._overseer_live is not None:
+            return
+        if self.master.is_alive():
+            return  # the init pass has the pane; the pending pass waits for it
+        # An init master that died without idling leaves the bootstrap hold set,
+        # and with a pass in the pane `_fill_slots` would read that pass as the
+        # init master and hold every launch. Settle it the way `_fill_slots` does.
+        self._bootstrapping = False
+        if not self.overseer.due(now):
+            return
+        self._start_overseer_pass(now)
+
+    def _start_overseer_pass(self, now: float) -> None:
+        """Reserve the pass (record, state, the live id) here; build its digest,
+        its mirror and its session on a thread.
+
+        A worktree mirror (one per repo) and a claude boot take tens of
+        seconds, which the loop must never spend: the thread reports back as
+        ``overseer-spawned <id> ok|failed``, exactly as a launch does."""
+        mem = self.overseer.mem
+        since = mem.last_pass_at or mem.anchor or now
+        prior = ovrecord.load_passes(self.cfg, limit=1)
+        last = prior[0].to_dict() if prior else None
+        reasons = self.overseer.begin(now)
+        pid = ovrecord.new_id(self.cfg, now)
+        mirror = ovrecord.mirror_name(pid) if self.cfg.git_isolation == "worktree" else ""
+        digest = overseer_mod.overseer_dir(self.cfg) / f"digest-{pid}.md"
+        ovrecord.create(self.cfg, pid, [asdict(r) for r in reasons], digest, mirror, now)
+        self._overseer_live = pid
+        self._overseer_reasons = reasons
+        with state_mod.transaction(self.cfg) as st:
+            st.overseer_pass = pid
+            st.overseer_deadline = now + self.cfg.overseer_timeout_s
+        self.log.line(
+            f"OVERSEER-PASS-START {pid} reasons={','.join(r.key for r in reasons) or '-'}"
+        )
+        launching, given_up, _ = self._launch_view()
+        self._start_overseer_spawn(pid, reasons, since, launching, sorted(given_up), last)
+
+    def _start_overseer_spawn(self, pid: str, *args) -> None:
+        """Run :meth:`_overseer_spawn` off the loop thread (daemon, like a launch)."""
+        threading.Thread(
+            target=self._overseer_spawn, args=(pid, *args), name=f"overseer:{pid}", daemon=True
+        ).start()
+
+    def _overseer_spawn(self, pid, reasons, since, launching, given_up, last) -> None:
+        """Thread body: digest, mirror, session; report through the FIFO."""
+        cfg = self.cfg
+        outcome = "failed"
+        try:
+            data = ovdigest.build(
+                cfg, state_mod.read(cfg), reasons,
+                since=since, launching=launching, given_up=given_up, last_pass=last,
+            )
+            digest = ovdigest.write(cfg, pid, data)
+            cwd: Path | None = None
+            if cfg.git_isolation == "worktree":
+                cwd = gitq.worktree_add(cfg, ovrecord.mirror_name(pid), self.log)
+                launch_mod.pretrust_dir(cwd, self.log)
+            record = ovrecord.md_path(cfg, pid)
+            env = {
+                **launch_mod.session_env(cfg, cwd),
+                "SWARM_MASTER_KIND": master_mod.OVERSEER,
+                "SWARM_OVERSEER_PASS": pid,
+                "SWARM_OVERSEER_DIGEST": str(digest),
+                "SWARM_OVERSEER_RECORD": str(record),
+                "SWARM_PROJECT": str(cfg.project_dir),
+            }
+            line = master_mod.overseer_brief(cfg, pid, digest, record, cwd)
+            pane = state_mod.read(cfg).master_pane
+            if self.master.spawn(master_mod.OVERSEER, pane, cwd=cwd, env=env, line=line):
+                outcome = "ok"
+        except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
+            self.log.line(f"OVERSEER-SPAWN-ERROR {pid} {exc!r}")
+        launch_mod._poke_fifo(cfg, f"overseer-spawned {pid} {outcome}\n")
+
+    def _on_overseer_spawned(self, pid: str, outcome: str) -> None:
+        if pid != self._overseer_live:
+            self.log.line(f"OVERSEER-SPAWNED-STALE {pid} {outcome}")
+            return
+        if outcome == "ok":
+            with state_mod.transaction(self.cfg) as st:
+                st.master_alive = True
+            self.log.line(f"OVERSEER-SPAWNED {pid}")
+            return
+        # It never ran: put its reasons back (they wait out the gap, so a pass
+        # that cannot start is not retried in a tight loop) and tell the owner.
+        self._overseer_live = None
+        with state_mod.transaction(self.cfg) as st:
+            st.overseer_pass = None
+            st.overseer_deadline = 0.0
+        ovrecord.update(self.cfg, pid, status=ovrecord.FAILED, ended_at=time.time())
+        self.overseer.requeue(self._overseer_reasons)
+        self.overseer.end()
+        if self.cfg.git_isolation == "worktree":
+            try:
+                gitq.discard(self.cfg, ovrecord.mirror_name(pid), self.log)
+            except gitq.GitError as exc:
+                self.log.line(f"OVERSEER-DISCARD-ERROR {pid} {exc}")
+        self.log.line(f"OVERSEER-SPAWN-FAILED {pid}")
+        self._ping(
+            "overseer-spawn",
+            f"swarm: an Overseer pass ({pid}) would not start -- its reasons wait for"
+            " the next one; check the supervisor pane",
+            kind="overseer",
+            source="supervisor._on_overseer_spawned",
+        )
+        self._finish_if_settled()
+
+    def _overseer_timeout(self, pid: str) -> None:
+        minutes = self.cfg.overseer_timeout_s // 60
+        self.log.line(f"OVERSEER-TIMEOUT {pid} after {self.cfg.overseer_timeout_s}s")
+        self._ping(
+            f"overseer-timeout:{pid}",
+            f"swarm: the Overseer pass {pid} ran past {minutes} min and was killed;"
+            " whatever it committed is being merged",
+            cooldown=0.0,
+            kind="overseer",
+            source="supervisor._overseer_timeout",
+        )
+        self._end_overseer_pass(pid, ovrecord.TIMEOUT)
+
+    def _end_overseer_pass(self, pid: str, status: str) -> None:
+        """End a pass: kill the pane BEFORE its mirror is merged and removed (no
+        live process may lose its cwd), settle the record, land the mirror
+        through the ordinary queue, and let the launcher and the finish look
+        again — the pass may have changed the ledger or retried a phase."""
+        if pid != self._overseer_live:
+            self.log.line(f"OVERSEER-DONE-IGNORED expected={self._overseer_live} got={pid}")
+            return
+        now = time.time()
+        self._overseer_live = None
+        self.master.kill()
+        with state_mod.transaction(self.cfg) as st:
+            st.master_alive = False
+            st.overseer_pass = None
+            st.overseer_deadline = 0.0
+        rec = ovrecord.update(self.cfg, pid, status=status, ended_at=now)
+        self.overseer.end(now)
+        self.log.line(f"OVERSEER-PASS-END {pid} {rec.status if rec else status}")
+        if self.cfg.git_isolation == "worktree":
+            name = ovrecord.mirror_name(pid)
+            if gitq.branch_exists(self.cfg.project_dir, f"swarm/{name}"):
+                with state_mod.transaction(self.cfg) as st:
+                    st.integ_push(name, ovrecord.INTEG_STATUS)
+                self._pump_integrations()
+        self._fill_slots(f"overseer pass {pid} over")
+        self._finish_if_settled()
+
+    def _overseer_holds_finish(self, st: state_mod.State) -> bool:
+        """A live pass, or one owed, holds the finish.
+
+        The event that settles a run may be the very one that should trigger a
+        pass (the last phase failing, the Nth finishing), and a run that finishes
+        first never gets it. So look once more here — without the starvation
+        verdict, which a settled run with excluded rows left over would satisfy
+        forever."""
+        if self._overseer_live is not None:
+            return True
+        if not self.cfg.overseer_enabled or not self._bootstrapped:
+            return False
+        self.overseer.observe(st, starving=None, doctor_fails=None)
+        pending = self.overseer.pending
+        if pending:
+            self.log.line(f"FINISH-HELD overseer pending={[r.key for r in pending]}")
+            return True
+        return False
 
     # -- finish -----------------------------------------------------------
     def _finish(

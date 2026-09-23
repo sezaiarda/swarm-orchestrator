@@ -142,6 +142,18 @@ def pytest_configure(config) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _overseer_off(monkeypatch):
+    """The Overseer is on by default in a real project; in the suite it is off.
+
+    A pass is a real ``claude`` session unless a fake is configured, and every
+    test that finishes phases would otherwise trigger one. Tests of the
+    Overseer turn it back on (``SWARM_OVERSEER=1``) with the fake master. Set in
+    the environment, so the ``swarm`` fixture's copy of it carries it too.
+    """
+    monkeypatch.setenv("SWARM_OVERSEER", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_inprocess_launch(request, monkeypatch):
     """An in-process :class:`Supervisor` records its launches instead of making them.
 

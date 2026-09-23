@@ -216,6 +216,31 @@ POLICY: dict[str, Policy] = {
         _p("operator_triage_model", "[operator]", "triage_model", NEXT, None,
            "triage is spawned by the worker's `swarm done` from its worktree"
            " mirror, so it reads the branched .swarm.toml copy"),
+        _p("overseer_enabled", "[overseer]", "enabled", HOT, "SWARM_OVERSEER",
+           "the supervisor's trigger policy reads it on every wake; a pass"
+           " already running is left to finish"),
+        _p("overseer_cmd", "[overseer]", "cmd", NEXT, "SWARM_OVERSEER_CMD",
+           "baked into the Overseer pane's command line when a pass is spawned"),
+        _p("overseer_model", "[overseer]", "model", NEXT, None,
+           "baked into the Overseer session's command line when a pass is spawned"),
+        _p("overseer_min_gap_s", "[overseer]", "min_gap_s", HOT, "SWARM_OVERSEER_MIN_GAP",
+           "read each time the policy asks whether a pass is due", numeric=True),
+        _p("overseer_every_finished", "[overseer]", "every_finished", HOT,
+           "SWARM_OVERSEER_EVERY_FINISHED",
+           "the finished-phase counter is compared against it on every wake",
+           numeric=True),
+        _p("overseer_every_s", "[overseer]", "every_s", HOT, "SWARM_OVERSEER_EVERY",
+           "the cadence clock is compared against it on every wake", numeric=True),
+        _p("overseer_owner_wait_s", "[overseer]", "owner_wait_s", HOT,
+           "SWARM_OVERSEER_OWNER_WAIT",
+           "each waiting phase's age is compared against it on every wake",
+           numeric=True),
+        _p("overseer_starve_s", "[overseer]", "starve_s", HOT, "SWARM_OVERSEER_STARVE",
+           "the starvation episode's age is compared against it on every wake",
+           numeric=True),
+        _p("overseer_timeout_s", "[overseer]", "timeout_s", NEXT, "SWARM_OVERSEER_TIMEOUT",
+           "a pass's deadline is fixed when it starts; the next pass gets the new one",
+           numeric=True),
     )
 }
 

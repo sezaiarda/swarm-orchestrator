@@ -22,6 +22,8 @@ from . import buildsem
 from . import notes as notes_mod
 from . import operator as operator_mod
 from . import opqueue
+from . import overseer as overseer_mod
+from . import ovrecord
 from . import tui as tui_mod
 from . import doctor as doctor_mod
 from . import gc as gc_mod
@@ -116,9 +118,7 @@ def _reconcile_orphans(cfg: Config) -> None:
         seed = gitq.sentinel_done(cfg)
         st = state_mod.read(cfg)
         try:
-            result = gitq.reconcile(
-                cfg, dict(st.done), log, operator=operator_mod.mirror_plan(cfg)
-            )
+            result = gitq.reconcile(cfg, dict(st.done), log, operator=_mirror_plan(cfg))
         except gitq.GitError as exc:
             print(f"reconcile skipped (git error): {exc}", file=sys.stderr)
             log.line(f"RECONCILE-ERROR {exc}")
@@ -138,21 +138,24 @@ def _reconcile_orphans(cfg: Config) -> None:
         if result.integrated:
             print(f"reconciled orphan branches: {', '.join(result.integrated)}")
         if result.operator_integrated:
-            print(f"landed operator mirrors: {', '.join(result.operator_integrated)}")
+            print(f"landed operator/overseer mirrors: {', '.join(result.operator_integrated)}")
         for phase, pushes in result.pushes.items():
             pushowed.settle(cfg, phase, pushes, log)  # a failed push is owed, not held
         if result.held:
             first = result.held[0]
             plan = operator_mod.mirror_plan(cfg)
+            passes = ovrecord.mirror_plan(cfg)
             with state_mod.transaction(cfg) as s:
                 s.integ_blocked = first.phase
                 s.integ_blocked_kind = first.kind
                 s.integ_blocked_repo = str(first.repo) if first.repo else None
                 for h in result.held:
+                    # Queued too, so `swarm resolved` re-lands it; a job or a
+                    # pass has no sentinel for the next `swarm up` to find it by.
                     if plan.get(h.phase) == operator_mod.INTEGRATE:
-                        # Queued too, so `swarm resolved` re-lands it; a job has
-                        # no sentinel for the next `swarm up` to find it by.
                         s.integ_push(h.phase, operator_mod.INTEG_STATUS)
+                    elif h.phase in passes:
+                        s.integ_push(h.phase, ovrecord.INTEG_STATUS)
             names = ", ".join(f"{h.phase} ({h.kind})" for h in result.held)
             print(f"integration HELD: {names}", file=sys.stderr)
             print("  these phases are NOT marked done — their branches never merged.")
@@ -168,6 +171,12 @@ def _reconcile_orphans(cfg: Config) -> None:
             )
     finally:
         log.close()
+
+
+def _mirror_plan(cfg: Config) -> dict[str, str]:
+    """Every ``swarm/*`` branch that has no sentinel by design and must not be
+    discarded as an interrupted phase: operator jobs' and Overseer passes'."""
+    return {**operator_mod.mirror_plan(cfg), **ovrecord.mirror_plan(cfg)}
 
 
 def _attach(cfg: Config) -> None:
@@ -561,6 +570,124 @@ def cmd_operator_add(cfg: Config, brief: str, phase: str | None = None) -> int:
     return 0
 
 
+def _live_pass(cfg: Config) -> tuple[str | None, state_mod.State]:
+    """The pass a session means: its own (``SWARM_OVERSEER_PASS``), else the current one."""
+    st = state_mod.read(cfg)
+    return os.environ.get("SWARM_OVERSEER_PASS") or st.overseer_pass, st
+
+
+def cmd_overseer(cfg: Config, now: bool, as_json: bool, limit: int) -> int:
+    """List recent Overseer passes, or (``--now``) ask for one straight away."""
+    if now:
+        if not cfg.overseer_enabled:
+            print("swarm overseer: `[overseer].enabled` is false — no pass would run",
+                  file=sys.stderr)
+            return 2
+        heard = _poke(cfg, "overseer-now")
+        print("Overseer pass requested")
+        print(f"  supervisor: {'poked — it starts once the pane is free' if heard else 'NOT RUNNING'}")
+        return 0 if heard else 1
+    st = state_mod.read(cfg)
+    passes = ovrecord.load_passes(cfg, limit=limit, live=st.overseer_pass)
+    pending = overseer_mod.Policy(cfg).pending
+    if as_json:
+        return _dump({
+            "enabled": cfg.overseer_enabled,
+            "live": st.overseer_pass,
+            "pending": [{"key": r.key, "text": r.text, "urgent": r.urgent, "at": r.at}
+                        for r in pending],
+            "passes": [p.to_dict() for p in passes],
+        })
+    head = "overseer" + ("" if cfg.overseer_enabled else " (OFF)")
+    print(f"{head}: live={st.overseer_pass or '-'} pending={len(pending)}")
+    for r in pending:
+        print(f"  pending: {'[urgent] ' if r.urgent else ''}{r.text}")
+    if not passes:
+        print("no passes yet")
+    for p in passes:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(p.started_at)) if p.started_at else "?"
+        dur = f" {p.duration_s / 60:.0f}m" if p.duration_s is not None else ""
+        why = ",".join(str(r.get("key", "?")) for r in p.reasons) or "-"
+        print(f"{when} {p.id} [{p.status}{dur}] ({why}) — {p.summary or '(no summary)'}")
+        if p.left:
+            print(f"    left for the owner: {' '.join(p.left.split())[:200]}")
+        if p.question and not p.answer:
+            print(f"    WAITING ON YOU: {p.question}")
+    return 0
+
+
+def cmd_overseer_done(cfg: Config, summary: str) -> int:
+    """The Overseer signals its pass is over, with a one-line summary.
+
+    Recorded before the poke, like ``swarm done``: the record is the durable
+    account of the pass whether or not the supervisor hears the signal."""
+    pid, st = _live_pass(cfg)
+    if not pid or ovrecord.load_json(cfg, pid) is None:
+        print("swarm overseer-done: no Overseer pass is running", file=sys.stderr)
+        return 1
+    summary = " ".join(summary.split())
+    ovrecord.update(cfg, pid, status=ovrecord.DONE, ended_at=time.time(), summary=summary)
+    ovrecord.append_summary(cfg, pid, summary or "(no summary)")
+    if st.overseer_pass != pid:
+        print(f"swarm overseer-done: pass {pid} is no longer live (timed out?) — recorded only",
+              file=sys.stderr)
+        return 1
+    heard = _poke(cfg, f"overseer-done {pid}")
+    print(f"overseer-done {pid}")
+    print(f"  supervisor: {'poked' if heard else 'not running — the pass ends on the next swarm up'}")
+    return 0
+
+
+def cmd_overseer_ask(cfg: Config, question: str) -> int:
+    """The Overseer hit an owner-level call: ping the owner and wait for them.
+
+    Like ``swarm waiting`` for a worker: the session stays alive and asks in its
+    own pane (AskUserQuestion); this is the ping that brings the owner there, and
+    the deadline stretch that stops the timeout killing a pass that is only
+    waiting on a person."""
+    question = " ".join(question.split())
+    if not question:
+        print("swarm overseer-ask: empty question", file=sys.stderr)
+        return 2
+    pid, st = _live_pass(cfg)
+    rec = ovrecord.load_json(cfg, pid) if pid else None
+    if rec is None or st.overseer_pass != pid:
+        print("swarm overseer-ask: no Overseer pass is running", file=sys.stderr)
+        return 1
+    fresh = rec.question != question or bool(rec.answer)
+    ovrecord.update(cfg, pid, question=question, asked_at=time.time(), answer="")
+    with state_mod.transaction(cfg) as s:
+        if s.overseer_pass == pid:
+            s.overseer_deadline = time.time() + opqueue.WAIT_LEASE_S
+    if fresh:
+        telegram.notify(
+            cfg.telegram_notify,
+            f"swarm: the Overseer is waiting on you — {question}",
+            kind="overseer-ask",
+            source="cli.overseer-ask",
+            state_dir=cfg.state_dir,
+        )
+    print(f"overseer-ask {pid}: the owner {'has been pinged' if fresh else 'already has this question'}")
+    print("  now ask it with AskUserQuestion in this pane and wait for the answer;")
+    print('  then run: swarm overseer-resumed "<the answer>"')
+    return 0
+
+
+def cmd_overseer_resumed(cfg: Config, answer: str) -> int:
+    """The owner answered: record it and put the pass back on its normal timeout."""
+    pid, st = _live_pass(cfg)
+    rec = ovrecord.load_json(cfg, pid) if pid else None
+    if rec is None or st.overseer_pass != pid or not rec.question:
+        print("swarm overseer-resumed: the Overseer is not waiting on the owner", file=sys.stderr)
+        return 1
+    ovrecord.update(cfg, pid, answer=" ".join(answer.split()) or "(answered)")
+    with state_mod.transaction(cfg) as s:
+        if s.overseer_pass == pid:
+            s.overseer_deadline = time.time() + cfg.overseer_timeout_s
+    print(f"overseer-resumed {pid}: carry on")
+    return 0
+
+
 def cmd_check(cfg: Config, strict: bool) -> int:
     """Preflight: config, ledger, telegram, prompts -- without a live supervisor."""
     bad = False
@@ -616,7 +743,7 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
     shipped = Path(__file__).resolve().parent / "prompts"
     if not shipped.is_dir():
         shipped = Path(__file__).resolve().parent.parent.parent / "prompts"
-    for name in ("init_master.md", "step_master.md", "resolver.md", "operator.md"):
+    for name in ("init_master.md", "step_master.md", "resolver.md", "operator.md", "overseer.md"):
         q = shipped / name
         if q.is_file():
             out.append((f"prompts/{name}", q))
@@ -1304,6 +1431,27 @@ def _build_parser() -> argparse.ArgumentParser:
     oad.add_argument("--phase", help="the phase this job belongs to (default: a fresh op-<ts> id)")
     oad.set_defaults(
         func=lambda cfg, a: cmd_operator_add(cfg, " ".join(a.brief), a.phase))
+
+    ovp = sub.add_parser("overseer", help="recent Overseer passes; --now asks for one")
+    ovp.add_argument("--now", action="store_true", help="request a pass straight away")
+    ovp.add_argument("--json", action="store_true")
+    ovp.add_argument("-n", "--limit", type=int, default=10, help="passes to list (default 10)")
+    ovp.set_defaults(func=lambda cfg, a: cmd_overseer(cfg, a.now, a.json, a.limit))
+
+    ovd = sub.add_parser(
+        "overseer-done", help="(Overseer) signal the pass is over, with a one-line summary")
+    ovd.add_argument("summary", nargs="*", help="what the pass did, in one line")
+    ovd.set_defaults(func=lambda cfg, a: cmd_overseer_done(cfg, " ".join(a.summary)))
+
+    ova = sub.add_parser(
+        "overseer-ask", help="(Overseer) an owner-level call: ping the owner and wait")
+    ova.add_argument("question", nargs="+")
+    ova.set_defaults(func=lambda cfg, a: cmd_overseer_ask(cfg, " ".join(a.question)))
+
+    ovr = sub.add_parser(
+        "overseer-resumed", help="(Overseer) the owner answered; back to the normal timeout")
+    ovr.add_argument("answer", nargs="*")
+    ovr.set_defaults(func=lambda cfg, a: cmd_overseer_resumed(cfg, " ".join(a.answer)))
 
     ckp = sub.add_parser("check", help="preflight config, ledger, telegram, prompts")
     ckp.add_argument("--strict", action="store_true", help="warnings are fatal")

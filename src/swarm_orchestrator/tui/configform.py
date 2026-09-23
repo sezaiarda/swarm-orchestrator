@@ -342,7 +342,7 @@ FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scal
 
 # The order the tables are drawn in — the order the file itself uses.
 SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "git",
-                 "operator", "tui", "(cli)")
+                 "operator", "overseer", "tui", "(cli)")
 
 
 @dataclass(frozen=True)
@@ -438,6 +438,18 @@ FIELDS: tuple[Setting, ...] = (
     Setting("operator_cmd", STR, 'command an operator session runs; "" = built-in'),
     Setting("operator_model", STR, 'model for an operator session; "" inherits'),
     Setting("operator_triage_model", STR, "model that decides now vs later"),
+    # -- [overseer] -------------------------------------------------------
+    Setting("overseer_enabled", BOOL, "run periodic Overseer review passes"),
+    Setting("overseer_cmd", STR, 'command an Overseer pass runs; "" = built-in'),
+    Setting("overseer_model", STR, 'model for the Overseer; "" = master_model'),
+    Setting("overseer_min_gap_s", INT, "min seconds between non-urgent passes", minimum=0),
+    Setting("overseer_every_finished", INT, "a pass every N finished phases; 0 = off",
+            minimum=0),
+    Setting("overseer_every_s", INT, "a pass at least this often (s); 0 = off", minimum=0),
+    Setting("overseer_owner_wait_s", INT, "owner-wait age that triggers a pass (s)",
+            minimum=0),
+    Setting("overseer_starve_s", INT, "idle-slot starvation before a pass (s)", minimum=0),
+    Setting("overseer_timeout_s", INT, "seconds before a hung pass is killed", minimum=1),
     # -- [tui] ------------------------------------------------------------
     Setting("tui_autostart", BOOL, "open this dashboard automatically at `swarm up`"),
     Setting("tui_cmd", STR, "command the dashboard pane is respawned with"),

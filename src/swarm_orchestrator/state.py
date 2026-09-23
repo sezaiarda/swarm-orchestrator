@@ -100,6 +100,13 @@ class State:
     operator_phase: str | None = None
     operator_lease_until: float = 0.0
     operator_pane: str | None = None
+    # The Overseer pass running in the master pane, if any, and the moment it is
+    # killed as hung. The deadline stretches while the pass waits on the owner
+    # (`swarm overseer-ask`) and resets when they answer. Both are wiped by
+    # ``init_state`` on ``up``: a restart means no pass is running. Optional on
+    # both sides of a version skew, like ``push_owed``.
+    overseer_pass: str | None = None
+    overseer_deadline: float = 0.0
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -317,6 +324,8 @@ class State:
             operator_phase=data.get("operator_phase"),
             operator_lease_until=float(data.get("operator_lease_until", 0.0)),
             operator_pane=data.get("operator_pane"),
+            overseer_pass=data.get("overseer_pass"),
+            overseer_deadline=float(data.get("overseer_deadline") or 0.0),
         )
 
     @classmethod

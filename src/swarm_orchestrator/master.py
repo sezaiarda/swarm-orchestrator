@@ -1,16 +1,22 @@
-"""The ``swarm context`` snapshot and the ephemeral master's lifecycle.
+"""The ``swarm context`` snapshot and the one supervisor-owned Claude session.
 
 The master is spawned/injected/killed *only* by the supervisor, so this module
 exposes a :class:`Master` handle the supervisor owns. Two drivers are supported:
 ``bare`` (a plain subprocess with a stdin pipe — used by the hermetic tests) and
 ``tmux`` (a pane in the master window). ``build_context`` is read-only and feeds
-both the real LLM master (which reasons over the ledger prose) and the fake
-master (which ``jq``-selects ``.launchable``).
+the init master, the Overseer's digest, the owner and the TUI.
+
+The pane runs one of two kinds of pass, never both at once: ``init`` (the
+bootstrap: telegram preflight, patch the worker command) once at ``swarm up``,
+then ``overseer`` passes for the rest of the run (:mod:`overseer` decides when).
+The Overseer is a full, unrestrained session — built by the worker's own shell
+builder — because what it is for is acting on what it reads.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -22,6 +28,11 @@ from .logutil import Log
 from .state import State
 
 _READY_TIMEOUT_S = 30.0
+
+INIT = "init"
+OVERSEER = "overseer"
+#: The prompt file each kind of pass is pointed at.
+_PROMPTS = {INIT: "init_master.md", "step": "step_master.md", OVERSEER: "overseer.md"}
 
 # Env vars a master pane needs so its `swarm` calls find this run. Forwarded on
 # the tmux respawn (bare masters inherit the supervisor's env directly).
@@ -93,19 +104,59 @@ def build_context(cfg: Config, st: State) -> dict:
     }
 
 
-def master_command(cfg: Config, kind: str) -> str:
+def _override(cfg: Config, kind: str) -> str:
+    """The configured command that replaces the built-in ``claude`` for ``kind``.
+
+    An Overseer falls back to ``master_cmd``: it is the master's session
+    repurposed, and a project (or test) that swapped the master out swapped out
+    the thing that runs in that pane."""
+    if kind == OVERSEER:
+        return cfg.overseer_cmd or cfg.master_cmd
+    return cfg.master_cmd
+
+
+def master_command(cfg: Config, kind: str, cwd: Path | None = None) -> str:
     """Shell command that runs the master.
 
     An explicit ``master_cmd`` (``SWARM_MASTER_CMD`` / config) short-circuits to
     that command — this is how the tests inject ``fake-master.sh``. Otherwise a
-    default ``claude`` invocation is returned; the init/step prompt is delivered
-    separately by :meth:`Master._spawn_tmux` and pinned during the owner's live
-    smoke (real ``claude`` is out of scope for the hermetic tests).
+    default ``claude`` invocation is returned; the prompt is delivered separately
+    by :meth:`Master._spawn_tmux` and pinned during the owner's live smoke (real
+    ``claude`` is out of scope for the hermetic tests).
+
+    An Overseer gets what a worker gets — in-process teammates, the meters tap,
+    the effort level — in ``cwd`` (its own mirror under worktree isolation), and
+    runs ``[overseer].model`` or else the master's.
     """
-    if cfg.master_cmd:
-        return cfg.master_cmd
+    override = _override(cfg, kind)
+    if override:
+        return override
+    if kind == OVERSEER:
+        model = cfg.overseer_model or cfg.master_model
+        base = "claude" + (f" --model {shlex.quote(model)}" if model else "") + " -n overseer"
+        return launch_mod._worker_shell(cfg, OVERSEER, cwd or cfg.project_dir, base)
     model = f" --model {cfg.master_model}" if cfg.master_model else ""
     return f"cd {cfg.project_dir} && exec claude{model}"
+
+
+def overseer_brief(
+    cfg: Config, pass_id: str, digest: Path, record: Path, cwd: Path | None
+) -> str:
+    """The one line an Overseer session is handed (no newlines: tmux submits on each)."""
+    prompt_file = resolver.prompt_path(_PROMPTS[OVERSEER])
+    where = (
+        f"Your cwd {cwd} is your own full-workspace mirror (branch swarm/{cwd.name}):"
+        " edit and commit the ledger there; the swarm merges it when you finish."
+        if cwd is not None
+        else f"Your cwd is the project itself, {cfg.project_dir}; commit there."
+    )
+    swarm = f"swarm --project-dir {shlex.quote(str(cfg.project_dir))}"
+    return (
+        f"Read {prompt_file} and follow it exactly. You are the swarm's Overseer, pass"
+        f" {pass_id}, for the project at {cfg.project_dir}. Read your digest first: {digest}."
+        f" Write your pass record in {record}. {where} Run swarm commands as `{swarm} <command>`."
+        f' When the pass is over run `{swarm} overseer-done "<one-line summary>"`.'
+    )
 
 
 class Master:
@@ -138,26 +189,37 @@ class Master:
         )
         return probe.returncode == 0 and probe.stdout.strip() != "1"
 
-    def spawn(self, kind: str, master_pane: str | None = None) -> bool:
-        """Start a fresh master (``kind`` is ``init`` or ``step``).
+    def spawn(
+        self,
+        kind: str,
+        master_pane: str | None = None,
+        *,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        line: str | None = None,
+    ) -> bool:
+        """Start a fresh master (``kind`` is ``init`` or ``overseer``).
 
+        ``cwd`` is where a built-in session works, ``env`` rides on top of the
+        run's own variables, and ``line`` replaces the default prompt line.
         Returns True on success. A False return means no master is running, so
         the caller must NOT mark the master alive.
         """
-        cmd = master_command(self.cfg, kind)
+        cmd = master_command(self.cfg, kind, cwd)
         if self.cfg.driver == "bare":
-            ok = self._spawn_bare(cmd)
+            ok = self._spawn_bare(cmd, env)
         else:
-            ok = self._spawn_tmux(cmd, kind, master_pane)
+            ok = self._spawn_tmux(cmd, kind, master_pane, env, line)
         if ok:
             self.log.line(f"ACTION spawn-master kind={kind}")
         return ok
 
-    def _spawn_bare(self, cmd: str) -> bool:
+    def _spawn_bare(self, cmd: str, env: dict[str, str] | None = None) -> bool:
         try:
             self.proc = subprocess.Popen(
                 ["/bin/sh", "-c", cmd],
                 cwd=str(self.cfg.project_dir),
+                env={**os.environ, **env} if env else None,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -169,13 +231,20 @@ class Master:
             self.log.line(f"ACTION spawn-master-failed bare {exc}")
             return False
 
-    def _spawn_tmux(self, cmd: str, kind: str, master_pane: str | None) -> bool:
+    def _spawn_tmux(
+        self,
+        cmd: str,
+        kind: str,
+        master_pane: str | None,
+        env: dict[str, str] | None = None,
+        line: str | None = None,
+    ) -> bool:
         if master_pane is None:
             self.log.line("ACTION spawn-master-failed no-pane")
             return False
         self.pane = master_pane
-        tmux.respawn_pane(master_pane, cmd, env=_master_env(self.cfg))
-        if not self.cfg.master_cmd and not self._deliver_prompt(master_pane, kind):
+        tmux.respawn_pane(master_pane, cmd, env={**_master_env(self.cfg), **(env or {})})
+        if not _override(self.cfg, kind) and not self._deliver_prompt(master_pane, kind, line):
             # Never primed (boot timed out / stuck on a modal): treat as a spawn
             # failure so the caller does NOT mark the master alive — otherwise the
             # next `done` would inject into a master that never got its prompt.
@@ -183,7 +252,7 @@ class Master:
             return False
         return True
 
-    def _deliver_prompt(self, pane: str, kind: str) -> bool:
+    def _deliver_prompt(self, pane: str, kind: str, line: str | None = None) -> bool:
         """Point a freshly launched claude master at its prompt file.
 
         Delivered as ONE line with no embedded newlines: tmux ``send-keys``
@@ -193,7 +262,7 @@ class Master:
         returns False on timeout instead of blindly typing into a not-ready pane.
         The fake-master override never reaches this path.
         """
-        prompt_file = resolver.prompt_path(f"{kind}_master.md")
+        prompt_file = resolver.prompt_path(_PROMPTS.get(kind, f"{kind}_master.md"))
         if not prompt_file.is_file():
             self.log.line(f"ACTION prompt-missing {prompt_file}")
             return False
@@ -206,7 +275,7 @@ class Master:
                 source="master._deliver_prompt",
             )
             return False
-        line = (
+        line = line or (
             f"Read {prompt_file} and follow every instruction in it exactly. "
             f"You are orchestrating the project at {self.cfg.project_dir}."
         )

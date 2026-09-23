@@ -84,6 +84,15 @@ class Config:
     operator_cmd: str
     operator_model: str
     operator_triage_model: str
+    overseer_enabled: bool
+    overseer_cmd: str
+    overseer_model: str
+    overseer_min_gap_s: int
+    overseer_every_finished: int
+    overseer_every_s: int
+    overseer_owner_wait_s: int
+    overseer_starve_s: int
+    overseer_timeout_s: int
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -182,6 +191,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     git = data.get("git", {})
     build = data.get("build", {})
     operator = data.get("operator", {})
+    overseer = data.get("overseer", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
     max_workers = int(swarm.get("max_workers", 4))
@@ -304,6 +314,34 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # the day that snapshot retires every hand-off silently falls to `later`.
         # Spelled out rather than imported from `recap` -- recap imports us.
         operator_triage_model=str(operator.get("triage_model", "haiku")),
+        # The Overseer: the old master, now a periodic reviewer that acts on what
+        # it reads (see overseer.py). On by default -- it is the one part of the
+        # swarm that notices a failure, a hold or a starved backlog and does
+        # something about it. `enabled = false` restores launch-and-integrate only.
+        overseer_enabled=_bool_env("SWARM_OVERSEER", overseer.get("enabled", True)),
+        overseer_cmd=os.environ.get("SWARM_OVERSEER_CMD", str(overseer.get("cmd", ""))),
+        # "" = the master's model: the Overseer IS the master's session, repurposed.
+        overseer_model=str(overseer.get("model", "")),
+        overseer_min_gap_s=_int_env(
+            "SWARM_OVERSEER_MIN_GAP", overseer.get("min_gap_s"), 600, minimum=0
+        ),
+        overseer_every_finished=_int_env(
+            "SWARM_OVERSEER_EVERY_FINISHED", overseer.get("every_finished"), 3, minimum=0
+        ),
+        overseer_every_s=_int_env(
+            "SWARM_OVERSEER_EVERY", overseer.get("every_s"), 10800, minimum=0
+        ),
+        overseer_owner_wait_s=_int_env(
+            "SWARM_OVERSEER_OWNER_WAIT", overseer.get("owner_wait_s"), 3600, minimum=0
+        ),
+        overseer_starve_s=_int_env(
+            "SWARM_OVERSEER_STARVE", overseer.get("starve_s"), 600, minimum=0
+        ),
+        # A hung pass must never hold the pane (or the finish) forever: past this
+        # the session is killed, logged and its committed work landed.
+        overseer_timeout_s=_int_env(
+            "SWARM_OVERSEER_TIMEOUT", overseer.get("timeout_s"), 2700, minimum=1
+        ),
     )
 
 

@@ -44,6 +44,8 @@ KINDS = (
     "finish",  # supervisor: the run is over
     "master-timeout",  # master: never became ready / prompt would not submit
     "master-note",  # cli.notify: the master telling the owner about a blocker it cannot decide
+    "overseer",  # supervisor: an Overseer pass hung past its timeout / would not start
+    "overseer-ask",  # cli: the Overseer is waiting on an owner-level decision
     "worktree-fail",  # launch: the phase mirror could not be created
     "spawn-fail",  # launch: the worker process/pane would not start
     "other",  # unclassified (the default)

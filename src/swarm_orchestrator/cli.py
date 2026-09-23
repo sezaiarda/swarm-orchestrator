@@ -41,6 +41,7 @@ from . import state as state_mod
 from . import statuses
 from . import supervisor as sup_mod
 from . import telegram, tmux
+from . import usage as usage_mod
 from .config import Config, load
 from . import logutil
 from .logutil import Log
@@ -215,6 +216,7 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         )
         return 1
     state_mod.init_state(cfg)
+    _start_run(cfg, "up")
     # Every up, whatever the isolation: it is what re-queues a hand-off whose
     # sentinel outlived its item — and the swarm also runs with isolation "none".
     log = Log(cfg.supervisor_log)
@@ -275,7 +277,62 @@ def cmd_down(cfg: Config) -> int:
             _wait_pid_gone(pid, timeout=5.0)
     if cfg.driver == "tmux":
         session_mod.teardown(cfg)
-    print("swarm down")
+    closed = usage_mod.close_run(cfg, "down")
+    print("swarm down" + (f" — {_run_line(closed)}" if closed else ""))
+    return 0
+
+
+def _run_line(rec: dict) -> str:
+    """One line for a run just closed: what it did and what it used per hour."""
+    s = rec.get("summary") or {}
+
+    def f(v):
+        return "—" if v is None else f"{v:.2f}"
+
+    return (f"run {rec['run_id']} closed: {s.get('hours', 0):.1f} h, "
+            f"{s.get('phases_finished', 0)} phase(s), 5-hour {f(s.get('five_pct_per_h'))} %/h, "
+            f"weekly {f(s.get('week_pct_per_h'))} %/h (`swarm usage` for the history)")
+
+
+def open_run(cfg: Config, reason: str) -> tuple[dict, dict | None]:
+    """Open a run and mirror it into ``state.json``. Shared with the dashboard's ``R``."""
+    rec, closed = usage_mod.start_run(cfg, reason)
+    with state_mod.transaction(cfg) as st:
+        st.run_id, st.run_epoch = rec["run_id"], rec["epoch_ts"]
+    return rec, closed
+
+
+def _start_run(cfg: Config, reason: str) -> dict:
+    """:func:`open_run`, saying what it closed, if anything."""
+    rec, closed = open_run(cfg, reason)
+    if closed:
+        print(_run_line(closed))
+    return rec
+
+
+def cmd_reset(cfg: Config) -> int:
+    """Close the open run and start a fresh one; nothing is restarted.
+
+    Resetting the ETA and the usage: both are measured from the run's
+    epoch, so a new epoch is the reset. The closed run keeps its summary in
+    ``history/runs/``, where ``swarm usage`` lists it.
+    """
+    rec = _start_run(cfg, "reset")
+    print(f"run {rec['run_id']} started — ETA and usage now count from here")
+    return 0
+
+
+def cmd_usage(cfg: Config, as_json: bool, last: int) -> int:
+    """The open run's usage per hour, then the last ``last`` closed runs."""
+    now = time.time()
+    src = usage_mod.Sources(cfg)
+    cur = usage_mod.live_summary(cfg, src, now)
+    past = usage_mod.past_summaries(cfg.state_dir, last)
+    if as_json:
+        return _dump({"current": cur, "runs": past,
+                      "now": {w: usage_mod.latest(src.samples, w, now) for w in ("five", "week")},
+                      "note": usage_mod.SKEW_NOTE})
+    print(usage_mod.render(cur, past, src.samples, now))
     return 0
 
 
@@ -1265,6 +1322,18 @@ def _build_parser() -> argparse.ArgumentParser:
     up.set_defaults(func=lambda cfg, a: cmd_up(cfg, attach=not a.no_attach))
     sub.add_parser("down", help="stop the supervisor + tear down").set_defaults(
         func=lambda cfg, a: cmd_down(cfg))
+    sub.add_parser(
+        "reset", help="start a fresh run: ETA and usage count from now (nothing restarts)"
+    ).set_defaults(func=lambda cfg, a: cmd_reset(cfg))
+    usp = sub.add_parser(
+        "usage",
+        help="this run's 5-hour and weekly usage per hour, and past runs",
+        description="Per-run usage: hours elapsed, average 5-hour and weekly %%/h, the "
+                    "5-hour windows spanned, phases and $/h. " + usage_mod.SKEW_NOTE,
+    )
+    usp.add_argument("--json", action="store_true", help="machine-readable")
+    usp.add_argument("-n", "--last", type=int, default=10, help="past runs to list (default 10)")
+    usp.set_defaults(func=lambda cfg, a: cmd_usage(cfg, a.json, a.last))
     sub.add_parser("_supervise").set_defaults(func=lambda cfg, a: cmd_supervise(cfg))
     sub.add_parser("context", help="print the read-only state snapshot (JSON)").set_defaults(
         func=lambda cfg, a: cmd_context(cfg))

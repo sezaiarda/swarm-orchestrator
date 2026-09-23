@@ -123,7 +123,9 @@ The master never asks — it runs autonomously. Everything else runs unattended.
 | command | what it does |
 |---|---|
 | `swarm up [--no-attach]` | build the session, start the supervisor + init master, then attach |
-| `swarm down` | stop the supervisor and tear the session down |
+| `swarm down` | stop the supervisor and tear the session down; closes the run with its summary |
+| `swarm reset` | close the open run and start a fresh one — ETA and usage count from now; nothing restarts (`R` in the dashboard) |
+| `swarm usage [--json] [-n N]` | the open run's hours, average 5-hour and weekly %/h, 5-hour windows spanned, phases and $/h, then the last N runs (`<state>/history/runs/`, kept forever) |
 | `swarm status` | human-readable state dump — slots, `done`, `paused`, `waiting`/`parked`, the integration queue |
 | `swarm context` | the JSON snapshot the master reasons over (`ready`, `launchable`, free slots, `waiting`, `parked`, ledger issues) |
 | `swarm pause` / `swarm resume` | hold new launches (in-flight finish) / resume filling free slots |

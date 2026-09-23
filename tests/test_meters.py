@@ -39,11 +39,41 @@ def test_the_peak_survives_a_shrinking_context_but_not_a_new_session(tmp_path):
     assert meters.record(payload(tokens=90_000, session="s2"), tmp_path, "P1")["peak_tokens"] == 90_000
 
 
-def test_weekly_samples_are_logged_only_when_the_figure_moves(tmp_path):
+def test_limit_samples_are_logged_only_when_a_figure_moves(tmp_path):
     for now, week in ((100.0, 41.0), (103.0, 41.0), (106.0, 42.0)):
         meters.record(payload(week=week), tmp_path, "P1", now=now)
-    rows = (tmp_path / "meters" / "limits.jsonl").read_text().splitlines()
-    assert [json.loads(r)["pct"] for r in rows] == [41.0, 42.0]
+    rows = [json.loads(r) for r in (tmp_path / "meters" / "limits.jsonl").read_text().splitlines()]
+    assert [r["week_pct"] for r in rows] == [41.0, 42.0]
+    # Both windows ride on every row, tagged with the run (none open here).
+    assert rows[0] == {"ts": 100.0, "run_id": None, "five_pct": 12, "five_resets_at": 1_900_000_000 - 3600,
+                       "week_pct": 41.0, "week_resets_at": 1_900_000_000}
+
+
+def test_a_limit_change_seen_by_two_workers_is_logged_once_with_the_open_run(tmp_path):
+    from swarm_orchestrator import runs
+
+    rec, _ = runs.start(tmp_path, 1, "none", now=50.0)
+    meters.record(payload(week=41.0), tmp_path, "P1", now=100.0)
+    meters.record(payload(week=41.0, session="s9"), tmp_path, "P2", now=101.0)  # same account figures
+    rows = [json.loads(r) for r in (tmp_path / "meters" / "limits.jsonl").read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["run_id"] == rec["run_id"]
+
+
+def test_a_five_hour_move_alone_is_logged(tmp_path):
+    p1 = payload()
+    meters.record(p1, tmp_path, "P1", now=100.0)
+    p2 = payload(tokens=500_000)
+    p2["rate_limits"]["five_hour"]["used_percentage"] = 13
+    meters.record(p2, tmp_path, "P1", now=110.0)
+    rows = [json.loads(r) for r in (tmp_path / "meters" / "limits.jsonl").read_text().splitlines()]
+    assert [r["five_pct"] for r in rows] == [12, 13]
+
+
+def test_a_replaced_session_is_kept_for_the_cost(tmp_path):
+    meters.record(payload(cost=3.0), tmp_path, "P1", now=100.0)
+    meters.record(payload(cost=1.0, session="s2"), tmp_path, "P1", now=200.0)
+    rows = [json.loads(r) for r in (tmp_path / "meters" / "sessions.jsonl").read_text().splitlines()]
+    assert [(r["session_id"], r["cost_usd"]) for r in rows] == [("s1", 3.0)]
 
 
 def test_a_render_writes_only_when_something_moved_and_at_most_every_two_seconds(tmp_path):

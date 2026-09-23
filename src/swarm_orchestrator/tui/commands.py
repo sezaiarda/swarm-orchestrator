@@ -94,6 +94,8 @@ DESTRUCTIVE: dict[str, tuple[str | None, str]] = {
     "integrate": (None, "merges swarm/<phase> into main"),
     "operator-done": (None, "settles the job and ends its operator session"),
     "gc": ("--yes", "deletes files from disk"),
+    "reset": (None, "closes the open run and starts a fresh one — ETA and usage count from "
+                    "now; the closed run keeps its summary under `swarm usage`"),
 }
 
 #: How many runs are kept, and how many the "recent" panel shows.

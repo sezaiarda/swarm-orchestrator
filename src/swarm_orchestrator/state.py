@@ -107,6 +107,13 @@ class State:
     # both sides of a version skew, like ``push_owed``.
     overseer_pass: str | None = None
     overseer_deadline: float = 0.0
+    # The open run (``swarm up`` → ``swarm down``, or a ``swarm reset``): the
+    # epoch every live ETA and usage figure counts from. A mirror for readers of
+    # this file only — the authority is ``history/current.json`` (see
+    # :mod:`runs`), because a supervisor on older code rewrites this file without
+    # keys it does not know. Optional on both sides, like ``push_owed``.
+    run_id: str | None = None
+    run_epoch: float = 0.0
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -326,6 +333,8 @@ class State:
             operator_pane=data.get("operator_pane"),
             overseer_pass=data.get("overseer_pass"),
             overseer_deadline=float(data.get("overseer_deadline") or 0.0),
+            run_id=data.get("run_id"),
+            run_epoch=float(data.get("run_epoch") or 0.0),
         )
 
     @classmethod

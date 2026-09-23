@@ -62,6 +62,7 @@ from . import resolver as resolver_mod
 from . import ledger as ledger_mod
 from . import state as state_mod
 from . import reload as reload_mod
+from . import runs as runs_mod
 from . import session as session_mod
 from . import telegram, tmux
 from .config import Config, load
@@ -496,6 +497,12 @@ class Supervisor:
 
         changed = [c.name for c in payload.changes]
         self.log.line("RELOAD " + (" ".join(changed) or "no-change"))
+        # The run's averages are split at every worker-count/isolation move, so
+        # a measurement at one worker is never silently blended with four.
+        try:
+            runs_mod.note_config(self.cfg.state_dir, applied.max_workers, applied.git_isolation)
+        except OSError as exc:
+            self.log.line(f"RUN-NOTE-FAILED {exc}")
         self._write_config_snapshot()
         if not st.paused and not st.finished:
             self._fill_slots("config reloaded")

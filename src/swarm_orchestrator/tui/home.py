@@ -50,13 +50,14 @@ from .data import (
     CONTEXT_BUDGET,
     completions_series,
     eta,
+    eta_runs_of,
     fmt_clock,
     fmt_coarse,
     fmt_duration,
     fmt_when,
     forecast,
-    limit_outlook,
     phase_eta,
+    usage_outlook,
 )
 from .shell import STALE_BAD_S, STALE_WARN_S
 from .theme import (
@@ -190,11 +191,14 @@ def headline(dash, width: int = 76) -> str:
     first = f"{PAD}[b]{escape(cur.name)}[/b]{' ' * gap}{paint(count, MUTED)}"
 
     workers = len(snap.slots) or int(getattr(dash.cfg, "max_workers", 0) or 0)
-    args = (dash.history or [], cur.live_total - cur.built, workers)
+    args = (eta_runs_of(dash), cur.live_total - cur.built, workers)
     left = eta(*args, running=len(cur.running), ready=len(cur.ready))
     finish_in, _ = forecast(*args, running=len(cur.running), ready=len(cur.ready))
     if finish_in and cur.live_total > cur.built:
         left += f" · done ~{fmt_when(time.time() + finish_in)}"
+        # This run has too few finished phases of its own to time the next.
+        if getattr(dash, "eta_from_history", False):
+            left += " (from history)"
     fill = OK if cur.complete else (INFO if cur.running or cur.ready else MUTED)
     second = (
         f"{PAD}{paint(bar(cur.built, max(1, cur.live_total), max(10, inner - len(left) - 2)), fill)}"
@@ -220,8 +224,9 @@ def headline(dash, width: int = 76) -> str:
     # Only once a worker's status line has reported: a run launched before the
     # meters tap existed would otherwise carry a permanent "not reported" line.
     if getattr(dash, "meters", None):
-        text, state = limit_outlook(getattr(dash, "limits", None), finish_in)
-        lines.append(PAD + paint(clip(text, inner), state))
+        for text, state in usage_outlook(getattr(dash, "limits", None),
+                                         getattr(dash, "usage", None), finish_in):
+            lines.append(PAD + paint(clip(text, inner), state))
     return rows(*lines)
 
 
@@ -328,7 +333,7 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         line = (
             f"{mark}[{COLOR[state]}]{slot.id:<2}[/]  "
             f"{clip(escape(slot.phase), phase_w):<{phase_w}} "
-            f"{fmt_duration(slot.elapsed_s):>6} {eta_cell(dash.history or [], slot.elapsed_s)}"
+            f"{fmt_duration(slot.elapsed_s):>6} {eta_cell(eta_runs_of(dash), slot.elapsed_s)}"
             f"  {gauge} {pct}{tag}"
         )
         note = worker_note(dash, slot, waiting_for)

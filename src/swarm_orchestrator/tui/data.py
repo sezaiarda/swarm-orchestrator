@@ -1059,6 +1059,32 @@ def typical_durations(runs: list[PhaseRun]) -> list[float]:
     ][:ETA_WINDOW]
 
 
+def eta_sample(history: list[PhaseRun], epoch: float | None) -> tuple[list[PhaseRun], bool]:
+    """``(runs, from_history)``: the phase runs every ETA of the open run is made from.
+
+    Only phases that finished in this run: yesterday's run at four workers on a
+    different campaign does not predict today's. Until the run has
+    :data:`ETA_MIN_SAMPLES` of its own, the whole history stands in and says so
+    (``from_history``) — a borrowed figure is better than none, if it is labelled.
+    No epoch (a state dir from before runs existed) keeps the old all-history read.
+    """
+    history = list(history or [])
+    if epoch is None:
+        return history, False
+    mine = [r for r in history if r.running or (r.ended_at is not None and r.ended_at >= epoch)]
+    if len(typical_durations(mine)) >= ETA_MIN_SAMPLES:
+        return mine, False
+    if len(typical_durations(history)) >= ETA_MIN_SAMPLES:
+        return history, True
+    return mine, False
+
+
+def eta_runs_of(dash) -> list[PhaseRun]:
+    """What a view should hand the ETA functions: the run's sample if the dash has one."""
+    got = getattr(dash, "eta_runs", None)
+    return list(got) if got is not None else list(getattr(dash, "history", None) or [])
+
+
 def forecast(runs: list[PhaseRun], remaining: int, max_workers: int,
              running: int = 0, ready: int = 0) -> tuple[float | None, str]:
     """:func:`eta` as ``(seconds, label)``: seconds when it can be said, else why not."""
@@ -1168,6 +1194,20 @@ def load_meters(meters_dir: Path) -> dict[str, Meter]:
     return out
 
 
+def live_meters(meters: dict[str, Meter], epoch: float | None,
+                active: set[str] | frozenset = frozenset()) -> dict[str, Meter]:
+    """Meters of phases active in the open run: written since its epoch, or busy now.
+
+    ``meters/`` keeps a file for every phase that ever ran, and a live view that
+    globbed them all showed last week's workers' figures after a down/up. A
+    worker idling on the owner writes nothing, so a busy phase is kept however
+    old its file.
+    """
+    if epoch is None:
+        return dict(meters)
+    return {p: m for p, m in meters.items() if m.ts >= epoch or p in active}
+
+
 @dataclass(frozen=True)
 class Limits:
     """The subscription's usage windows, as last reported by any worker."""
@@ -1218,8 +1258,15 @@ def load_limits(meters: dict[str, Meter], limits_log: Path, now: float | None = 
             row = json.loads(line)
         except ValueError:
             continue
-        ts, pct = _as_float(row.get("ts")), _as_float(row.get("pct"))
-        if ts is not None and pct is not None and _as_float(row.get("resets_at")) == resets:
+        if not isinstance(row, dict):
+            continue
+        # Rows written before runs existed are ``{ts, pct, resets_at}``; newer
+        # ones carry both windows as ``week_pct``/``five_pct``.
+        legacy = "week_pct" not in row
+        ts = _as_float(row.get("ts"))
+        pct = _as_float(row.get("pct" if legacy else "week_pct"))
+        row_resets = _as_float(row.get("resets_at" if legacy else "week_resets_at"))
+        if ts is not None and pct is not None and row_resets == resets:
             samples.append((ts, pct))
     five_resets = _as_float(five.get("resets_at"))
     five_live = five_resets is None or five_resets > now
@@ -1249,8 +1296,11 @@ def week_pace(samples, now: float | None = None) -> float | None:
     return max(0.0, (p1 - p0) / ((t1 - t0) / 3600))
 
 
+_UNSET = object()
+
+
 def limit_outlook(limits: Limits | None, finish_in_s: float | None,
-                  now: float | None = None) -> tuple[str, str]:
+                  now: float | None = None, pace=_UNSET, pace_label: str = "") -> tuple[str, str]:
     """``(text, state)``: where the weekly limit stands, and whether the run beats it.
 
     The question the owner actually has is not "what percent" but "will this
@@ -1263,13 +1313,14 @@ def limit_outlook(limits: Limits | None, finish_in_s: float | None,
     head = f"week {pct:.0f}% · resets {fmt_when(resets, now)}"
     if pct >= 100:
         return f"{head} · limit hit, the run waits for the reset", "bad"
-    pace = week_pace(limits.samples, now)
+    if pace is _UNSET:
+        pace = week_pace(limits.samples, now)
     if pace is None:
         return f"{head} · pace unknown", "info"
     if pace <= 0:
         return f"{head} · flat", "ok"
     full_in = (100 - pct) / pace * 3600
-    rate = f"{pace:.1f}%/h"
+    rate = f"{pace:.1f}%/h{pace_label}"
     if resets is not None and now + full_in >= resets:
         return f"{head} · {rate}, lasts until the reset", "ok"
     if finish_in_s is not None and finish_in_s <= full_in:
@@ -1277,6 +1328,49 @@ def limit_outlook(limits: Limits | None, finish_in_s: float | None,
     if finish_in_s is None:
         return f"{head} · {rate}, limit in ~{fmt_coarse(full_in)}", "warn"
     return f"{head} · {rate}, limit in ~{fmt_coarse(full_in)}, before the run finishes", "bad"
+
+
+def five_outlook(limits: Limits | None, pace: float | None,
+                 now: float | None = None) -> tuple[str, str]:
+    """``(text, state)`` for the 5-hour window: where it stands and when it fills."""
+    if limits is None or limits.five_pct is None:
+        return "5-hour not reported yet", "muted"
+    now = time.time() if now is None else now
+    pct, resets = limits.five_pct, limits.five_resets_at
+    head = f"5-hour {pct:.0f}% · resets {fmt_when(resets, now)}"
+    if resets is not None:
+        head += f" (in {fmt_coarse(max(0.0, resets - now))})"
+    if pct >= 100:
+        return f"{head} · limit hit, the run waits for the reset", "bad"
+    if pace is None:
+        return f"{head} · this run's pace not known yet", "info"
+    if pace <= 0:
+        return f"{head} · this run 0%/h", "ok"
+    full_in = (100 - pct) / pace * 3600
+    rate = f"this run {pace:.1f}%/h"
+    if resets is not None and now + full_in >= resets:
+        return f"{head} · {rate}, lasts until the reset", "ok"
+    return f"{head} · {rate}, 100% in ~{fmt_coarse(full_in)}", "warn"
+
+
+def usage_outlook(limits: Limits | None, run_usage: dict | None,
+                  finish_in_s: float | None, now: float | None = None) -> list[tuple[str, str]]:
+    """The home page's two usage lines: 5-hour, then weekly, at this run's pace.
+
+    ``run_usage`` is the open run's summary (:func:`swarm_orchestrator.usage.summarize`);
+    without one (a state dir from before runs) the weekly line keeps its old
+    recent-slope pace and the 5-hour line has none.
+    """
+    run_usage = run_usage or {}
+    five_pace = run_usage.get("five_pct_per_h")
+    lines = [five_outlook(limits, five_pace, now)]
+    if run_usage:
+        text, state = limit_outlook(limits, finish_in_s, now,
+                                    pace=run_usage.get("week_pct_per_h"), pace_label=" this run")
+    else:
+        text, state = limit_outlook(limits, finish_in_s, now)
+    lines.append((text, state))
+    return lines
 
 
 def integration_holds(events: list[Event]) -> list[tuple[str, float]]:

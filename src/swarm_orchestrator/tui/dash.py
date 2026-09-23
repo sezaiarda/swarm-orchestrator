@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 
 from .. import opqueue
+from .. import runs as runs_mod
+from .. import usage as usage_mod
 from ..meters import LIMITS_LOG, METERS_DIR
 from . import probes
 from .data import (
@@ -25,12 +27,14 @@ from .data import (
     build_snapshot,
     completion_density,
     completions_series,
+    eta_sample,
     fmt_ago,
     fmt_clock,
     fmt_duration,
     fmt_stamp,
     integration_holds,
     launch_times,
+    live_meters,
     load_attempts,
     load_all_notes,
     load_limits,
@@ -54,6 +58,10 @@ from .data import (
 #: ticks every 10 s, and on WSL two git walks per busy worktree per tick was a
 #: steady CPU and filesystem-lock cost for a commit count that moves per minutes.
 REPO_PROBE_S = 30.0
+
+#: The run's usage summary is re-derived at least this often (its $/h moves with
+#: every render of every worker), and at once when a limit sample or the run moves.
+USAGE_EVERY_S = 60.0
 
 
 class Dash:
@@ -82,6 +90,18 @@ class Dash:
         self.repos: dict[str, probes.RepoStat] = {}  # phase -> commits/dirty
         self.meters: dict[str, Meter] = {}  # phase -> its worker's status-line figures
         self.limits: Limits | None = None
+        # The open run (``None`` = a state dir from before runs), the phase runs
+        # its ETA is made from, and whether those had to be borrowed from history.
+        self.run: dict | None = None
+        self.eta_runs: list[PhaseRun] = []
+        self.eta_from_history = False
+        #: The open run's usage summary (legacy period when no run is open).
+        self.usage: dict | None = None
+        #: Closed runs' stored summaries, newest first — the runs tab.
+        self.past_runs: list[dict] = []
+        self._samples = usage_mod.SampleTail(cfg.state_dir / METERS_DIR / LIMITS_LOG)
+        self._all_meters: dict[str, Meter] = {}
+        self._usage_at = 0.0
         self._mtimes: dict[str, float] = {}
         self._graph_mtime: float | None = None
         self._repos_at = 0.0  # when the git half of the probe last ran
@@ -148,18 +168,55 @@ class Dash:
         if self._changed("operator", self.operator_dir):
             self.operator = opqueue.load_all(self.cfg)
             changed.add("operator")
+        history_dir = runs_mod.history_dir(self.cfg.state_dir)
+        if self._changed("run", history_dir / runs_mod.CURRENT):
+            self.run = runs_mod.current(self.cfg.state_dir)
+            self.past_runs = usage_mod.past_summaries(self.cfg.state_dir, 50)
+            changed.add("run")
         # The tap replaces its file atomically, so every write moves the dir.
         if self._changed("meters", self.meters_dir):
-            self.meters = load_meters(self.meters_dir)
-            self.limits = load_limits(self.meters, self.meters_dir / LIMITS_LOG)
+            self._all_meters = load_meters(self.meters_dir)
             changed.add("meters")
+        if changed & {"meters", "run"}:
+            # Only phases active in this run feed the live views; a busy one is
+            # kept even if it has not rendered since the epoch.
+            active = {s.phase for s in self.snapshot.slots if s.busy and s.phase}
+            active |= {b.phase for b in self.snapshot.blockers if b.phase}
+            self.meters = live_meters(self._all_meters, self.epoch, active)
+            self.limits = load_limits(self.meters, self.meters_dir / LIMITS_LOG)
         if self._changed("ledger", Path(self.cfg.project_dir) / self.cfg.ledger):
             self.graph = load_graph(self.cfg)
             changed.add("ledger")
         if changed & {"state", "log", "notifications", "done", "recaps", "ledger",
-                      "notes", "operator"}:
+                      "notes", "operator", "run"}:
             self._rebuild()
+        grew = self._samples.poll()
+        now = time.time()
+        if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
+            self._usage_at = now
+            self.usage = self._run_usage(now)
+            changed.add("usage")
         return changed
+
+    @property
+    def epoch(self) -> float | None:
+        """The open run's epoch, or ``None`` before runs were recorded."""
+        return float(self.run["epoch_ts"]) if self.run else None
+
+    def _run_usage(self, now: float) -> dict | None:
+        """The open run summarised to now; before runs, since the last supervisor start."""
+        rec = self.run
+        if rec is None:
+            began = run_started_at(self.tail.events)
+            if began is None:
+                return None
+            rec = {"run_id": None, "epoch_ts": began}
+        try:
+            return usage_mod.summarize(
+                rec, now, samples=self._samples.samples, events=self.tail.events,
+                sessions=usage_mod.load_sessions(self.meters_dir))
+        except Exception:  # noqa: BLE001 - a usage figure must never take the dash down
+            return None
 
     def _rebuild(self) -> None:
         events = self.tail.events
@@ -175,6 +232,7 @@ class Dash:
         self.history = build_history(
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes
         )
+        self.eta_runs, self.eta_from_history = eta_sample(self.history, self.epoch)
 
     def probe(self, now: float | None = None) -> None:
         """Refresh the live probes. Runs on a worker thread — never on the UI.

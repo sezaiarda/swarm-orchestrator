@@ -70,11 +70,12 @@ try:
 except Exception as exc:  # noqa: BLE001
     Home = _missing("home", exc)
 try:
-    from .tables import History, Notifications, Workers
+    from .tables import History, Notifications, Runs, Workers
 except Exception as exc:  # noqa: BLE001
     Workers = _missing("workers", exc)
     History = _missing("history", exc)
     Notifications = _missing("notifications", exc)
+    Runs = _missing("runs", exc)
 try:
     from .disk import Disk
 except Exception as exc:  # noqa: BLE001
@@ -120,11 +121,13 @@ class HelpScreen(ModalScreen[None]):
     HELP = f"""[b]tabs[/b]
   [{COLOR[OK]}]1[/] home      [{COLOR[OK]}]2[/] workers   [{COLOR[OK]}]3[/] history   [{COLOR[OK]}]4[/] alerts
   [{COLOR[OK]}]5[/] disk      [{COLOR[OK]}]6[/] settings  [{COLOR[OK]}]7[/] commands  [{COLOR[OK]}]8[/] doctor
+  [{COLOR[OK]}]9[/] runs
   [{COLOR[MUTED]}]tab / shift+tab cycle[/]
 
 [b]anywhere[/b]
   [{COLOR[OK]}]n[/] needs-you drawer   [{COLOR[OK]}]c[/] command centre   [{COLOR[OK]}]d[/] run the doctor
   [{COLOR[OK]}]j k[/] / arrows move    [{COLOR[OK]}]enter[/] or click opens what is selected
+  [{COLOR[OK]}]R[/] reset the run: ETA and usage count from now (asks first)
 
 [b]on their own tab[/b]
   [{COLOR[OK]}]/[/] filter (workers, history, alerts, commands)   [{COLOR[OK]}]esc[/] clear it
@@ -168,6 +171,8 @@ class SwarmApp(App):
         Binding("6", "tab('settings')", "settings"),
         Binding("7", "tab('commands')", "commands"),
         Binding("8", "tab('doctor')", "doctor"),
+        Binding("9", "tab('runs')", "runs"),
+        Binding("R", "reset_run", "reset run", show=False),
         Binding("c", "tab('commands')", "commands", show=False),
         Binding("d", "doctor", "doctor", show=False),
         Binding("n", "toggle_drawer", "needs you"),
@@ -204,6 +209,8 @@ class SwarmApp(App):
                     yield Commands(id="tab-commands")
                 with TabPane("8 doctor", id="doctor"):
                     yield Doctor(id="tab-doctor")
+                with TabPane("9 runs", id="runs"):
+                    yield Runs(id="tab-runs")
             if Drawer is not None:
                 yield Drawer(id="drawer")
         yield Footer()
@@ -347,6 +354,32 @@ class SwarmApp(App):
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
+
+    def action_reset_run(self) -> None:
+        """``R``: close the open run and start a fresh one, after the usual confirm."""
+        from .commands import ConfirmRun, destructive_reason
+
+        def answered(go: bool | None) -> None:
+            if not go:
+                self.notify("run not reset")
+                return
+            try:
+                rec = reset_run(self.cfg)
+            except Exception as exc:  # noqa: BLE001 - say it, never crash the cockpit
+                self.notify(f"reset failed: {exc}", severity="error")
+                return
+            self.notify(f"run {rec['run_id']} started — ETA and usage count from now")
+            self.dash.poll()
+            self.refresh_all()
+
+        self.push_screen(ConfirmRun("swarm reset", destructive_reason("reset", [])), answered)
+
+
+def reset_run(cfg) -> dict:
+    """What ``R`` does — ``swarm reset``, in-process (it is a few file writes)."""
+    from ..cli import open_run
+
+    return open_run(cfg, "reset")[0]
 
 
 def main(cfg) -> int:

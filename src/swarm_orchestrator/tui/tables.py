@@ -57,6 +57,7 @@ from .data import (
     fmt_ago,
     fmt_clock,
     fmt_duration,
+    eta_runs_of,
     fmt_phase_eta,
     fmt_stamp,
     load_attempts,
@@ -328,7 +329,7 @@ def worker_detail(entry, dash) -> str:
     lines.append(field("branch", escape(slot.branch or "—")))
     lines.append(field("worktree", escape(slot.worktree or "—")))
     lines.append(field("started", fmt_ago(slot.started_at)))
-    history = getattr(dash, "history", None) or []
+    history = eta_runs_of(dash)
     left_s, over = phase_eta(history, slot.elapsed_s)
     if left_s is not None:
         lines.append(field("eta", fmt_phase_eta(history, slot.elapsed_s) + " vs the typical phase",
@@ -790,7 +791,7 @@ class Workers(TableTab):
                 r,
                 (dash.repos or {}).get(unpack_slot_row(r)[0].phase or ""),
                 (getattr(dash, "meters", None) or {}).get(unpack_slot_row(r)[0].phase or ""),
-                dash.history,
+                eta_runs_of(dash),
             ),
         )
 
@@ -858,6 +859,106 @@ class History(TableTab):
     def selected_phase(self) -> str | None:
         run = self.selected
         return None if run is None else run.phase
+
+
+# -- runs tab --------------------------------------------------------------
+RUN_COLUMNS: tuple[tuple[str, int], ...] = (
+    ("", 2),
+    ("run", 17),
+    ("started", 13),
+    ("hours", 6),
+    ("wk", 3),
+    ("isolation", 9),
+    ("done", 5),
+    ("fail", 5),
+    ("5h %/h", 7),
+    ("win", 4),
+    ("wk %/h", 7),
+    ("$/h", 7),
+)
+
+
+def _rate(value, width: int) -> str:
+    return cell("—" if value is None else f"{value:.2f}", width, None if value is not None else MUTED)
+
+
+def run_key(summary: dict) -> str:
+    return str(summary.get("run_id") or "legacy")
+
+
+def run_row(summary: dict) -> tuple[str, ...]:
+    """One run: how long, at what config, and what it used per hour."""
+    live = bool(summary.get("live") or summary.get("legacy"))
+    return (
+        paint("●", INFO if live else OK),
+        cell(summary.get("run_id") or "legacy", 17, None if summary.get("run_id") else MUTED),
+        cell(fmt_stamp(summary.get("start")), 13, MUTED),
+        cell(f"{summary.get('hours') or 0:.1f}", 6),
+        cell(str(summary.get("max_workers") or "?"), 3),
+        cell(str(summary.get("isolation") or "?"), 9, MUTED),
+        cell(str(summary.get("phases_finished", 0)), 5),
+        cell(str(summary.get("phases_failed", 0)), 5, BAD if summary.get("phases_failed") else MUTED),
+        _rate(summary.get("five_pct_per_h"), 7),
+        cell(str(summary.get("five_windows", 0)), 4, MUTED),
+        _rate(summary.get("week_pct_per_h"), 7),
+        _rate(summary.get("usd_per_h"), 7),
+    )
+
+
+def run_detail(summary: dict) -> str:
+    """The selected run in full, split per worker count if a reload moved it."""
+    def rate(v) -> str:
+        return "—" if v is None else f"{v:.2f}"
+
+    head = "open run" if summary.get("live") else (
+        "before runs were recorded (since the last supervisor start)" if summary.get("legacy")
+        else f"closed by {summary.get('closed_by') or '?'}")
+    lines = [
+        field("run", escape(str(summary.get("run_id") or "legacy")) + "  " + paint(escape(head), MUTED)),
+        field("span", f"{fmt_stamp(summary.get('start'))} → "
+                      f"{'now' if summary.get('live') else fmt_stamp(summary.get('end'))}"
+                      f"  ({summary.get('hours') or 0:.1f} h)"),
+        field("5-hour", f"{rate(summary.get('five_pct_per_h'))} %/h · "
+                        f"{summary.get('five_used') or 0:.0f} pts over {summary.get('five_windows', 0)} window(s)"),
+        field("weekly", f"{rate(summary.get('week_pct_per_h'))} %/h · {summary.get('week_used') or 0:.0f} pts"),
+        field("phases", f"{summary.get('phases_finished', 0)} finished · "
+                        f"{summary.get('phases_failed', 0)} failed · {rate(summary.get('phases_per_h'))}/h"),
+        field("cost", "—" if summary.get("usd") is None else
+              f"${summary['usd']:.2f} · ${rate(summary.get('usd_per_h'))}/h (API-equivalent)"),
+    ]
+    for seg in summary.get("segments") or []:
+        lines.append(field(
+            f"{seg.get('max_workers')}w {seg.get('isolation')}",
+            f"{seg.get('hours', 0):.1f} h · 5h {rate(seg.get('five_pct_per_h'))} %/h · "
+            f"wk {rate(seg.get('week_pct_per_h'))} %/h · {seg.get('phases_finished', 0)} phase(s)"))
+    lines.append(paint("account-wide figures: other sessions on the account count too", MUTED))
+    return "\n".join(lines)
+
+
+class Runs(TableTab):
+    """Every run (``swarm up`` → ``down``, or a ``reset``) with its per-hour averages.
+
+    The open run is on top and live; ``R`` anywhere closes it and starts another.
+    """
+
+    COLUMNS = RUN_COLUMNS
+    DETAIL_TITLE = "run"
+    EMPTY_DETAIL = "no runs recorded yet — the next `swarm up` or `R` starts one"
+
+    def _update(self, dash) -> None:
+        cur = getattr(dash, "usage", None)
+        cur = [cur | {"live": bool(getattr(dash, "run", None))}] if cur else []
+        rows = cur + list(getattr(dash, "past_runs", None) or [])
+        rows = [r for r in rows if not self.filter or self.filter.lower() in run_key(r).lower()]
+        self.sync(rows, [run_key(r) for r in rows], run_row)
+        self.set_head(f"{len(rows)} run(s)  ·  R resets the open run" + self.head_suffix())
+        self.update_detail(dash)
+
+    def detail_text(self, dash) -> str:
+        summary = self.selected
+        if summary is None:
+            return paint(escape(self.EMPTY_DETAIL), MUTED)
+        return run_detail(summary)
 
 
 # -- notifications tab -----------------------------------------------------

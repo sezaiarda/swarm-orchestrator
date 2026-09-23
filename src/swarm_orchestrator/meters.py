@@ -10,7 +10,8 @@ the owner stepped in).
 
 So each worker's settings carry this module as its status line
 (:func:`settings_with_tap`). It writes ``<state>/meters/<phase>.json`` and, when
-the weekly figure moves, appends a sample to ``meters/limits.jsonl`` — then runs
+the 5-hour or weekly figure moves, appends a sample tagged with the open run to
+``meters/limits.jsonl`` (see :mod:`swarm_orchestrator.usage`) — then runs
 the owner's own status line on the same payload and prints what it prints, so a
 pane looks exactly as it did and the pane-scraped meter keeps working.
 
@@ -34,8 +35,11 @@ import sys
 import time
 from pathlib import Path
 
-METERS_DIR = "meters"
-LIMITS_LOG = "limits.jsonl"
+from . import runs, usage
+
+METERS_DIR = usage.METERS_DIR
+LIMITS_LOG = usage.LIMITS_LOG
+SESSIONS_LOG = usage.SESSIONS_LOG
 #: The owner's status line gets this long before the tap prints its own line.
 CHAIN_TIMEOUT_S = 2.0
 #: At most one meter write per phase this often; a skipped render is picked up
@@ -75,8 +79,8 @@ def record(payload: dict, state_dir: str | Path, phase: str, now: float | None =
 
     The write is skipped when nothing but the clock moved, and when the file was
     written under :data:`MIN_WRITE_S` ago — except for a new session, whose first
-    meter must replace the previous session's at once. The weekly-limit sample
-    rides with the write, so a skipped render cannot append it twice.
+    meter must replace the previous session's at once. The limit sample rides
+    with the write, so a skipped render cannot append it twice.
     """
     now = time.time() if now is None else now
     root = Path(state_dir) / METERS_DIR
@@ -118,15 +122,44 @@ def record(payload: dict, state_dir: str | Path, phase: str, now: float | None =
         return meter
     _write_json(path, meter)
 
-    week = meter["seven_day"]
-    if week and week != prev.get("seven_day"):
-        line = json.dumps({"ts": now, "pct": week["pct"], "resets_at": week["resets_at"]}) + "\n"
-        fd = os.open(root / LIMITS_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            os.write(fd, line.encode("utf-8"))
-        finally:
-            os.close(fd)
+    if not same and prev.get("session_id") and prev.get("cost_usd") is not None:
+        # The outgoing session's final figures, before its file is gone: a
+        # retried phase's first attempt still counts toward the run's cost.
+        _append(root / SESSIONS_LOG, {k: prev.get(k) for k in (
+            "ts", "phase", "session_id", "started_at", "cost_usd", "duration_ms")})
+
+    five, week = meter["five_hour"], meter["seven_day"]
+    if (five or week) and (five != prev.get("five_hour") or week != prev.get("seven_day")):
+        row = usage.sample_row(now, runs.current_id(state_dir), five, week)
+        # Every worker reports the same account-wide figures, so each change
+        # would otherwise be logged once per worker. Compare with the last row
+        # written by anyone; reading a file's last kilobyte is cheap and only
+        # happens when this worker's own figures moved.
+        last = _last_row(root / LIMITS_LOG)
+        if last is None or not usage.same_values(last, row):
+            _append(root / LIMITS_LOG, row)
     return meter
+
+
+def _append(path: Path, row: dict) -> None:
+    line = json.dumps(row) + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def _last_row(path: Path) -> dict | None:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 1024))
+            lines = fh.read().splitlines()
+        row = json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        return None
+    return row if isinstance(row, dict) else None
 
 
 _OWNER_SETTINGS = Path.home() / ".claude" / "settings.json"

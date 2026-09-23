@@ -884,6 +884,17 @@ def test_app_boots_against_a_run_that_never_started(cfg, capfd, monkeypatch):
     )
 
 
+def test_capital_r_resets_the_run_only_after_a_yes(cfg, capfd, monkeypatch):
+    """`R` confirms like every other destructive action: `n` leaves no run behind,
+    `y` opens one — and the runs tab (9) renders it."""
+    from swarm_orchestrator import runs
+
+    _boot(cfg, ["R", "n"], capfd, monkeypatch)
+    assert runs.current(cfg.state_dir) is None
+    _boot(cfg, ["R", "y", "9"], capfd, monkeypatch)
+    assert runs.current(cfg.state_dir) is not None
+
+
 def test_app_boots_against_a_populated_state_dir(cfg, capfd, monkeypatch):
     cfg.state_path.write_text(
         json.dumps(

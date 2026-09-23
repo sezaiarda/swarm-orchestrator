@@ -204,7 +204,7 @@ def test_a_live_hand_off_holds_the_finish_open(cfg):
     sup._finish_if_settled(_settled(cfg))
 
     assert state_mod.read(cfg).finished is False
-    assert "WATCHDOG-FINISH-HELD" in cfg.supervisor_log.read_text(encoding="utf-8")
+    assert "FINISH-HELD operator=" in cfg.supervisor_log.read_text(encoding="utf-8")
 
 
 def test_an_abandoned_hand_off_does_not_block_and_finish_completes(cfg):

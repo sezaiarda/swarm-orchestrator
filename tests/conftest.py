@@ -134,6 +134,39 @@ def _kill_orphan_fakes(state_dir: Path) -> None:
             continue  # exited mid-scan, or not ours to read
 
 
+def pytest_configure(config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_launch: let an in-process Supervisor really start worker processes",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_inprocess_launch(request, monkeypatch):
+    """An in-process :class:`Supervisor` records its launches instead of making them.
+
+    The supervisor launches workers itself now, on a thread, the moment a slot
+    frees — and the default ``worker_cmd`` is a real ``claude``. Every test that
+    builds ``Supervisor(cfg)`` and drives ``_advance_done`` / ``_park`` /
+    ``_on_master_idle`` would otherwise start one. Picks are appended to
+    ``sup.stub_launches`` and settle like a denial (no slot claimed), so the
+    double-launch guard and the finish check behave as after a real refusal.
+    Tests of the launcher itself opt out with ``@pytest.mark.real_launch`` and
+    point ``SWARM_WORKER_CMD`` at something harmless. The end-to-end ``swarm``
+    fixture is unaffected: its supervisor is a separate process.
+    """
+    if request.node.get_closest_marker("real_launch"):
+        return
+    from swarm_orchestrator.supervisor import Supervisor
+
+    def record(self, phase: str) -> None:
+        self.__dict__.setdefault("stub_launches", []).append(phase)
+        with self._launch_lock:
+            self._launching.discard(phase)
+
+    monkeypatch.setattr(Supervisor, "_start_launch", record)
+
+
 @pytest.fixture
 def swarm(tmp_path: Path):
     project = tmp_path / "project"

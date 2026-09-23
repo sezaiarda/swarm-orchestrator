@@ -245,21 +245,25 @@ def test_late_fail_is_ignored_for_a_blocked_phase(monkeypatch, tmp_path):
         sup.log.close()
 
 
-def test_resume_redrives_an_alive_master(monkeypatch, tmp_path):
+def test_resume_launches_the_ready_set_without_a_master(monkeypatch, tmp_path):
+    """`resume` used to spawn a step master (or nudge a live one) to do the
+    launching. It launches the ready set itself now, and never touches a master
+    — live or not."""
     cfg = _bare_cfg(monkeypatch, tmp_path)
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    (tmp_path / "docs" / "PHASE-LEDGER.md").write_text(
+        "- [ ] `A1` · needs:—\n- [ ] `B1` · needs:—\n", encoding="utf-8"
+    )
     state_mod.init_state(cfg)
     sup = Supervisor(cfg)
     try:
-        injected: list[str] = []
+        touched: list[str] = []
         sup.master.is_alive = lambda: True
-        sup.master.inject = lambda text: injected.append(text)
+        sup.master.inject = lambda text: touched.append(f"inject {text}")
+        sup._spawn_master = lambda kind: touched.append(f"spawn {kind}") or True
         sup._on_resume()
-        assert injected
-        spawned: list[str] = []
-        sup.master.is_alive = lambda: False
-        sup._spawn_master = lambda kind: spawned.append(kind)
-        sup._on_resume()
-        assert spawned == ["step"]
+        assert sup.stub_launches == ["A1", "B1"]
+        assert touched == []
     finally:
         sup.log.close()
 
@@ -276,3 +280,100 @@ def test_duplicate_done_does_not_overwrite_settled_status(monkeypatch, tmp_path)
         assert "DONE-DUPLICATE" in cfg.supervisor_log.read_text()
     finally:
         sup.log.close()
+
+
+# -- worktree_add builds the components in parallel, all or nothing ----------
+def test_worktree_add_builds_components_concurrently(monkeypatch, tmp_path):
+    """Many repos added one after another made every launch slow. The components go
+    through a bounded pool now; the umbrella still goes first (they nest in it)."""
+    import threading
+    import time
+
+    project, _ = _make_workspace(tmp_path, siblings=("a1", "b2", "c3", "d4"))
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    real = gitq._mirror_base
+    lock = threading.Lock()
+    live = {"now": 0, "peak": 0}
+    order: list[str] = []
+
+    def slow_base(repo, main):
+        with lock:
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+            order.append(repo.name)
+        time.sleep(0.2)
+        with lock:
+            live["now"] -= 1
+        return real(repo, main)
+
+    monkeypatch.setattr(gitq, "_mirror_base", slow_base)
+    log = Log(cfg.supervisor_log)
+    try:
+        wt = gitq.worktree_add(cfg, "P1", log)
+    finally:
+        log.close()
+    assert order[0] == project.name  # umbrella first, alone
+    assert live["peak"] > 1  # components overlapped
+    for s in ("a1", "b2", "c3", "d4"):
+        assert _out(wt / s, "rev-parse", "--abbrev-ref", "HEAD").strip() == "swarm/P1"
+
+
+def test_a_failed_component_discards_the_whole_partial_mirror(monkeypatch, tmp_path):
+    project, repos = _make_workspace(tmp_path, siblings=("a1", "b2", "c3"))
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    real = gitq._add_one
+
+    def flaky(c, repo, main, phase, log):
+        if repo.name == "b2":
+            raise gitq.GitError("git worktree add @ b2: disk full")
+        return real(c, repo, main, phase, log)
+
+    monkeypatch.setattr(gitq, "_add_one", flaky)
+    log = Log(cfg.supervisor_log)
+    try:
+        with pytest.raises(gitq.GitError, match="disk full"):
+            gitq.worktree_add(cfg, "P1", log)
+    finally:
+        log.close()
+    assert not (cfg.wt_dir / "P1").exists()  # no half mirror left behind
+    for r in (project, *repos.values()):
+        assert _out(r, "branch", "--list", "swarm/*").strip() == ""
+    assert "WORKTREE-ADD-FAIL P1" in cfg.supervisor_log.read_text()
+
+
+# -- a CHANGELOG / lessons journal in ANY repo is union-merged ------------------
+def test_changelog_union_resolves_in_a_component_repo(monkeypatch, tmp_path):
+    """`[git].auto_resolve` keys are matched against the path *inside the repo
+    being merged*, so one bare `CHANGELOG.md` key covers every repo's changelog —
+    no per-repo entry, no glob needed. Two phases each prepending an entry is the
+    conflict union exists for: both land, neither is duplicated."""
+    project, repos = _make_workspace(tmp_path)
+    v = repos["pricing"]
+    (v / "CHANGELOG.md").write_text("# Changelog\n\n## 0.1.0\n- first\n")
+    (v / "tasks").mkdir()
+    (v / "tasks" / "lessons.md").write_text("# Lessons\n")
+    _git(v, "add", "-A")
+    _git(v, "commit", "-m", "journals")
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    cfg.git_auto_resolve = {"CHANGELOG.md": "union", "tasks/lessons.md": "union"}
+    log = Log(cfg.supervisor_log)
+    try:
+        wts = {p: gitq.worktree_add(cfg, p, log) for p in ("P1", "P2")}
+        for p, wt in wts.items():
+            cl = wt / "pricing" / "CHANGELOG.md"
+            cl.write_text(cl.read_text().replace("\n\n## 0.1.0", f"\n\n## {p}\n- {p} entry\n\n## 0.1.0"))
+            ls = wt / "pricing" / "tasks" / "lessons.md"
+            ls.write_text(ls.read_text() + f"- {p} lesson\n")
+            _git(wt / "pricing", "add", "-A")
+            _git(wt / "pricing", "commit", "-m", p)
+        assert gitq.integrate(cfg, "P1", log) == gitq.MERGED
+        assert gitq.integrate(cfg, "P2", log) == gitq.MERGED  # conflicted, auto-resolved
+    finally:
+        log.close()
+    _git(v, "checkout", "master")
+    text = (v / "CHANGELOG.md").read_text()
+    assert text.count("## P1") == 1 and text.count("## P2") == 1
+    assert text.count("## 0.1.0") == 1
+    lessons = (v / "tasks" / "lessons.md").read_text()
+    assert "- P1 lesson" in lessons and "- P2 lesson" in lessons
+    assert "AUTORESOLVE" in cfg.supervisor_log.read_text()

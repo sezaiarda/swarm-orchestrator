@@ -19,12 +19,12 @@ windows of at most four (`workers`, `workers-2`, …), arranged by `[tmux].layou
 — the default `"auto"` gives a lone slot its whole window, splits two LEFT|RIGHT,
 and tiles three–four into a grid; pin `"top-bottom"` (or any tmux preset) to
 stack them instead, or flip it live with `swarm layout`. It starts a detached
-**supervisor** and launches an **init master**. The master reads your phase
-ledger, works out which phases are ready, and `swarm launch`es as many as there
-are free slots — each a real `claude` running `/prime <phase>`. When a worker
-finishes it calls `swarm done`; the supervisor spawns a fresh master (or nudges
-the live one) to launch the next ready phase into the freed slot. It loops until
-nothing is left, then telegrams you.
+**supervisor** and runs one **init master** pass (telegram preflight, patch and
+commit the worker command). Then the supervisor itself launches the ledger's
+ready phases, in ledger order, into the free slots — each a real `claude` running
+`/prime <phase>`. When a worker finishes it calls `swarm done`; the supervisor
+launches the next ready phase into the freed slot at once, with no model in the
+loop. It loops until nothing is left, then telegrams you.
 
 Slot accounting is **state-based**, not pane-counting: `max_workers` pane ids
 tagged `@swarm_slot N` across a global index, claimed check-and-set under
@@ -38,12 +38,13 @@ the sole writer of `state.json`, and the sole killer of the master pane. It is
 event-driven — no redo, no reconcile pass, no crash watchdog, no auto-retry; its
 only timed wake is a park deadline a `waiting` worker armed (rule 5):
 
-1. **`done <phase> <ok|operator|fail>`** — free the slot; if no master is
-   alive, **spawn** one, otherwise **inject** a one-line nudge into the live one.
-   (`ok`/`operator` integrate the work; `fail` rolls it back.)
-2. **`master-idle`** — kill the master pane.
-3. After a kill — **finish** (teardown + telegram) once nothing is `pending`
-   *and* nothing is integrating.
+1. **`done <phase> <ok|operator|fail>`** — free the slot and **launch** the
+   ready phases into the free slots (each launch on its own thread, reported
+   back as `launched <phase> <outcome>`). (`ok`/`operator` integrate the work;
+   `fail` rolls it back.)
+2. **`master-idle`** — kill the init master pane; the first launch waits for it.
+3. **Finish** (teardown + telegram) once nothing is launchable, launching,
+   `pending`, integrating or owed (an operator hand-off, a push).
 4. Anything in flight keeps the run `pending` so finish can't fire early — a busy
    slot, a worker `waiting` on you, or a `parked` worker.
 5. **`waiting <phase>`** — a worker needs you. After `[worker].park_after` with no
@@ -53,22 +54,16 @@ only timed wake is a park deadline a `waiting` worker armed (rule 5):
 ```mermaid
 flowchart TD
   D["worker: swarm done phase ok"] --> FR["free the slot"]
-  FR --> Q{"a master<br/>alive?"}
-  Q -->|no| SP["spawn a fresh master"]
-  Q -->|yes| IN["inject a nudge"]
-  SP --> LA["master: swarm context,<br/>launch the next ready phases"]
-  IN --> LA
-  LA --> ID["master: swarm master-idle"]
-  ID --> KI["supervisor kills the master pane"]
-  KI --> BQ{"any slot busy<br/>or integrating?"}
+  FR --> LA["supervisor: launch the ready phases<br/>(ledger order, one thread each)"]
+  LA --> BQ{"anything launching, busy,<br/>integrating or owed?"}
   BQ -->|yes| WA["stay alive — wait for the next event"]
   BQ -->|no| FI["finish + telegram"]
 ```
 
-Pure injection has no backstop, on purpose. If tmux ever drops an injected
-keystroke, that slot's next phase waits for the following `done` and self-heals;
-if it was the *last* worker, `finish` fires with the ready phase logged so you can
-`swarm launch` it by hand.
+A launch that fails (worktree, pane, boot — the boot is retried once) is retried
+after a minute; after three failures in a row the phase is left for you and you
+are told once (`swarm launch <phase>` or `swarm resume` hands it back). With the
+watchdog on, a free slot beside ready phases for `watchdog_s` is filled again.
 
 ## Install
 

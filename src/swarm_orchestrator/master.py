@@ -52,7 +52,10 @@ def _master_env(cfg: Config) -> dict[str, str]:
 
 
 def build_context(cfg: Config, st: State) -> dict:
-    """Read-only snapshot the master uses to decide what to launch."""
+    """Read-only snapshot of what is ready and where it can go.
+
+    The supervisor's launcher starts ``launchable`` directly; ``swarm context``
+    prints the same snapshot for the init master, the owner and the TUI."""
     ledger_path = cfg.project_dir / cfg.ledger
     graph = ledger_mod.load(ledger_path)
     # A parked or waiting phase is still in flight (its worker owes the owner an

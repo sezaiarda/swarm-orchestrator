@@ -30,8 +30,20 @@ from . import telegram, tmux
 from .config import Config, ready_needle
 from .logutil import Log
 
-READY_TIMEOUT_S = 30.0
+# 30 s was measured too tight once launches stopped queueing behind an LLM
+# master: several sessions now boot at the same moment on a loaded box, and a
+# cold claude start under a parallel cargo build overran it. A boot that misses
+# the window is also retried once (:func:`_launch_tmux`) before the launch fails.
+READY_TIMEOUT_S = 45.0
 POLL_INTERVAL_S = 0.25
+
+# What :func:`launch_outcome` reports. ``denied`` never claimed a slot (paused,
+# no free slot, the phase already in flight, unmet deps); ``failed`` claimed one
+# and could not start the worker, and has already rolled the claim back. The
+# supervisor retries only ``failed`` -- a denial is the state machine working.
+LAUNCHED = "launched"
+DENIED = "denied"
+FAILED = "failed"
 
 # `swarm done` statuses that SATISFY a dependent phase's `needs:`. A `fail` is a
 # *recorded outcome*, not a completed dependency — its work was rolled back, so
@@ -175,6 +187,19 @@ def _unmet_deps(cfg: Config, phase: str, done: dict[str, str]) -> list[str]:
 def launch(cfg: Config, phase: str, log: Log) -> bool:
     """Claim a slot and start a worker for ``phase``. Returns success.
 
+    The ``swarm launch`` form: a denial is also printed, because the caller is a
+    person (or a session) at a terminal. See :func:`launch_outcome`."""
+    return launch_outcome(cfg, phase, log) == LAUNCHED
+
+
+def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) -> str:
+    """Claim a slot and start a worker for ``phase``; return what happened.
+
+    One of :data:`LAUNCHED`, :data:`DENIED` or :data:`FAILED`. ``quiet``
+    suppresses the stdout line a denial prints for a terminal caller: the
+    supervisor launches from its own loop, where stdout is nobody's, and the
+    reason is in the log either way.
+
     Under ``isolation = worktree`` a full-workspace mirror on ``swarm/<phase>``
     is created before the pane is respawned; the branch and umbrella worktree
     path (both deterministic from the phase) are recorded on the slot *in the
@@ -185,11 +210,11 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
     with state_mod.transaction(cfg) as st:
         if st.paused:
             log.line(f"LAUNCH-DENIED {phase} paused")
-            return False
+            return DENIED
         slot = st.claim_slot(phase)
         if slot is None:
             log.line(f"LAUNCH-DENIED {phase} no-free-slot")
-            return False
+            return DENIED
         # Dependency backstop: st.done is written only after a phase's worktree is
         # merged, so gating on it means a phase can never start before every dep it
         # depends on has merged — even if the LLM master mis-reasons over the prose
@@ -200,8 +225,9 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
             st.free_slot_for(phase)
             detail = " ".join(missing)
             log.line(f"LAUNCH-DENIED {phase} unmet-deps [{detail}]")
-            print(f"LAUNCH-DENIED {phase}: unmet deps [{detail}]")
-            return False
+            if not quiet:
+                print(f"LAUNCH-DENIED {phase}: unmet deps [{detail}]")
+            return DENIED
         sid, pane = slot.id, slot.pane_id
         if cfg.git_isolation == "worktree":
             slot.branch = f"swarm/{phase}"
@@ -224,7 +250,7 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
                 state_dir=cfg.state_dir,
             )
             log.line(f"WORKTREE-FAIL {phase} {exc}")
-            return False
+            return FAILED
         # Pre-trust the fresh worktree so claude never pops the folder-trust dialog.
         pretrust_dir(worktree, log)
 
@@ -238,7 +264,10 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
         # yank the cwd out from under a live process (which would strand an
         # orphaned claude in a deleted directory).
         if cfg.driver != "bare" and pane is not None:
-            tmux.respawn_pane(pane, "exec sleep infinity")
+            try:
+                tmux.respawn_pane(pane, "exec sleep infinity")
+            except subprocess.CalledProcessError:
+                pass  # the pane is gone: nothing left running in the worktree
         with state_mod.transaction(cfg) as st:
             st.free_slot_for(phase)
         if worktree is not None:
@@ -252,9 +281,9 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
             state_dir=cfg.state_dir,
         )
         log.line(f"LAUNCH-FAIL {phase} slot={sid}")
-        return False
+        return FAILED
     log.line(f"LAUNCH {phase} slot={sid}")
-    return True
+    return LAUNCHED
 
 
 def _launch_bare(cfg: Config, phase: str, worktree: Path | None, log: Log) -> bool:
@@ -279,16 +308,30 @@ def _launch_bare(cfg: Config, phase: str, worktree: Path | None, log: Log) -> bo
 def _launch_tmux(
     cfg: Config, phase: str, pane: str | None, worktree: Path | None, log: Log
 ) -> bool:
-    """Respawn the slot pane, detect readiness, drive the worker command."""
+    """Respawn the slot pane, detect readiness, drive the worker command.
+
+    A boot that misses :data:`READY_TIMEOUT_S` is respawned and awaited once
+    more before the launch fails. A slow boot on a loaded box is the common
+    cause, and the alternative -- fail, discard a freshly built 13-repo mirror,
+    telegram the owner and rebuild it all on the next launch -- costs far more
+    than a second wait. A pane tmux no longer knows is a failed launch (rolled
+    back by the caller), not an exception that strands the claimed slot."""
     if pane is None:
         log.line(f"LAUNCH-FAIL {phase} no-pane")
         return False
     cwd = worktree or cfg.project_dir
-    tmux.respawn_pane(
-        pane, _worker_shell(cfg, phase, cwd), env=_worker_env(cfg, phase, worktree)
-    )
-    if not _await_ready(cfg, pane, log):
-        return False
+    shell, env = _worker_shell(cfg, phase, cwd), _worker_env(cfg, phase, worktree)
+    for attempt in (1, 2):
+        try:
+            tmux.respawn_pane(pane, shell, env=env)
+        except subprocess.CalledProcessError as exc:
+            log.line(f"LAUNCH-FAIL {phase} respawn pane={pane} {exc}")
+            return False
+        if _await_ready(cfg, pane, log):
+            break
+        if attempt == 2:
+            return False
+        log.line(f"READY-RETRY {phase} pane={pane}")
     command = cfg.command_template.format(phase=phase)
     if not tmux.send_submit(pane, command):
         log.line(f"SUBMIT-LOST {phase} pane={pane}")

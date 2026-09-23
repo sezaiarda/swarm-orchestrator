@@ -16,6 +16,7 @@ in-process, so no teammate panes ever appear).
 from __future__ import annotations
 
 import shlex
+import subprocess
 
 from . import state as state_mod
 from . import tmux
@@ -101,6 +102,59 @@ def setup(cfg: Config) -> dict[str, str]:
             if gidx < len(st.slots):
                 st.slots[gidx].pane_id = pane
     return windows
+
+
+def _worker_window_index(name: str) -> int:
+    """``workers`` -> 1, ``workers-3`` -> 3; anything else sorts last."""
+    if name == "workers":
+        return 1
+    tail = name.removeprefix("workers-")
+    return int(tail) if tail.isdigit() else 1 << 30
+
+
+def add_slot_panes(
+    cfg: Config, windows: dict[str, str], slot_ids: list[int], layout: str
+) -> tuple[dict[int, str], dict[str, str], list[int]]:
+    """Give each new slot a tagged holding pane; return ``(panes, windows, failed)``.
+
+    ``swarm up`` builds every slot's pane in :func:`setup`; a live ``max_workers``
+    grow used to add the slot record only, so its ``pane_id`` stayed ``None`` and
+    every launch that picked it failed ``no-pane``. New panes follow the same
+    pagination ``setup`` uses: fill the first ``workers*`` window holding fewer
+    than :data:`PANES_PER_WINDOW` panes (re-tidied to ``layout``), else open the
+    next ``workers-N`` window. ``windows`` is returned updated with any window
+    opened here; ``failed`` lists slots tmux would not give a pane (the caller
+    must keep anything from launching into them).
+    """
+    windows = dict(windows)
+    worker_wins = sorted(
+        ((n, w) for n, w in windows.items() if n == "workers" or n.startswith("workers-")),
+        key=lambda nw: _worker_window_index(nw[0]),
+    )
+    panes: dict[int, str] = {}
+    failed: list[int] = []
+    for sid in slot_ids:
+        try:
+            target = next(
+                (w for _, w in worker_wins if 0 < len(tmux.list_panes(w)) < PANES_PER_WINDOW),
+                None,
+            )
+            if target is None:
+                k = max((_worker_window_index(n) for n, _ in worker_wins), default=0) + 1
+                name = "workers" if k == 1 else f"workers-{k}"
+                target = tmux.new_window(cfg.session, name)
+                windows[name] = target
+                worker_wins.append((name, target))
+                pane = tmux.list_panes(target)[0]
+            else:
+                pane = tmux.split_one(target)
+                tmux.apply_layout(target, len(tmux.list_panes(target)), layout)
+            tmux.set_slot(pane, sid)
+        except (subprocess.CalledProcessError, IndexError, OSError):
+            failed.append(sid)
+            continue
+        panes[sid] = pane
+    return panes, windows, failed
 
 
 def teardown(cfg: Config) -> None:

@@ -31,6 +31,7 @@ import fcntl
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -359,31 +360,65 @@ def _mirror_base(repo: Path, main: str) -> str:
     return main
 
 
+#: How many component worktrees :func:`worktree_add` builds at once. Each one is
+#: a ``fetch`` plus a checkout, mostly waiting on the network and the disk, so a
+#: serial walk over many repos is slow on every launch. Bounded rather than one
+#: thread per repo because the checkouts do contend for the same disk.
+WORKTREE_ADD_WORKERS = 6
+
+
+def _add_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> None:
+    """Create one repo's ``swarm/<phase>`` worktree under its own repo lock."""
+    branch = f"swarm/{phase}"
+    wt = _wt_for(cfg, repo, phase)
+    with repo_lock(cfg, repo):
+        base = _mirror_base(repo, main)
+        if _branch_exists(repo, branch) or wt.exists():
+            _gc(cfg, repo, phase, log)  # stale leftover -> start clean
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        _git(repo, "worktree", "add", str(wt), "-b", branch, base)
+        _link_target_cache(cfg, wt, repo, log)
+
+
 def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
     """Build the phase's full-workspace mirror; return the umbrella worktree
     (the worker's cwd).
 
     The umbrella worktree is created first (its directory must exist before
-    component worktrees nest inside it), then each component. Each branches off
-    :func:`_mirror_base` — local ``main`` unless ``origin/<main>`` strictly
-    fast-forwards it — so unpushed owner commits are never dropped from the
-    mirror. A stale leftover from a prior run is GC'd first.
+    component worktrees nest inside it), then the components, up to
+    :data:`WORKTREE_ADD_WORKERS` at a time. Components are added one nesting
+    depth at a time, so a repo configured *inside* another component's path never
+    races its parent's checkout. Each branches off :func:`_mirror_base` — local
+    ``main`` unless ``origin/<main>`` strictly fast-forwards it — so unpushed
+    owner commits are never dropped from the mirror. A stale leftover from a
+    prior run is GC'd first.
+
+    All or nothing: if any repo fails, every repo's worktree and branch for the
+    phase is discarded (the ones that did get built too) and the first failure
+    is raised as :class:`GitError`. A half mirror is worse than none — a worker
+    started in it would find some repos missing and build against nothing.
     """
-    branch = f"swarm/{phase}"
-    umbrella = (cfg.project_dir, cfg.git_main_branch)
-    ordered = [umbrella] + [
-        (r, m) for (r, m) in _repos(cfg) if r.resolve() != cfg.project_dir.resolve()
-    ]
+    root = cfg.project_dir.resolve()
+    components = [(r, m) for (r, m) in _repos(cfg) if r.resolve() != root]
     cfg.wt_dir.mkdir(parents=True, exist_ok=True)
-    for repo, main in ordered:
-        wt = _wt_for(cfg, repo, phase)
-        with repo_lock(cfg, repo):
-            base = _mirror_base(repo, main)
-            if _branch_exists(repo, branch) or wt.exists():
-                _gc(cfg, repo, phase, log)  # stale leftover -> start clean
-            wt.parent.mkdir(parents=True, exist_ok=True)
-            _git(repo, "worktree", "add", str(wt), "-b", branch, base)
-            _link_target_cache(cfg, wt, repo, log)
+    try:
+        _add_one(cfg, cfg.project_dir, cfg.git_main_branch, phase, log)
+        by_depth: dict[int, list[tuple[Path, str]]] = {}
+        for repo, main in components:
+            depth = len(repo.resolve().relative_to(root).parts)
+            by_depth.setdefault(depth, []).append((repo, main))
+        for depth in sorted(by_depth):
+            batch = by_depth[depth]
+            with ThreadPoolExecutor(max_workers=min(WORKTREE_ADD_WORKERS, len(batch))) as pool:
+                futures = [pool.submit(_add_one, cfg, r, m, phase, log) for r, m in batch]
+            for fut in futures:
+                fut.result()  # re-raise the first failure, after all have settled
+    except (GitError, OSError) as exc:
+        log.line(f"WORKTREE-ADD-FAIL {phase} {exc}")
+        discard(cfg, phase, log)
+        if isinstance(exc, GitError):
+            raise
+        raise GitError(f"worktree add {phase}: {exc}") from exc
     log.line(f"WORKTREE-ADD {phase} {cfg.wt_dir / phase}")
     return cfg.wt_dir / phase
 

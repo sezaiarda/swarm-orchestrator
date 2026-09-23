@@ -315,3 +315,17 @@ def test_a_late_decline_leaves_earlier_files_as_the_merge_left_them(tmp_path, mo
 
     assert gitq._auto_resolve(_cfg(table), tmp_path, "P1", _Log()) is False
     assert (tmp_path / "docs/FINDINGS.md").read_text() == MARKERS
+
+
+def test_a_bare_journal_key_matches_that_journal_in_every_repo():
+    """Keys match the path inside whichever repo is being merged, so a bare
+    ``CHANGELOG.md`` covers the root changelog of every component and a nested
+    crate's too — but never a file that merely ends in the same letters."""
+    table = {"CHANGELOG.md": "union", "tasks/lessons.md": "union"}
+    for path in ("CHANGELOG.md", "crates/core/CHANGELOG.md"):
+        assert automerge.strategy_for(path, table) == "union", path
+    assert automerge.strategy_for("tasks/lessons.md", table) == "union"
+    assert automerge.strategy_for("OLD-CHANGELOG.md", table) is None
+    assert automerge.strategy_for("tasks/lessons.md.bak", table) is None
+    # a glob works too, for projects that want to be explicit about it
+    assert automerge.strategy_for("docs/CHANGELOG.md", {"**/CHANGELOG.md": "union"}) == "union"

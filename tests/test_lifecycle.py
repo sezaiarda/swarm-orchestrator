@@ -60,30 +60,46 @@ def test_second_up_is_refused_while_supervisor_running(swarm):
     assert "already running" in (proc.stdout + proc.stderr).lower()
 
 
-def test_two_dones_while_master_alive_are_injected(swarm):
-    """Assertion 3: two dones while a master is ALIVE -> both injected + reused."""
-    swarm.env["FAKE_MASTER_WAIT"] = "8"  # keep the master alive across both dones
+def test_two_quick_dones_launch_both_successors_without_a_master(swarm):
+    """Assertion 3: two dones in quick succession each fill their freed slot —
+    straight from the supervisor, with no master spawned or nudged after the
+    init pass. (This used to prove both were INJECTED into a live master.)"""
     swarm.env["FAKE_WORKER_PARK"] = "1"  # workers hold slots; test controls `done`
     _point_ledger(swarm, "ledger_inject.txt")
     swarm.up()
 
-    # init master launches A,B (parked); it then idles-waits, ALIVE.
-    assert swarm.wait(
-        lambda: swarm.busy_phases() == ["A", "B"] and swarm.state()["master_alive"],
-        timeout=20,
-    ), swarm.log_text()
+    # The supervisor launches A,B once the init master idles.
+    assert swarm.wait(lambda: swarm.busy_phases() == ["A", "B"], timeout=20), (
+        swarm.log_text()
+    )
+    assert swarm.wait(lambda: "EVENT master-idle" in swarm.log_text(), timeout=10)
 
-    # Fire both completions in quick succession while the master is alive.
+    # Fire both completions in quick succession.
     swarm.cli("done", "A", "ok")
     swarm.cli("done", "B", "ok")
 
-    # Both injected -> the live master launches X and Y into the freed slots.
     assert swarm.wait(lambda: swarm.busy_phases() == ["X", "Y"], timeout=20), (
         swarm.log_text()
     )
     log = swarm.log_text()
-    assert log.count("ACTION inject-master") >= 2  # both dones injected
     assert log.count("ACTION spawn-master") == 1  # only the init master spawned
+    assert "ACTION inject-master" not in log  # nothing nudged a master
+    assert "LAUNCH-READY A B (init master idle)" in log
+    assert log.count("LAUNCH X ") == 1 and log.count("LAUNCH Y ") == 1  # no double launch
+
+
+def test_the_first_launch_waits_for_the_init_master(swarm):
+    """The init master commits the patched worker command; a worktree cut before
+    that commit would not carry it. So nothing launches while it is mid-pass."""
+    swarm.env["FAKE_MASTER_WAIT"] = "3"
+    swarm.up()
+    assert swarm.wait(lambda: "ACTION spawn-master kind=init" in swarm.log_text(), timeout=10)
+    time.sleep(1.5)
+    assert swarm.busy_phases() == []  # held behind the bootstrap pass
+    assert swarm.wait(lambda: swarm.busy_phases() == ["P0"] or "LAUNCH P0" in swarm.log_text(),
+                      timeout=20), swarm.log_text()
+    log = swarm.log_text()
+    assert log.index("EVENT master-idle") < log.index("CLAIM P0")
 
 
 def test_parked_worker_blocks_finish(swarm):

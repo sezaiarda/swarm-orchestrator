@@ -23,6 +23,7 @@ existing log stays readable across the change.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,10 @@ class Log:
     def __init__(self, path: Path, echo: bool = False) -> None:
         self.path = path
         self.echo = echo
+        # The supervisor launches workers on background threads, and a launch
+        # builds its worktrees on a pool, all writing to this one handle. A line
+        # is the unit every reader greps for, so it must never interleave.
+        self._lock = threading.Lock()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             self._fh = path.open("a", encoding="utf-8", buffering=1)
@@ -48,18 +53,20 @@ class Log:
             f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} "
             f"{time.monotonic():.3f} {message}\n"
         )
-        if self._fh is not None:
-            try:
-                self._fh.write(record)
-            except OSError as exc:
-                print(f"log-write-failed: {exc}", file=sys.stderr)
-        if self.echo or self._fh is None:
-            sys.stderr.write(record)
+        with self._lock:
+            if self._fh is not None:
+                try:
+                    self._fh.write(record)
+                except (OSError, ValueError) as exc:  # ValueError: closed under us
+                    print(f"log-write-failed: {exc}", file=sys.stderr)
+            if self.echo or self._fh is None:
+                sys.stderr.write(record)
 
     def close(self) -> None:
-        if self._fh is not None:
-            self._fh.close()
-            self._fh = None
+        with self._lock:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
 
 
 def _boot_epoch() -> float | None:

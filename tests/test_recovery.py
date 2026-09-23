@@ -207,25 +207,29 @@ def test_watchdog_leaves_a_live_pane_alone(tmp_path, monkeypatch):
         sup.log.close()
 
 
-def test_watchdog_renudges_an_idle_swarm_with_ready_phases(tmp_path, monkeypatch):
-    """The accepted lost-nudge race is now recoverable instead of terminal."""
+def test_watchdog_relaunches_an_idle_swarm_with_ready_phases(tmp_path, monkeypatch):
+    """A free slot beside ready phases for a whole watchdog interval is filled
+    by the launcher itself — even with a (hung) master alive, which used to be
+    the thing the watchdog could only nudge."""
     cfg = _cfg(tmp_path, monkeypatch, watchdog=1)
     state_mod.init_state(cfg)
     with state_mod.transaction(cfg) as st:
         st.last_event_at = time.time() - 600  # nothing has happened for 10 min
 
     sup = Supervisor(cfg)
+    sup._bootstrapping = True  # an init master that never idled
     injected: list[str] = []
     monkeypatch.setattr(sup.master, "is_alive", lambda: True)
     monkeypatch.setattr(sup.master, "inject", lambda msg: injected.append(msg))
     try:
         sup._watchdog_tick()
-        assert injected and "watchdog" in injected[0]
-        # ...and the nudge counts as movement, so it does not re-fire at once.
-        injected.clear()
+        assert sup.stub_launches == ["P0", "R1"]
+        assert injected == []
+        assert "WATCHDOG-RELAUNCH" in cfg.supervisor_log.read_text(encoding="utf-8")
+        # ...and the relaunch counts as movement, so it does not re-fire at once.
         sup._last_sweep = 0.0
         sup._watchdog_tick()
-        assert injected == []
+        assert sup.stub_launches == ["P0", "R1"]
     finally:
         sup.log.close()
 
@@ -268,9 +272,6 @@ def test_watchdog_holds_off_while_paused_or_blocked(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch, watchdog=1)
     state_mod.init_state(cfg)
     sup = Supervisor(cfg)
-    injected: list[str] = []
-    monkeypatch.setattr(sup.master, "is_alive", lambda: True)
-    monkeypatch.setattr(sup.master, "inject", lambda msg: injected.append(msg))
     try:
         for field, value in (("paused", True), ("integ_blocked", "P9")):
             with state_mod.transaction(cfg) as st:
@@ -279,7 +280,7 @@ def test_watchdog_holds_off_while_paused_or_blocked(tmp_path, monkeypatch):
                 st.last_event_at = time.time() - 600
             sup._last_sweep = 0.0
             sup._watchdog_tick()
-            assert injected == [], field
+            assert getattr(sup, "stub_launches", []) == [], field
     finally:
         sup.log.close()
 

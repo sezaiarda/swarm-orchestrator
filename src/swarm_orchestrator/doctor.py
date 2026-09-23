@@ -441,16 +441,24 @@ def _check_supervisor(cfg: Config, st: State) -> list[Check]:
     return checks
 
 
-def _dead_panes(cfg: Config, st: State) -> tuple[list[str], int, int]:
-    """``(dead descriptions, unreadable count, busy count)`` — probed once.
+def _dead_panes(cfg: Config, st: State) -> tuple[list[str], int, int, list[str]]:
+    """``(dead busy panes, unreadable count, busy count, dead free panes)`` —
+    probed once.
 
     Shared by :func:`_check_panes` and :func:`_check_watchdog` so a swarm with
     four busy slots costs four ``tmux`` calls, not eight.
+
+    Every slot is probed, not only the busy ones. A *free* slot with no pane (or
+    a pane tmux no longer knows) is invisible until something launches into it —
+    and then every launch that picks it fails ``no-pane``: that is what a
+    ``swarm reload`` growing ``max_workers`` left behind before it created panes.
+    A free pane only has to exist; it runs the ``sleep`` placeholder, not claude.
     """
     busy = [s for s in st.busy_slots() if s.pane_id]
-    if cfg.driver != "tmux" or not busy:
-        return [], 0, len(busy)
+    if cfg.driver != "tmux":
+        return [], 0, len(busy), []
     dead: list[str] = []
+    dead_free: list[str] = []
     unknown = 0
     for slot in busy:
         cmd = _pane_cmd(slot.pane_id or "")
@@ -458,34 +466,55 @@ def _dead_panes(cfg: Config, st: State) -> tuple[list[str], int, int]:
             unknown += 1
         elif cmd != "claude":
             dead.append(f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}")
-    return dead, unknown, len(busy)
+    for slot in st.slots:
+        if slot.busy or slot.retiring:
+            continue
+        if not slot.pane_id:
+            dead_free.append(f"free slot {slot.id} has no pane")
+            continue
+        cmd = _pane_cmd(slot.pane_id)
+        if cmd == "?":
+            unknown += 1
+        elif cmd == "gone":
+            dead_free.append(f"free slot {slot.id} pane {slot.pane_id} is gone")
+    return dead, unknown, len(busy), dead_free
 
 
-def _check_panes(cfg: Config, st: State, probe: tuple[list[str], int, int]) -> Check:
-    """Every busy slot's pane still exists and still runs ``claude``.
+def _check_panes(
+    cfg: Config, st: State, probe: tuple[list[str], int, int, list[str]]
+) -> Check:
+    """Every busy slot's pane still exists and still runs ``claude``, and every
+    free slot still has a pane to launch into.
 
     A worker that crashed or was killed never runs ``swarm done``, so its slot
     stays busy forever and the run can neither progress nor finish.
     """
-    dead, unknown, busy = probe
+    dead, unknown, busy, dead_free = probe
     if cfg.driver != "tmux":
         return Check("slots.panes", OK, f"driver={cfg.driver}; no panes to check")
-    if not busy:
-        return Check("slots.panes", OK, "no busy slots")
     if dead:
         phase = next((s.phase for s in st.busy_slots() if s.phase), "<phase>")
         return Check(
             "slots.panes",
             FAIL,
-            "worker died without `swarm done`: " + "; ".join(dead),
+            "worker died without `swarm done`: " + "; ".join(dead + dead_free),
             f"swarm free {phase}  # then relaunch it",
         )
+    if dead_free:
+        return Check(
+            "slots.panes",
+            FAIL,
+            "slot(s) with nowhere to launch a worker: " + "; ".join(dead_free),
+            "swarm down && swarm up  # rebuilds every slot's pane",
+        )
+    if not busy:
+        return Check("slots.panes", OK, "no busy slots")
     if unknown:
         return Check("slots.panes", OK, f"{busy} busy; {unknown} pane(s) unreadable")
     return Check("slots.panes", OK, f"{busy} busy slot(s), all running claude")
 
 
-def _check_watchdog(cfg: Config, probe: tuple[list[str], int, int]) -> Check:
+def _check_watchdog(cfg: Config, probe: tuple[list[str], int, int, list[str]]) -> Check:
     """Whether anything will ever *reclaim* a slot whose worker died.
 
     ``[swarm].watchdog_s = 0`` restores the purely event-driven supervisor, which
@@ -497,7 +526,7 @@ def _check_watchdog(cfg: Config, probe: tuple[list[str], int, int]) -> Check:
     nothing else in the tool looks at.
     """
     watchdog = int(getattr(cfg, "watchdog_s", 0) or 0)
-    dead, _unknown, _busy = probe
+    dead = probe[0]  # busy slots only: the watchdog reaps workers, not free panes
     if watchdog and dead:
         return Check(
             "run.watchdog",

@@ -1,15 +1,23 @@
 """The supervisor: sole FIFO reader, sole master-killer, sole finisher.
 
-It implements EXACTLY the four-rule pure-injection lifecycle and nothing more —
-no redo/coalescing, no need re-derivation, no sentinel reconcile, no auto-retry.
+It implements EXACTLY the four-rule lifecycle below and nothing more —
+no redo/coalescing, no need re-derivation, no sentinel reconcile, and no
+auto-retry beyond a failed launch's bounded back-off.
 It is event-driven; its timed wakes are the park deadline a ``waiting`` worker
 arms (rule 4) and — only when ``[swarm].watchdog_s`` is non-zero — a periodic
 liveness reconcile (see :meth:`Supervisor._watchdog_tick`):
 
-1. ``done``       -> free the slot; spawn a master if none is alive, else inject.
-2. ``master-idle``-> kill the master pane.
-3. after a kill   -> finish when nothing is ``pending``, nothing is integrating and
-   no operator hand-off is still owed.
+1. ``done``       -> free the slot and launch what the ledger makes ready, in
+   ledger order, straight from here (:meth:`Supervisor._fill_slots`). No LLM
+   master sits between a free slot and its next worker any more: the launchable
+   set is a pure function of the ledger and ``state.json``, and waiting on a
+   master for it cost a delay and a model call per launch (and could hang outright).
+2. ``master-idle``-> kill the master pane. The only master left is the ``init``
+   bootstrap pass (command-file patch, telegram preflight); its idle is what
+   releases the first launch.
+3. finish when nothing is launchable, launching, ``pending``, integrating or
+   owed (an operator hand-off, a push) — checked after every event that could
+   have been the last (:meth:`Supervisor._finish_if_settled`).
 4. a worker that is still busy, ``waiting`` on the owner, or ``parked`` in its own
    window keeps the swarm ``pending`` — so finish cannot fire until every phase has
    run ``swarm done``. Parking frees the grid slot (via the deadline-driven
@@ -34,11 +42,13 @@ import json
 import os
 import select
 import signal
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 from . import gitq
+from . import launch as launch_mod
 from . import master as master_mod
 from . import operator as operator_mod
 from . import opqueue
@@ -46,13 +56,26 @@ from . import pushowed
 from . import resolver as resolver_mod
 from . import state as state_mod
 from . import reload as reload_mod
+from . import session as session_mod
 from . import telegram, tmux
 from .config import Config, load
 from .logutil import Log
 
 
+#: A phase whose launch *failed* (claimed a slot, could not start) is not
+#: relaunched on the very next event: the cause is usually still there, and the
+#: next free slot would just fail it again and ping again. It waits this long,
+#: then is eligible like any other ready phase.
+LAUNCH_RETRY_S = 60.0
+#: After this many consecutive failed launches a phase is no longer launched
+#: automatically; the owner is told once. ``swarm launch <phase>`` or ``swarm
+#: resume`` puts it back. It stops holding the finish open, and the finish
+#: message names it.
+LAUNCH_GIVE_UP = 3
+
+
 class Supervisor:
-    """Long-running owner of the FIFO, ``state.json`` and the master lifecycle."""
+    """Long-running owner of the FIFO, ``state.json``, the launcher and the master."""
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -70,6 +93,20 @@ class Supervisor:
         # window in `launch` can never be mistaken for a dead worker.
         self._suspect: dict[int, str] = {}
         self._pinged: dict[str, float] = {}  # ping key -> last send (cooldown)
+        # The launcher. A launch blocks for up to two READY_TIMEOUTs (worktree
+        # build + claude boot + one retry), so each runs on its own thread and
+        # reports back through the FIFO as `launched <phase> <outcome>`; the loop
+        # never waits on one. `_launching` is the double-launch guard: a phase is
+        # in it from the moment it is picked until its thread has settled the
+        # state, so no second pick can race the first to `claim_slot`.
+        self._launch_lock = threading.Lock()
+        self._launching: set[str] = set()
+        # phase -> (consecutive failed launches, time of the last one)
+        self._launch_fails: dict[str, tuple[int, float]] = {}
+        self._retried: set[str] = set()  # back-off expiries already acted on
+        # True while the init master's bootstrap pass runs: the worker command it
+        # patches has to be committed before the first worktree branches off main.
+        self._bootstrapping = False
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -136,6 +173,7 @@ class Supervisor:
                 self._dispatch("park-deadlines", self._check_park_deadlines)
                 self._dispatch("operator-queue", self._check_operator_queue)
                 self._dispatch("watchdog", self._watchdog_tick)
+                self._dispatch("launch-retry", self._retry_backed_off)
                 if self._fifo_fd not in ready:
                     continue
                 try:
@@ -245,6 +283,11 @@ class Supervisor:
             self._on_waiting(parts[1] if len(parts) > 1 else "?")
         elif verb == "resumed":
             self._on_resumed(parts[1] if len(parts) > 1 else "?")
+        elif verb == "launched":
+            self._on_launched(
+                parts[1] if len(parts) > 1 else "?",
+                parts[2] if len(parts) > 2 else launch_mod.FAILED,
+            )
         elif verb == "bootstrap":
             self._on_bootstrap()
         elif verb == "resume":
@@ -262,10 +305,22 @@ class Supervisor:
 
     # -- rule 0 (bootstrap): first master, once ---------------------------
     def _on_bootstrap(self) -> None:
+        """Run the init master's one pass, then launch.
+
+        The init pass patches and commits the worker command file; launching
+        before that commit would branch every first-batch worktree off a main
+        that lacks it. So the first launch waits for its ``master-idle`` — or,
+        if no master could be started, happens now. A master that hangs cannot
+        hold launching for longer than one watchdog interval."""
         if self.master.is_alive():
             self.log.line("BOOTSTRAP-IGNORED master-alive")
             return
-        self._spawn_master("init")
+        if self._spawn_master("init"):
+            self._bootstrapping = True
+            return
+        self.log.line("BOOTSTRAP-NO-MASTER launching without the init pass")
+        self._fill_slots("bootstrap (no init master)")
+        self._finish_if_settled()
 
     # -- resume: fill free slots after a pause ----------------------------
     def _write_config_snapshot(self) -> None:
@@ -340,10 +395,14 @@ class Supervisor:
         # work: growing the pool yields no drops and no retirements, so gating on
         # those meant `max_workers 2 -> 4` reloaded cleanly and added no slots.
         grew = applied.max_workers != prior_workers
+        new_slots: list[int] = []
         if grew or shifts:
             with state_mod.transaction(self.cfg) as s2:
                 if grew:
                     added, retiring = s2.resize(applied.max_workers)
+                    new_slots = [
+                        s.id for s in s2.slots if not s.pane_id and not s.retiring
+                    ]
                     # resize only MARKS the surplus; reaping drops the ones that
                     # are free right now. A retiring slot that is still BUSY keeps
                     # its record and its pane and drains normally -- deleting it
@@ -358,6 +417,8 @@ class Supervisor:
                 for phase, deadline in shifts.items():
                     if phase in s2.waiting:
                         s2.waiting[phase] = deadline
+        if new_slots and self.cfg.driver == "tmux":
+            self._add_slot_panes(new_slots)
         for slot_id in drop_ids:
             self.log.line(f"RELOAD-SLOT-DROPPED {slot_id}")
         for slot_id in retire_ids:
@@ -367,19 +428,52 @@ class Supervisor:
         self.log.line("RELOAD " + (" ".join(changed) or "no-change"))
         self._write_config_snapshot()
         if not st.paused and not st.finished:
-            self._relaunch(None, "config reloaded")
+            self._fill_slots("config reloaded")
+
+    def _add_slot_panes(self, slot_ids: list[int]) -> None:
+        """Create and record the tmux panes of slots a live grow just added.
+
+        A slot tmux would not give a pane is marked ``retiring`` (and, being
+        free, reaped at once): ``claim_slot`` takes the *first* free slot, so a
+        paneless one left in the pool would fail every launch that reached it."""
+        with state_mod.transaction(self.cfg) as st:
+            windows = dict(st.windows)
+            layout = st.layout or self.cfg.tmux_layout
+        panes, windows, failed = session_mod.add_slot_panes(
+            self.cfg, windows, slot_ids, layout
+        )
+        with state_mod.transaction(self.cfg) as st:
+            st.windows.update(windows)
+            for sid, pane in panes.items():
+                slot = st.slot_by_id(sid)
+                if slot is not None:
+                    slot.pane_id = pane
+            for sid in failed:
+                slot = st.slot_by_id(sid)
+                if slot is not None and not slot.busy:
+                    slot.retiring = True
+            if failed:
+                st.reap_retired()
+        self.log.line(f"RELOAD-PANES added={panes} failed={failed}")
+        if failed:
+            self._ping(
+                "reload-panes",
+                f"swarm: {self.cfg.slug} reload could not create a pane for slot(s)"
+                f" {failed}; running with {len(panes)} of {len(slot_ids)} new slot(s)",
+                cooldown=0.0,
+            )
 
     def _on_resume(self) -> None:
+        """Fill free slots after a pause, a ``swarm free`` or a ``swarm retry``.
+
+        Also the owner's way to hand a given-up phase back to the launcher: a
+        resume is a person saying "try again", so the failure counts reset."""
         self.log.line("EVENT resume")
-        if not self.master.is_alive():
-            self._spawn_master("step")
-        else:
-            # A live-but-idle master launched nothing while paused; re-drive it
-            # (symmetric with the `done` inject path) so it fills free slots now
-            # instead of idling straight into a premature finish.
-            self.master.inject(
-                "resumed -- run `swarm context` and launch what is ready"
-            )
+        with self._launch_lock:
+            self._launch_fails.clear()
+            self._retried.clear()
+        self._fill_slots("resumed")
+        self._finish_if_settled()
 
     # -- rule 1: done -----------------------------------------------------
     def _on_done(self, phase: str, status: str) -> None:
@@ -617,9 +711,10 @@ class Supervisor:
         """Seconds until the earliest scheduled deadline, or ``None`` when nothing
         is scheduled (``select`` then blocks indefinitely — no busy-poll).
 
-        Two kinds of deadline, both timestamps: a park deadline a ``waiting``
-        worker armed, and whatever the operator queue next wants looking at — a
-        backed-off item becoming eligible, or a lease running out. The queue
+        Three kinds of deadline, all timestamps: a park deadline a ``waiting``
+        worker armed, whatever the operator queue next wants looking at — a
+        backed-off item becoming eligible, or a lease running out — and a failed
+        launch's retry back-off running out. The queue
         belongs here for exactly the reason ``run_after`` is a timestamp rather
         than a flag: a supervisor that only wakes on input sits straight past it,
         and with ``watchdog_s = 0`` there is no other wake at all. A deadline
@@ -629,6 +724,17 @@ class Supervisor:
         queued = opqueue.next_deadline(self.cfg)
         if queued is not None:
             stamps.append(queued)
+        # A failed launch's back-off expiring. Only future ones: an expired one
+        # is acted on by the wake that reaches it (``_retry_backed_off``), and a
+        # past stamp here would clamp the timeout to 0 and spin the loop.
+        now = time.time()
+        with self._launch_lock:
+            stamps.extend(
+                last + LAUNCH_RETRY_S
+                for p, (n, last) in self._launch_fails.items()
+                if 0 < n < LAUNCH_GIVE_UP and p not in self._retried
+                and last + LAUNCH_RETRY_S > now
+            )
         if not stamps:
             return None
         return max(0.0, min(stamps) - time.time())
@@ -669,11 +775,12 @@ class Supervisor:
         supervisor and it only ever asserts what the event path would have done:
 
         * a busy slot whose pane is gone -> free it, roll back its branches, ping;
-        * idle, unpaused, unblocked, with a free slot and ready phases -> re-nudge
-          the master (the accepted lost-injection race, now recoverable);
-        * settled with nothing left to do -> finish (rule 3), because the
-          ``master-idle`` that would normally notice was already refused while a
-          since-reaped worker still held its slot, and none will arrive again;
+        * idle, unpaused, unblocked, with a free slot and ready phases -> run the
+          launcher again, past a hung init master and a launch-retry backoff
+          (only a phase given up on after :data:`LAUNCH_GIVE_UP` failures stays
+          out — that one is the owner's);
+        * settled with nothing left to do -> finish (rule 3): a since-reaped
+          worker never sends the ``done`` whose handling would have noticed;
         * ``finished`` with phases still ready -> tell the owner they were dropped;
         * a repo owing a push -> retry it, at most every
           :data:`pushowed.TICK_RETRY_S` (the owner may have fixed its check or
@@ -701,10 +808,14 @@ class Supervisor:
             pushowed.retry(self.cfg, self.log, min_gap=pushowed.TICK_RETRY_S)
         if idle < self.watchdog_s:
             return  # something moved recently -- leave a live swarm alone
-        ready = master_mod.build_context(self.cfg, st)["ready"]
+        ready = [
+            p
+            for p in master_mod.build_context(self.cfg, st)["ready"]
+            if not self._given_up(p)
+        ]
         if not ready:
             self._check_operator_queue()  # opportunistic: a genuinely quiet swarm
-            self._finish_if_settled(st)
+            self._finish_if_settled(st, tag="WATCHDOG-FINISH")
             return
         if st.finished:
             self._ping(
@@ -716,28 +827,44 @@ class Supervisor:
         if st.paused or st.integ_blocked is not None or not st.free_slots():
             return
         self.log.line(f"WATCHDOG-RELAUNCH idle={idle:.0f}s ready={ready}")
-        self._touch()  # the nudge counts as movement; don't re-fire next sweep
-        self._relaunch(None, f"watchdog: idle {idle:.0f}s with ready phases")
+        self._touch()  # the relaunch counts as movement; don't re-fire next sweep
+        self._fill_slots(f"watchdog: idle {idle:.0f}s with ready phases", force=True)
 
-    def _finish_if_settled(self, st: state_mod.State) -> None:
-        """Apply rule 3 when no ``master-idle`` can ever arrive to apply it.
+    def _finish_if_settled(
+        self, st: state_mod.State | None = None, tag: str = "FINISH"
+    ) -> None:
+        """Finish the run (rule 3) iff there is nothing left that could move it.
 
-        The finish check runs only on ``master-idle``, and that event is
-        single-shot: the last one was refused because a worker still held a slot,
-        and once that worker is reaped (it never sent ``done``) nothing re-triggers
-        it. The run is then complete but never *finishes* — no telegram, ``finished``
-        left false. Same guards as :meth:`_on_master_idle`, so this can only fire on
-        a run that is genuinely settled."""
+        Called after every event that could have been the last one — a ``done``,
+        a launch settling, the init master idling, an operator session ending, a
+        resume, a watchdog sweep. It holds while anything is still owed: a busy,
+        waiting or parked phase, a launch in flight, an integration queued or
+        held, a push origin does not have yet, an operator hand-off, a live
+        master mid-pass — or a ready phase, because the launcher owns that one
+        (a phase given up on after :data:`LAUNCH_GIVE_UP` failed launches does
+        not hold it; the finish message names it instead)."""
+        if st is None:
+            st = state_mod.read(self.cfg)
         if st.finished or st.paused or st.pending():
             return
         if st.integ_queue or st.integ_blocked is not None or self.master.is_alive():
             return
+        with self._launch_lock:
+            inflight = sorted(self._launching)
+        if inflight:
+            return
+        ctx = master_mod.build_context(self.cfg, st)
+        if any(not self._given_up(p) for p in ctx["ready"]):
+            return
+        if st.push_owed:
+            self.log.line(f"{tag}-HELD push-owed={sorted(st.push_owed)}")
+            return
         owed = self._operator_blocking()
         if owed:
-            self.log.line(f"WATCHDOG-FINISH-HELD operator={owed}")
+            self.log.line(f"{tag}-HELD operator={owed}")
             return
-        self.log.line("WATCHDOG-FINISH settled")
-        self._on_master_idle()
+        self.log.line(f"{tag} settled")
+        self._finish_run(ctx)
 
     def _reap_dead_panes(self, st: state_mod.State) -> list[str]:
         """Free every busy slot whose worker pane has vanished. Returns the phases.
@@ -811,7 +938,7 @@ class Supervisor:
         breaking the live waiter out to ``wait:<phase>`` (so ``break-pane`` never
         sees a single-pane window and renames in place), re-tidy the survivors, and
         tag the replacement with the slot. Then ``st.park`` frees the slot record —
-        keeping its now-replacement ``pane_id`` — and ``_relaunch`` fills it with
+        keeping its now-replacement ``pane_id`` — and ``_fill_slots`` fills it with
         the next ready phase (the parked phase is excluded from ``ready``)."""
         with state_mod.transaction(self.cfg) as st:
             slot = next((s for s in st.slots if s.busy and s.phase == phase), None)
@@ -853,9 +980,9 @@ class Supervisor:
         if paused:
             self.log.line("PARK-PAUSED holding — no launch")
             return
-        self._relaunch(sid, f"{phase} parked")
+        self._fill_slots(f"{phase} parked (slot {sid} free)")
 
-    # -- rule 1 core (pure-injection): free slot + spawn/inject -----------
+    # -- rule 1 core: free the slot, launch what is ready -----------------
     def _advance_done(self, phase: str, status: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             already = phase in st.done
@@ -864,7 +991,7 @@ class Supervisor:
             if already and freed is None and not was_parked:
                 # Duplicate `swarm done` for an already-completed phase (its slot
                 # was already freed/reused, and it isn't parked). True no-op: DON'T
-                # overwrite the recorded status and don't spuriously spawn/inject.
+                # overwrite the recorded status and don't spuriously launch.
                 self.log.line(f"DONE-DUPLICATE {phase} ignored")
                 return
             st.mark_done(phase, status)
@@ -886,53 +1013,157 @@ class Supervisor:
         # main. A session opened any earlier acts on a phantom.
         operator_mod.on_finished(self.cfg, phase, self.log)
         if paused:
-            # Paused: the slot is freed but we launch nothing and hold — no
-            # master spawn/inject, so in-flight workers drain without advancing.
+            # Paused: the slot is freed but we launch nothing and hold, so
+            # in-flight workers drain without advancing.
             self.log.line("DONE-PAUSED holding — no launch")
             return
-        self._relaunch(freed_id, f"worker {phase} done")
+        self._fill_slots(f"worker {phase} done (slot {freed_id} free)")
+        self._finish_if_settled()
 
-    def _relaunch(self, freed_id: int | None, reason: str) -> None:
-        """Fill a just-freed slot: spawn a master if none is alive, else nudge the
-        live one to launch what is ready. Shared by :meth:`_advance_done` (a worker
-        finished) and :meth:`_park` (a waiting worker vacated its slot)."""
-        if not self.master.is_alive():
-            self._spawn_master("step")
-        else:
-            where = f", slot {freed_id} free" if freed_id is not None else ""
-            self.master.inject(
-                f"{reason}{where} -- run `swarm context` and launch what is ready"
+    # -- the launcher: ledger order, no model in the loop -----------------
+    def _given_up(self, phase: str) -> bool:
+        with self._launch_lock:
+            return self._launch_fails.get(phase, (0, 0.0))[0] >= LAUNCH_GIVE_UP
+
+    def _backing_off(self, phase: str, now: float) -> bool:
+        """Is ``phase`` waiting out :data:`LAUNCH_RETRY_S` after a failed launch?
+        Caller holds ``_launch_lock``."""
+        fails, last = self._launch_fails.get(phase, (0, 0.0))
+        return fails > 0 and now - last < LAUNCH_RETRY_S
+
+    def _fill_slots(self, reason: str, *, force: bool = False) -> list[str]:
+        """Launch the ledger's ready phases into the free slots; return the picks.
+
+        The same set ``swarm context`` reports as ``launchable`` — ``ready`` in
+        ledger order, capped at the free slots — minus phases already launching
+        (the double-launch guard) and phases backing off after a failed launch.
+        Free slots still awaiting a launch thread's claim are counted as taken.
+        ``force`` (the watchdog) skips the back-off and the bootstrap hold.
+
+        Each pick runs :func:`launch.launch_outcome` on its own thread; this
+        returns at once. A racing ``swarm launch`` by hand is harmless: whichever
+        claims second is refused by :meth:`state.State.claim_slot`."""
+        st = state_mod.read(self.cfg)
+        if st.paused or st.finished:
+            return []
+        if self._bootstrapping and not force:
+            if self.master.is_alive():
+                self.log.line(f"LAUNCH-HELD bootstrap ({reason})")
+                return []
+            self._bootstrapping = False  # the init master died without idling
+        ctx = master_mod.build_context(self.cfg, st)
+        busy = set(ctx["busy_slots"].values())
+        now = time.time()
+        with self._launch_lock:
+            budget = len(ctx["free_slots"]) - sum(
+                1 for p in self._launching if p not in busy
             )
+            picks: list[str] = []
+            for phase in ctx["ready"]:
+                if len(picks) >= budget:
+                    break
+                if phase in self._launching:
+                    continue
+                fails = self._launch_fails.get(phase, (0, 0.0))[0]
+                if fails >= LAUNCH_GIVE_UP or (not force and self._backing_off(phase, now)):
+                    continue
+                picks.append(phase)
+            self._launching.update(picks)
+        if picks:
+            self.log.line(f"LAUNCH-READY {' '.join(picks)} ({reason})")
+        for phase in picks:
+            self._start_launch(phase)
+        return picks
 
-    # -- rule 2 + 3: master-idle, then maybe finish -----------------------
+    def _start_launch(self, phase: str) -> None:
+        """Run one launch off the loop thread (daemon: never holds up shutdown;
+        an interrupted launch leaves a claimed slot that ``swarm up`` rebuilds)."""
+        threading.Thread(
+            target=self._launch_worker, args=(phase,), name=f"launch:{phase}", daemon=True
+        ).start()
+
+    def _launch_worker(self, phase: str) -> None:
+        """Thread body: launch, settle the guard, report through the FIFO."""
+        cfg = self.cfg
+        try:
+            outcome = launch_mod.launch_outcome(cfg, phase, self.log, quiet=True)
+        except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
+            self.log.line(f"LAUNCH-ERROR {phase} {exc!r}")
+            outcome = launch_mod.FAILED
+            with state_mod.transaction(cfg) as st:
+                st.free_slot_for(phase)  # don't strand the claim nothing will run
+        with self._launch_lock:
+            self._launching.discard(phase)
+            if outcome == launch_mod.FAILED:
+                fails = self._launch_fails.get(phase, (0, 0.0))[0] + 1
+                self._launch_fails[phase] = (fails, time.time())
+                self._retried.discard(phase)  # a fresh back-off to wait out
+            elif outcome == launch_mod.LAUNCHED:
+                self._launch_fails.pop(phase, None)
+        launch_mod._poke_fifo(cfg, f"launched {phase} {outcome}\n")
+
+    def _on_launched(self, phase: str, outcome: str) -> None:
+        """A launch thread settled. Tell the owner once if the phase has now
+        failed often enough to be given up on, then re-check the finish — a
+        launch that failed may have been the last thing the run was waiting on.
+        A failure deliberately does NOT refill the slot at once: it would hand
+        the same broken cause the next phase. The back-off, the next event or
+        the watchdog does."""
+        with self._launch_lock:
+            fails = self._launch_fails.get(phase, (0, 0.0))[0]
+        self.log.line(f"EVENT launched {phase} {outcome} fails={fails}")
+        if outcome == launch_mod.FAILED and fails == LAUNCH_GIVE_UP:
+            self._ping(
+                f"launch-gave-up:{phase}",
+                f"swarm: {phase} failed to launch {fails} times in a row -- no longer"
+                f" launched automatically. Fix the cause, then `swarm launch {phase}`"
+                " (or `swarm resume` to retry every given-up phase).",
+                cooldown=0.0,
+            )
+        self._finish_if_settled()
+
+    def _retry_backed_off(self) -> None:
+        """Relaunch once a failed launch's back-off has run out. Runs on every
+        wake; :meth:`_next_timeout` makes sure there *is* a wake at that moment
+        even with the watchdog off."""
+        now = time.time()
+        with self._launch_lock:
+            due = [
+                p
+                for p, (n, last) in self._launch_fails.items()
+                if 0 < n < LAUNCH_GIVE_UP and last + LAUNCH_RETRY_S <= now
+                and p not in self._retried
+            ]
+            self._retried.update(due)
+        if due:
+            self._fill_slots(f"retry after a failed launch: {' '.join(due)}")
+
+    # -- rule 2 + 3: master-idle, then launch / maybe finish --------------
     def _on_master_idle(self) -> None:
+        """The init master finished its pass: kill it, then launch (the first
+        batch waits for this) and re-check the finish."""
         self.master.kill()
+        self._bootstrapping = False
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False
+            paused = st.paused
             pending = st.pending()
             integrating = bool(st.integ_queue) or st.integ_blocked is not None
-            paused = st.paused
-            ctx = master_mod.build_context(self.cfg, st)
-        owed = self._operator_blocking()
         self.log.line(
-            f"EVENT master-idle pending={pending} integrating={integrating}"
-            f" paused={paused} operator={owed} ready={ctx['ready']}"
+            f"EVENT master-idle pending={pending} integrating={integrating} paused={paused}"
         )
         if paused:
-            # Held: do not finish while paused — resume decides what happens next.
+            # Held: do not launch or finish while paused — resume decides.
             self.log.line("MASTER-IDLE paused — holding")
             return
-        if pending or integrating or owed:
-            # A busy/waiting/parked worker, a pending/blocked integration or an
-            # undrained operator hand-off keeps the supervisor alive: it must stay
-            # in select() so `resolved`/`done`/`operator-done` (and a firing park
-            # deadline) can still complete rather than finishing mid-flight.
-            return
-        if ctx["ready"]:
-            # Accepted lost-injection race: nothing is running or integrating yet
-            # a phase is ready. We finish anyway (no backstop); the owner is told
-            # (log + telegram) and can `swarm launch` it manually.
-            self.log.line(f"FINISH-WITH-READY leftover={ctx['ready']}")
+        self._fill_slots("init master idle")
+        self._finish_if_settled()
+
+    def _finish_run(self, ctx: dict) -> None:
+        """Announce a settled run, counting only what actually built."""
+        leftover = [p for p in ctx["ready"] if self._given_up(p)]
+        if leftover:
+            self.log.line(f"FINISH-WITH-READY leftover={leftover}")
         done = ctx["done"]
         built = sum(1 for s in done.values() if s in gitq.DONE_INTEGRATE)
         skipped = sum(1 for s in done.values() if s == "skip")
@@ -941,21 +1172,22 @@ class Supervisor:
         )
         self._finish(
             built,
-            ctx["ready"],
+            leftover,
             skipped=skipped,
             failed=failed,
             operator=operator_mod.outstanding(self.cfg),
         )
 
-    def _spawn_master(self, kind: str) -> None:
+    def _spawn_master(self, kind: str) -> bool:
         with state_mod.transaction(self.cfg) as st:
             master_pane = st.master_pane
         if not self.master.spawn(kind, master_pane):
             # No master is running; do not claim one is alive (else the next
             # `done` would inject into nothing). Owner sees spawn-master-failed.
-            return
+            return False
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = True
+        return True
 
     # -- finish -----------------------------------------------------------
     def _finish(
@@ -983,10 +1215,10 @@ class Supervisor:
         if failed:
             msg += f", {len(failed)} failed: {', '.join(failed[:8])}"
         if leftover:
-            # Accepted-race surfacing: a nudge was lost, so these ready phases
-            # were never launched. Tell the owner how to resume (no auto-retry).
+            # Ready phases the launcher gave up on after repeated failed
+            # launches: real work nothing will retry. Say how to resume.
             msg += (
-                f"; {len(leftover)} ready but unlaunched (lost nudge): "
+                f"; {len(leftover)} ready but unlaunched (launch kept failing): "
                 f"{', '.join(leftover)} -- run `swarm launch <phase>` to resume"
             )
         if operator:

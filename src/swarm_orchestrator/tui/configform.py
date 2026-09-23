@@ -341,7 +341,7 @@ CHOICE = "choice"
 FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scalar
 
 # The order the tables are drawn in — the order the file itself uses.
-SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "git",
+SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "git",
                  "operator", "overseer", "tui", "(cli)")
 
 
@@ -424,6 +424,11 @@ FIELDS: tuple[Setting, ...] = (
             "concurrent heavy `swarm build` runs; rest queue", minimum=0),
     Setting("build_jobs", INT, "CARGO_BUILD_JOBS handed to each build", minimum=0),
     Setting("build_cache", BOOL, "share one cargo target cache across worktrees"),
+    # -- [gc] -------------------------------------------------------------
+    Setting("gc_auto", BOOL, "prune build output / dead mirrors automatically"),
+    Setting("gc_every_s", INT, "auto gc at most this often (s); 0 = idle-only", minimum=0),
+    Setting("gc_idle_s", INT, "also once per idle stretch this long (s); 0 = off", minimum=0),
+    Setting("gc_keep_days", INT, "keep build output used within N days", minimum=1),
     # -- [git] ------------------------------------------------------------
     Setting("git_isolation", CHOICE,
             "worktree = own mirror + queue; none = in place",

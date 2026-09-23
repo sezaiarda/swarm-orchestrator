@@ -32,8 +32,11 @@ _FORWARD_ENV = (
 )
 
 
-def _resolver_env(cfg: Config) -> dict[str, str]:
-    env = {"SWARM_STATE_DIR": str(cfg.state_dir)}
+def _resolver_env(cfg: Config, phase: str) -> dict[str, str]:
+    """The run's variables plus ``TMPDIR``. The resolver finishes ``phase``'s
+    integration, so it shares that phase's temp dir, which goes when the merge
+    lands (``gitq._rmtree_mirror``) — no second lifetime to track."""
+    env = {"SWARM_STATE_DIR": str(cfg.state_dir), **launch_mod.tmp_env(cfg, phase)}
     for key in _FORWARD_ENV:
         val = os.environ.get(key)
         if val is not None:
@@ -68,7 +71,7 @@ def spawn(cfg: Config, phase: str, repo: Path, log: Log) -> str | None:
     # that no-ops on resolve-* windows would leave every merge conflict silently
     # landing on the owner to fix by hand.
     cmd = cfg.resolver_cmd or f"cd {repo} && exec claude"
-    tmux.respawn_pane(pane, cmd, env=_resolver_env(cfg))
+    tmux.respawn_pane(pane, cmd, env=_resolver_env(cfg, phase))
     if not cfg.resolver_cmd:
         _deliver(cfg, pane, phase, repo, log)
     log.line(f"RESOLVER-SPAWN {phase} repo={repo.name} win={win}")

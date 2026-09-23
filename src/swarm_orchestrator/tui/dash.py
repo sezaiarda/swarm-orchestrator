@@ -50,6 +50,12 @@ from .data import (
 )
 
 
+#: Per-slot ``git rev-list`` + ``git status`` run at most this often. The probe
+#: ticks every 10 s, and on WSL two git walks per busy worktree per tick was a
+#: steady CPU and filesystem-lock cost for a commit count that moves per minutes.
+REPO_PROBE_S = 30.0
+
+
 class Dash:
     """Everything on disk, re-read only when it changed.
 
@@ -72,13 +78,13 @@ class Dash:
         self.graph: dict = {}
         self.agents: list = []
         self.panes: dict = {}
-        self.contexts: dict[str, float] = {}  # pane_id -> context percent
         self.tails: dict[str, str] = {}  # pane_id -> last visible lines
         self.repos: dict[str, probes.RepoStat] = {}  # phase -> commits/dirty
         self.meters: dict[str, Meter] = {}  # phase -> its worker's status-line figures
         self.limits: Limits | None = None
         self._mtimes: dict[str, float] = {}
         self._graph_mtime: float | None = None
+        self._repos_at = 0.0  # when the git half of the probe last ran
 
     @property
     def notifications_path(self) -> Path:
@@ -170,25 +176,33 @@ class Dash:
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes
         )
 
-    def probe(self) -> None:
-        """Refresh the live probes. Runs on a worker thread — never on the UI."""
+    def probe(self, now: float | None = None) -> None:
+        """Refresh the live probes. Runs on a worker thread — never on the UI.
+
+        ``capture-pane`` stays: the pane's last lines are the activity preview.
+        Context no longer comes from scraping it — the meters tap writes the
+        exact figure (:meth:`context_pct`). The git half runs every
+        :data:`REPO_PROBE_S`, or at once for a busy phase it has not seen yet.
+        """
+        now = time.time() if now is None else now
         self.agents = probes.agents()
         self.panes = probes.panes()
         main = getattr(self.cfg, "git_main_branch", "master")
-        contexts: dict[str, float] = {}
-        tails: dict[str, str] = {}
-        repos: dict[str, probes.RepoStat] = {}
-        for slot in self.snapshot.slots:
-            if not slot.busy or not slot.pane_id:
-                continue
-            text = probes.capture(slot.pane_id)
-            tails[slot.pane_id] = text
-            parsed = probes.parse_context(text)
-            if parsed:
-                contexts[slot.pane_id] = parsed[2]
-            if slot.phase and slot.worktree:
-                repos[slot.phase] = probes.repo_stat(slot.worktree, main)
-        self.contexts, self.tails, self.repos = contexts, tails, repos
+        busy = [s for s in self.snapshot.slots if s.busy and s.pane_id]
+        self.tails = {s.pane_id: probes.capture(s.pane_id) for s in busy}
+        wanted = {s.phase: s.worktree for s in busy if s.phase and s.worktree}
+        if now - self._repos_at >= REPO_PROBE_S or set(wanted) - set(self.repos):
+            self._repos_at = now
+            self.repos = {p: probes.repo_stat(wt, main) for p, wt in wanted.items()}
+        else:
+            self.repos = {p: r for p, r in self.repos.items() if p in wanted}
+
+    def context_pct(self, phase: str | None) -> float | None:
+        """A worker's context use in percent, from its meters file."""
+        m = self.meters.get(phase or "")
+        if m is None or not m.context_tokens or not m.context_window:
+            return None
+        return min(100.0, 100.0 * m.context_tokens / m.context_window)
 
     def slot_rows(self) -> list[tuple]:
         """Slots joined with live probe data: ``(slot, live_status, waiting_for, ctx)``."""
@@ -211,7 +225,7 @@ class Dash:
                     slot,
                     status,
                     agent.waiting_for if agent else "",
-                    self.contexts.get(slot.pane_id or ""),
+                    self.context_pct(slot.phase),
                     pane,
                 )
             )

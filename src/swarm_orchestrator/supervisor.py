@@ -48,6 +48,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import doctor as doctor_mod
+from . import gc as gc_mod
 from . import gitq
 from . import launch as launch_mod
 from . import master as master_mod
@@ -80,6 +81,10 @@ LAUNCH_GIVE_UP = 3
 #: The cheap doctor checks behind the Overseer's ``doctor`` trigger are probed at
 #: most this often: they parse the ledger, and a FAIL that matters lasts minutes.
 DOCTOR_PROBE_S = 600.0
+#: An automatic gc that found a build slot taken (or a compiler running) tries
+#: again this much later — soon enough to catch the gap between two builds,
+#: rarely enough that probing the gate costs nothing.
+GC_RETRY_S = 600.0
 
 
 class Supervisor:
@@ -126,6 +131,20 @@ class Supervisor:
         self._overseer_live: str | None = None
         self._overseer_reasons: list[overseer_mod.Reason] = []
         self._doctor_probed = 0.0
+        # Automatic gc (see `_gc_tick`). Its clock resumes from the last recorded
+        # run; a run that never had one anchors at start-up, so a fresh `swarm up`
+        # does not open with a full sweep while its first workers are booting —
+        # the idle trigger reaches an idle swarm soon enough.
+        self._gc_thread: threading.Thread | None = None
+        record = gc_mod.read_record(cfg) or {}
+        self._gc_last = float(record.get("ts") or time.time())
+        self._gc_retry_at = 0.0
+        # Idle episodes: counted up each time the slots all go quiet, so the run
+        # a thread finishes is credited to the episode it *started* in, never to
+        # a later one it raced.
+        self._gc_idle_since: float | None = None
+        self._gc_episode = 0
+        self._gc_episode_done = -1
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -195,6 +214,7 @@ class Supervisor:
                 self._dispatch("watchdog", self._watchdog_tick)
                 self._dispatch("launch-retry", self._retry_backed_off)
                 self._dispatch("overseer", self._overseer_tick)
+                self._dispatch("gc", self._gc_tick)
                 if self._fifo_fd not in ready:
                     continue
                 try:
@@ -724,6 +744,8 @@ class Supervisor:
         open the next job, and re-check the finish the job was holding open."""
         released = operator_mod.release(self.cfg, self.log)
         self.log.line(f"EVENT operator-done {phase} released={released}")
+        # The pane is idle again, so nothing is using the job's TMPDIR any more.
+        launch_mod.drop_session_tmp(self.cfg, operator_mod.mirror_name(phase))
         mirror = operator_mod.integration_for(self.cfg, phase)
         if mirror is not None:
             with state_mod.transaction(self.cfg) as st:
@@ -810,6 +832,7 @@ class Supervisor:
         deadline = state_mod.read(self.cfg).overseer_deadline
         if self._overseer_live is not None and deadline > now:
             stamps.append(deadline)
+        stamps.extend(t for t in self._gc_deadlines() if t > now)
         if not stamps:
             return None
         return max(0.0, min(stamps) - time.time())
@@ -996,6 +1019,7 @@ class Supervisor:
                 gitq.discard(self.cfg, phase, self.log)
             except gitq.GitError as exc:
                 self.log.line(f"WATCHDOG-DISCARD-ERROR {phase} {exc}")
+        launch_mod.drop_session_tmp(self.cfg, phase)  # the pane is dead
 
     def _check_park_deadlines(self) -> None:
         """Park every waiting phase whose deadline has fired. Runs on every wake;
@@ -1081,6 +1105,10 @@ class Supervisor:
             paused = st.paused
         if wait_win and self.cfg.driver == "tmux":
             tmux.kill_window(wait_win)  # close the parked worker's own window
+        # The session's TMPDIR ends with its phase. Under worktree isolation the
+        # merge/discard already took it with the mirror; this is the in-place
+        # (`isolation = none`) path, and an idempotent no-op otherwise.
+        launch_mod.drop_session_tmp(self.cfg, phase)
         self.log.line(
             f"EVENT done {phase} {status} freed_slot={freed_id} parked={was_parked}"
         )
@@ -1412,7 +1440,7 @@ class Supervisor:
                 launch_mod.pretrust_dir(cwd, self.log)
             record = ovrecord.md_path(cfg, pid)
             env = {
-                **launch_mod.session_env(cfg, cwd),
+                **launch_mod.session_env(cfg, cwd, tmp=ovrecord.mirror_name(pid)),
                 "SWARM_MASTER_KIND": master_mod.OVERSEER,
                 "SWARM_OVERSEER_PASS": pid,
                 "SWARM_OVERSEER_DIGEST": str(digest),
@@ -1484,6 +1512,7 @@ class Supervisor:
         now = time.time()
         self._overseer_live = None
         self.master.kill()
+        launch_mod.drop_session_tmp(self.cfg, ovrecord.mirror_name(pid))  # session gone
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False
             st.overseer_pass = None
@@ -1518,6 +1547,95 @@ class Supervisor:
             self.log.line(f"FINISH-HELD overseer pending={[r.key for r in pending]}")
             return True
         return False
+
+    # -- automatic gc ---------------------------------------------------------
+    def _gc_running(self) -> bool:
+        return self._gc_thread is not None and self._gc_thread.is_alive()
+
+    def _gc_tick(self) -> None:
+        """Start a background gc when one is due; never blocks the loop.
+
+        Due at most once per ``[gc].every_s``, and once per idle episode (no busy
+        slot) longer than ``[gc].idle_s``. :func:`gc.auto` itself refuses to run
+        while any build slot is held or a compiler is running under a tree it
+        would touch; that comes back as ``busy`` and is retried after
+        :data:`GC_RETRY_S` rather than queueing builds behind it."""
+        cfg = self.cfg
+        if not cfg.gc_auto:
+            return
+        # Idle tracking first, even while a gc runs: a busy spell during one must
+        # still end its episode, or the next idle stretch would go unserved.
+        now = time.time()
+        if state_mod.read(cfg).busy_slots():
+            self._gc_idle_since = None
+        elif self._gc_idle_since is None:
+            self._gc_idle_since = now
+            self._gc_episode += 1
+        if self._gc_running():
+            return
+        reason = self._gc_due(now)
+        if reason is None or now < self._gc_retry_at:
+            return
+        episode = self._gc_episode if self._gc_idle_since is not None else None
+        self._gc_thread = threading.Thread(
+            target=self._gc_run, args=(reason, episode), name="gc-auto", daemon=True
+        )
+        self._gc_thread.start()
+
+    def _gc_due(self, now: float) -> str | None:
+        cfg = self.cfg
+        if cfg.gc_every_s and now - self._gc_last >= cfg.gc_every_s:
+            return "interval"
+        if (
+            cfg.gc_idle_s
+            and self._gc_idle_since is not None
+            and self._gc_episode_done != self._gc_episode
+            and now - self._gc_idle_since >= cfg.gc_idle_s
+        ):
+            return "idle"
+        return None
+
+    def _gc_deadlines(self) -> list[float]:
+        """When the gc scheduler next wants a wake (the caller drops past ones)."""
+        cfg = self.cfg
+        if not cfg.gc_auto or self._gc_running():
+            return []
+        out = [self._gc_retry_at]
+        if cfg.gc_every_s:
+            out.append(self._gc_last + cfg.gc_every_s)
+        if cfg.gc_idle_s and self._gc_idle_since is not None and (
+            self._gc_episode_done != self._gc_episode
+        ):
+            out.append(self._gc_idle_since + cfg.gc_idle_s)
+        return out
+
+    def _gc_run(self, reason: str, episode: int | None) -> None:
+        """Thread body: one automatic gc, logged and recorded."""
+        try:
+            result = gc_mod.auto(self.cfg, self.log)
+        except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
+            result = gc_mod.AutoResult(gc_mod.AUTO_FAILED, detail=repr(exc))
+        now = time.time()
+        if result.outcome == gc_mod.AUTO_BUSY:
+            self._gc_retry_at = now + GC_RETRY_S
+            self.log.line(f"GC-AUTO-SKIP {reason} busy: {result.detail}")
+            return
+        # A failure waits out the same interval as a success: retrying a broken
+        # gc every few minutes would walk every large build target for nothing.
+        self._gc_last = now
+        if episode is not None:
+            self._gc_episode_done = episode
+        gc_mod.write_record(self.cfg, result, reason, now)
+        if result.outcome == gc_mod.AUTO_FAILED:
+            self.log.line(f"GC-AUTO-FAILED {reason} {result.detail}")
+            return
+        kinds = " ".join(
+            f"{k}={gc_mod.human(v)}" for k, v in sorted(result.by_kind.items()) if v
+        )
+        self.log.line(
+            f"GC-AUTO {reason} freed={result.freed} ({gc_mod.human(result.freed)})"
+            f" {kinds or '-'} errors={result.errors}"
+        )
 
     # -- finish -----------------------------------------------------------
     def _finish(

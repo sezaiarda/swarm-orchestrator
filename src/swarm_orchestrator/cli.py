@@ -1398,8 +1398,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "gc", help="reclaim disk (dry run unless --yes)",
         description="Prints a plan and deletes nothing unless --yes is given.")
     gcp.add_argument("--yes", action="store_true", help="actually delete")
-    gcp.add_argument("--older-than", type=int, default=1, dest="sweep_days",
-                     help="only sweep build artifacts older than N days (default 1)")
+    gcp.add_argument("--older-than", type=int, default=None, dest="sweep_days",
+                     help="sweep build artifacts unused for N days"
+                          " (default [gc].keep_days, 3)")
     gcp.add_argument("--aggressive", action="store_true",
                      help="also incremental/, release/, doc/")
     gcp.add_argument("--transcripts", action="store_true",
@@ -1412,7 +1413,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="proceed even if the build gate cannot be proven idle")
     gcp.add_argument("-v", "--verbose", action="store_true")
     gcp.set_defaults(func=lambda cfg, a: cmd_gc(cfg, gc_mod.GcOptions(
-        yes=a.yes, sweep_days=a.sweep_days, aggressive=a.aggressive,
+        yes=a.yes,
+        sweep_days=cfg.gc_keep_days if a.sweep_days is None else a.sweep_days,
+        aggressive=a.aggressive,
         transcripts=a.transcripts, branches=a.branches, canonical=a.canonical,
         force=a.force), a.verbose))
 

@@ -16,6 +16,7 @@ import errno
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -137,10 +138,42 @@ def _worker_env(
 ) -> dict[str, str]:
     """Env vars a worker (and its ``swarm done``) need to find this run: the
     phase marker plus everything :func:`session_env` gives any session."""
-    return {cfg.env_marker: phase, **session_env(cfg, worktree)}
+    return {cfg.env_marker: phase, **session_env(cfg, worktree, tmp=phase)}
 
 
-def session_env(cfg: Config, worktree: Path | None = None) -> dict[str, str]:
+def tmp_env(cfg: Config, name: str) -> dict[str, str]:
+    """``TMPDIR``/``TMP``/``TEMP`` pointing at the session's own on-disk temp dir.
+
+    ``/tmp`` can be a small tmpfs, i.e. RAM: a worker's ad-hoc
+    ``CARGO_TARGET_DIR=/tmp/...`` plus Claude Code's own diff cache under
+    ``/tmp/claude-<uid>`` can fill it and push the host into swap. Claude Code,
+    cargo, rustc and Python all honour ``TMPDIR``; ``TMP``/``TEMP`` are set to the
+    same place so nothing that reads one of those instead lands back in RAM. One
+    dir per session so it can be dropped whole when the session's work lands
+    (:func:`drop_session_tmp`, ``gitq._rmtree_mirror``) and so ``swarm gc`` can
+    tell whose it is. Empty when the directory cannot be made: a session on the
+    default ``/tmp`` beats a session that does not start.
+    """
+    path = cfg.session_tmp(name)
+    if path is None:
+        return {}
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return {}
+    return {"TMPDIR": str(path), "TMP": str(path), "TEMP": str(path)}
+
+
+def drop_session_tmp(cfg: Config, name: str) -> None:
+    """Remove a finished session's temp dir (best effort, idempotent)."""
+    path = cfg.session_tmp(name)
+    if path is not None:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def session_env(
+    cfg: Config, worktree: Path | None = None, tmp: str | None = None
+) -> dict[str, str]:
     """Env vars any swarm session needs so ``swarm`` inside it finds this run.
 
     Shared by workers and the operator. The phase marker is deliberately NOT
@@ -159,8 +192,13 @@ def session_env(cfg: Config, worktree: Path | None = None) -> dict[str, str]:
     so no phase can ever reuse another's incremental cache — it only fills the disk
     with dead weight. An explicit ``CARGO_INCREMENTAL`` in the environment still
     wins (``setdefault`` over the inherited value).
+
+    ``tmp`` names the session's own ``TMPDIR`` (:func:`tmp_env`): the phase for a
+    worker, the mirror name for the operator and the Overseer.
     """
     env = {"SWARM_STATE_DIR": str(cfg.state_dir)}
+    if tmp:
+        env.update(tmp_env(cfg, tmp))
     env.setdefault("CARGO_INCREMENTAL", os.environ.get("CARGO_INCREMENTAL") or "0")
     for key in ("SWARM_SLUG", "SWARM_TG_SINK", "SWARM_BIN", "SWARM_DRIVER"):
         val = os.environ.get(key)

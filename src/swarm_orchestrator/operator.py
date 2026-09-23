@@ -82,7 +82,7 @@ def mirror_name(job: str) -> str:
 
 
 def _operator_env(cfg: Config, job: str, mirror: Path | None = None) -> dict[str, str]:
-    env = launch_mod.session_env(cfg, mirror)
+    env = launch_mod.session_env(cfg, mirror, tmp=mirror_name(job))
     for key in _FORWARD_ENV:
         val = os.environ.get(key)
         if val is not None:

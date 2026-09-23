@@ -16,6 +16,12 @@ pane looks exactly as it did and the pane-scraped meter keeps working.
 
 Contract, as for ``scripts/stop-hook.py``: never fail, never block for long,
 stdlib only (it starts a Python per render).
+
+It runs several times a second per streaming worker, so it does as little as it
+can: the meter file is rewritten only when a figure moved, and at most once per
+:data:`MIN_WRITE_S` (the dashboard polls every two seconds anyway); the owner's
+status-line command is resolved once, at launch, and handed over on the command
+line instead of re-parsing ``~/.claude/settings.json`` on every render.
 """
 
 from __future__ import annotations
@@ -32,6 +38,11 @@ METERS_DIR = "meters"
 LIMITS_LOG = "limits.jsonl"
 #: The owner's status line gets this long before the tap prints its own line.
 CHAIN_TIMEOUT_S = 2.0
+#: At most one meter write per phase this often; a skipped render is picked up
+#: by the next one. The dashboard's own tick is two seconds.
+MIN_WRITE_S = 2.0
+#: Fields that change on every render without meaning anything moved.
+_VOLATILE = ("ts", "duration_ms")
 
 
 def _num(value) -> float | None:
@@ -60,7 +71,13 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 def record(payload: dict, state_dir: str | Path, phase: str, now: float | None = None) -> dict:
-    """Fold one status-line payload into the phase's meter file; return the meter."""
+    """Fold one status-line payload into the phase's meter file; return the meter.
+
+    The write is skipped when nothing but the clock moved, and when the file was
+    written under :data:`MIN_WRITE_S` ago — except for a new session, whose first
+    meter must replace the previous session's at once. The weekly-limit sample
+    rides with the write, so a skipped render cannot append it twice.
+    """
     now = time.time() if now is None else now
     root = Path(state_dir) / METERS_DIR
     root.mkdir(parents=True, exist_ok=True)
@@ -92,6 +109,13 @@ def record(payload: dict, state_dir: str | Path, phase: str, now: float | None =
         "five_hour": _window(limits, "five_hour"),
         "seven_day": _window(limits, "seven_day"),
     }
+    moved = any(meter[k] != prev.get(k) for k in meter if k not in _VOLATILE)
+    # The previous write's own timestamp, not the file's mtime: one clock, and
+    # no extra stat per render.
+    last = _num(prev.get("ts"))
+    fresh = last is not None and 0.0 <= now - last < MIN_WRITE_S
+    if not moved or (same and fresh):
+        return meter
     _write_json(path, meter)
 
     week = meter["seven_day"]
@@ -103,6 +127,9 @@ def record(payload: dict, state_dir: str | Path, phase: str, now: float | None =
         finally:
             os.close(fd)
     return meter
+
+
+_OWNER_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 
 def _owner_command(settings_path: Path) -> str:
@@ -121,11 +148,18 @@ def _fallback(meter: dict) -> str:
     return f"{meter['phase']} · {tokens / 1000:.0f}k/{window / 1_000_000:.1f}M"
 
 
-def settings_with_tap(worker_settings: str, state_dir: str | Path, phase: str) -> str:
+def settings_with_tap(
+    worker_settings: str,
+    state_dir: str | Path,
+    phase: str,
+    owner_settings: Path | None = None,
+) -> str:
     """``worker_settings`` with this tap as the status line, unless one is set.
 
     Only a JSON object is touched: an empty string means "pass no settings" and a
-    project that configured its own ``statusLine`` keeps it.
+    project that configured its own ``statusLine`` keeps it. The owner's own
+    status-line command is looked up here, once, and passed as the tap's third
+    argument ("" = none), so a render never has to read ``settings.json``.
     """
     try:
         data = json.loads(worker_settings) if worker_settings else None
@@ -133,8 +167,9 @@ def settings_with_tap(worker_settings: str, state_dir: str | Path, phase: str) -
         return worker_settings
     if not isinstance(data, dict) or "statusLine" in data:
         return worker_settings
+    owner = _owner_command(owner_settings or _OWNER_SETTINGS)
     cmd = " ".join(shlex.quote(p) for p in (
-        sys.executable, "-m", "swarm_orchestrator.meters", str(state_dir), phase))
+        sys.executable, "-m", "swarm_orchestrator.meters", str(state_dir), phase, owner))
     data["statusLine"] = {"type": "command", "command": cmd, "padding": 0}
     return json.dumps(data, separators=(",", ":"))
 
@@ -146,12 +181,14 @@ def main(argv: list[str]) -> int:
     except ValueError:
         payload = {}
     meter = {"phase": argv[1] if len(argv) > 1 else "?"}
-    if isinstance(payload, dict) and len(argv) == 2:
+    if isinstance(payload, dict) and len(argv) in (2, 3):
         try:
             meter = record(payload, argv[0], argv[1])
         except OSError:
             pass
-    owner = _owner_command(Path.home() / ".claude" / "settings.json")
+    # Third argument: the owner's command, resolved at launch. A tap launched by
+    # an older build passes only two, and keeps reading settings.json as before.
+    owner = argv[2] if len(argv) == 3 else _owner_command(_OWNER_SETTINGS)
     if owner:
         try:
             # shell=True on purpose: this is the owner's own statusLine command

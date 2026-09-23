@@ -36,11 +36,29 @@ the gate is disabled (``max_concurrent = 0``) it proves nothing, so GC refuses
 without ``--force``. As a backstop for a bare ``cargo`` that never went through
 ``swarm build``, :func:`live_builders` also looks for live cargo/rustc processes
 with a cwd inside the worktree root.
+
+**Symlinked caches are the normal case, not an exception.** In a live run every
+``cache/target/<repo>`` is a symlink into the canonical repo's own ``target/``
+(so a worktree build and an owner build share one cache), and at first
+every planner here skipped symlinks — ``swarm gc`` pruned nothing while the
+canonical targets grew without bound. A cache entry is now resolved to its real
+directory and deduplicated by that path, so a target several links share is
+swept once. Resolution is the ONLY way GC reaches into the canonical project: a
+resolved root there must be a directory literally named ``target``, and nothing
+outside such a root is touched without ``--canonical``.
+
+**It also runs by itself** (:func:`auto`, from the supervisor): at most once per
+``[gc].every_s`` and once per long idle stretch, only when every build slot can
+be taken *without waiting*, and never with the opt-in tiers (``--aggressive``,
+``--transcripts``, ``--branches``). What it removes is dead by construction:
+build output unused for ``[gc].keep_days``, ``incremental/`` (workers run
+``CARGO_INCREMENTAL=0``), mirrors and ``tmp/`` dirs no live session owns.
 """
 
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import shutil
@@ -52,6 +70,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import gitq
+from . import operator as operator_mod
+from . import ovrecord
 from . import state as state_mod
 from .config import Config
 from .state import State
@@ -69,6 +89,16 @@ AGGRESSIVE_SUBDIRS = ("debug/incremental", "release", "doc", "semver-checks")
 # Directories whose deletion in isolation breaks the next build rather than
 # merely slowing it: cargo reads these to decide what NOT to rebuild.
 NEVER_DELETE_NAMES = (".fingerprint",)
+
+# Profiles whose `incremental/` is dead weight: every swarm session builds with
+# CARGO_INCREMENTAL=0, so nothing reads it again — it only ages until swept.
+INCREMENTAL_PROFILES = ("debug", "release")
+
+#: A ``/tmp`` leftover smaller than this is not worth a line in the report.
+TMP_REPORT_MIN_BYTES = 256 << 20
+
+#: The supervisor's record of its last automatic gc (read by doctor).
+AUTO_RECORD = "gc-auto.json"
 
 _SIZE_RE = re.compile(r"([\d.]+)\s*(B|[KMGT]iB)")
 _UNITS = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40}
@@ -90,6 +120,10 @@ class GcOptions:
     canonical: bool = False  # allow touching anything under the project dir
     force: bool = False  # proceed despite a disabled gate / live builders
     gate_timeout_s: float = 300.0
+    # Ask cargo-sweep for a dry-run estimate at plan time. The automatic gc skips
+    # it: that is a second full walk of every target just to print a number the
+    # applied run measures anyway.
+    estimate: bool = True
 
 
 @dataclass
@@ -98,7 +132,7 @@ class Target:
 
     kind: str
     label: str
-    op: str  # rmtree | sweep | branch | prune
+    op: str  # rmtree | sweep | branch | prune | discard
     detail: str
     path: str | None = None
     repo: str | None = None
@@ -135,6 +169,8 @@ class GcPlan:
     targets: list[Target] = field(default_factory=list)
     protected: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+    # Things worth the owner's eye that GC will never delete itself.
+    notes: list[str] = field(default_factory=list)
     applied: bool = False
 
     @property
@@ -154,6 +190,7 @@ class GcPlan:
             "targets": [t.to_dict() for t in self.targets],
             "protected": self.protected,
             "blockers": self.blockers,
+            "notes": self.notes,
             "total_bytes": self.total_bytes,
             "reclaimed_bytes": self.reclaimed_bytes,
         }
@@ -172,7 +209,7 @@ def plan_gc(cfg: Config, opts: GcOptions, st: State | None = None) -> GcPlan:
         st = state_mod.read(cfg)
     plan = GcPlan(cfg=cfg, opts=opts)
     plan.blockers = _blockers(cfg, opts)
-    live = _live_phases(st)
+    live = _live_names(cfg, st)
 
     # Tiers must not overlap, or the total is a fiction. An orphan cache goes
     # whole, so its sub-profiles must not be proposed again underneath it; and
@@ -180,15 +217,24 @@ def plan_gc(cfg: Config, opts: GcOptions, st: State | None = None) -> GcPlan:
     # a cache it covers is left out of the sweep entirely (the note below says to
     # re-run --sweep afterwards for what is left in the live `debug/` profile).
     orphans = _plan_orphan_caches(plan, cfg, live)
+    # An orphan cache goes whole (above), so it is never also swept or pruned.
+    gone = {o.resolve() for o in orphans}
+    roots = {r: n for r, n in cache_roots(cfg).items() if r not in gone}
     swept_by_aggressive: set[Path] = set()
     if opts.aggressive:
-        swept_by_aggressive = _plan_aggressive(plan, cfg, orphans)
+        swept_by_aggressive = _plan_aggressive(plan, roots)
+    # Incremental goes before the sweep in the target list, so the sweep's
+    # before/after measures what is left once it is gone.
+    incremental = _plan_incremental(plan, roots, swept_by_aggressive)
     if opts.sweep_days is not None:
-        _plan_sweep(plan, cfg, opts.sweep_days, orphans, swept_by_aggressive)
+        _plan_sweep(plan, roots, opts, swept_by_aggressive, incremental)
     if opts.transcripts:
         _plan_transcripts(plan, cfg)
     if opts.branches:
         _plan_branches(plan, cfg, live)
+    _plan_mirrors(plan, cfg, st, live)
+    _plan_tmp(plan, cfg, live)
+    _report_tmp(plan)
 
     _note_protected(plan, cfg, live)
     return plan
@@ -211,6 +257,26 @@ def _blockers(cfg: Config, opts: GcOptions) -> list[str]:
             f" {'; '.join(builders[:3])}"
         )
     return out
+
+
+def _live_names(cfg: Config, st: State) -> set[str]:
+    """Every name (phase, ``op-<job>``, ``ovs-<pass>``) whose mirror or ``tmp/``
+    dir a live session may be using, or that the swarm still means to land.
+
+    Beyond :func:`_live_phases`: the operator job holding the lease, every
+    operator mirror :func:`operator.mirror_plan` keeps or will integrate, and the
+    Overseer pass running now.
+    """
+    names = _live_phases(st)
+    if st.operator_phase:
+        names |= {st.operator_phase, operator_mod.mirror_name(st.operator_phase)}
+    try:
+        names |= set(operator_mod.mirror_plan(cfg))
+    except (OSError, ValueError):
+        pass
+    if st.overseer_pass:
+        names.add(ovrecord.mirror_name(st.overseer_pass))
+    return names
 
 
 def _live_phases(st: State) -> set[str]:
@@ -267,10 +333,84 @@ def _plan_orphan_caches(plan: GcPlan, cfg: Config, live: set[str]) -> set[Path]:
     return orphans
 
 
+def cache_roots(cfg: Config) -> dict[Path, list[str]]:
+    """Real target directories behind ``cache/target/*``, each with the cache
+    entry names that reach it.
+
+    A symlinked entry is resolved and deduplicated by real path, so a target that
+    several entries share is planned — and swept — exactly once. A resolved root
+    inside the canonical project is accepted only when it is a directory named
+    ``target`` below the project root: that is what :func:`gitq._link_target_cache`
+    creates, and it is the guarantee that a mis-pointed link can never aim GC at
+    source. A dangling link, or one resolving to a non-directory, is skipped.
+    """
+    roots: dict[Path, list[str]] = {}
+    base = cfg.build_cache_dir
+    if not base.is_dir():
+        return roots
+    project = cfg.project_dir.resolve()
+    for entry in sorted(base.iterdir()):
+        try:
+            real = entry.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not real.is_dir():
+            continue
+        if entry.is_symlink() and real.is_relative_to(project):
+            if real.name != "target" or real.parent == real or real == project:
+                continue
+        roots.setdefault(real, []).append(entry.name)
+    return roots
+
+
+def _root_label(names: list[str]) -> str:
+    return f"cache/target/{'+'.join(names)}"
+
+
+def _plan_incremental(
+    plan: GcPlan, roots: dict[Path, list[str]], skip: set[Path]
+) -> dict[Path, int]:
+    """``<profile>/incremental`` in every real target: always dead weight here.
+
+    Every swarm session builds with ``CARGO_INCREMENTAL=0`` (see
+    :func:`launch.session_env`), so nothing reads these again; any already on
+    disk predates that setting or came from an owner build. A root
+    ``--aggressive`` already empties is skipped, so nothing is counted twice.
+    Returns the bytes planned per root, which the sweep subtracts.
+    """
+    planned: dict[Path, int] = {}
+    for root, names in roots.items():
+        if root in skip:
+            continue
+        for profile in INCREMENTAL_PROFILES:
+            path = root / profile / "incremental"
+            if not path.is_dir() or path.is_symlink():
+                continue
+            size = du(path)
+            planned[root] = planned.get(root, 0) + size
+            plan.targets.append(
+                Target(
+                    kind="incremental",
+                    label=f"{_root_label(names)}/{profile}/incremental",
+                    op="rmtree",
+                    detail="incremental state; every session builds with CARGO_INCREMENTAL=0",
+                    path=str(path),
+                    repo="+".join(names),
+                    before=size,
+                    estimate=size,
+                )
+            )
+    return planned
+
+
 def _plan_sweep(
-    plan: GcPlan, cfg: Config, days: int, orphans: set[Path], aggressive: set[Path]
+    plan: GcPlan,
+    roots: dict[Path, list[str]],
+    opts: GcOptions,
+    aggressive: set[Path],
+    incremental: dict[Path, int],
 ) -> None:
-    """``cargo sweep --time <days>`` over every repo's shared target cache.
+    """``cargo sweep --time <days>`` over every real target directory, once each.
 
     ``cargo-sweep`` only understands a *cargo project* (it reads ``cargo
     metadata`` to find the target directory), and our caches are bare target
@@ -279,10 +419,14 @@ def _plan_sweep(
     exactly the shape a real worktree has, and the shape cargo-sweep was written
     against. The shim carries its own ``[workspace]`` table so ``cargo metadata``
     cannot wander into a surrounding workspace.
+
+    ``before`` excludes the incremental dirs planned ahead of it, because they
+    are gone by the time the sweep runs; the estimate is capped by the same
+    figure, since cargo-sweep's own count includes stale incremental files.
     """
-    root = cfg.build_cache_dir
+    days = int(opts.sweep_days or 0)
     binary = _cargo_sweep()
-    if not root.is_dir():
+    if not roots:
         return
     if binary is None:
         plan.blockers.append(
@@ -290,66 +434,170 @@ def _plan_sweep(
             " plan --sweep"
         )
         return
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir() or entry.is_symlink() or entry in orphans:
-            continue
-        if entry in aggressive:
+    for root, names in roots.items():
+        if root in aggressive:
             plan.protected.append(
-                f"{entry} — not swept: --aggressive already drops the profiles a"
+                f"{root} — not swept: --aggressive already drops the profiles a"
                 " sweep would prune; re-run with --sweep alone afterwards for"
                 " what is left in debug/"
             )
             continue
-        before = du(entry)
-        estimate = _sweep(binary, entry, days, dry_run=True)
+        before = max(0, du(root) - incremental.get(root, 0))
+        if before == 0:
+            continue  # an empty cache (a repo with no Rust built yet): nothing to sweep
+        estimate = _sweep(binary, root, days, dry_run=True) if opts.estimate else 0
         plan.targets.append(
             Target(
                 kind="cargo-sweep",
-                label=f"cache/target/{entry.name}",
+                label=_root_label(names),
                 op="sweep",
                 detail=f"drop build artefacts unused for >{days}d",
-                path=str(entry),
-                repo=entry.name,
+                path=str(root),
+                repo="+".join(names),
                 before=before,
-                estimate=max(0, estimate),
+                estimate=min(max(0, estimate), before),
                 extra={"days": days},
             )
         )
 
 
-def _plan_aggressive(plan: GcPlan, cfg: Config, skip: set[Path]) -> set[Path]:
-    """Whole rebuildable profiles under each repo cache (:data:`AGGRESSIVE_SUBDIRS`).
+def _plan_aggressive(plan: GcPlan, roots: dict[Path, list[str]]) -> set[Path]:
+    """Whole rebuildable profiles under each real target (:data:`AGGRESSIVE_SUBDIRS`).
 
     These cost a full cold rebuild of what they held, which is why they are behind
     a flag — but ``debug/incremental`` alone can reach tens of GiB in a long run, and
     nothing in a phase build reads ``release/``, ``doc/`` or ``semver-checks/``.
     """
     touched: set[Path] = set()
-    root = cfg.build_cache_dir
-    if not root.is_dir():
-        return touched
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir() or entry.is_symlink() or entry in skip:
-            continue
+    for root, names in roots.items():
         for sub in AGGRESSIVE_SUBDIRS:
-            path = entry / sub
+            path = root / sub
             if not path.is_dir() or path.is_symlink():
                 continue
             size = du(path)
-            touched.add(entry)
+            touched.add(root)
             plan.targets.append(
                 Target(
                     kind="aggressive",
-                    label=f"cache/target/{entry.name}/{sub}",
+                    label=f"{_root_label(names)}/{sub}",
                     op="rmtree",
                     detail="rebuildable build artefacts (cold rebuild next time)",
                     path=str(path),
-                    repo=entry.name,
+                    repo="+".join(names),
                     before=size,
                     estimate=size,
                 )
             )
     return touched
+
+
+def _plan_mirrors(plan: GcPlan, cfg: Config, st: State, live: set[str]) -> None:
+    """``wt/<name>`` mirrors no live phase, job or pass owns.
+
+    A mirror normally goes with its merge or discard; one is left behind when a
+    removal timed out (``gitq._gc`` never raises) or a run was killed. The rule
+    for which may go is exactly :func:`gitq.reconcile`'s, so GC never decides
+    anything ``swarm up`` would not: a name already in ``done`` is discarded, and
+    so is one with no completion sentinel (an interrupted build, an abandoned
+    job, a stale pass). A finished-but-unmerged phase is left for reconcile to
+    land. Removal goes through :func:`gitq.discard` — the same worktree-remove,
+    branch-delete and prune the integrator uses, with its generous timeout.
+    """
+    if not cfg.wt_dir.is_dir():
+        return
+    sentinels = gitq.sentinel_done(cfg)
+    for entry in sorted(cfg.wt_dir.iterdir()):
+        name = entry.name
+        if not entry.is_dir() or entry.is_symlink() or name in live:
+            continue
+        if name not in st.done and sentinels.get(name) in gitq.DONE_INTEGRATE:
+            plan.protected.append(
+                f"{entry} — {name} finished but is not merged yet; `swarm up` lands it"
+            )
+            continue
+        size = du(entry)
+        plan.targets.append(
+            Target(
+                kind="orphan-mirror",
+                label=f"wt/{name}",
+                op="discard",
+                detail="no live phase, job or pass owns this mirror",
+                path=str(entry),
+                before=size,
+                estimate=size,
+                extra={"name": name},
+            )
+        )
+
+
+def _plan_tmp(plan: GcPlan, cfg: Config, live: set[str]) -> None:
+    """``tmp/<name>`` session temp dirs whose session is over.
+
+    Each is normally dropped when its session's work lands; this catches the
+    ones a crash, a reaped pane or an in-place run left behind.
+    """
+    if not cfg.tmp_dir.is_dir():
+        return
+    for entry in sorted(cfg.tmp_dir.iterdir()):
+        if entry.is_symlink() or entry.name in live:
+            continue
+        size = du(entry) if entry.is_dir() else entry.lstat().st_blocks * 512
+        plan.targets.append(
+            Target(
+                kind="stale-tmp",
+                label=f"tmp/{entry.name}",
+                op="rmtree",
+                detail="TMPDIR of a session that is no longer running",
+                path=str(entry),
+                before=size,
+                estimate=size,
+            )
+        )
+
+
+def tmp_offenders(
+    root: Path = Path("/tmp"), min_bytes: int = TMP_REPORT_MIN_BYTES
+) -> list[tuple[Path, int, str]]:
+    """Big ``/tmp`` entries of ours that look swarm-made, largest first.
+
+    Report-only, for GC and doctor alike: ``/tmp`` is shared with the owner's own
+    sessions and tools, so nothing here is ever deleted automatically. "Looks
+    swarm-made" is deliberately narrow — a cargo target (``CACHEDIR.TAG``, which
+    cargo writes into every target dir, or a ``debug/`` profile), a GC sweep shim,
+    or Claude Code's per-user dir (every session's diff cache lands there when no
+    ``TMPDIR`` is set).
+    """
+    out: list[tuple[Path, int, str]] = []
+    uid = os.getuid()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return out
+    for entry in entries:
+        try:
+            info = entry.lstat()
+        except OSError:
+            continue
+        if info.st_uid != uid or not entry.is_dir() or entry.is_symlink():
+            continue
+        name = entry.name
+        if name == f"claude-{uid}":
+            why = "Claude Code's temp dir (bash output, edit diffs)"
+        elif name.startswith("swarm-"):
+            why = "a swarm helper's scratch dir"
+        elif (entry / "CACHEDIR.TAG").is_file() or (entry / "debug" / ".fingerprint").is_dir():
+            why = "a cargo target dir (CARGO_TARGET_DIR under /tmp)"
+        else:
+            continue
+        size = du(entry)
+        if size >= min_bytes:
+            out.append((entry, size, why))
+    return sorted(out, key=lambda t: t[1], reverse=True)
+
+
+def _report_tmp(plan: GcPlan) -> None:
+    for path, size, why in tmp_offenders():
+        plan.notes.append(f"{path} — {human(size)}, {why}; not removed (shared /tmp)")
 
 
 def _plan_transcripts(plan: GcPlan, cfg: Config) -> None:
@@ -455,6 +703,9 @@ def _note_protected(plan: GcPlan, cfg: Config, live: set[str]) -> None:
         wt = cfg.wt_dir / phase
         if wt.exists():
             plan.protected.append(f"{wt} — {phase} is in flight")
+        tmp = cfg.session_tmp(phase)
+        if tmp is not None and tmp.exists():
+            plan.protected.append(f"{tmp} — {phase}'s session TMPDIR")
     if not plan.opts.canonical:
         plan.protected.append(
             f"{cfg.project_dir} — the canonical workspace (pass --canonical)"
@@ -462,7 +713,14 @@ def _note_protected(plan: GcPlan, cfg: Config, live: set[str]) -> None:
 
 
 # -- applying -------------------------------------------------------------
-def apply(plan: GcPlan) -> GcPlan:
+class _NoLog:
+    """Stand-in for a :class:`~.logutil.Log` when ``swarm gc`` runs by hand."""
+
+    def line(self, text: str) -> None:
+        pass
+
+
+def apply(plan: GcPlan, log=None) -> GcPlan:
     """Execute the plan under the build gate. Refuses unless ``opts.yes``.
 
     Blockers are re-evaluated here, not trusted from plan time: a build can start
@@ -477,25 +735,33 @@ def apply(plan: GcPlan) -> GcPlan:
         raise GcRefused("; ".join(blockers))
 
     with build_gate(cfg, opts):
-        # Re-read INSIDE the gate: a phase can have started between planning and
-        # here, and its worktree/branch must then be off limits.
-        live = _live_phases(state_mod.read(cfg))
-        for target in plan.targets:
-            reason = _protected_reason(cfg, target, opts, live)
-            if reason is not None:
-                target.error = f"skipped: {reason}"
-                target.reclaimed = 0
-                continue
-            try:
-                _execute(cfg, target)
-            except (OSError, subprocess.SubprocessError, gitq.GitError) as exc:
-                target.error = str(exc)
-                target.reclaimed = 0
-    plan.applied = True
+        _apply_in_gate(plan, log)
     return plan
 
 
-def _execute(cfg: Config, target: Target) -> None:
+def _apply_in_gate(plan: GcPlan, log=None) -> None:
+    """The deleting half of :func:`apply`; the caller holds the build gate."""
+    cfg, opts = plan.cfg, plan.opts
+    log = log or _NoLog()
+    # Re-read INSIDE the gate: a phase can have started between planning and
+    # here, and its worktree/branch must then be off limits.
+    live = _live_names(cfg, state_mod.read(cfg))
+    roots = set(cache_roots(cfg))
+    for target in plan.targets:
+        reason = _protected_reason(cfg, target, opts, live, roots)
+        if reason is not None:
+            target.error = f"skipped: {reason}"
+            target.reclaimed = 0
+            continue
+        try:
+            _execute(cfg, target, log)
+        except (OSError, subprocess.SubprocessError, gitq.GitError) as exc:
+            target.error = str(exc)
+            target.reclaimed = 0
+    plan.applied = True
+
+
+def _execute(cfg: Config, target: Target, log=None) -> None:
     """Run one target's action and measure what it actually reclaimed."""
     if target.op == "rmtree":
         path = Path(target.path or "")
@@ -518,13 +784,22 @@ def _execute(cfg: Config, target: Target) -> None:
         with gitq.repo_lock(cfg, repo):
             gitq._git(repo, "worktree", "prune", check=False)
         target.after = 0
+    elif target.op == "discard":
+        # Worktrees, branches and the mirror dir, the way a failed phase is
+        # rolled back — never a bare rmtree, which would strand git metadata.
+        gitq.discard(cfg, str(target.extra["name"]), log or _NoLog())
+        target.after = du(Path(target.path or ""))
     else:  # pragma: no cover - the op set is closed
         raise OSError(f"unknown gc op {target.op!r}")
     target.reclaimed = max(0, target.before - (target.after or 0))
 
 
 def _protected_reason(
-    cfg: Config, target: Target, opts: GcOptions, live: set[str]
+    cfg: Config,
+    target: Target,
+    opts: GcOptions,
+    live: set[str],
+    roots: set[Path] | None = None,
 ) -> str | None:
     """The last line of defence, re-checked for every target at delete time.
 
@@ -537,6 +812,12 @@ def _protected_reason(
         if phase and phase in live:
             return f"{phase} started again and is in flight"
         return None
+    if target.op == "discard":
+        name = str(target.extra.get("name", ""))
+        if cfg.session_tmp(name) is None or target.path != str(cfg.wt_dir / name):
+            return "not a mirror under wt/"
+        if name in live:
+            return f"{name} is live again"
     if target.path is None:
         return None
     path = Path(target.path)
@@ -561,6 +842,7 @@ def _protected_reason(
         cfg.buildsem_dir,
         cfg.log_dir,
         cfg.wt_dir,
+        cfg.tmp_dir,
         cfg.build_cache_dir,
     }
     if path in protected_exact:
@@ -576,11 +858,107 @@ def _protected_reason(
         wt = cfg.wt_dir / phase
         if path == wt or _under(path, wt):
             return f"{phase} is in flight and its worker is inside {wt}"
+        tmp = cfg.session_tmp(phase)
+        if tmp is not None and (path == tmp or _under(path, tmp)):
+            return f"{phase} is live and {tmp} is its TMPDIR"
 
     if _under(path, cfg.project_dir) and not _under(path, cfg.state_dir):
-        if not opts.canonical:
+        # The one way in without --canonical: a real target dir the build cache
+        # links to *right now* (re-resolved at apply time, never trusted from the
+        # plan), and never the target dir itself — only what is inside it, or a
+        # sweep, which prunes files within it.
+        roots = cache_roots(cfg).keys() if roots is None else roots
+        in_cache = any(
+            (path == r and target.op == "sweep") or (path != r and _under(path, r))
+            for r in roots
+        )
+        if not opts.canonical and not in_cache:
             return "it is inside the canonical project (pass --canonical)"
     return None
+
+
+# -- the automatic run ----------------------------------------------------
+#: :func:`auto` outcomes. ``busy`` is the only one worth retrying soon.
+AUTO_DONE, AUTO_BUSY, AUTO_FAILED = "done", "busy", "failed"
+
+
+@dataclass
+class AutoResult:
+    """What one automatic gc did."""
+
+    outcome: str
+    freed: int = 0
+    by_kind: dict[str, int] = field(default_factory=dict)
+    errors: int = 0
+    detail: str = ""
+
+
+def auto(cfg: Config, log=None) -> AutoResult:
+    """One unattended gc: the dead-weight tiers only, never during a build.
+
+    The build gate is tried *without waiting* (``gate_timeout_s = 0``) and held
+    for the whole run, planning included — so the sizes it measures are the
+    sizes it deletes, and no build can start mid-sweep. A busy slot, or a live
+    cargo/rustc under a tree it would touch, is ``busy``: the caller retries
+    later instead of queueing builds behind it. The opt-in tiers are never used,
+    and neither is ``--canonical``; the canonical project is reached only through
+    the build-cache links (:func:`cache_roots`).
+    """
+    opts = GcOptions(
+        yes=True, sweep_days=cfg.gc_keep_days, gate_timeout_s=0.0, estimate=False
+    )
+    if cfg.build_max_concurrent < 1:
+        return AutoResult(AUTO_FAILED, detail="[build].max_concurrent is 0 — no gate to hold")
+    try:
+        with build_gate(cfg, opts):
+            busy = live_builders(cfg, opts)
+            if busy:
+                return AutoResult(AUTO_BUSY, detail=busy[0])
+            plan = plan_gc(cfg, opts)
+            _apply_in_gate(plan, log)
+    except GcRefused as exc:
+        return AutoResult(AUTO_BUSY, detail=str(exc))
+    kinds: dict[str, int] = {}
+    for t in plan.targets:
+        kinds[t.kind] = kinds.get(t.kind, 0) + (t.reclaimed or 0)
+    errors = [t for t in plan.targets if t.error]
+    return AutoResult(
+        AUTO_DONE,
+        freed=plan.reclaimed_bytes,
+        by_kind=kinds,
+        errors=len(errors),
+        detail=(errors[0].error or "") if errors else "",
+    )
+
+
+def write_record(cfg: Config, result: AutoResult, reason: str, now: float) -> None:
+    """Persist the last automatic run (doctor reads it; the scheduler resumes
+    its clock from it after a restart)."""
+    data = {
+        "ts": now,
+        "reason": reason,
+        "outcome": result.outcome,
+        "freed": result.freed,
+        "by_kind": result.by_kind,
+        "errors": result.errors,
+        "detail": result.detail,
+    }
+    path = cfg.state_dir / AUTO_RECORD
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def read_record(cfg: Config) -> dict | None:
+    """The last automatic run's record, or ``None`` if it never ran."""
+    try:
+        data = json.loads((cfg.state_dir / AUTO_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 # -- the build gate -------------------------------------------------------
@@ -638,10 +1016,15 @@ def live_builders(cfg: Config, opts: GcOptions | None = None) -> list[str]:
     for the compiler processes themselves and matches on their cwd. Best-effort by
     construction: a process we cannot read is skipped rather than assumed idle,
     which is why the gate — not this — is the real interlock.
+
+    A cache that resolves into a canonical repo's ``target/`` is written by the
+    owner's own builds there too, which no gate sees — so that repo is watched
+    as well whenever GC could sweep its target.
     """
     roots = [cfg.wt_dir]
     if opts is not None and opts.canonical:
         roots.append(cfg.project_dir)
+    roots.extend(r.parent for r in cache_roots(cfg) if not _under(r, cfg.state_dir))
     out: list[str] = []
     proc = Path("/proc")
     if not proc.is_dir():
@@ -888,6 +1271,12 @@ def render(plan: GcPlan, verbose: bool = False) -> str:
         label = "reclaimed" if plan.applied else "reclaimable"
         total = plan.reclaimed_bytes if plan.applied else plan.total_bytes
         out.append(f"total {label}: {human(total)}")
+
+    if plan.notes:
+        out.append("")
+        out.append(f"left for you ({len(plan.notes)}, report only):")
+        for item in plan.notes:
+            out.append(f"  {item}")
 
     if plan.protected and (verbose or not plan.applied):
         out.append("")

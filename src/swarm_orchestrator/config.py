@@ -93,6 +93,10 @@ class Config:
     overseer_owner_wait_s: int
     overseer_starve_s: int
     overseer_timeout_s: int
+    gc_auto: bool
+    gc_every_s: int
+    gc_idle_s: int
+    gc_keep_days: int
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -150,6 +154,22 @@ class Config:
         return self.state_dir / "operator"
 
     @property
+    def tmp_dir(self) -> Path:
+        """Per-session ``TMPDIR`` roots (``tmp/<phase|op-job|ovs-pass>``).
+
+        On disk, beside the run, because ``/tmp`` can be a RAM-backed
+        tmpfs: one worker's scratch cargo target there plus Claude Code's
+        own diff cache can fill it and push swap to the limit."""
+        return self.state_dir / "tmp"
+
+    def session_tmp(self, name: str) -> Path | None:
+        """``tmp/<name>`` for one session, or ``None`` for a name that could
+        escape :attr:`tmp_dir` (it is created and later ``rmtree``'d)."""
+        if not name or "/" in name or name in (".", ".."):
+            return None
+        return self.tmp_dir / name
+
+    @property
     def build_cache_dir(self) -> Path:
         """Shared, per-repo cargo ``target`` cache (symlinked into each worktree),
         so unchanged crates aren't recompiled from scratch in every worktree."""
@@ -192,6 +212,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     build = data.get("build", {})
     operator = data.get("operator", {})
     overseer = data.get("overseer", {})
+    gc = data.get("gc", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
     max_workers = int(swarm.get("max_workers", 4))
@@ -342,6 +363,16 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         overseer_timeout_s=_int_env(
             "SWARM_OVERSEER_TIMEOUT", overseer.get("timeout_s"), 2700, minimum=1
         ),
+        # Automatic `swarm gc` from the supervisor: nothing else ever prunes the
+        # build caches, which can grow very large. It runs at most
+        # once per `every_s` and once per idle episode longer than `idle_s`, only
+        # when it can take every build slot without waiting (never during a build).
+        gc_auto=_bool_env("SWARM_GC_AUTO", gc.get("auto", True)),
+        gc_every_s=_int_env("SWARM_GC_EVERY", gc.get("every_s"), 86400, minimum=0),
+        gc_idle_s=_int_env("SWARM_GC_IDLE", gc.get("idle_s"), 1800, minimum=0),
+        # Build output untouched this many days goes (`cargo sweep --time N`).
+        # Three days keeps every dependency a phase in the current campaign built.
+        gc_keep_days=_int_env("SWARM_GC_KEEP_DAYS", gc.get("keep_days"), 3, minimum=1),
     )
 
 

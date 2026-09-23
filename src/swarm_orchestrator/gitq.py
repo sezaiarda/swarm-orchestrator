@@ -281,8 +281,13 @@ def _gc(cfg: Config, repo: Path, phase: str, log: Log) -> None:
 
 def _rmtree_mirror(cfg: Config, phase: str) -> None:
     """Best-effort remove the phase's umbrella worktree directory shell (any
-    empty nesting dirs a component worktree left behind)."""
+    empty nesting dirs a component worktree left behind) and the session's
+    ``TMPDIR`` (``launch.tmp_env``) — both end when the mirror's work has landed
+    or been dropped, which is exactly when this runs (merged or discarded)."""
     shutil.rmtree(cfg.wt_dir / phase, ignore_errors=True)
+    tmp = cfg.session_tmp(phase)
+    if tmp is not None:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def discard(cfg: Config, phase: str, log: Log) -> None:

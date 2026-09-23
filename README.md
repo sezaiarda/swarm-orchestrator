@@ -144,6 +144,7 @@ The master never asks — it runs autonomously. Everything else runs unattended.
 | `swarm overseer-done "<summary>"` | the Overseer's sign-off — records the pass and frees the pane |
 | `swarm overseer-ask "<question>"` / `swarm overseer-resumed ["<answer>"]` | the Overseer waits on an owner-level call (pinged, timeout stretched) / carries on |
 | `swarm integrate <phase>` | manually integrate `swarm/<phase>` into main (worktree mode) |
+| `swarm gc [--yes] [--older-than N] [--aggressive] [--transcripts] [--branches]` | reclaim disk — a dry run unless `--yes`. Sweeps build output unused for `[gc].keep_days` from every real target the cache links to (once each), drops dead `incremental/` dirs, orphan `wt/` mirrors and stale `tmp/` dirs; reports big swarm-looking leftovers in `/tmp`. The supervisor runs it by itself (`[gc]`) |
 | `swarm finish` | ask the supervisor to stop now |
 
 `swarm bootstrap` and `swarm master-idle` are low-level FIFO pokes the tooling
@@ -258,6 +259,12 @@ max_concurrent = 2                  # most concurrent `swarm build` jobs; 0 disa
 jobs           = 6                  # CARGO_BUILD_JOBS cap per build (core fan-out)
 cache          = true               # shared per-repo cargo target cache across worktrees
 
+[gc]                                # the supervisor's automatic `swarm gc`
+auto      = true                    # daily + once per idle stretch; never during a build
+every_s   = 86400                   # at most this often (0 = idle trigger only)
+idle_s    = 1800                    # also when no slot has been busy this long (0 = off)
+keep_days = 3                       # build output used within N days survives the sweep
+
 [git]                               # omit the block for isolation = "none"
 isolation   = "worktree"
 main_branch = "master"
@@ -370,7 +377,9 @@ timeout_s      = 2700    # a pass past this is killed
 State lives outside the repo, under
 `~/.local/state/swarm-orchestrator/<project-slug>/` — `state.json`,
 `control.fifo`, `done/` (durable completion sentinels), `operator/` (the hand-off
-queue), `overseer/` (trigger memory, digests, pass records), `logs/`, and, in worktree mode, `wt/` (the per-phase mirrors) and `git/`
+queue), `overseer/` (trigger memory, digests, pass records), `logs/`, `tmp/<name>`
+(each session's `TMPDIR`/`TMP`/`TEMP` — on disk, because `/tmp` may be a RAM
+tmpfs; dropped when the session's work lands), and, in worktree mode, `wt/` (the per-phase mirrors) and `git/`
 (per-repo integration locks). The slug includes a hash of the full project path,
 so two projects that share a folder name never share state.
 

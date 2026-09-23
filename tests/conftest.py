@@ -154,6 +154,14 @@ def _overseer_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _gc_auto_off(monkeypatch):
+    """Automatic gc is on by default in a real project; in the suite it is off,
+    so no supervisor under test starts a gc thread walking /proc and the temp
+    tree. ``tests/test_gc.py`` turns it back on where it is the subject."""
+    monkeypatch.setenv("SWARM_GC_AUTO", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_inprocess_launch(request, monkeypatch):
     """An in-process :class:`Supervisor` records its launches instead of making them.
 

@@ -40,6 +40,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import gc as gc_mod
 from . import gitq
 from . import ledger as ledger_mod
 from . import opqueue
@@ -79,6 +80,9 @@ _DU_TIMEOUT_S = 20.0
 _GIT_TIMEOUT_S = 30.0
 _TMUX_TIMEOUT_S = 10.0
 _SAMPLE_NAME = ".doctor-disk.json"
+#: A tmpfs ``/tmp`` fuller than this is RAM the box does not have spare.
+_TMP_WARN_PCT = 80.0
+_TMP_ROOT = Path("/tmp")
 
 _SENTINEL_STATUSES = statuses.ALL
 
@@ -844,16 +848,42 @@ def _check_disk(cfg: Config) -> list[Check]:
     if size is None:
         disk = Check("disk.state", OK, f"{cfg.state_dir} size unknown (du timed out)")
     elif size >= _DISK_WARN_BYTES or (rate or 0) >= _GROWTH_WARN_BYTES_PER_H:
+        auto_ok, auto_note = _auto_gc(cfg)
         disk = Check(
             "disk.state",
             WARN,
-            f"state dir is {_human_bytes(size)}{growth}",
-            f"rm -rf {cfg.build_cache_dir}  # shared cargo target cache, rebuilt on demand",
+            f"state dir is {_human_bytes(size)}{growth}; {auto_note}",
+            f"swarm gc  # dry run: what {cfg.build_cache_dir} and dead mirrors would give back"
+            if auto_ok
+            else f"swarm gc --yes  # sweeps {cfg.build_cache_dir}, drops dead mirrors and tmp",
         )
     else:
         disk = Check("disk.state", OK, f"state dir is {_human_bytes(size)}{growth}")
 
-    return [disk, _check_incremental(cfg)]
+    return [disk, _check_incremental(cfg), _check_tmp()]
+
+
+def _auto_gc(cfg: Config, now: float | None = None) -> tuple[bool, str]:
+    """``(healthy, one-line status)`` of the supervisor's automatic gc.
+
+    Healthy means a manual ``swarm gc --yes`` would only do early what is about
+    to happen anyway: auto is on and its last run did not fail and is not
+    overdue (twice ``[gc].every_s``). Only when it is not do the disk checks
+    tell the owner to run it by hand.
+    """
+    if not cfg.gc_auto:
+        return False, "automatic gc is off ([gc].auto = false)"
+    now = time.time() if now is None else now
+    rec = gc_mod.read_record(cfg)
+    if rec is None:
+        return True, "automatic gc has not run yet (it runs when the swarm idles and daily)"
+    ts = float(rec.get("ts") or 0.0)
+    when = _human_age(now - ts)
+    if rec.get("outcome") == gc_mod.AUTO_FAILED:
+        return False, f"automatic gc FAILED {when} ago: {rec.get('detail') or '?'}"
+    if cfg.gc_every_s and now - ts > 2 * cfg.gc_every_s:
+        return False, f"automatic gc has not completed for {when}"
+    return True, f"automatic gc last ran {when} ago, freed {_human_bytes(int(rec.get('freed') or 0))}"
 
 
 def _check_incremental(cfg: Config) -> Check:
@@ -871,8 +901,9 @@ def _check_incremental(cfg: Config) -> Check:
         pass
     sizes = [s for s in (_dir_size(p) for p in incr_dirs) if s]
     on_disk = sum(sizes)
+    auto_ok, auto_note = _auto_gc(cfg)
     hint = (
-        f"rm -rf {cfg.build_cache_dir}/*/*/incremental  (and export CARGO_INCREMENTAL=0)"
+        "swarm gc --yes  # removes every incremental/ (and export CARGO_INCREMENTAL=0)"
         if on_disk
         else "export CARGO_INCREMENTAL=0 before `swarm up`"
     )
@@ -884,15 +915,67 @@ def _check_incremental(cfg: Config) -> Check:
             f"{_human_bytes(on_disk)} of incremental state on disk that no phase can reuse",
             hint,
         )
+    if on_disk and auto_ok:
+        # Dead weight with a scheduled removal is not something to act on.
+        return Check(
+            "disk.incremental",
+            OK,
+            f"{_human_bytes(on_disk)} of stale incremental state; the next"
+            f" automatic gc removes it ({auto_note})",
+        )
     if on_disk:
         return Check(
             "disk.incremental",
             WARN,
             f"{_human_bytes(on_disk)} of stale incremental state in the build cache "
-            "(workers now set CARGO_INCREMENTAL=0, so nothing will reuse it)",
+            f"(workers now set CARGO_INCREMENTAL=0, so nothing will reuse it); {auto_note}",
             hint,
         )
     return Check("disk.incremental", OK, "no cargo incremental dead weight")
+
+
+def _tmpfs(path: Path) -> bool:
+    """Whether ``path`` is its own tmpfs mount (i.e. RAM), per ``/proc/mounts``."""
+    try:
+        lines = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == str(path):
+            return parts[2] == "tmpfs"
+    return False
+
+
+def _check_tmp(root: Path = _TMP_ROOT) -> Check:
+    """A RAM-backed ``/tmp`` filling up, and the swarm-looking things filling it.
+
+    Where ``/tmp`` is a small tmpfs, a worker's scratch cargo target
+    there and Claude Code's own diff cache can fill it and push swap to the limit.
+    Sessions the swarm starts now get an on-disk ``TMPDIR``; this names whatever
+    still lands in RAM. Report-only — ``/tmp`` is shared with the owner's own
+    sessions, so the hint is a path to look at, never a command that deletes.
+    """
+    if not _tmpfs(root):
+        return Check("disk.tmp", OK, f"{root} is not a tmpfs")
+    try:
+        st = os.statvfs(root)
+    except OSError:
+        return Check("disk.tmp", OK, f"{root} usage unknown")
+    total = st.f_blocks * st.f_frsize
+    used = total - st.f_bfree * st.f_frsize
+    pct = 100.0 * used / total if total else 0.0
+    line = f"{root} (tmpfs, RAM) is {pct:.0f}% full ({_human_bytes(used)} of {_human_bytes(total)})"
+    if pct <= _TMP_WARN_PCT:
+        return Check("disk.tmp", OK, line)
+    top = gc_mod.tmp_offenders(root)[:3]
+    named = "; ".join(f"{p} {_human_bytes(n)} ({why})" for p, n, why in top)
+    return Check(
+        "disk.tmp",
+        WARN,
+        f"{line} — largest swarm-looking: {named}" if named else line,
+        f"du -sh {root}/* | sort -h | tail  # then remove what is yours",
+    )
 
 
 def _check_sentinels(cfg: Config, st: State) -> Check:

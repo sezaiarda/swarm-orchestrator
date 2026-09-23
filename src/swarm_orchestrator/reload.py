@@ -241,6 +241,15 @@ POLICY: dict[str, Policy] = {
         _p("overseer_timeout_s", "[overseer]", "timeout_s", NEXT, "SWARM_OVERSEER_TIMEOUT",
            "a pass's deadline is fixed when it starts; the next pass gets the new one",
            numeric=True),
+        _p("gc_auto", "[gc]", "auto", HOT, "SWARM_GC_AUTO",
+           "the supervisor's gc scheduler reads it on every wake; a gc already"
+           " running is left to finish"),
+        _p("gc_every_s", "[gc]", "every_s", HOT, "SWARM_GC_EVERY",
+           "the last-run clock is compared against it on every wake", numeric=True),
+        _p("gc_idle_s", "[gc]", "idle_s", HOT, "SWARM_GC_IDLE",
+           "the idle episode's age is compared against it on every wake", numeric=True),
+        _p("gc_keep_days", "[gc]", "keep_days", HOT, "SWARM_GC_KEEP_DAYS",
+           "read when the next gc builds its plan", numeric=True),
     )
 }
 

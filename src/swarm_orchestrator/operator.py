@@ -198,7 +198,23 @@ def _deliver(
     if not launch_mod.await_ready(cfg, pane, log):
         log.line(f"OPERATOR-READY-TIMEOUT {item.phase}")
         return False
-    if not tmux.send_submit(pane, brief(cfg, item, cwd)):
+    # The brief goes to a file and the pane gets one short line pointing at it.
+    # Typed straight in, a long brief (1-2 KB is normal for a hand-off) is folded
+    # by Claude Code into "[Pasted text #1]" and the Enter never lands, so the
+    # submit check fails every time: phases were
+    # abandoned after three attempts without a session ever seeing their brief.
+    brief_file = opqueue.item_path(cfg, item.phase).with_suffix(".brief.md")
+    try:
+        brief_file.parent.mkdir(parents=True, exist_ok=True)
+        brief_file.write_text(brief(cfg, item, cwd) + "\n", encoding="utf-8")
+    except OSError as exc:
+        log.line(f"OPERATOR-BRIEF-WRITE-FAILED {item.phase} {exc}")
+        return False
+    line = (
+        f"You are swarm operator job {item.phase}. Read your full brief in"
+        f" {brief_file} first, then do exactly what it says."
+    )
+    if not tmux.send_submit(pane, line):
         log.line(f"OPERATOR-SUBMIT-LOST {item.phase}")
         return False
     return True

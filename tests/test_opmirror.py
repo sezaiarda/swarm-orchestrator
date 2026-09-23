@@ -178,3 +178,24 @@ def test_under_isolation_none_the_job_runs_in_the_project(env, monkeypatch):
     assert opqueue.load(cfg, JOB).mirror == ""
     assert operator_mod.integration_for(cfg, JOB) is None
     assert "project itself" in operator_mod.brief(cfg, opqueue.load(cfg, JOB))
+
+
+def test_a_long_brief_goes_to_a_file_and_the_pane_gets_one_short_line(env, monkeypatch):
+    """A 1-2 KB brief typed into the pane is folded by Claude Code into
+    "[Pasted text #1]" and never submits; the job would be silently abandoned
+    -- so the pane must only ever get a short pointer."""
+    cfg, _project, _origin, log = env
+    long_note = "Roll the provider and verify it. " * 60  # ~2 KB, like a real hand-off
+    assert opqueue.add(cfg, JOB, status="operator", note=long_note) is not None
+    item = opqueue.load(cfg, JOB)
+    sent: list[str] = []
+    monkeypatch.setattr(operator_mod.launch_mod, "await_ready", lambda *a, **k: True)
+    monkeypatch.setattr(operator_mod.tmux, "send_submit", lambda pane, text, *a, **k: sent.append(text) or True)
+
+    assert operator_mod._deliver(cfg, "%1", item, log) is True
+
+    brief_file = opqueue.item_path(cfg, JOB).with_suffix(".brief.md")
+    assert brief_file.read_text(encoding="utf-8").strip() == operator_mod.brief(cfg, item)
+    assert len(sent) == 1 and len(sent[0]) < 300
+    assert str(brief_file) in sent[0]
+    assert opqueue.load(cfg, JOB) is not None  # the queue still reads only *.json

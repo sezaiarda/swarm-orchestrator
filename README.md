@@ -126,7 +126,8 @@ The master never asks — it runs autonomously. Everything else runs unattended.
 | `swarm down` | stop the supervisor and tear the session down; closes the run with its summary |
 | `swarm reset` | close the open run and start a fresh one — ETA and usage count from now; nothing restarts (`R` in the dashboard) |
 | `swarm usage [--json] [-n N]` | the open run's hours, average 5-hour and weekly %/h, 5-hour windows spanned, phases and $/h, then the last N runs (`<state>/history/runs/`, kept forever) |
-| `swarm status` | human-readable state dump — slots, `done`, `paused`, `waiting`/`parked`, the integration queue |
+| `swarm status` | human-readable state dump — slots, `done`, `paused`, `waiting`/`parked`, the integration queue, the web board's address |
+| `swarm web [--host H] [--port N]` | the read-only Kanban board for a phone or a browser on the LAN (`swarm up` starts it; see [The web board](#the-web-board-web)) |
 | `swarm context` | the JSON snapshot the master reasons over (`ready`, `launchable`, free slots, `waiting`, `parked`, ledger issues) |
 | `swarm pause` / `swarm resume` | hold new launches (in-flight finish) / resume filling free slots |
 | `swarm layout [name]` | re-arrange the live worker panes (`side-by-side`, `top-bottom`, `tiled`, `main-vertical`, `auto`, …); no argument prints the current one and every valid name |
@@ -373,6 +374,32 @@ owner_wait_s   = 3600    # a phase waiting on you this long triggers one
 starve_s       = 600     # idle slots with backlog this long triggers one
 timeout_s      = 2700    # a pass past this is killed
 ```
+
+### The web board (`[web]`)
+
+`swarm up` starts a read-only Kanban board in a `web` tmux window (the last one; under
+the headless driver, a detached process) and `swarm down` stops it. `swarm status` and
+`swarm doctor` print its LAN address. Every ledger row is on it — backlog, blocked rows
+with the root that holds them, what is building (slot, elapsed, context, the worker's
+last turn), merging, operator jobs, done, failed and owner-run — plus campaign
+swimlanes (what each campaign is, from its ledger heading or governing ADR, and its
+progress), an Activity view (Overseer passes, recent finishes) and a detail sheet per
+card (`#phase=<id>` deep links). Live over Server-Sent Events; phone-first.
+
+```toml
+[web]
+enabled = true        # start it at `swarm up`
+host    = "0.0.0.0"   # every interface: the LAN is the point
+port    = 8765
+```
+
+It is **open on the LAN with no token** (the owner's choice) and read-only: GET only, no
+path is ever mapped to a file, and every string it serves is redacted for anything
+shaped like a credential (`sk-…`, `ghp_…`, `Bearer …`, `key=`/`token=`/`secret=` values).
+Under WSL with mirrored networking a phone reaches it only once Windows lets the port in:
+`New-NetFirewallRule -DisplayName "swarm web" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow`
+(elevated PowerShell), plus the Hyper-V firewall
+(`Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow`) if it still does not answer.
 
 ## Runtime state
 

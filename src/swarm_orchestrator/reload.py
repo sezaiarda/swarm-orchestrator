@@ -124,6 +124,15 @@ POLICY: dict[str, Policy] = {
            "the dashboard pane is respawned once, by session.setup at `swarm up`;"
            " a live dash keeps the command it was started with"),
 
+        _p("web_enabled", "[web]", "enabled", RESTART, "SWARM_WEB",
+           "the board's window is created once, by `swarm up`; there is no later"
+           " moment a reload could start or stop it"),
+        _p("web_host", "[web]", "host", RESTART, "SWARM_WEB_HOST",
+           "the listening socket is bound once, when the board starts"),
+        _p("web_port", "[web]", "port", RESTART, "SWARM_WEB_PORT",
+           "the listening socket is bound once, when the board starts",
+           numeric=True),
+
         # -- hot: re-read at every use --------------------------------------
         _p("max_workers", "[swarm]", "max_workers", HOT, None,
            "slots are plain state records; growing appends, shrinking retires",

@@ -52,6 +52,7 @@ from .config import Config
 from .logutil import parse_ts
 from .master import build_context
 from .state import State
+from .web import lifecycle as web_lifecycle
 
 OK = "ok"
 WARN = "warn"
@@ -1144,6 +1145,28 @@ def _check_prompts() -> Check:
 
 
 # -- entry points ---------------------------------------------------------
+def _check_web(cfg: Config, st: State) -> Check:
+    """Is the LAN board answering, and at what address?
+
+    The address is the point: it is what the owner types into the phone. Only
+    a live run that should have a board and does not is worth a warning — a
+    stopped run has no board by design.
+    """
+    if not cfg.web_enabled:
+        return Check("web.board", OK, "off ([web] enabled = false)")
+    where = " ".join(web_lifecycle.urls(cfg))
+    if web_lifecycle.listening(cfg):
+        return Check("web.board", OK, f"listening: {where}")
+    if st.supervisor_pid and _pid_alive(st.supervisor_pid):
+        return Check(
+            "web.board",
+            WARN,
+            f"the run is up but nothing answers on :{cfg.web_port}",
+            "swarm web   # or check the `web` tmux window / <state>/logs/web.log",
+        )
+    return Check("web.board", OK, f"not running — `swarm up` starts it on :{cfg.web_port}")
+
+
 def run_checks(cfg: Config) -> list[Check]:
     """Every diagnosis, in reading order. Never raises.
 
@@ -1189,6 +1212,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_failed(st))
     checks.append(_check_operator(cfg))
     checks.append(_check_prompts())
+    checks.append(_check_web(cfg, st))
     return checks
 
 

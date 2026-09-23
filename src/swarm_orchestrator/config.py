@@ -97,6 +97,9 @@ class Config:
     gc_every_s: int
     gc_idle_s: int
     gc_keep_days: int
+    web_enabled: bool
+    web_host: str
+    web_port: int
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -213,6 +216,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     operator = data.get("operator", {})
     overseer = data.get("overseer", {})
     gc = data.get("gc", {})
+    web = data.get("web", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
     max_workers = int(swarm.get("max_workers", 4))
@@ -373,6 +377,14 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # Build output untouched this many days goes (`cargo sweep --time N`).
         # Three days keeps every dependency a phase in the current campaign built.
         gc_keep_days=_int_env("SWARM_GC_KEEP_DAYS", gc.get("keep_days"), 3, minimum=1),
+        # The read-only web board (`swarm web`), started by `swarm up` in its own
+        # window. On by default so the run can be followed from a
+        # phone; bound to every interface because the LAN is the point, and open
+        # (no token) by design -- it serves computed JSON only, never
+        # a file by path, and redacts anything shaped like a secret.
+        web_enabled=_bool_env("SWARM_WEB", web.get("enabled", True)),
+        web_host=os.environ.get("SWARM_WEB_HOST", str(web.get("host", "0.0.0.0"))),
+        web_port=_int_env("SWARM_WEB_PORT", web.get("port"), 8765, minimum=0),
     )
 
 

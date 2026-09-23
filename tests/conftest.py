@@ -162,6 +162,17 @@ def _gc_auto_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _web_off(monkeypatch):
+    """The web board is on by default in a real project; in the suite it is off.
+
+    Every end-to-end ``swarm up`` would otherwise start a server on the fixed
+    default port, and two tests (or the owner's live board) would fight over it.
+    ``tests/test_web_lifecycle.py`` turns it back on, on a free port.
+    """
+    monkeypatch.setenv("SWARM_WEB", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_inprocess_launch(request, monkeypatch):
     """An in-process :class:`Supervisor` records its launches instead of making them.
 

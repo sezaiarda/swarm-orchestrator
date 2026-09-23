@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0d1117">
+<title>swarm board</title>
+<style>
+/* Palette: the TUI's (tui/theme.py) so the phone and the terminal read alike. */
+:root{--bg:#0d1117;--sf:#161b22;--sf2:#1c2330;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;
+--ok:#3fb950;--warn:#d29922;--bad:#f85149;--info:#58a6ff;--acc:#bc8cff;--r:10px;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:left}
+:focus-visible{outline:2px solid var(--info);outline-offset:2px;border-radius:6px}
+code,.mono{font-family:var(--mono);font-size:.88em}
+.mu{color:var(--mu)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.info{color:var(--info)}.acc{color:var(--acc)}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--bd);padding:8px 12px calc(6px);padding-top:max(8px,env(safe-area-inset-top))}
+.top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.top h1{font-size:16px;margin:0;font-weight:650}
+.pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--bd);border-radius:999px;padding:1px 9px;font-size:12.5px;white-space:nowrap;background:var(--sf)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--mu);display:inline-block;flex:none}
+.needs{border-color:var(--warn);color:var(--warn);font-weight:600}
+.needs[hidden]{display:none}
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:4px 14px;margin-top:6px;font-size:12.5px}
+.meter{display:flex;align-items:center;gap:6px;min-width:0}
+.meter b{font-weight:600;white-space:nowrap}
+.bar{flex:1;height:6px;border-radius:3px;background:var(--sf2);overflow:hidden;min-width:40px}
+.bar i{display:block;height:100%;background:var(--info)}
+.sub{color:var(--mu);overflow-wrap:anywhere}
+nav{display:flex;gap:6px;padding:8px 12px 0;align-items:center;flex-wrap:wrap}
+.tab{padding:6px 12px;border-radius:8px;border:1px solid transparent;color:var(--mu);font-weight:600}
+.tab[aria-selected=true]{color:var(--tx);background:var(--sf);border-color:var(--bd)}
+.search{flex:1;min-width:140px;background:var(--sf);border:1px solid var(--bd);color:var(--tx);border-radius:8px;padding:6px 10px;font:inherit}
+.chips{display:flex;gap:6px;overflow-x:auto;padding:8px 12px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{border:1px solid var(--bd);border-radius:999px;padding:3px 10px;font-size:13px;white-space:nowrap;background:var(--sf)}
+.chip[aria-pressed=true]{border-color:var(--acc);color:var(--acc)}
+.chip small{color:var(--mu);margin-left:4px}
+main{padding:0 0 40px}
+/* Board: columns scroll sideways; on a phone one column per swipe. */
+.board{display:flex;gap:10px;overflow-x:auto;padding:4px 12px 16px;scroll-snap-type:x mandatory;align-items:flex-start;overscroll-behavior-x:contain}
+.col{flex:0 0 min(86vw,320px);scroll-snap-align:start;background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);display:flex;flex-direction:column;max-height:calc(100vh - 190px);max-height:calc(100dvh - 190px)}
+.col.shut,.col.none{flex-basis:auto;min-width:150px}
+.colh{display:flex;align-items:center;gap:8px;padding:9px 11px;border-bottom:1px solid var(--bd);width:100%}
+.colh h2{font-size:14px;margin:0;font-weight:650}
+.colh .n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--mu);font-size:13px}
+.colh .hint{display:block;font-size:11.5px;color:var(--mu);font-weight:400}
+.col.shut .cards{display:none}
+.cards{overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
+.card{display:block;width:100%;background:var(--bg);border:1px solid var(--bd);border-left:3px solid var(--mu);border-radius:8px;padding:8px 10px}
+.card:hover{border-color:#484f58}
+.card .h{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.card .id{font-family:var(--mono);font-size:13px;font-weight:650}
+.card .c{font-size:11.5px;color:var(--mu)}
+.card .t{margin:3px 0 0;font-size:13.5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card .m{margin-top:4px;font-size:12.5px;color:var(--mu)}
+.card .q{margin-top:5px;font-size:13px;color:var(--tx);border-left:2px solid var(--warn);padding-left:7px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.ctx{display:inline-block;width:46px;height:5px;border-radius:3px;background:var(--sf2);vertical-align:middle;overflow:hidden}
+.ctx i{display:block;height:100%}
+.more{margin:4px 8px 10px;padding:6px;border:1px dashed var(--bd);border-radius:8px;color:var(--mu);text-align:center;width:calc(100% - 16px)}
+.empty{color:var(--mu);font-size:13px;padding:6px 4px}
+/* Tone of a column / card edge. */
+.t-needs_you{border-left-color:var(--warn)}.t-blocked{border-left-color:#6e7681}.t-ready{border-left-color:var(--acc)}
+.t-building{border-left-color:var(--info)}.t-merging{border-left-color:var(--warn)}.t-operator{border-left-color:var(--acc)}
+.t-done{border-left-color:var(--ok)}.t-failed{border-left-color:var(--bad)}.t-excluded{border-left-color:#484f58}
+.d-needs_you{background:var(--warn)}.d-blocked{background:#6e7681}.d-ready{background:var(--acc)}.d-building{background:var(--info)}
+.d-merging{background:var(--warn)}.d-operator{background:var(--acc)}.d-done{background:var(--ok)}.d-failed{background:var(--bad)}.d-excluded{background:#484f58}
+/* Campaigns: one lane per campaign. */
+.lanes{padding:4px 12px;display:flex;flex-direction:column;gap:12px;max-width:1100px}
+.lane{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:10px 12px}
+.lane h2{margin:0;font-size:15px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.lane .what{margin:3px 0 6px;color:var(--tx)}
+.lane .about{margin:0 0 6px;color:var(--mu);font-size:13px}
+.prog{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--mu)}
+.prog .bar{height:8px}.prog .bar i{background:var(--ok)}
+.grp{margin-top:9px}
+.grp h3{font-size:12.5px;margin:0 0 5px;color:var(--mu);font-weight:600;display:flex;gap:6px;align-items:center}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:7px}
+.lane details summary{cursor:pointer;color:var(--mu);font-size:12.5px;margin-top:8px}
+/* Activity. */
+.feed{padding:4px 12px;display:flex;flex-direction:column;gap:10px;max-width:900px}
+.item{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:10px 12px}
+.item h3{margin:0 0 3px;font-size:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+.item p{margin:4px 0;font-size:13.5px}
+.item details{margin-top:4px}.item summary{cursor:pointer;color:var(--mu);font-size:13px}
+.pre{white-space:pre-wrap;word-break:break-word;font-size:13px}
+h2.sec{font-size:13px;color:var(--mu);margin:14px 0 2px;text-transform:uppercase;letter-spacing:.04em}
+/* The detail sheet: bottom sheet on a phone, side panel on a desk. */
+.scrim{position:fixed;inset:0;background:rgba(1,4,9,.6);z-index:20}
+.sheet{position:fixed;z-index:21;left:0;right:0;bottom:0;max-height:88vh;max-height:88dvh;background:var(--sf);border:1px solid var(--bd);border-radius:14px 14px 0 0;display:flex;flex-direction:column;box-shadow:0 -8px 30px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}
+@media (min-width:900px){.sheet{left:auto;top:0;bottom:0;width:min(560px,46vw);max-height:none;border-radius:0;border-width:0 0 0 1px}}
+.sheet .bar-h{display:flex;align-items:flex-start;gap:8px;padding:12px 14px;border-bottom:1px solid var(--bd)}
+.sheet .bar-h h2{margin:0;font-size:16px;font-family:var(--mono)}
+.x{margin-left:auto;border:1px solid var(--bd);border-radius:8px;padding:4px 10px;background:var(--bg)}
+.body{overflow-y:auto;padding:4px 14px 20px;-webkit-overflow-scrolling:touch}
+.body section{margin-top:12px}
+.body h3{font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mu);margin:0 0 5px}
+.md{white-space:pre-wrap;word-break:break-word;font-size:13.5px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:9px 10px;max-height:50vh;overflow:auto}
+.md code{background:var(--sf2);padding:0 3px;border-radius:4px}
+ul.refs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+ul.refs button{display:flex;gap:8px;align-items:baseline;width:100%;padding:4px 6px;border-radius:6px}
+ul.refs button:hover{background:var(--sf2)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:13.5px}
+.kv dt{color:var(--mu)}.kv dd{margin:0;word-break:break-all}
+.note{border-left:2px solid var(--bd);padding:2px 0 2px 8px;margin:4px 0;font-size:13.5px}
+.note.owner_decision{border-color:var(--acc)}.note.risk{border-color:var(--bad)}.note.assumption{border-color:var(--warn)}.note.decision{border-color:var(--info)}
+.conn{position:fixed;right:10px;bottom:10px;z-index:6;font-size:12px}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+@media (min-width:900px){.col{flex-basis:300px}.board{scroll-snap-type:none}}
+/* A phone has no height to spare for a pinned header: it scrolls away. */
+@media (max-width:699px){header{position:static}}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1 id="proj">swarm</h1>
+    <span class="pill" id="runstate"><span class="dot"></span><span>connecting…</span></span>
+    <button class="pill needs" id="needs" hidden></button>
+    <span class="pill" id="slots"></span>
+  </div>
+  <div class="strip" id="strip"></div>
+</header>
+<nav role="tablist" aria-label="Views">
+  <button class="tab" role="tab" id="tab-board" aria-selected="true" data-view="board">Board</button>
+  <button class="tab" role="tab" id="tab-camps" aria-selected="false" data-view="camps">Campaigns</button>
+  <button class="tab" role="tab" id="tab-act" aria-selected="false" data-view="act">Activity</button>
+  <input class="search" id="q" type="search" placeholder="Search id or text" aria-label="Search phases by id or text" autocomplete="off">
+</nav>
+<div class="chips" id="chips" role="toolbar" aria-label="Filter by campaign"></div>
+<main id="main" tabindex="-1"></main>
+<div id="sheetroot"></div>
+<div class="conn pill" id="conn" hidden></div>
+<script>
+"use strict";
+// State ----------------------------------------------------------------------
+const S = {board: null, version: -1, view: "board", camp: "", q: "", hits: null,
+  skew: 0, shut: JSON.parse(localStorage.getItem("swarm.shut") || '{"done":true,"excluded":true}'),
+  showAll: {}, allChips: false, open: null, pushed: false};
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const now = () => Date.now() / 1000 + S.skew;
+const TONE = {needs_you: "warn", blocked: "mu", ready: "acc", building: "info", merging: "warn", operator: "acc", done: "ok", failed: "bad", excluded: "mu"};
+const COLNAME = {};
+
+function dur(s) {
+  if (s == null || !isFinite(s)) return "—";
+  s = Math.max(0, s);
+  if (s < 90) return Math.round(s) + "s";
+  if (s < 5400) return Math.round(s / 60) + "m";
+  if (s < 172800) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + "h" + (m ? " " + m + "m" : ""); }
+  return (s / 86400).toFixed(1) + "d";
+}
+const ago = (t) => t ? dur(now() - t) + " ago" : "—";
+function clock(t) {
+  if (!t) return "—";
+  const d = new Date(t * 1000), n = new Date();
+  const hm = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  if (d.toDateString() === n.toDateString()) return hm;
+  if (Math.abs(d - n) < 6 * 864e5) return d.toLocaleDateString([], {weekday: "short"}) + " " + hm;
+  return d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + hm;
+}
+// Light markdown: escaped first, then bold / code; links become their text.
+function md(s) {
+  let h = esc(s);
+  h = h.replace(/\[([^\]\n]+)\]\([^)\s]*\)/g, "$1");
+  h = h.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  h = h.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  return h;
+}
+
+// Data -------------------------------------------------------------------------
+let etag = null;
+async function load() {
+  try {
+    const r = await fetch("/api/board", {headers: etag ? {"If-None-Match": etag} : {}, cache: "no-store"});
+    if (r.status === 304) return;
+    if (!r.ok) throw new Error(r.status);
+    etag = r.headers.get("ETag");
+    const b = await r.json();
+    S.skew = (b.generated_at || Date.now() / 1000) - Date.now() / 1000;
+    S.board = b; S.version = b.version;
+    b.columns.forEach(c => COLNAME[c.key] = c.title);
+    render(true);
+    if (S.open) openDetail(S.open, true);
+  } catch (e) { conn("board unavailable — retrying"); }
+}
+let es = null, backoff = 1000;
+function connect() {
+  if (es) es.close();
+  es = new EventSource("/events");
+  es.addEventListener("board", (ev) => {
+    backoff = 1000; conn("");
+    try { if (JSON.parse(ev.data).version !== S.version) load(); } catch (e) { load(); }
+  });
+  es.onopen = () => { backoff = 1000; conn(""); };
+  es.onerror = () => {
+    conn("reconnecting…");
+    if (es.readyState === EventSource.CLOSED) {
+      setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 30000);
+    }
+  };
+}
+function conn(msg) { const c = $("#conn"); c.hidden = !msg; c.textContent = msg; }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { load(); if (!es || es.readyState === 2) connect(); } });
+
+// Filters ----------------------------------------------------------------------
+function visible(card) {
+  if (S.camp && card.c !== S.camp) return false;
+  if (!S.q) return true;
+  const q = S.q.toLowerCase();
+  if ((card.id + " " + (card.t || "") + " " + card.c + " " + (card.q || "")).toLowerCase().includes(q)) return true;
+  return !!(S.hits && S.hits.has(card.id));
+}
+let qTimer = null;
+$("#q").addEventListener("input", (e) => {
+  S.q = e.target.value.trim(); S.hits = null; render();
+  clearTimeout(qTimer);
+  if (S.q.length >= 3) qTimer = setTimeout(async () => {
+    const want = S.q;
+    try {
+      const r = await fetch("/api/search?q=" + encodeURIComponent(want));
+      const j = await r.json();
+      if (want === S.q) { S.hits = new Set(j.ids); render(); }
+    } catch (e) {}
+  }, 250);
+});
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => setView(t.dataset.view)));
+function setView(v) {
+  S.view = v;
+  document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", t.dataset.view === v));
+  render(); window.scrollTo(0, 0);
+}
+$("#needs").addEventListener("click", () => {
+  S.camp = ""; S.q = ""; $("#q").value = ""; setView("board");
+  const col = document.querySelector('[data-col="needs_you"]');
+  if (col) col.scrollIntoView({inline: "start", block: "nearest"});
+});
+
+// Render -----------------------------------------------------------------------
+function render(live) {
+  const b = S.board; if (!b) return;
+  header(b); chips(b);
+  const main = $("#main");
+  // Keep the reader where they were across a live update.
+  const keep = {y: window.scrollY, x: ($(".board") || {}).scrollLeft, cols: {}, focus: document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.id : null};
+  document.querySelectorAll(".col").forEach(c => keep.cols[c.dataset.col] = $(".cards", c).scrollTop);
+  main.innerHTML = S.view === "board" ? boardView(b) : S.view === "camps" ? campsView(b) : activityView(b);
+  const bd = $(".board");
+  if (live && bd) bd.scrollLeft = keep.x || 0;
+  document.querySelectorAll(".col").forEach(c => { if (keep.cols[c.dataset.col] != null) $(".cards", c).scrollTop = keep.cols[c.dataset.col]; });
+  if (live) window.scrollTo(0, keep.y);
+  if (keep.focus) { const el = main.querySelector(`[data-id="${CSS.escape(keep.focus)}"]`); if (el) el.focus({preventScroll: true}); }
+}
+function header(b) {
+  const h = b.header;
+  document.title = (h.needs_you ? `(${h.needs_you}) ` : "") + (b.project || "swarm") + " board";
+  $("#proj").textContent = b.project || "swarm";
+  const rs = $("#runstate");
+  let tone = "ok", txt = "running";
+  if (!h.running) { tone = "mu"; txt = h.state || "stopped"; }
+  else if (h.finished) { tone = "ok"; txt = "finished"; }
+  else if (h.paused) { tone = "warn"; txt = "paused"; }
+  rs.innerHTML = `<span class="dot" style="background:var(--${tone === "mu" ? "mu" : tone})"></span><span>${esc(txt)}</span>`;
+  const nb = $("#needs"); nb.hidden = !h.needs_you; nb.textContent = `${h.needs_you} need${h.needs_you === 1 ? "s" : ""} you`;
+  $("#slots").textContent = `${h.slots.busy}/${h.slots.total} slots`;
+  const u = h.usage || {}, parts = [];
+  for (const [k, label] of [["five", "5-hour"], ["week", "week"]]) {
+    const w = u[k] || {};
+    const pct = w.pct == null ? null : Math.max(0, Math.min(100, w.pct));
+    const col = pct == null ? "var(--mu)" : pct >= 90 ? "var(--bad)" : pct >= 70 ? "var(--warn)" : "var(--info)";
+    const rate = w.per_h != null ? ` · ${w.per_h.toFixed(1)}%/h` : "";
+    const run = w.runway_h != null ? ` · full in ${dur(w.runway_h * 3600)}` : "";
+    const reset = w.resets_at ? ` · resets ${clock(w.resets_at)}` : "";
+    parts.push(`<div class="meter" title="${esc(w.text || "")}"><b>${label} ${pct == null ? "—" : Math.round(pct) + "%"}</b><span class="bar" role="img" aria-label="${label} usage ${pct == null ? "unknown" : Math.round(pct) + " percent"}"><i style="width:${pct || 0}%;background:${col}"></i></span></div><div class="sub ${esc(w.tone === "bad" ? "bad" : w.tone === "warn" ? "warn" : "")}">${esc((rate + run + reset).replace(/^ · /, "") || w.text || "")}</div>`);
+  }
+  const e = h.eta || {};
+  const eta = e.seconds ? `~${dur(e.seconds)} left · done ~${clock((b.generated_at || now()) + e.seconds)}${e.from_history ? " (from history)" : ""}` : (e.label || "—");
+  parts.push(`<div class="meter"><b>ETA</b><span class="sub">${esc(eta)} · ${e.remaining || 0} open</span></div>`);
+  const r = h.run;
+  parts.push(`<div class="meter"><b>run</b><span class="sub">${r ? esc((r.id || "") + " · " + dur((r.hours || 0) * 3600) + " · " + (r.finished || 0) + " done" + (r.usd != null ? " · $" + r.usd.toFixed(0) : "")) : "no run open"}</span></div>`);
+  const p = h.last_pass;
+  parts.push(`<div class="meter"><b>Overseer</b><span class="sub">${p ? esc(p.status + " · " + ago(p.ended_at || p.started_at)) : "no pass yet"}</span></div>`);
+  $("#strip").innerHTML = parts.join("");
+}
+function chips(b) {
+  const open = b.campaigns.filter(c => c.open || c.active || (c.counts && c.counts.operator));
+  const list = S.allChips ? b.campaigns : open.slice(0, 16);
+  const html = [`<button class="chip" aria-pressed="${!S.camp}" data-camp="">All</button>`];
+  for (const c of list) html.push(`<button class="chip" aria-pressed="${S.camp === c.name}" data-camp="${esc(c.name)}" title="${esc(c.what)}">${esc(c.name)}<small>${c.done}/${c.total}</small></button>`);
+  if (S.camp && !list.some(c => c.name === S.camp)) html.push(`<button class="chip" aria-pressed="true" data-camp="${esc(S.camp)}">${esc(S.camp)}</button>`);
+  html.push(`<button class="chip" data-more="1">${S.allChips ? "fewer" : "all " + b.campaigns.length + " campaigns"}</button>`);
+  const el = $("#chips"); el.innerHTML = html.join("");
+}
+$("#chips").addEventListener("click", (e) => {
+  const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.more) { S.allChips = !S.allChips; chips(S.board); return; }
+  S.camp = S.camp === t.dataset.camp ? "" : t.dataset.camp; render();
+});
+
+function meta(c) {
+  const bits = [];
+  switch (c.col) {
+    case "building": {
+      bits.push(`slot ${c.slot}`);
+      if (c.since) bits.push(`<span data-since="${c.since}">${dur(now() - c.since)}</span>` + (c.typical ? ` / ~${dur(c.typical)}` : ""));
+      if (c.ctx != null) { const col = c.ctx >= 60 ? "var(--bad)" : c.ctx >= 30 ? "var(--warn)" : "var(--ok)"; bits.push(`ctx <span class="ctx"><i style="width:${Math.min(100, c.ctx)}%;background:${col}"></i></span> ${Math.round(c.ctx)}%`); }
+      if (c.last) bits.push(`active <span data-ago="${c.last}">${ago(c.last)}</span>`);
+      break;
+    }
+    case "blocked":
+      if (c.root) bits.push(`root <b class="mono">${esc(c.root)}</b> <span class="mu">(${esc(c.root_kind)}, holds ${c.root_blocks})</span>`);
+      else if (c.sub) bits.push(esc(c.sub));
+      if (c.needs) bits.push(`needs ${c.needs.map(esc).join(", ")}${c.unmet > c.needs.length ? "…" : ""}`);
+      break;
+    case "done": case "failed":
+      bits.push(esc(c.sub || c.st || c.col)); if (c.at) bits.push(clock(c.at)); break;
+    default:
+      if (c.sub) bits.push(esc(c.sub));
+      if (c.since) bits.push(`<span data-ago="${c.since}">${ago(c.since)}</span>`);
+  }
+  if (c.r && c.col !== "done") bits.push(`<span class="mono">${c.r.map(r => esc(r === "." ? "(root)" : r)).join(" ")}</span>`);
+  return bits.join(" · ");
+}
+function card(c) {
+  const doing = c.doing ? `<div class="m" style="color:var(--tx)">${esc(c.doing)}</div>` : "";
+  const q = c.q ? `<div class="q">${esc(c.q)}</div>` : "";
+  return `<button class="card t-${c.col}" data-id="${esc(c.id)}" aria-label="${esc(c.id + ": " + (c.t || ""))}">
+<span class="h"><span class="id">${esc(c.id)}</span><span class="c">${esc(c.c)}</span></span>
+${c.t ? `<span class="t">${esc(c.t)}</span>` : ""}${q}<span class="m" style="display:block">${meta(c)}</span>${doing}</button>`;
+}
+const LIMIT = 60;
+function boardView(b) {
+  let out = '<div class="board">';
+  for (const col of b.columns) {
+    const cs = col.cards.filter(visible), shut = !!S.shut[col.key] && !S.q;
+    const lim = S.showAll[col.key] ? cs.length : LIMIT;
+    // An empty column shrinks to its header: on a phone a whole swipe of
+    // "nothing here" is a swipe wasted.
+    out += `<section class="col${shut ? " shut" : ""}${cs.length ? "" : " none"}" data-col="${col.key}" aria-label="${esc(col.title)}">
+<button class="colh" data-toggle="${col.key}" aria-expanded="${!shut}"><span class="dot d-${col.key}"></span><h2>${esc(col.title)}<span class="hint">${esc(col.hint)}</span></h2><span class="n">${cs.length}</span></button>
+<div class="cards">${cs.slice(0, lim).map(card).join("") || '<div class="empty">nothing here</div>'}
+${cs.length > lim ? `<button class="more" data-all="${col.key}">show ${cs.length - lim} more</button>` : ""}</div></section>`;
+  }
+  return out + "</div>";
+}
+function campsView(b) {
+  const byId = {};
+  b.columns.forEach(col => col.cards.forEach(c => byId[c.id] = c));
+  const lanes = b.campaigns.filter(c => !S.camp || c.name === S.camp);
+  let out = '<div class="lanes">';
+  for (const camp of lanes) {
+    const cards = b.columns.flatMap(col => col.cards.filter(c => c.c === camp.name && visible(c)));
+    if (S.q && !cards.length) continue;
+    const pct = camp.total ? Math.round(100 * camp.done / camp.total) : 0;
+    out += `<article class="lane"><h2><span class="mono">${esc(camp.name)}</span>${camp.adr ? `<span class="pill">${esc(camp.adr)}</span>` : ""}${camp.active ? '<span class="pill info">active</span>' : ""}</h2>
+${camp.what ? `<p class="what">${esc(camp.what)}</p>` : ""}${camp.about ? `<p class="about">${esc(camp.about)}</p>` : ""}
+<div class="prog"><span class="bar" role="img" aria-label="${pct} percent done"><i style="width:${pct}%"></i></span><span>${camp.done}/${camp.total} done</span></div>`;
+    for (const col of b.columns) {
+      const mine = cards.filter(c => c.col === col.key);
+      if (!mine.length) continue;
+      const grid = `<div class="grid">${mine.slice(0, 200).map(card).join("")}</div>`;
+      const head = `<span class="dot d-${col.key}"></span>${esc(col.title)} · ${mine.length}`;
+      out += (col.key === "done" || col.key === "excluded") && !S.q
+        ? `<details class="grp"><summary>${head}</summary>${grid}</details>`
+        : `<div class="grp"><h3>${head}</h3>${grid}</div>`;
+    }
+    out += "</article>";
+  }
+  return out + (lanes.length ? "" : '<p class="empty">no campaign matches</p>') + "</div>";
+}
+function activityView(b) {
+  const a = b.activity || {passes: [], finished: []};
+  let out = '<div class="feed"><h2 class="sec">Overseer passes</h2>';
+  if (!a.passes.length) out += '<p class="empty">no Overseer pass recorded yet</p>';
+  for (const p of a.passes) {
+    const tone = p.status === "done" ? "ok" : p.status === "running" ? "info" : "warn";
+    const sec = (k, t) => p[k] ? `<details${k === "left" && p[k] ? " open" : ""}><summary>${t}</summary><div class="pre">${md(p[k])}</div></details>` : "";
+    out += `<article class="item"><h3><span class="${tone}">● ${esc(p.status)}</span><span class="mono">${esc(p.id)}</span><span class="mu">${clock(p.started_at)}${p.ended_at ? " · took " + dur(p.ended_at - p.started_at) : ""}</span></h3>
+${p.reasons.length ? `<p class="mu">why: ${esc(p.reasons.join(" · "))}</p>` : ""}${p.summary ? `<p>${md(p.summary)}</p>` : ""}
+${p.question ? `<p class="warn">asks: ${esc(p.question)}${p.answer ? ` — answered: ${esc(p.answer)}` : ""}</p>` : ""}
+${sec("saw", "What it saw")}${sec("did", "What it did")}${sec("left", "What it left for you")}</article>`;
+  }
+  out += '<h2 class="sec">Recently finished</h2>';
+  if (!a.finished.length) out += '<p class="empty">nothing has finished yet</p>';
+  for (const f of a.finished) {
+    if (S.camp && f.c !== S.camp) continue;
+    const tone = f.st === "fail" ? "bad" : f.st === "skip" ? "mu" : "ok";
+    out += `<article class="item"><h3><button class="mono" data-id="${esc(f.id)}" style="font-weight:650">${esc(f.id)}</button><span class="${tone}">${esc(f.st || "?")}</span><span class="mu">${clock(f.at)}${f.took ? " · took " + dur(f.took) : ""}</span></h3>
+${f.recap ? `<p>${esc(f.recap)}</p>` : ""}${f.note && f.note !== f.recap ? `<details><summary>completion note</summary><p class="pre">${md(f.note)}</p></details>` : ""}</article>`;
+  }
+  return out + "</div>";
+}
+$("#main").addEventListener("click", (e) => {
+  const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.toggle) { S.shut[t.dataset.toggle] = !S.shut[t.dataset.toggle]; localStorage.setItem("swarm.shut", JSON.stringify(S.shut)); render(); return; }
+  if (t.dataset.all) { S.showAll[t.dataset.all] = true; render(true); return; }
+  if (t.dataset.id) show(t.dataset.id);
+});
+// Live clocks without a re-render.
+setInterval(() => {
+  document.querySelectorAll("[data-since]").forEach(el => el.textContent = dur(now() - +el.dataset.since));
+  document.querySelectorAll("[data-ago]").forEach(el => el.textContent = ago(+el.dataset.ago));
+}, 15000);
+
+// Detail sheet (deep link: #phase=<id>) ----------------------------------------
+// A sheet opened from the board pushed a history entry, so Back closes it; one
+// opened from a shared link did not, and Back must not leave the page for it.
+function show(id) { S.pushed = true; location.hash = "phase=" + encodeURIComponent(id); }
+function dismiss() { if (S.pushed && location.hash) history.back(); else closeSheet(); }
+function fromHash() {
+  const m = /^#phase=(.+)$/.exec(location.hash);
+  if (m) openDetail(decodeURIComponent(m[1])); else { S.pushed = false; closeSheet(true); }
+}
+window.addEventListener("hashchange", fromHash);
+let lastFocus = null;
+async function openDetail(id, refresh) {
+  if (!refresh) lastFocus = document.activeElement;
+  S.open = id;
+  if (!refresh || !$(".sheet")) paintSheet(id, null);
+  try {
+    const r = await fetch("/api/phase/" + encodeURIComponent(id), {cache: "no-store"});
+    const d = r.ok ? await r.json() : {error: r.status === 404 ? "not on the board" : "unavailable"};
+    if (S.open === id) paintSheet(id, d, refresh);
+  } catch (e) { if (S.open === id) paintSheet(id, {error: "unavailable"}, refresh); }
+}
+function closeSheet(fromNav) {
+  if (!S.open) return;
+  S.open = null; $("#sheetroot").innerHTML = "";
+  if (!fromNav && location.hash) history.replaceState(null, "", location.pathname + location.search);
+  if (lastFocus && lastFocus.focus) lastFocus.focus({preventScroll: true});
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && S.open) { e.preventDefault(); dismiss(); }
+  if (e.key === "Tab" && S.open) {  // keep focus inside the dialog
+    const f = [...document.querySelectorAll(".sheet button, .sheet summary")]; if (!f.length) return;
+    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+  }
+});
+function refs(list) {
+  if (!list || !list.length) return '<p class="mu">none</p>';
+  return `<ul class="refs">${list.map(x => `<li><button data-id="${esc(x.id)}"><span class="dot d-${esc(x.col || "blocked")}"></span><span class="mono">${esc(x.id)}</span><span class="mu">${esc(COLNAME[x.col] || x.st || "not on the board")}${x.sub ? " · " + esc(x.sub) : ""}</span></button></li>`).join("")}</ul>`;
+}
+const NOTE = {owner_decision: "Your decisions", decision: "Decisions it made", assumption: "Assumptions", risk: "Risks"};
+function paintSheet(id, d, keepScroll) {
+  const root = $("#sheetroot");
+  const prev = $(".sheet .body"), y = keepScroll && prev ? prev.scrollTop : 0;
+  const c = d && d.card ? d.card : {};
+  let body = "";
+  if (!d) body = '<p class="mu">loading…</p>';
+  else if (d.error) body = `<p class="bad">${esc(d.error)}</p>`;
+  else {
+    const sec = (t, h) => h ? `<section><h3>${t}</h3>${h}</section>` : "";
+    const camp = d.campaign ? `<p><span class="mu">campaign</span> <span class="mono">${esc(d.campaign.name)}</span>${d.campaign.adr ? " · " + esc(d.campaign.adr) : ""}${d.campaign.what ? ` — ${esc(d.campaign.what)}` : ""}</p>` : "";
+    body += camp;
+    body += `<p><span class="pill"><span class="dot d-${esc(c.col)}"></span>${esc(COLNAME[c.col] || c.col || "")}</span> ${esc(c.sub || "")}${c.root ? ` · root <b class="mono">${esc(c.root)}</b> (${esc(c.root_kind)}, holds ${c.root_blocks})` : ""}</p>`;
+    if (d.question) body += sec("Waiting on you", `<div class="md">${md(d.question)}</div>`);
+    if (d.build) {
+      const bl = d.build;
+      body += sec("Building now", `<dl class="kv"><dt>slot</dt><dd>${bl.slot}</dd><dt>elapsed</dt><dd>${dur(bl.since ? now() - bl.since : bl.elapsed)}</dd>${bl.branch ? `<dt>branch</dt><dd class="mono">${esc(bl.branch)}</dd>` : ""}${bl.worktree ? `<dt>worktree</dt><dd class="mono">${esc(bl.worktree)}</dd>` : ""}${c.ctx != null ? `<dt>context</dt><dd>${Math.round(c.ctx)}%</dd>` : ""}</dl>${bl.last_turn ? `<p class="mu">last turn ${ago(bl.last_turn.ts)}</p><div class="md">${md(bl.last_turn.text)}</div>` : ""}`);
+    }
+    if (d.row && d.row.text) body += sec("The ledger row", `${d.row.section && d.row.section.length ? `<p class="mu">${md(d.row.section.join(" › "))}${d.row.line ? " · line " + d.row.line : ""}</p>` : ""}<div class="md">${md(d.row.text)}</div>`);
+    if (d.recap) body += sec("Recap", `<p>${md(d.recap.summary)}</p>`);
+    if (d.completion && d.completion.note) body += sec(`Completion note (${esc(d.completion.status)}, ${clock(d.completion.ts)})`, `<div class="md">${md(d.completion.note)}</div>`);
+    if (d.notes) for (const [k, list] of Object.entries(d.notes)) body += sec(NOTE[k] || k, list.map(n => `<div class="note ${esc(k)}">${md(n.text)} <span class="mu">${clock(n.ts)}</span></div>`).join(""));
+    if (d.needs) body += sec(`Needs (${d.needs.length})`, refs(d.needs));
+    if (d.blocks) body += sec(`Blocks (${d.blocks.length} direct, ${d.blocks_total} in all)`, refs(d.blocks));
+    if (d.jobs && d.jobs.length) body += sec("Operator jobs", d.jobs.map(j => `<div class="note"><b class="mono">${esc(j.id)}</b> · ${esc(j.state)}${j.when ? " · " + esc(j.when) : ""}${j.attempts ? " · " + j.attempts + " attempt(s)" : ""}<div class="pre">${md(j.note)}</div>${j.question ? `<p class="warn">asks: ${esc(j.question)}${j.answer ? " — answered: " + esc(j.answer) : ""}</p>` : ""}${j.outcome ? `<p class="ok">did: ${md(j.outcome)}</p>` : ""}${j.error ? `<p class="bad">${esc(j.error)}</p>` : ""}</div>`).join(""));
+    if (d.runs && d.runs.length) body += sec("Runs", `<ul class="refs">${d.runs.map(r => `<li class="mu">${clock(r.started || r.ended)} · ${esc(r.status || "running")}${r.took ? " · took " + dur(r.took) : ""}${r.slot != null ? " · slot " + esc(r.slot) : ""}${r.parked ? " · parked" : ""}</li>`).join("")}</ul>`);
+    if (d.attempts && d.attempts.length) body += sec("Attempts", d.attempts.map(a => `<div class="note"><span class="${a.status === "fail" ? "bad" : "ok"}">${esc(a.status)}</span> <span class="mu">${clock(a.ts)}</span><div class="pre">${md(a.note)}</div></div>`).join(""));
+    if (d.excluded_why) body += sec("Why it is excluded", `<p>${md(d.excluded_why)}</p>`);
+  }
+  root.innerHTML = `<div class="scrim" data-close="1"></div><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+<div class="bar-h"><div><h2 id="sheet-title">${esc(id)}</h2>${c.t ? `<div style="font-size:14px;margin-top:2px">${esc(c.t)}</div>` : ""}</div><button class="x" data-close="1" aria-label="Close details">Close</button></div>
+<div class="body">${body}</div></div>`;
+  const b2 = $(".sheet .body"); if (b2) b2.scrollTop = y;
+  if (!keepScroll) { const x = $(".sheet .x"); if (x) x.focus({preventScroll: true}); }
+}
+$("#sheetroot").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-close],button[data-id]"); if (!t) return;
+  if (t.dataset.close) { dismiss(); return; }
+  if (t.dataset.id) show(t.dataset.id);
+});
+
+load().then(() => { connect(); fromHash(); });
+</script>
+</body>
+</html>

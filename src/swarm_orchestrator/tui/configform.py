@@ -342,7 +342,7 @@ FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scal
 
 # The order the tables are drawn in — the order the file itself uses.
 SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "git",
-                 "operator", "overseer", "tui", "(cli)")
+                 "operator", "overseer", "tui", "web", "(cli)")
 
 
 @dataclass(frozen=True)
@@ -458,6 +458,10 @@ FIELDS: tuple[Setting, ...] = (
     # -- [tui] ------------------------------------------------------------
     Setting("tui_autostart", BOOL, "open this dashboard automatically at `swarm up`"),
     Setting("tui_cmd", STR, "command the dashboard pane is respawned with"),
+    # -- [web] ------------------------------------------------------------
+    Setting("web_enabled", BOOL, "start the LAN web board at `swarm up`"),
+    Setting("web_host", STR, "address the web board binds (0.0.0.0 = LAN)"),
+    Setting("web_port", INT, "port the web board listens on", minimum=0),
     # -- (cli) ------------------------------------------------------------
     Setting("project_dir", FROZEN, "the project root — --project-dir or the cwd"),
 )

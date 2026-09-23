@@ -42,6 +42,7 @@ from . import statuses
 from . import supervisor as sup_mod
 from . import telegram, tmux
 from . import usage as usage_mod
+from .web import lifecycle as web_lifecycle
 from .config import Config, load
 from . import logutil
 from .logutil import Log
@@ -247,9 +248,29 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         return 1
     _poke(cfg, "bootstrap")
     print(f"swarm up: supervisor pid={pid} driver={cfg.driver}")
+    if cfg.web_enabled:
+        # Under tmux the board already runs in its own window (session.setup);
+        # the headless driver has no session, so it gets its own process.
+        if cfg.driver != "tmux":
+            web_lifecycle.start_detached(cfg)
+        print(f"web board: {' '.join(web_lifecycle.urls(cfg))}")
     if attach:
         _attach(cfg)  # interactive: hand the terminal to the swarm window
     return 0
+
+
+def cmd_web(cfg: Config, host: str | None, port: int | None, pidfile: str | None,
+            explicit: str | None = None) -> int:
+    """Serve the board. Deferred import: `swarm done` must not pay for http.server."""
+    from .web import server as web_server
+
+    return web_server.serve(
+        cfg,
+        cfg.web_host if host is None else host,
+        cfg.web_port if port is None else port,
+        pidfile=pidfile,
+        explicit_config=explicit,
+    )
 
 
 def cmd_supervise(cfg: Config) -> int:
@@ -277,6 +298,9 @@ def cmd_down(cfg: Config) -> int:
             _wait_pid_gone(pid, timeout=5.0)
     if cfg.driver == "tmux":
         session_mod.teardown(cfg)
+    # After the teardown: under tmux the board died with its window, and this
+    # only clears the pid file; under the headless driver it is what stops it.
+    web_lifecycle.stop(cfg)
     closed = usage_mod.close_run(cfg, "down")
     print("swarm down" + (f" — {_run_line(closed)}" if closed else ""))
     return 0
@@ -1302,6 +1326,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.append(f"done={st.done}")
+    lines.append(web_lifecycle.status_line(cfg))
     print("\n".join(lines))
     return 0
 
@@ -1444,6 +1469,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("tui", help="the always-on dashboard (window 0)").set_defaults(
         func=lambda cfg, a: cmd_tui(cfg))
+
+    wbp = sub.add_parser("web", help="the read-only Kanban board, served on the LAN")
+    wbp.add_argument("--host", help="address to bind (default [web] host, 0.0.0.0)")
+    wbp.add_argument("--port", type=int, help="port (default [web] port, 8765; 0 = any)")
+    wbp.add_argument("--pidfile", help=argparse.SUPPRESS)  # written only when `up` starts it
+    wbp.set_defaults(func=lambda cfg, a: cmd_web(cfg, a.host, a.port, a.pidfile, a.config))
 
     dcp = sub.add_parser("doctor", help="diagnose a stuck or unhealthy swarm")
     dcp.add_argument("--json", action="store_true")

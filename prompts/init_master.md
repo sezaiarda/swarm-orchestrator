@@ -58,7 +58,8 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   it with `swarm note "$SWARM_PHASE" decision "<what + why>"`. It asks the owner
   only for non-obvious or big calls (scope, money, taste/UX, irreversible or
   live-data changes, contradicting a written owner decision, anything only the
-  owner's devices can check) — and then it must NOT guess: it runs
+  owner's devices can check) **and whenever it is in doubt or suspects the owner
+  would not want what it is about to do** — and then it must NOT guess: it runs
   `swarm waiting "$SWARM_PHASE" "<the question>"` *before* it opens the
   AskUserQuestion, and `swarm resumed "$SWARM_PHASE" "<the answer in one line>"`
   *immediately after* the answer returns (the answer is recorded in the history).

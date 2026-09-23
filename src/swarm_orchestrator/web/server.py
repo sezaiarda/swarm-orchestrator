@@ -10,6 +10,10 @@ dependency and a board is not a reason to grow one. The endpoints, all GET:
 ``/events``           Server-Sent Events: the board's version whenever it moves,
                       and a comment every :data:`HEARTBEAT_S` so a phone's
                       connection (and any proxy on the way) stays open
+``/healthz``          identifies this server as *our* board for this project —
+                      see :func:`_health_body` — so a caller that only got a
+                      connection accepted on the port (another program can be
+                      squatting on it) can tell the two apart
 
 **Read-only and open, by the owner's choice.** There is no mutating endpoint —
 anything but GET/HEAD is refused by :mod:`http.server` itself — and no path is
@@ -117,7 +121,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/events":
                 self._events()
             elif path == "/healthz":
-                self._send(200, b"ok\n", "text/plain; charset=utf-8")
+                self._json(200, _health_body(self.server.feed.cfg))
             else:
                 self._json(404, {"error": "not found"})
         except (BrokenPipeError, ConnectionResetError):
@@ -177,6 +181,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def _event(version: int) -> bytes:
     return f"event: board\ndata: {json.dumps({'version': version})}\n\n".encode()
+
+
+def _health_body(cfg) -> dict:
+    """What ``/healthz`` answers: enough for a caller (:func:`lifecycle.probe`) to
+    tell *our* board from whatever else might already be squatting the port."""
+    return {"app": lifecycle.APP_ID, "project": cfg.project_dir.name}
 
 
 def make_server(cfg, host: str, port: int, explicit_config: str | None = None,

@@ -1155,8 +1155,17 @@ def _check_web(cfg: Config, st: State) -> Check:
     if not cfg.web_enabled:
         return Check("web.board", OK, "off ([web] enabled = false)")
     where = " ".join(web_lifecycle.urls(cfg))
-    if web_lifecycle.listening(cfg):
+    state, detail = web_lifecycle.probe(cfg)
+    if state == web_lifecycle.OURS:
         return Check("web.board", OK, f"listening: {where}")
+    if state == web_lifecycle.TAKEN:
+        who = f" ({detail})" if detail else ""
+        return Check(
+            "web.board",
+            WARN,
+            f"port :{cfg.web_port} is held by another program{who}, not the board",
+            "set [web].port in .swarm.toml to a free port and restart",
+        )
     if st.supervisor_pid and _pid_alive(st.supervisor_pid):
         return Check(
             "web.board",

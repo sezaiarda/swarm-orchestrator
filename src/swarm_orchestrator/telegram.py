@@ -48,6 +48,7 @@ KINDS = (
     "overseer-ask",  # cli: the Overseer is waiting on an owner-level decision
     "worktree-fail",  # launch: the phase mirror could not be created
     "spawn-fail",  # launch: the worker process/pane would not start
+    "web-board",  # cli.cmd_up: the LAN board's window/process did not come up
     "other",  # unclassified (the default)
 )
 

@@ -8,7 +8,9 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -20,6 +22,7 @@ from swarm_orchestrator import state as state_mod
 from swarm_orchestrator import tmux
 from swarm_orchestrator.config import load
 from swarm_orchestrator.web import lifecycle
+from swarm_orchestrator.web import server as web_server
 
 DEMO = Path(__file__).resolve().parent.parent / "examples" / "demo"
 
@@ -128,3 +131,99 @@ def test_tmux_up_puts_the_board_in_the_last_window(monkeypatch, tmp_path):
     finally:
         session_mod.teardown(cfg)
     assert _wait(lambda: not _listening(port)), "the board outlived its session"
+
+
+def test_probe_tells_ours_taken_and_closed_apart(tmp_path, monkeypatch):
+    """The bug this fixes: a plain connect-and-see (``listening``) cannot tell
+    our board from a stray ``python3 -m http.server`` that got the port first —
+    both just "accept a connection". ``probe`` must, by checking ``/healthz``."""
+    port = _free_port()
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_WEB", "1")
+    monkeypatch.setenv("SWARM_WEB_PORT", str(port))
+    monkeypatch.setenv("SWARM_WEB_HOST", "127.0.0.1")
+    cfg = load(project_dir=str(tmp_path))
+
+    assert lifecycle.probe(cfg) == (lifecycle.CLOSED, None)
+
+    squatter = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait(lambda: _listening(port)), "the squatter never bound"
+        state, detail = _wait_state(cfg, lifecycle.TAKEN)
+        assert state == lifecycle.TAKEN
+        assert detail is None or "pid" in detail  # ``ss`` may be unavailable
+    finally:
+        squatter.terminate()
+        squatter.wait(timeout=5)
+    assert _wait(lambda: not _listening(port)), "the squatter outlived the test"
+
+    srv = web_server.make_server(cfg, "127.0.0.1", port)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert lifecycle.probe(cfg) == (lifecycle.OURS, None)
+    finally:
+        # ``close`` calls ``shutdown()``, which blocks forever unless
+        # ``serve_forever`` is actually running to notice the request.
+        web_server.close(srv)
+
+
+def _wait_state(cfg, want: str, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    state, detail = lifecycle.probe(cfg)
+    while state != want and time.monotonic() < deadline:
+        time.sleep(0.1)
+        state, detail = lifecycle.probe(cfg)
+    return state, detail
+
+
+def test_status_line_names_the_program_holding_a_taken_port(tmp_path, monkeypatch):
+    port = _free_port()
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_WEB", "1")
+    monkeypatch.setenv("SWARM_WEB_PORT", str(port))
+    monkeypatch.setenv("SWARM_WEB_HOST", "127.0.0.1")
+    cfg = load(project_dir=str(tmp_path))
+
+    squatter = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait(lambda: _listening(port)), "the squatter never bound"
+        line = _wait(lambda: "held by another program" in lifecycle.status_line(cfg))
+        assert line, lifecycle.status_line(cfg)
+        assert f":{port}" in lifecycle.status_line(cfg)
+    finally:
+        squatter.terminate()
+        squatter.wait(timeout=5)
+
+
+def test_up_reports_and_telegrams_when_the_port_is_taken(swarm):
+    """A board that cannot bind used to fail silently: the pane died, ``up``
+    printed the URLs anyway, and only a since-fixed connect-only check ever
+    disagreed. Now ``up`` itself says so, on stderr and to the owner's phone."""
+    port = _free_port()
+    swarm.env.update(
+        {"SWARM_WEB": "1", "SWARM_WEB_PORT": str(port), "SWARM_WEB_HOST": "127.0.0.1"}
+    )
+    squatter = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait(lambda: _listening(port)), "the squatter never bound"
+        out = swarm.up()
+        assert "web board: FAILED to start" in out.stderr
+        assert f"port :{port} is held by another program" in out.stderr
+        assert not (swarm.state_dir / lifecycle.PIDFILE).exists()
+        lines = swarm.tg_lines()
+        assert any("the web board did not start" in ln and f"port :{port}" in ln
+                   for ln in lines), lines
+    finally:
+        squatter.terminate()
+        squatter.wait(timeout=5)
+        swarm.down()

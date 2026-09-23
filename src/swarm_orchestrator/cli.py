@@ -203,6 +203,32 @@ def _attach(cfg: Config) -> None:
         print(f"could not attach to tmux session {cfg.session!r}: {exc}", file=sys.stderr)
 
 
+def _report_web_board(cfg: Config) -> None:
+    """After ``up`` starts the board (tmux window or detached process), say
+    whether it actually came up — port-taken and crash both used to go silent:
+    the pane died, ``swarm up`` printed the URLs anyway, and nothing but a
+    since-corrected ``status``/``doctor`` connect check ever disagreed."""
+    state, detail = web_lifecycle.wait_probe(cfg)
+    if state == web_lifecycle.OURS:
+        print(f"web board: {' '.join(web_lifecycle.urls(cfg))}")
+        return
+    if state == web_lifecycle.TAKEN:
+        who = f" ({detail})" if detail else ""
+        reason = f"port :{cfg.web_port} is held by another program{who}"
+    else:
+        reason = f"nothing answered on :{cfg.web_port} — check <state>/logs/web.log"
+    hint = "set [web].port in .swarm.toml to a free port and restart"
+    print(f"web board: FAILED to start — {reason}", file=sys.stderr)
+    print(f"  fix: {hint}", file=sys.stderr)
+    telegram.notify(
+        cfg.telegram_notify,
+        f"swarm: {cfg.slug} — the web board did not start ({reason}); {hint}",
+        kind="web-board",
+        source="cli._report_web_board",
+        state_dir=cfg.state_dir,
+    )
+
+
 def cmd_up(cfg: Config, attach: bool = True) -> int:
     cfg.ensure_dirs()
     if _supervisor_running(cfg):
@@ -253,7 +279,7 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         # the headless driver has no session, so it gets its own process.
         if cfg.driver != "tmux":
             web_lifecycle.start_detached(cfg)
-        print(f"web board: {' '.join(web_lifecycle.urls(cfg))}")
+        _report_web_board(cfg)
     if attach:
         _attach(cfg)  # interactive: hand the terminal to the swarm window
     return 0

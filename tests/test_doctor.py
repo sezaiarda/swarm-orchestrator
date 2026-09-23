@@ -20,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -480,6 +482,51 @@ def test_a_failed_phase_warns_with_a_relaunch_hint():
 
 def test_the_prompts_ship_with_this_checkout():
     assert doctor._check_prompts().status == OK
+
+
+def test_check_web_warns_when_the_port_is_taken_by_something_else(cfg):
+    """A connect-only check reads a squatter's open port as a live board — see
+    ``web.lifecycle.probe``. The doctor must say WHO holds it, not "listening"."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cfg.web_enabled, cfg.web_host, cfg.web_port = True, "127.0.0.1", port
+    squatter = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        check = doctor._check_web(cfg, set_state(cfg))
+        while check.status != WARN and time.monotonic() < deadline:
+            time.sleep(0.1)
+            check = doctor._check_web(cfg, set_state(cfg))
+        assert check.status == WARN
+        assert "held by another program" in check.detail
+        assert f":{port}" in check.detail
+        assert check.fix_hint and "web].port" in check.fix_hint
+    finally:
+        squatter.terminate()
+        squatter.wait(timeout=5)
+
+
+def test_check_web_is_ok_when_our_own_board_answers(cfg):
+    from swarm_orchestrator.web import server as web_server
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cfg.web_enabled, cfg.web_host, cfg.web_port = True, "127.0.0.1", port
+    srv = web_server.make_server(cfg, "127.0.0.1", port)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        check = doctor._check_web(cfg, set_state(cfg))
+        assert check.status == OK and "listening" in check.detail
+    finally:
+        # ``close`` calls ``shutdown()``, which blocks forever unless
+        # ``serve_forever`` is actually running to notice the request.
+        web_server.close(srv)
 
 
 # -- the whole run -----------------------------------------------------------

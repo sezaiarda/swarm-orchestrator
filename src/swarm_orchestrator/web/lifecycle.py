@@ -17,6 +17,7 @@ writes nothing into it.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -25,10 +26,23 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 PIDFILE = "web.pid"
 LOG = "web.log"
+#: Must match :data:`swarm_orchestrator.web.server.APP_ID` — the string
+#: ``/healthz`` answers with when the listener is our own board.
+APP_ID = "swarm-web"
+#: :func:`probe` outcomes: our board, some other program on the port, or
+#: nothing listening at all. A plain connect-and-see (:func:`listening`) cannot
+#: tell the first two apart — that gap is what let a stray
+#: ``python3 -m http.server`` on :8765 read as "(listening)" in ``swarm status``
+#: while the board's own pane had died with "Address already in use".
+OURS = "ours"
+TAKEN = "taken"
+CLOSED = "closed"
 #: Interfaces that are never the LAN: container bridges and virtual links. A
 #: phone cannot reach 172.17.0.1, and printing it as "the address" would send
 #: the owner to a dead URL first.
@@ -99,7 +113,12 @@ def urls(cfg) -> list[str]:
 
 
 def listening(cfg, timeout: float = 0.3) -> bool:
-    """Whether something accepts connections on the board's port right now."""
+    """Whether something accepts connections on the board's port right now.
+
+    Cheap, but cannot tell *our* board from an unrelated process that beat it to
+    the port — a plain TCP connect succeeds either way. Use :func:`probe` where
+    the answer needs to be trustworthy (``status``, ``doctor``, ``up``).
+    """
     host = cfg.web_host if cfg.web_host not in ("", "0.0.0.0", "::") else "127.0.0.1"
     try:
         with socket.create_connection((host, int(cfg.web_port)), timeout=timeout):
@@ -108,14 +127,70 @@ def listening(cfg, timeout: float = 0.3) -> bool:
         return False
 
 
+def probe(cfg, timeout: float = 0.5) -> tuple[str, str | None]:
+    """What answers on the board's port right now: :data:`OURS`, :data:`TAKEN`
+    (something else holds it) or :data:`CLOSED` (nothing does).
+
+    ``GET /healthz`` and match its JSON body, rather than the connect-only check
+    :func:`listening` does — a squatter that merely accepts the connection
+    (another ``http.server``, say) must not read as our board. The second
+    element of the pair is the occupant's ``command (pid N)`` for ``TAKEN``,
+    when :func:`_occupant` can say so cheaply; otherwise ``None``.
+    """
+    host = cfg.web_host if cfg.web_host not in ("", "0.0.0.0", "::") else "127.0.0.1"
+    port = int(cfg.web_port)
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=timeout) as resp:
+            body = json.loads(resp.read())
+    except (OSError, ValueError, urllib.error.URLError):
+        if listening(cfg, timeout):
+            return TAKEN, _occupant(port)
+        return CLOSED, None
+    if body.get("app") == APP_ID and body.get("project") == cfg.project_dir.name:
+        return OURS, None
+    return TAKEN, _occupant(port)
+
+
+def _occupant(port: int) -> str | None:
+    """``command (pid N)`` holding ``port``, from ``ss -ltnp`` where that is
+    cheaply available. Best-effort: no ``ss``, or an unprivileged caller ``ss``
+    redacts the pid for, just means the occupant goes unnamed, not unreported."""
+    try:
+        out = subprocess.run(
+            ["ss", "-ltnp", f"sport = :{port}"], capture_output=True, text=True, timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', out)
+    return f"{m.group(1)} (pid {m.group(2)})" if m else None
+
+
 def status_line(cfg) -> str:
     """One line for ``swarm status``: where the board is, and whether it answers."""
     if not cfg.web_enabled:
         return "web: off ([web] enabled = false)"
     where = " ".join(urls(cfg))
-    if listening(cfg):
+    state, detail = probe(cfg)
+    if state == OURS:
         return f"web: {where} (listening)"
+    if state == TAKEN:
+        who = f" ({detail})" if detail else " (pid unknown)"
+        return (f"web: port :{cfg.web_port} is held by another program{who}, not the board — "
+                "set [web].port in .swarm.toml to a free port")
     return f"web: not listening on :{cfg.web_port} — `swarm up` starts it, or run `swarm web`"
+
+
+def wait_probe(cfg, timeout: float = 5.0) -> tuple[str, str | None]:
+    """:func:`probe`, retried until it stops saying :data:`CLOSED` or ``timeout``
+    runs out — the board's pane/process needs a moment to bind after ``up``
+    starts it, so a single probe right away cannot yet distinguish "still
+    starting" from "never came up"."""
+    deadline = time.monotonic() + timeout
+    state, detail = probe(cfg)
+    while state == CLOSED and time.monotonic() < deadline:
+        time.sleep(0.2)
+        state, detail = probe(cfg)
+    return state, detail
 
 
 def start_detached(cfg) -> int | None:

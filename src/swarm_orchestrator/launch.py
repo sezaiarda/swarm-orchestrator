@@ -906,6 +906,49 @@ def done(
     )
 
 
+#: How much of a question an owner ping carries. The owner answers from a phone;
+#: a 140-word dump quoting source lines is not answerable there, and the full
+#: text is on screen in the asker's own window anyway.
+PING_QUESTION_CHARS = 600
+_CUT_MARK = " … (full question in its window)"
+
+
+def ping_question(question: str, limit: int = PING_QUESTION_CHARS) -> str:
+    """The question as a phone ping carries it: collapsed, cut to one screen."""
+    text = _collapse(question)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + _CUT_MARK
+
+
+def cost_line(blocked: int | None, held: str, asked_at: float) -> str:
+    """What this question costs while it waits, as the ping's first line.
+
+    No ping used to say it, so the owner could not tell a question holding up a
+    chain of phases from one holding up nothing. ``blocked`` is ``None`` when the
+    ledger could not be read — the line then says what it does know rather than
+    guessing a number.
+    """
+    parts = []
+    if blocked is not None:
+        parts.append(f"{blocked} phase{'' if blocked == 1 else 's'} blocked behind this")
+    parts.append(held)
+    parts.append("asked " + time.strftime("%H:%M", time.localtime(asked_at)))
+    return " · ".join(parts)
+
+
+def _blocked_behind(cfg: Config, phase: str) -> int | None:
+    """:func:`ledger.blocked_behind` against the live ledger and ``done`` map."""
+    try:
+        graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
+        done = state_mod.read(cfg).done
+    except (OSError, ValueError):
+        return None
+    if phase not in graph:
+        return None
+    return ledger_mod.blocked_behind(graph, phase, done, set(cfg.exclude))
+
+
 def waiting(cfg: Config, phase: str, note: str = "") -> None:
     """Signal that the worker for ``phase`` is blocked on the owner.
 
@@ -915,11 +958,12 @@ def waiting(cfg: Config, phase: str, note: str = "") -> None:
     Never hangs the worker if the supervisor is down. The note is NOT sent over the
     FIFO — only ``waiting <phase>`` — since parking keys on the phase alone.
     """
-    recap = _collapse(note)  # trim + collapse the free-text question
+    recap = ping_question(note)
     tail = f" — {recap}" if recap else ""
+    cost = cost_line(_blocked_behind(cfg, phase), "slot held", time.time())
     telegram.notify(
         cfg.telegram_notify,
-        f"swarm: {phase} is waiting on you{tail}",
+        f"{cost}\nswarm: {phase} is waiting on you{tail}",
         kind="waiting",
         phase=phase,
         source="launch.waiting",

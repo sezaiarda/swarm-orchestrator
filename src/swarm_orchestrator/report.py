@@ -17,8 +17,11 @@ This module is the reader. It joins the five places a phase leaves a trace:
   overwritten (or a later call being *refused*) by a subsequent one;
 * ``recaps/<phase>.json`` — :mod:`recap`'s generated one-glance summary;
 * ``notes/<phase>.jsonl`` — :mod:`notes`, the decisions a worker recorded without
-  a ping. Its own docstring names ``swarm report --decisions`` as where they
+  a ping, and the owner's answers (``owner_decision``) relayed by ``swarm
+  resumed``. Its own docstring names ``swarm report --decisions`` as where they
   surface, so this is that;
+* ``operator/<job>.json`` — :mod:`opqueue`, the follow-up jobs a phase handed
+  on and what became of them;
 * ``logs/supervisor.log`` — ``CLAIM`` / ``LAUNCH`` / ``EVENT done`` triples,
   timestamped via :func:`logutil.parse_ts` (which reads both the current
   ``<iso> <mono> <msg>`` format and legacy monotonic-only lines);
@@ -54,9 +57,9 @@ from datetime import datetime, timedelta
 
 from . import ledger as ledger_mod
 from . import notes as notes_mod
+from . import opqueue, statuses
 from . import recap as recap_mod
 from . import state as state_mod
-from . import statuses
 from . import telegram as telegram_mod
 from .config import Config
 from .logutil import parse_ts
@@ -124,6 +127,8 @@ class PhaseReport:
     recap: str = ""  # recap.summary from recaps/<phase>.json
     recap_reason: str = ""  # why there is no recap, when there isn't one
     notes: list[dict] = field(default_factory=list)  # `swarm note` decisions
+    #: The phase's operator jobs: ``{job, state, brief, outcome}``.
+    operator_jobs: list[dict] = field(default_factory=list)
     pings: list[Ping] = field(default_factory=list)  # owner notifications sent
     started: float | None = None  # first CLAIM
     finished: float | None = None  # when the WORKER finished (sentinel / jsonl)
@@ -147,7 +152,7 @@ class PhaseReport:
         worker judged it needed review. Otherwise the summary has to be more than
         the filler a worker types because the argument is required.
         """
-        if self.notes:
+        if self.notes or self.operator_jobs:
             return True
         text = " ".join(self.decision.split())
         return bool(text) and text.lower() not in _FILLER and len(text) >= 4
@@ -214,6 +219,7 @@ def build_report(
     jsonl = _read_jsonl(cfg)
     recaps = _read_recaps(cfg)
     notes = notes_mod.load_all(cfg)
+    jobs = _read_jobs(cfg)
     pings, ping_ledger = _read_pings(cfg)
     runs, denials = _read_log(cfg)
     live = _live_map(st)
@@ -224,6 +230,7 @@ def build_report(
         | set(jsonl)
         | set(recaps)
         | set(notes)
+        | set(jobs)
         | set(pings)
         | set(runs)
         | set(live)
@@ -237,6 +244,8 @@ def build_report(
              runs, denials, live)
         for name in sorted(names)
     ]
+    for r in reports:
+        r.operator_jobs = jobs.get(r.phase, [])
     reports = [r for r in reports if _in_window(r, since)]
     reports.sort(key=lambda r: (r.finished or r.started or 0.0, r.phase))
 
@@ -568,6 +577,25 @@ def _read_log(cfg: Config) -> tuple[dict[str, list[Run]], dict[str, list[str]]]:
     return runs, denials
 
 
+def _read_jobs(cfg: Config) -> dict[str, list[dict]]:
+    """Operator jobs keyed by the phase they belong to, oldest first.
+
+    ``P-op2`` files under P, so a phase's follow-ups read as one story; an
+    ``op-<epoch>`` job queued with no phase is its own row.
+    """
+    out: dict[str, list[dict]] = {}
+    for item in sorted(opqueue.load_all(cfg), key=lambda i: (i.queued_at, i.phase)):
+        out.setdefault(opqueue.owning_phase(item.phase), []).append(
+            {
+                "job": item.phase,
+                "state": item.state,
+                "brief": " ".join(item.note.split()),
+                "outcome": " ".join((item.outcome or item.last_error).split()),
+            }
+        )
+    return out
+
+
 def _read_pings(cfg: Config) -> tuple[dict[str, list[Ping]], bool]:
     """Owner notifications per phase, and whether the ledger exists at all.
 
@@ -671,18 +699,35 @@ def render(rep: Report, decisions: bool = False) -> str:
 
     if decisions:
         for p in rows:
-            head = f"{p.phase}  [{p.status or p.live or 'pending'}]"
+            head = f"{p.phase}  [{p.status or p.live or _unrun_label(p.phase)}]"
             when = f"  {_when(p.finished)}" if p.finished else ""
             out.append(f"{head}{when}")
             if p.decision:
                 out.append(f"    {p.decision}")
+            # The owner's calls first: they are what every later line was built on.
+            owner = [n for n in p.notes if n.get("kind") == notes_mod.OWNER_DECISION]
+            for note in owner:
+                out.append(f"    [owner] {note.get('text', '')}")
             for note in p.notes:
-                out.append(f"    [{note.get('kind', 'decision')}] {note.get('text', '')}")
+                if note.get("kind") != notes_mod.OWNER_DECISION:
+                    out.append(f"    [{note.get('kind', 'decision')}] {note.get('text', '')}")
+            for job in p.operator_jobs:
+                out.append(f"    {_job_line(job)}")
         out.append("")
-        recorded = sum(len(p.notes) for p in rows)
-        tail = f" ({recorded} explicit `swarm note` entries)" if recorded else ""
+        owner_n = sum(
+            1 for p in rows for n in p.notes if n.get("kind") == notes_mod.OWNER_DECISION
+        )
+        recorded = sum(len(p.notes) for p in rows) - owner_n
+        jobs_n = sum(len(p.operator_jobs) for p in rows)
+        extra = [
+            f"{recorded} explicit `swarm note` entries" if recorded else "",
+            f"{owner_n} owner decision(s)" if owner_n else "",
+            f"{jobs_n} operator job(s)" if jobs_n else "",
+        ]
+        tail = ", ".join(e for e in extra if e)
         out.append(
-            f"{len(rows)} of {len(rep.phases)} phases recorded a decision{tail}"
+            f"{len(rows)} of {len(rep.phases)} phases recorded a decision"
+            + (f" ({tail})" if tail else "")
         )
         return "\n".join(out)
 
@@ -719,6 +764,22 @@ def render(rep: Report, decisions: bool = False) -> str:
         for w in rep.warnings:
             out.append(f"  {w.phase}: {w.detail}")
     return "\n".join(out)
+
+
+def _unrun_label(name: str) -> str:
+    """A row with no status: an open phase, or one of the two non-phase keys."""
+    if name == notes_mod.OVERSEER:
+        return "Overseer"
+    if name.startswith(opqueue.ADHOC_PREFIX):
+        return "ad-hoc job"
+    return "pending"
+
+
+def _job_line(job: dict) -> str:
+    """One operator job: its state, then what it did — or, while open, what it is for."""
+    state = job.get("state", "?")
+    what = job.get("outcome") if state in opqueue.TERMINAL else ""
+    return f"[operator {state}] {job.get('job', '?')}: {_clip(what or job.get('brief', ''), 160)}"
 
 
 def _no_recap(p: PhaseReport) -> str:

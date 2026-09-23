@@ -233,3 +233,36 @@ def ready(
         if deps <= satisfied:
             result.append(phase)
     return result
+
+
+def blocked_behind(
+    graph: dict[str, set[str]],
+    phase: str,
+    done: dict[str, str],
+    excluded: set[str] | frozenset[str] = frozenset(),
+) -> int:
+    """How many open phases stand behind ``phase``, transitively.
+
+    What a question costs while it waits: every phase that needs ``phase`` —
+    directly or through another open phase — cannot start until it lands. A
+    dependent already in ``done`` (landed, skipped or failed) is not waiting on
+    anything and the walk does not go through it; an excluded one will never run,
+    so it is not counted either. Iterative, so a long serial chain cannot hit the
+    recursion limit.
+    """
+    dependents: dict[str, list[str]] = {}
+    for p, deps in graph.items():
+        for d in deps:
+            dependents.setdefault(d, []).append(p)
+    seen: set[str] = set()
+    frontier = [phase]
+    while frontier:
+        nxt: list[str] = []
+        for node in frontier:
+            for dep in dependents.get(node, ()):
+                if dep in seen or dep == phase or dep in done or dep in excluded:
+                    continue
+                seen.add(dep)
+                nxt.append(dep)
+        frontier = nxt
+    return len(seen)

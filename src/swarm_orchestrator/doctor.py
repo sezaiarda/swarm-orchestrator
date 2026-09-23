@@ -745,7 +745,7 @@ def _check_owner(cfg: Config, st: State) -> Check:
         "owner.blocking",
         status,
         "you are the blocker: " + "; ".join(bits),
-        f"answer in its pane, then `swarm resumed {target}` (or `swarm done {target} ...`)",
+        f"answer in its pane, then `swarm resumed {target} '<the answer>'` (or `swarm done {target} ...`)",
     )
 
 

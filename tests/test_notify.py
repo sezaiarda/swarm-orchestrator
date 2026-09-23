@@ -343,7 +343,10 @@ def test_a_dropped_fail_ping_is_reported_by_done(cfg, tmp_path, monkeypatch):
 
 def test_waiting_pings_the_question_under_its_own_kind(cfg, sink):
     launch.waiting(cfg, "P1", "  which\n schema? ")
-    assert sent(sink) == ["swarm: P1 is waiting on you — which schema?"]
+    cost, head = sent(sink)
+    assert head == "swarm: P1 is waiting on you — which schema?"
+    # The first line says what waiting costs (unit-tested in test_owner_history).
+    assert "slot held · asked " in cost
     [row] = ledger(cfg.state_dir)
     assert (row["kind"], row["phase"], row["source"]) == ("waiting", "P1", "launch.waiting")
 

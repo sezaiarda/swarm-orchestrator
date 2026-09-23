@@ -37,6 +37,18 @@ from .config import Config
 
 KINDS = ("decision", "assumption", "risk")
 
+#: The owner's answer to a question a session asked, recorded by ``swarm
+#: resumed`` / ``operator-resumed`` / ``overseer-resumed``. Not in :data:`KINDS`
+#: because no session writes one with ``swarm note``: it is the owner's call,
+#: relayed, and the history is only worth reading if the two never blur.
+OWNER_DECISION = "owner_decision"
+ALL_KINDS = KINDS + (OWNER_DECISION,)
+
+#: The notes key the Overseer's owner answers are filed under. One fixed key, not
+#: the pass id: its calls are one running history, and a key per pass would
+#: scatter them across the report.
+OVERSEER = "overseer"
+
 
 @dataclass
 class Note:
@@ -56,10 +68,19 @@ def _notes_dir(cfg: Config) -> Path:
 
 
 def add(cfg: Config, phase: str, text: str, kind: str = "decision") -> Note:
-    """Append a note. Never raises — a lost note must not fail a worker's turn."""
-    if kind not in KINDS:
+    """Append a note. Never raises — a lost note must not fail a worker's turn.
+
+    An identical ``(phase, kind, text)`` already on file is returned instead of
+    written again: a session that retries a command it was unsure landed would
+    otherwise say the same thing twice in the history, and the recorded runs had
+    exactly those duplicates.
+    """
+    if kind not in ALL_KINDS:
         kind = "decision"
     note = Note(phase=phase, kind=kind, text=text.strip())
+    for prior in load(cfg, phase):
+        if prior.kind == note.kind and prior.text == note.text:
+            return prior
     try:
         d = _notes_dir(cfg)
         d.mkdir(parents=True, exist_ok=True)
@@ -117,8 +138,28 @@ def summary_line(cfg: Config) -> str | None:
     allnotes = load_all(cfg)
     if not allnotes:
         return None
-    n = sum(len(v) for v in allnotes.values())
+    n = sum(1 for v in allnotes.values() for x in v if x.kind != OWNER_DECISION)
+    owner = sum(1 for v in allnotes.values() for x in v if x.kind == OWNER_DECISION)
+    also = f", {owner} owner answer(s)" if owner else ""
     return (
-        f"{n} decision(s) logged across {len(allnotes)} phase(s) "
+        f"{n} decision(s){also} logged across {len(allnotes)} phase(s) "
         f"— `swarm report --decisions`"
     )
+
+
+def owner_answer(cfg: Config, phase: str, answer: str, question: str = "") -> Note | None:
+    """Record the owner's answer to ``phase``'s question as an ``owner_decision``.
+
+    The answer used to live only in the session that asked, so the history said
+    what workers decided and never what the owner did. ``question`` is kept as a
+    short tail for context; an empty answer records nothing (there is nothing to
+    read back).
+    """
+    text = " ".join((answer or "").split())
+    if not text:
+        return None
+    asked = " ".join((question or "").split())
+    if asked:
+        asked = asked if len(asked) <= 200 else asked[:199].rstrip() + "…"
+        text = f"{text} (asked: {asked})"
+    return add(cfg, phase, text, OWNER_DECISION)

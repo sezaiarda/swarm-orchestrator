@@ -52,13 +52,19 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   that caps how many heavy builds run at once so parallel worktrees can't OOM the
   host; it auto-releases even if a build is killed. If the gates already route
   through it, skip. Give these builds a generous bash timeout — they may queue.
-- **Owner questions (ask, don't guess)**: when `SWARM_PHASE` is set and the worker
-  genuinely needs the owner (an ambiguity it must not guess), it must NOT assume —
-  it runs `swarm waiting "$SWARM_PHASE" "<the question>"` *before* it opens the
-  AskUserQuestion, and `swarm resumed "$SWARM_PHASE"` *immediately after* the answer
-  returns. The principle: never guess or assume when you truly need the owner — ask,
-  and self-report so the swarm can free your grid slot (moving you to your own
-  window) while you wait, then finish normally with `swarm done` once answered.
+- **Decide the obvious, ask the big (never guess a genuine question)**: when
+  `SWARM_PHASE` is set, the worker decides anything the ledger row, ADRs/specs,
+  lessons, CLAUDE.md or standard engineering practice already settles, and records
+  it with `swarm note "$SWARM_PHASE" decision "<what + why>"`. It asks the owner
+  only for non-obvious or big calls (scope, money, taste/UX, irreversible or
+  live-data changes, contradicting a written owner decision, anything only the
+  owner's devices can check) — and then it must NOT guess: it runs
+  `swarm waiting "$SWARM_PHASE" "<the question>"` *before* it opens the
+  AskUserQuestion, and `swarm resumed "$SWARM_PHASE" "<the answer in one line>"`
+  *immediately after* the answer returns (the answer is recorded in the history).
+  It never waits on a deploy/roll, post-build verification, another repo's gate or
+  an overnight measurement — that is an `operator` finish with an actionable brief.
+  If the file already says this, leave it.
 - **Cost rules** (each line below is a known
   time or cost sink). Add whichever the file does not already say:
   - Subagents come back immediately — an `Agent` call returns in a second and

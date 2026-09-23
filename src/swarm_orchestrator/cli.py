@@ -516,7 +516,9 @@ def cmd_operator_ask(cfg: Config, phase: str, question: str) -> int:
     if fresh:
         telegram.notify(
             cfg.telegram_notify,
-            f"swarm: operator job {phase} is waiting on you — {item.question}"
+            launch_mod.cost_line(None, "operator session held", item.asked_at or time.time())
+            + f"\nswarm: operator job {phase} is waiting on you"
+            f" — {launch_mod.ping_question(item.question)}"
             f" (the job: {_job_brief(item.note or 'no brief')})",
             kind="operator-ask",
             phase=phase,
@@ -537,6 +539,8 @@ def cmd_operator_resumed(cfg: Config, phase: str, answer: str = "") -> int:
         print(f"swarm operator-resumed: {phase} is not waiting on the owner", file=sys.stderr)
         return 1
     operator_mod.hold_lease(cfg, phase, item.lease_until)
+    if notes_mod.owner_answer(cfg, opqueue.owning_phase(phase), item.answer, item.question):
+        print("  recorded as an owner decision (`swarm report --decisions`)")
     print(f"operator-resumed {phase}: carry on")
     return 0
 
@@ -662,7 +666,8 @@ def cmd_overseer_ask(cfg: Config, question: str) -> int:
     if fresh:
         telegram.notify(
             cfg.telegram_notify,
-            f"swarm: the Overseer is waiting on you — {question}",
+            launch_mod.cost_line(None, "Overseer pass held", time.time())
+            + f"\nswarm: the Overseer is waiting on you — {launch_mod.ping_question(question)}",
             kind="overseer-ask",
             source="cli.overseer-ask",
             state_dir=cfg.state_dir,
@@ -684,6 +689,8 @@ def cmd_overseer_resumed(cfg: Config, answer: str) -> int:
     with state_mod.transaction(cfg) as s:
         if s.overseer_pass == pid:
             s.overseer_deadline = time.time() + cfg.overseer_timeout_s
+    if notes_mod.owner_answer(cfg, notes_mod.OVERSEER, answer, rec.question):
+        print("  recorded as an owner decision (`swarm report --decisions`)")
     print(f"overseer-resumed {pid}: carry on")
     return 0
 
@@ -893,6 +900,19 @@ def cmd_tui(cfg: Config) -> int:
     return tui_mod.main(cfg)
 
 
+def _note_words(words: list[str], kind: str) -> tuple[str, str]:
+    """``(text, kind)`` from ``swarm note``'s positional words.
+
+    ``swarm note P decision "…"`` reads naturally and is how the worker directive
+    spells it, so a leading bare kind word is the kind rather than the first word
+    of the text. Only a separate argument counts: a quoted ``"risk of X"`` is one
+    word and stays text.
+    """
+    if len(words) > 1 and words[0] in notes_mod.KINDS:
+        return " ".join(words[1:]), words[0]
+    return " ".join(words), kind
+
+
 def cmd_note(cfg: Config, phase: str, text: str, kind: str) -> int:
     """Record a decision without pinging anyone.
 
@@ -948,10 +968,20 @@ def cmd_waiting(cfg: Config, phase: str, note: str) -> int:
     return 0
 
 
-def cmd_resumed(cfg: Config, phase: str) -> int:
-    """Signal the owner answered — cancel a pending park (distinct from `resume`)."""
+def cmd_resumed(cfg: Config, phase: str, answer: str = "") -> int:
+    """Signal the owner answered — cancel a pending park (distinct from `resume`).
+
+    ``answer`` is the owner's answer in one line. It is recorded as an
+    ``owner_decision`` note before the poke, so the history keeps it whether or
+    not a supervisor is listening; without it the owner's calls were the one kind
+    of decision the history never held.
+    """
+    if answer.strip():
+        notes_mod.owner_answer(cfg, phase, answer, doctor_mod.waiting_question(cfg, phase))
     _poke(cfg, f"resumed {phase}")
     print(f"resumed {phase}")
+    if answer.strip():
+        print("  recorded as an owner decision (`swarm report --decisions`)")
     return 0
 
 
@@ -1262,7 +1292,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "resumed", help="report the owner answered — cancel a pending park"
     )
     rsp.add_argument("phase")
-    rsp.set_defaults(func=lambda cfg, a: cmd_resumed(cfg, a.phase))
+    rsp.add_argument("answer", nargs="*", default=[],
+                     help="the owner's answer in one line — recorded in the history")
+    rsp.set_defaults(func=lambda cfg, a: cmd_resumed(cfg, a.phase, " ".join(a.answer)))
 
     ip = sub.add_parser("integrate", help="manually integrate swarm/<phase> into main")
     ip.add_argument("phase")
@@ -1475,9 +1507,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="decision",
         help="decision (default), assumption, or risk",
     )
-    npp.set_defaults(
-        func=lambda cfg, a: cmd_note(cfg, a.phase, " ".join(a.text), a.kind)
-    )
+    npp.set_defaults(func=lambda cfg, a: cmd_note(cfg, a.phase, *_note_words(a.text, a.kind)))
     return p
 
 

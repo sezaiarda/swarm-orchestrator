@@ -90,14 +90,17 @@ To ask, run
     swarm operator-ask <job> "<question>"
 
 which pings the owner and keeps this session alive for as long as they take.
-Then ask the same question here with AskUserQuestion, in plain product terms —
-what you are blocked on, the options, what each costs. When they have answered,
-run
+Then ask the same question here with AskUserQuestion, in plain product terms and
+on one screen: lead with the decision, give 2-4 options each with its
+consequence, recommended one first — no quoted source lines; the owner answers
+from a phone. When they have answered, run
 
-    swarm operator-resumed <job> "<their answer>"
+    swarm operator-resumed <job> "<their answer, in one line>"
 
-and carry on. Nobody else will answer: questions go to the owner, not to the
-swarm.
+and carry on. Always pass the answer: it is recorded in the run's history as the
+owner's decision, next to the job — without it the history says you asked and
+never what they said. Nobody else will answer: questions go to the owner, not to
+the swarm.
 
 ## Worker questions are not yours
 

@@ -263,6 +263,37 @@ def worker_row(entry, repo=None, meter=None, history=None) -> tuple[str, ...]:
     )
 
 
+OWNER_DECISION = "owner_decision"
+
+
+def _note_block(notes: list, limit: int, width: int, stamp) -> list[str]:
+    """A phase's recorded calls: the owner's answers first, then its own.
+
+    Two headings because they are two different things — what the owner decided
+    when asked, and what the worker decided without asking — and the history is
+    only worth reading if the two never blur.
+    """
+    out: list[str] = []
+    owner = [n for n in notes if n.kind == OWNER_DECISION]
+    own = [n for n in notes if n.kind != OWNER_DECISION]
+    for title, group, colour in (
+        (f"owner decisions ({len(owner)})", owner, lambda k: OK),
+        (f"decisions it made on its own ({len(own)})", own,
+         lambda k: WARN if k in ("risk", "assumption") else INFO),
+    ):
+        if not group:
+            continue
+        out.append("")
+        out.append(paint(title, ACCENT))
+        for note in group[-limit:]:
+            label = "owner" if note.kind == OWNER_DECISION else note.kind
+            out.append(
+                f"  [{COLOR[MUTED]}]{stamp(note.ts)}[/] "
+                f"{paint(escape(label), colour(note.kind))}  {escape(clip(note.text, width))}"
+            )
+    return out
+
+
 def worker_detail(entry, dash) -> str:
     """The selected slot in full: where it is, what it decided, what it just printed.
 
@@ -336,15 +367,7 @@ def worker_detail(entry, dash) -> str:
         lines.append(escape(clip(recap.summary, 600)))
 
     notes = (dash.notes or {}).get(slot.phase or "") or []
-    if notes:
-        lines.append("")
-        lines.append(paint(f"decisions it made on its own ({len(notes)})", ACCENT))
-        for note in notes[-6:]:
-            lines.append(
-                f"  [{COLOR[MUTED]}]{fmt_clock(note.ts)}[/] "
-                f"{paint(escape(note.kind), token(note.kind) if note.kind != 'decision' else INFO)} "
-                f"{escape(clip(note.text, 140))}"
-            )
+    lines.extend(_note_block(notes, 6, 140, fmt_clock))
 
     tail = (dash.tails or {}).get(slot.pane_id or "", "")
     body = [ln for ln in tail.splitlines() if ln.strip()][-6:]
@@ -435,15 +458,7 @@ def history_detail(run: PhaseRun, dash) -> str:
         notes = load_notes(dash.notes_dir, run.phase)
     except Exception:  # noqa: BLE001 - a detail pane never costs more than itself
         notes = []
-    if notes:
-        lines.append("")
-        lines.append(paint(f"decisions it made on its own ({len(notes)})", ACCENT))
-        for note in notes[-10:]:
-            lines.append(
-                f"  [{COLOR[MUTED]}]{fmt_stamp(note.ts)}[/] "
-                f"{paint(escape(note.kind), WARN if note.kind in ('risk', 'assumption') else INFO)}"
-                f"  {escape(clip(note.text, 200))}"
-            )
+    lines.extend(_note_block(notes, 10, 200, fmt_stamp))
 
     try:
         attempts = load_attempts(dash.cfg.done_dir, run.phase)

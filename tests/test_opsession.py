@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from swarm_orchestrator import notes as notes_mod
 from swarm_orchestrator import operator as operator_mod
 from swarm_orchestrator import opqueue, promptlint
 from swarm_orchestrator import state as state_mod
@@ -386,6 +387,10 @@ def test_operator_resumed_puts_the_session_back_on_an_ordinary_lease(cfg, log):
     assert st.operator_lease_until == item.lease_until
     assert st.operator_lease_until <= time.time() + opqueue.LEASE_S + 1
     assert cli(cfg, "operator-resumed", PHASE).returncode == 1  # not waiting now
+    # The owner's call is history, filed under the job's phase.
+    [owner] = notes_mod.load(cfg, opqueue.owning_phase(PHASE))
+    assert (owner.kind, owner.text) == (
+        notes_mod.OWNER_DECISION, "the staging box (asked: which host)")
 
 
 def test_operator_done_records_the_outcome_and_telegrams_one_line(cfg, log):

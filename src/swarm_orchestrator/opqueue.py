@@ -394,6 +394,19 @@ def _adhoc_ids(phase: str | None, now: float):
         yield f"{base}{sep}{n}"
 
 
+_EXTRA_JOB_RE = re.compile(r"^(.+)-op\d+$")
+
+
+def owning_phase(job: str) -> str:
+    """The phase a job id belongs to: ``P`` and ``P-op2`` are both P's.
+
+    The inverse of :func:`_adhoc_ids` for the ``--phase`` shape. An
+    ``op-<epoch>`` job belongs to no phase and is its own key.
+    """
+    m = _EXTRA_JOB_RE.match(job)
+    return m.group(1) if m and not job.startswith(ADHOC_PREFIX) else job
+
+
 def add_adhoc(cfg: Config, brief: str, phase: str | None = None) -> Item | None:
     """Queue a job nobody's ``swarm done`` left: ``swarm operator-add``.
 

@@ -246,6 +246,9 @@ def test_asking_the_owner_stretches_the_deadline_and_answering_resets_it(sup, cf
     assert cli_main(["--project-dir", str(cfg.project_dir), "overseer-resumed", "keep", "it"]) == 0
     rec = ovrecord.load_json(cfg, pid)
     assert (rec.question, rec.answer) == ("drop the look campaign?", "keep it")
+    [owner] = notes_mod.load(cfg, notes_mod.OVERSEER)
+    assert owner.kind == notes_mod.OWNER_DECISION
+    assert owner.text == "keep it (asked: drop the look campaign?)"
     assert state_mod.read(cfg).overseer_deadline < time.time() + 2800
 
 

@@ -88,10 +88,12 @@ Prefer the step you can undo.
       swarm overseer-ask "<question>"
 
   which pings the owner and keeps this pass alive while they come, then ask the
-  same question here with AskUserQuestion in plain product terms: what is blocked,
-  the options, what each costs. When they have answered, run
-  `swarm overseer-resumed "<their answer>"` and carry on. Ask only what is
-  genuinely theirs; decide everything else yourself.
+  same question here with AskUserQuestion in plain product terms, on one screen:
+  lead with the decision, 2-4 options each with its consequence, recommended one
+  first. When they have answered, run
+  `swarm overseer-resumed "<their answer, in one line>"` and carry on — always
+  with the answer, which is recorded in the run's history as the owner's decision.
+  Ask only what is genuinely theirs; decide everything else yourself.
 
 Do not run `swarm done`, `swarm up`, `swarm down` or `swarm finish`.
 

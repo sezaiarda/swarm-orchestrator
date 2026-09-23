@@ -74,16 +74,6 @@ Go through the digest and ask, in this order:
 Say what you are about to do before each action, in this pane, in one line.
 Prefer the step you can undo.
 
-## 3b. Talking to other sessions
-
-Every running swarm session is reachable with Claude Code's native `ListAgents` /
-`SendMessage` (load them with ToolSearch if they are deferred): workers are
-`worker:<phase>`, the operator is `operator:<job>`, the reviewer is `overseer`.
-Message a session when your work touches theirs — a deploy that changes what a
-running phase builds against, a defect you found in a peer's output, a fact a peer
-needs. One message saying what changed and what they should do, not a chat. The
-owner's questions still go through the ask commands above, never through a peer.
-
 ## 4. What is not yours
 
 - **Worker questions.** Workers ask the owner their own questions. Never answer

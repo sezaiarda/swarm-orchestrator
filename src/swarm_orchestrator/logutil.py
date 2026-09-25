@@ -22,30 +22,85 @@ existing log stays readable across the change.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
+#: Size at which the supervisor rotates its log, and how many old files it keeps
+#: (``supervisor.log.1`` newest … ``.3`` oldest). The log grows by tens of KB a
+#: day on a busy campaign, so this bounds it without ever touching a live run's
+#: history, and every reader of that history reads the old files too
+#: (:func:`read_all`).
+ROTATE_BYTES = 16 * 1024 * 1024
+ROTATE_KEEP = 3
+
+
+def generations(path: Path) -> list[Path]:
+    """The rotated files of ``path`` that exist, oldest first."""
+    out = []
+    for n in range(ROTATE_KEEP, 0, -1):
+        old = path.with_name(f"{path.name}.{n}")
+        if old.is_file():
+            out.append(old)
+    return out
+
+
+def read_all(path: Path, keep: int | None = None, current: bool = True) -> str:
+    """``path`` with its rotated files before it, oldest first: the whole history.
+
+    ``keep`` limits how many rotated files are read (the newest ones);
+    ``current=False`` reads only the rotated ones. A missing or unreadable file
+    contributes nothing.
+    """
+    olds = generations(path)
+    if keep is not None:
+        olds = olds[len(olds) - keep:] if keep > 0 else []
+    parts = []
+    for p in [*olds, *([path] if current else [])]:
+        try:
+            parts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "".join(parts)
+
+
+def rotate(path: Path, keep: int = ROTATE_KEEP) -> None:
+    """``path`` -> ``path.1`` -> … -> ``path.<keep>``; the oldest is dropped."""
+    for n in range(keep, 0, -1):
+        src = path if n == 1 else path.with_name(f"{path.name}.{n - 1}")
+        if src.exists():
+            os.replace(src, path.with_name(f"{path.name}.{n}"))
 
 
 class Log:
-    """Append-only line logger backed by a file (with stderr fallback)."""
+    """Append-only line logger backed by a file (with stderr fallback).
 
-    def __init__(self, path: Path, echo: bool = False) -> None:
+    ``max_bytes`` (the supervisor's, :data:`ROTATE_BYTES`) rotates the file once
+    it reaches that size. Short-lived writers (every CLI call) leave it at 0: a
+    line one of them appends during a rotation lands in ``.1``, which every
+    history reader reads anyway.
+    """
+
+    def __init__(self, path: Path, echo: bool = False, max_bytes: int = 0) -> None:
         self.path = path
         self.echo = echo
+        self.max_bytes = max_bytes
         # The supervisor launches workers on background threads, and a launch
         # builds its worktrees on a pool, all writing to this one handle. A line
         # is the unit every reader greps for, so it must never interleave.
         self._lock = threading.Lock()
+        self._fh = self._open()
+
+    def _open(self):
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self._fh = path.open("a", encoding="utf-8", buffering=1)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            return self.path.open("a", encoding="utf-8", buffering=1)
         except OSError as exc:
-            print(f"log-open-failed {path}: {exc}", file=sys.stderr)
-            self._fh = None
+            print(f"log-open-failed {self.path}: {exc}", file=sys.stderr)
+            return None
 
     def line(self, message: str) -> None:
         """Write one timestamped line."""
@@ -57,6 +112,10 @@ class Log:
             if self._fh is not None:
                 try:
                     self._fh.write(record)
+                    if self.max_bytes and os.fstat(self._fh.fileno()).st_size >= self.max_bytes:
+                        self._fh.close()
+                        rotate(self.path)
+                        self._fh = self._open()
                 except (OSError, ValueError) as exc:  # ValueError: closed under us
                     print(f"log-write-failed: {exc}", file=sys.stderr)
             if self.echo or self._fh is None:

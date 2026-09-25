@@ -132,6 +132,26 @@ def test_log_tail_on_a_missing_file_is_empty(tmp_path):
     assert data.LogTail(tmp_path / "nope.log").poll() == []
 
 
+def test_log_tail_keeps_the_history_across_a_rotation(tmp_path):
+    """A rotated log moves to `.1`; the tail reads it back instead of forgetting."""
+    from swarm_orchestrator import logutil
+
+    path = tmp_path / "supervisor.log"
+    path.write_text(log_text((0, "SUPERVISOR-START pid=1 driver=tmux"),
+                             (5, "LAUNCH P0 slot=0")), encoding="utf-8")
+    tail = data.LogTail(path)
+    tail.poll()
+    logutil.rotate(path)
+    path.write_text(log_text((9, "LAUNCH P1 slot=1")), encoding="utf-8")
+    tail.poll()
+    assert [e.phase for e in tail.events if e.kind == "launch"] == ["P0", "P1"]
+    # ...and a dashboard started after the rotation sees it all from the start.
+    assert len(data.LogTail(path).poll()) == 1
+    fresh = data.LogTail(path)
+    fresh.poll()
+    assert [e.phase for e in fresh.events if e.kind == "launch"] == ["P0", "P1"]
+
+
 # -- state normalisation --------------------------------------------------
 def test_read_state_returns_none_before_the_first_run(cfg):
     # And without creating the state dir: the dashboard is strictly read-only,

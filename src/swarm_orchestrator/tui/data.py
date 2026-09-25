@@ -36,6 +36,7 @@ from statistics import median
 from .. import ledger as ledger_mod
 from .. import opqueue
 from .. import statuses
+from .. import logutil
 from ..logutil import parse_ts
 
 # Same phase-token shape the ledger accepts, so a positional token is only read
@@ -117,16 +118,22 @@ class LogTail:
         self.path = Path(path)
         self.events: list[Event] = []
         self._offset = 0
+        self._ino: int | None = None
 
     def poll(self) -> list[Event]:
-        """Decode whatever was appended since the last call; returns the new events."""
+        """Decode whatever was appended since the last call; returns the new events.
+
+        The first read, and the one after a rotation, starts from the rotated
+        files (:func:`logutil.read_all`), so a rotation never empties the history."""
         try:
-            size = self.path.stat().st_size
+            st = self.path.stat()
         except OSError:
             return []
-        if size < self._offset:
+        size = st.st_size
+        if self._ino is None or st.st_ino != self._ino or size < self._offset:
+            self._ino = st.st_ino
             self._offset = 0
-            self.events = []
+            self.events = parse_events(logutil.read_all(self.path, current=False))
         if size == self._offset:
             return []
         try:

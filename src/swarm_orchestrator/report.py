@@ -62,6 +62,7 @@ from . import recap as recap_mod
 from . import state as state_mod
 from . import telegram as telegram_mod
 from .config import Config
+from . import logutil
 from .logutil import parse_ts
 from .state import State
 
@@ -535,12 +536,7 @@ def _read_log(cfg: Config) -> tuple[dict[str, list[Run]], dict[str, list[str]]]:
     open_run: dict[str, Run] = {}
     if not cfg.supervisor_log.is_file():
         return runs, denials
-    try:
-        lines = cfg.supervisor_log.read_text(
-            encoding="utf-8", errors="replace"
-        ).splitlines()
-    except OSError:
-        return runs, denials
+    lines = logutil.read_all(cfg.supervisor_log).splitlines()  # rotated files too
 
     for raw in lines:
         ts, msg = parse_ts(raw)

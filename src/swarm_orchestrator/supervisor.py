@@ -66,6 +66,7 @@ from . import runs as runs_mod
 from . import session as session_mod
 from . import telegram, tmux
 from .config import Config, load
+from . import logutil
 from .logutil import Log
 
 
@@ -93,7 +94,8 @@ class Supervisor:
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.log = Log(cfg.supervisor_log, echo=bool(os.environ.get("SWARM_LOG_ECHO")))
+        self.log = Log(cfg.supervisor_log, echo=bool(os.environ.get("SWARM_LOG_ECHO")),
+                       max_bytes=logutil.ROTATE_BYTES)
         self.master = master_mod.Master(cfg, self.log)
         self._stop = False
         self._fifo_fd = -1

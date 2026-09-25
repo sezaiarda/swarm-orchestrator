@@ -668,10 +668,10 @@ project path, so two projects with the same folder name never share state.
 | `notes/<phase>.jsonl` | Decisions, assumptions, risks, and owner answers. |
 | `turns/<phase>.jsonl` | Final turn texts from the Stop hook. |
 | `recaps/<phase>.json` | Generated recaps. |
-| `meters/` | Per-phase meters, `limits.jsonl` (5-hour and weekly samples), `sessions.jsonl`. |
+| `meters/` | Per-phase meters, `limits.jsonl` (5-hour and weekly samples), `sessions.jsonl`. `limits.jsonl` is not rotated: a row is written only when a usage figure moves (a few hundred small rows a day at most), the open run's usage is computed from every sample since its start, and each closed run keeps its own slice in `history/runs/<id>/`. |
 | `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
 | `notifications.jsonl` | Every Telegram send and whether it landed. |
-| `logs/supervisor.log`, `logs/web.log` | Logs. Neither is rotated. |
+| `logs/supervisor.log`, `logs/web.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` is not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |
 | `cache/target/<repo>/` | The shared cargo target cache. |

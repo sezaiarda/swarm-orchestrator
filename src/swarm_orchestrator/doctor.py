@@ -51,7 +51,7 @@ from . import state as state_mod
 from . import statuses
 from . import telegram
 from .config import Config
-from .logutil import parse_ts
+from .logutil import parse_ts, read_all
 from .master import build_context
 from .state import State
 from .web import lifecycle as web_lifecycle
@@ -262,11 +262,8 @@ def _log_ts(cfg: Config, prefix: str) -> float | None:
     what is happening, never when it started — so ages ("blocked for 4h") come
     from here. Reads the tail only; the log grows unbounded over a campaign.
     """
-    try:
-        with cfg.supervisor_log.open("r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()[-4000:]
-    except OSError:
-        return None
+    # The newest rotated file too, so a rotation a minute ago loses nothing.
+    lines = read_all(cfg.supervisor_log, keep=1).splitlines()[-4000:]
     for line in reversed(lines):
         ts, message = parse_ts(line)
         if message.startswith(prefix):

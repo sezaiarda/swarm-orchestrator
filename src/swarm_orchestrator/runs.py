@@ -1,8 +1,8 @@
 """Runs: one ``swarm up`` → ``swarm down`` (or ``swarm reset``), on disk.
 
 Every number the dashboard derives over time — the ETA's typical phase, the
-usage pace — used to be computed from files that are never rotated: the
-append-only supervisor log and ``meters/limits.jsonl``. So a ``swarm down`` then
+usage pace — used to be computed from files that only ever grow: the
+supervisor log (and its rotated files) and ``meters/limits.jsonl``. So a ``swarm down`` then
 ``swarm up`` kept yesterday's phases in today's ETA and yesterday's samples in
 today's pace, and there was no way to say "start counting from now". A run is
 that "from now": an id and an epoch every live figure is measured since.

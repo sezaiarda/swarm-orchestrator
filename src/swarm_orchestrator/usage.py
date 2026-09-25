@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import runs, statuses
+from . import logutil, runs, statuses
 
 METERS_DIR = "meters"
 LIMITS_LOG = "limits.jsonl"
@@ -299,11 +299,8 @@ class Sources:
         meters_dir = Path(cfg.state_dir) / METERS_DIR
         self.samples = load_samples(meters_dir / LIMITS_LOG)
         self.sessions = load_sessions(meters_dir)
-        try:
-            text = Path(cfg.supervisor_log).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            text = ""
-        self.events = parse_events(text)
+        # The rotated files too: a run can outlast a rotation.
+        self.events = parse_events(logutil.read_all(Path(cfg.supervisor_log)))
 
     def summarize(self, rec: dict, end: float) -> dict:
         return summarize(rec, end, samples=self.samples, events=self.events,

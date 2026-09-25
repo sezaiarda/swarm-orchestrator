@@ -824,6 +824,22 @@ def _swarm_branches(repo: Path) -> list[str]:
     return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
 
 
+def _mirror_empty(cfg: Config, phase: str) -> bool:
+    """Nothing in ``swarm/<phase>`` to lose: in no repo does the branch hold a
+    commit past main, nor its worktree an edit (tracked or untracked). A status
+    that cannot be read counts as not empty."""
+    branch = f"swarm/{phase}"
+    for repo, main in _repos(cfg):
+        if _branch_exists(repo, branch) and _commits_ahead(repo, main, branch) > 0:
+            return False
+        wt = _wt_for(cfg, repo, phase)
+        if wt.is_dir():
+            status = _git(wt, "status", "--porcelain", check=False)
+            if status.returncode != 0 or status.stdout.strip():
+                return False
+    return True
+
+
 def _all_swarm_phases(cfg: Config) -> set[str]:
     phases: set[str] = set()
     for repo in [cfg.project_dir, *discovered_repos(cfg)]:
@@ -891,7 +907,12 @@ def reconcile(
     pushes: dict[str, dict[Path, PushResult]] = {}
     for phase in sorted(_all_swarm_phases(cfg)):
         job = operator.get(phase)
-        if job == "keep":
+        if job == "keep" and _mirror_empty(cfg, phase):
+            # Kept so a retry finds the commits an attempt already made; with
+            # none, keeping it only hands the next attempt a stale base.
+            discard(cfg, phase, log)
+            log.line(f"RECONCILE-DISCARD {phase} empty operator mirror")
+        elif job == "keep":
             log.line(f"RECONCILE-KEEP {phase} operator-job")
         elif phase in done_phases:
             discard(cfg, phase, log)

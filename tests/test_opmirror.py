@@ -199,3 +199,61 @@ def test_a_long_brief_goes_to_a_file_and_the_pane_gets_one_short_line(env, monke
     assert len(sent) == 1 and len(sent[0]) < 300
     assert str(brief_file) in sent[0]
     assert opqueue.load(cfg, JOB) is not None  # the queue still reads only *.json
+
+
+def test_swarm_up_reconciles_what_a_down_left_behind(env):
+    """The aftermath of a `swarm down`: state still showed two busy
+    slots and a running operator job, and every repo still held the worktrees and
+    `swarm/*` branches of two workers, the operator job and an Overseer pass —
+    all empty. What `swarm up` does before it starts a supervisor (``init_state``,
+    ``opqueue.reconcile``, ``_reconcile_orphans``, in that order) must leave: no
+    busy slot, the job queued for another attempt, no mirror, no branch, and every
+    `done` record where it was."""
+    from swarm_orchestrator import cli, ovrecord
+
+    cfg, project, _origin, log = env
+    with state_mod.transaction(cfg) as st:
+        st.mark_done("L0", "ok")
+    (cfg.done_dir / "L0.ok").write_text("L0 ok landed\n", encoding="utf-8")
+    for phase in ("L1", "L2"):  # two launched workers, killed before a commit
+        with state_mod.transaction(cfg) as st:
+            assert st.claim_slot(phase) is not None
+        gitq.worktree_add(cfg, phase, log)
+    _queue(cfg)  # an operator job, dispatched and killed before a commit
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+    pass_id = "20260925T201209Z"  # an Overseer pass, interrupted before a commit
+    ovrecord.create(cfg, pass_id, [], None, ovrecord.mirror_name(pass_id))
+    gitq.worktree_add(cfg, ovrecord.mirror_name(pass_id), log)
+    ovrecord.update(cfg, pass_id, status=ovrecord.INTERRUPTED, ended_at=1.0)
+    st = state_mod.read(cfg)
+    assert sorted(s.phase for s in st.busy_slots()) == ["L1", "L2"]
+    assert st.operator_phase == JOB and opqueue.load(cfg, JOB).state == opqueue.RUNNING
+    assert _out(project, "branch", "--list", "swarm/*").count("swarm/") == 4
+
+    state_mod.init_state(cfg)
+    opqueue.reconcile(cfg, log)
+    cli._reconcile_orphans(cfg)
+
+    st = state_mod.read(cfg)
+    assert st.busy_slots() == [] and st.operator_phase is None
+    assert st.done == {"L0": "ok"}
+    assert (cfg.done_dir / "L0.ok").is_file()
+    item = opqueue.load(cfg, JOB)
+    assert item.state == opqueue.QUEUED and item.attempts == 1
+    assert _out(project, "branch", "--list", "swarm/*").strip() == ""
+    assert [p.name for p in cfg.wt_dir.iterdir() if p.is_dir()] == []
+    assert "empty operator mirror" in cfg.supervisor_log.read_text()
+
+    assert operator_mod.dispatch(cfg, JOB, log) is True  # the retry builds afresh
+    assert (cfg.wt_dir / f"op-{JOB}" / "README.md").is_file()
+
+
+def test_swarm_up_keeps_a_live_jobs_mirror_that_holds_only_an_uncommitted_edit(env):
+    cfg, _project, _origin, log = env
+    _queue(cfg)
+    assert operator_mod.dispatch(cfg, JOB, log) is True
+    (cfg.wt_dir / f"op-{JOB}" / "draft.txt").write_text("not committed yet\n")
+
+    gitq.reconcile(cfg, {}, log, operator=operator_mod.mirror_plan(cfg))
+
+    assert (cfg.wt_dir / f"op-{JOB}" / "draft.txt").is_file()

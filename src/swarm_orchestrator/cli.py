@@ -552,7 +552,8 @@ def cmd_operator_triage(cfg: Config, phase: str) -> int:
     if decision.get("when") == opqueue.NOW:
         # `now` means it cannot keep. Poke rather than dispatch here: the
         # supervisor is the sole opener of the session, exactly as it is the sole
-        # spawner of the master. A `later` item drains from the queue sweep.
+        # spawner of the master, and it holds the job until its phase has
+        # merged. A `later` item drains from the queue sweep once the run is quiet.
         _poke(cfg, f"operator {phase}")
     print(
         f"{phase}: {decision.get('when')} "

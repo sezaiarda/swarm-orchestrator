@@ -362,3 +362,24 @@ def test_hook_script_is_executable():
     hook = Path(__file__).resolve().parent.parent / "scripts" / "stop-hook.py"
     assert hook.is_file()
     assert shutil.which(str(hook)) is not None, "the hook must be directly executable"
+
+
+def test_a_recap_uses_claude_p_even_with_an_api_key(cfg, monkeypatch, tmp_path):
+    """A subscription login has no API key: a recap asks for the `haiku` alias, which
+    is not an API model id, so it goes through `claude -p` whatever the env holds."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    calls = []
+
+    def api(*a, **k):
+        calls.append("api")
+        return None, "no"
+
+    def cli(*a, **k):
+        calls.append("cli")
+        return "Built it.", None
+
+    monkeypatch.setattr(recap, "_api_summary", api)
+    monkeypatch.setattr(recap, "_cli_summary", cli)
+    write_sentinel(cfg, "P0", "ok", LONG_NOTE)
+    assert recap.summarize(cfg, "P0").summary == "Built it."
+    assert calls == ["cli"]

@@ -27,13 +27,17 @@ that can run for hours — it returns nothing for the entire window you care abo
 
 The model call
 --------------
-Haiku is asked for the 1-2 sentences. Three back-ends, in preference order:
-``SWARM_RECAP_CMD`` (the hermetic-test seam, same shape as ``SWARM_MASTER_CMD``),
-a direct Messages API call when ``ANTHROPIC_API_KEY`` exists, then ``claude -p``
-— which needs no key at all because it reuses the CLI's own OAuth login. There is
-no API key is assumed in the environment, so ``claude -p`` is the live path; it
-carries a few thousand tokens of harness overhead per call, which is irrelevant
-at ~25 calls per campaign and buys zero setup.
+Haiku is asked for the 1-2 sentences, through ``claude -p --model haiku``: it
+needs no key at all because it reuses the CLI's own login, so it runs on the
+owner's subscription. ``SWARM_RECAP_CMD`` (the hermetic-test seam, same shape as
+``SWARM_MASTER_CMD``) replaces it in the tests. The call carries a few thousand
+tokens of harness overhead, which is irrelevant at ~25 calls per campaign and
+buys zero setup.
+
+:func:`ask` also has a direct Messages API path, but it is taken only for a full
+``claude-*`` model id with ``ANTHROPIC_API_KEY`` set. A recap always asks for the
+``haiku`` alias, so it always goes through ``claude -p``, key or no key; only an
+operator triage with a dated ``[operator].triage_model`` could reach the API.
 
 And when the captured text is *already* short enough to serve as the recap (the
 common case — a worker's completion note is usually one tight sentence), no model
@@ -321,9 +325,8 @@ def _api_summary(
 ) -> tuple[str | None, str | None]:
     """One Messages API call over stdlib urllib (the package has no deps).
 
-    Only reachable when ``ANTHROPIC_API_KEY`` is set. It is preferred when it is,
-    because it costs a fraction of the ``claude -p`` path — a bare prompt instead
-    of a whole CLI harness.
+    Only reachable when ``ANTHROPIC_API_KEY`` is set AND the model is a full
+    ``claude-*`` id (:func:`ask`), which no default is: recaps never take it.
     """
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
@@ -408,9 +411,10 @@ def ask(
     """One cheap headless model call. Returns ``(answer, reason)``; never raises.
 
     Back-ends in preference order: the ``seam`` env var (the hermetic-test stand-in
-    for the model), the direct API when a key exists, then ``claude -p``. Each is
-    skipped rather than tried when it is not configured, so adding an
-    ``ANTHROPIC_API_KEY`` later switches paths with no code change.
+    for the model), the direct API, then ``claude -p``. The API is tried only for
+    a full ``claude-*`` model id with ``ANTHROPIC_API_KEY`` set: an alias such as
+    the default ``haiku`` is not an API model id, so every default call (every
+    recap, and triage unless ``triage_model`` is a dated id) is ``claude -p``.
 
     Taken out of :func:`_model_summary` so the operator triage shares this chain
     instead of copying it — including the rule a copy would get wrong, that a key

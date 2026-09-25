@@ -52,3 +52,26 @@ def test_status_json_is_machine_readable(cfg, capsys):
 
     assert cli.cmd_status(cfg, as_json=True, show_all=True) == 0
     assert json.loads(capsys.readouterr().out)["done"]["a-P1"] == "skip"
+
+
+# -- the ledger is the project's, wherever the command runs from ----------
+CYCLE = "- [ ] `a-P0` · needs:`a-P1`\n- [ ] `a-P1` · needs:`a-P0`\n"
+
+
+def test_check_reads_the_project_ledger_from_another_cwd(cfg, tmp_path, monkeypatch, capsys):
+    (cfg.project_dir / cfg.ledger).write_text(CYCLE, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)  # `swarm --project-dir <project> check` from elsewhere
+    assert cli.cmd_check(cfg, strict=False) == 1
+    out = capsys.readouterr().out
+    assert "ledger: 2 phases" in out and "dependency cycle" in out
+
+
+def test_retry_cascade_reads_the_project_ledger_from_another_cwd(cfg, tmp_path, monkeypatch):
+    (cfg.project_dir / cfg.ledger).write_text(
+        "- [ ] `a-P2` · needs:—\n- [ ] `a-P3` · needs:`a-P2`\n", encoding="utf-8")
+    with state_mod.transaction(cfg) as st:
+        st.done = {"a-P2": "fail", "a-P3": "ok"}
+    monkeypatch.chdir(tmp_path)
+    assert cli.cmd_retry(cfg, ["a-P2"], all_failed=False, cascade=True,
+                         launch=False, keep_branch=True) == 0
+    assert state_mod.read(cfg).done == {}

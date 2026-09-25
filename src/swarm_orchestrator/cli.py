@@ -833,7 +833,7 @@ def cmd_check(cfg: Config, strict: bool) -> int:
     print(f"telegram: {'ok' if ok else 'FAIL'} — {detail}")
     bad = bad or not ok
     try:
-        graph = ledger_mod.load(Path(cfg.ledger))
+        graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
         issues = ledger_mod.validate(graph)
         print(f"ledger: {len(graph)} phases, {len(issues) or 'no'} issue(s)")
         for i in issues:
@@ -979,7 +979,7 @@ def cmd_retry(cfg: Config, phases: list[str], all_failed: bool,
             return 1
         if cascade:
             try:
-                graph = ledger_mod.load(Path(cfg.ledger))
+                graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
                 grew = True
                 while grew:
                     grew = False

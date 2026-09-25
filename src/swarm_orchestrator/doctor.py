@@ -49,7 +49,7 @@ from . import opqueue
 from . import pushowed
 from . import state as state_mod
 from . import statuses
-from . import telegram
+from . import telegram, tgbot
 from .config import Config
 from .logutil import parse_ts, read_all
 from .master import build_context
@@ -1184,6 +1184,31 @@ def _check_web(cfg: Config, st: State) -> Check:
     return Check("web.board", OK, f"not running — `swarm up` starts it on :{cfg.web_port}")
 
 
+def _check_tgbot(cfg: Config, st: State) -> Check:
+    """Is the bot's command listener (``/usage``) running, and is it being answered?
+
+    A 409 means some other program polls the same bot token; the listener backs
+    off and says so in its status file, which is where this reads it from.
+    """
+    name = "telegram.bot"
+    if not cfg.telegram_commands:
+        return Check(name, OK, "off ([telegram] commands = false)")
+    pid = tgbot.running(cfg)
+    if pid is not None:
+        info = tgbot.read_status(cfg, pid)
+        state, detail = info.get("state") or "starting", info.get("detail") or ""
+        if state in (tgbot.CONFLICT, tgbot.REJECTED, tgbot.WAITING_LOCK, tgbot.NETWORK):
+            return Check(name, WARN, f"running (pid {pid}) but {state}: {detail}",
+                         f"see {cfg.log_dir / tgbot.LOG}")
+        return Check(name, OK, f"running (pid {pid}): /usage and /help answered")
+    if st.supervisor_pid and _pid_alive(st.supervisor_pid):
+        why = ("" if tgbot.credentials(cfg) is not None
+               else f" (no bot token/chat id in {tgbot.env_file(cfg)})")
+        return Check(name, WARN, f"the run is up but the command listener is not running{why}",
+                     f"swarm telegram-bot   # or check {cfg.log_dir / tgbot.LOG}")
+    return Check(name, OK, "not running — `swarm up` starts it")
+
+
 def run_checks(cfg: Config) -> list[Check]:
     """Every diagnosis, in reading order. Never raises.
 
@@ -1230,6 +1255,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_operator(cfg))
     checks.append(_check_prompts())
     checks.append(_check_web(cfg, st))
+    checks.append(_check_tgbot(cfg, st))
     return checks
 
 

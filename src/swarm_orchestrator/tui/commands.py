@@ -70,8 +70,9 @@ from .theme import (
 #: Not offered even though the parser has them. ``tui`` is this program: a second
 #: cockpit started on a pipe instead of a terminal has nowhere to draw. The
 #: ``_``-prefixed commands are the supervisor's own plumbing and are skipped by
-#: the same rule ``cli._known_commands`` uses.
-HIDDEN = frozenset({"tui"})
+#: the same rule ``cli._known_commands`` uses. ``telegram-bot`` runs until it is
+#: killed and ``swarm up`` already starts one: from here it would only hang the tab.
+HIDDEN = frozenset({"tui", "telegram-bot"})
 
 #: Positionals that name a phase, and so are prefilled from what the app has
 #: selected. ``free`` takes "a slot id or a phase" — a phase is the common case.

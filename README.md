@@ -379,12 +379,16 @@ flowchart TD
 - **`swarm usage`:** each run's hours, phases, average 5-hour and weekly %/h,
   windows spanned, and $/h. The figures are account-wide, so other Claude sessions
   on the same account count too.
+- **On your phone:** the Overseer's Telegram summary ends with a short usage
+  block (5-hour and weekly %, resets, this run's %/h, phases and $/h, and how old
+  the sample is), and sending `/usage` to the swarm bot answers with the same block.
 
 ### Doctor, why, gc
 
 - **`swarm doctor`:** about 25 read-only checks covering the supervisor, slots,
   the run, integration, questions waiting on you, the ledger, Telegram, disk,
-  records, the operator, prompts and the web board. Exit 1 on any FAIL.
+  records, the operator, prompts, the web board and the bot's command listener.
+  Exit 1 on any FAIL.
 - **`swarm why <phase>`:** the one reason a phase is not running, walking unmet
   dependencies to the root blockers.
 - **`swarm gc`:** reclaims disk. It is a dry run unless you pass `--yes`.
@@ -445,6 +449,12 @@ nine tabs, switched with `1`–`9`, are:
   - the finish summary.
 
   `ok` finishes are silent.
+- **Commands:** the bot also listens. Send it `/usage` for the usage block or
+  `/help` for the list. `swarm up` starts the listener (`[telegram].commands`, on
+  by default), `swarm down` stops it, and `swarm telegram-bot` runs it in the
+  foreground. It answers only the chat in `TELEGRAM_CHAT_ID` and ignores everyone
+  else. Only one program may poll a bot token: while it runs,
+  `scripts/resolve-chat-id.sh` gets a 409, so run that before `swarm up`.
 - **Asking:** a worker runs `swarm waiting` / `resumed`, the operator runs
   `operator-ask` / `operator-resumed`, and the Overseer runs `overseer-ask` /
   `overseer-resumed`. Each pings you, asks in its own pane, and records your
@@ -671,12 +681,13 @@ project path, so two projects with the same folder name never share state.
 | `meters/` | Per-phase meters, `limits.jsonl` (5-hour and weekly samples), `sessions.jsonl`. `limits.jsonl` is not rotated: a row is written only when a usage figure moves (a few hundred small rows a day at most), the open run's usage is computed from every sample since its start, and each closed run keeps its own slice in `history/runs/<id>/`. |
 | `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
 | `notifications.jsonl` | Every Telegram send and whether it landed. |
-| `logs/supervisor.log`, `logs/web.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` is not rotated. |
+| `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
 | `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |
+| `telegram-bot.pid`, `.offset.json`, `.status.json` | The command listener's pid, the next Telegram update id it will ask for, and what it is doing (polling, backing off a 409, …). |
 
 ## Tests
 
@@ -701,6 +712,7 @@ fake scripts need bash (`read -t`).
   `test_overseer_*.py`);
 - the dashboard, which is booted headless at three terminal sizes (`test_tui_*.py`);
 - the web board (`test_web_*.py`);
+- the usage block and the bot's command listener (`test_tgbot.py`);
 - units for every other module.
 
 ## Design principles

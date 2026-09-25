@@ -102,7 +102,8 @@ Do not run `swarm done`, `swarm up`, `swarm down` or `swarm finish`.
 1. **Tell the owner**, unless nothing has changed since the last pass and nothing
    needs them: one `swarm notify "<text>"`, plain language, at most six short
    lines — done since the last pass, running now, stuck, and what needs the
-   owner. No internals they would have to decode.
+   owner. No internals they would have to decode. The swarm appends the usage
+   figures (5-hour and weekly limits, this run's pace) itself; leave them out.
 2. **Fill in your pass record** (its path is in your first line): write what you
    saw under `## Saw` (short), what you did under `## Did` (each action and its
    result), and what you left for the owner under `## Left for the owner`

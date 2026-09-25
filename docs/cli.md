@@ -9,8 +9,8 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass and the board, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
-| `down` | Stop the supervisor, end every session process, tear the session down, close the run. |
+| `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass, the board and the bot's command listener, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
+| `down` | Stop the supervisor, the board and the command listener, end every session process, tear the session down, close the run. |
 | `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued, unless `--force`. |
 | `pause` / `resume` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. |
 | `reset` | Close the open run and start a new one: ETA and usage count from now. Nothing restarts. |
@@ -26,10 +26,11 @@ exact flags.
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |
 | `report [--decisions] [--phase P] [--json]` | What every phase did, with its recap and timings. |
-| `usage [-n N] [--json]` | This run's and past runs' usage per hour. |
+| `usage [-n N] [--json]` | This run's and past runs' usage per hour, and how old the newest sample is. |
 | `overseer [--now] [-n N] [--json]` | Recent Overseer passes and pending reasons. `--now` requests a pass. |
 | `tui` | The dashboard (window 0). |
 | `web [--host H] [--port N]` | Serve the read-only board. |
+| `telegram-bot` | Answer `/usage` and `/help` from the owner's Telegram chat, in the foreground. `swarm up` starts it detached. |
 | `check [--strict]` | Preflight: Telegram, ledger, prompt lint. Exit 1 on a failure or a contradicted prompt line; `--strict` also fails on a wasteful one. |
 
 ## Phases
@@ -52,7 +53,7 @@ exact flags.
 | `resumed <phase> ["answer"]` | The owner answered. Records the answer and cancels the park. |
 | `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |
 | `build <cmd…>` | Run a heavy build through the swarm-wide gate. |
-| `notify "message"` | Message the owner through the swarm's own sender. |
+| `notify "message"` | Message the owner through the swarm's own sender. From an Overseer pass, the usage block is appended. |
 
 ## Operator
 

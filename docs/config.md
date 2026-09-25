@@ -70,6 +70,7 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `notify` | `<this repo>/scripts/notify.sh` | | hot | The sender. It is called with the message as `$1`. The bundled script reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's `.env`, or from the file named by `SWARM_TG_ENV`. |
+| `commands` | `true` | `SWARM_TG_COMMANDS` | restart | Start the bot's command listener at `swarm up`, so `/usage` and `/help` sent to the bot are answered. It reads the token and chat id from the file the sender reads, answers only that chat, and is not started when the file lacks them. |
 
 ## `[tmux]`
 
@@ -161,7 +162,8 @@ auto_resolve = { "docs/PHASE-LEDGER.md" = "keyed:^- \\[[ x]\\] `([A-Za-z0-9_.-]+
 | `SWARM_STATE_DIR` | Use this directory as the state dir instead of `$XDG_STATE_HOME/swarm-orchestrator/<slug>`. Every session the swarm starts gets it. |
 | `XDG_STATE_HOME` | The state root. Default `~/.local/state`. |
 | `SWARM_TG_SINK` | Append telegrams to this file instead of sending them. The tests use it; it also skips recap generation. |
-| `SWARM_TG_ENV` | The credentials file the bundled `notify.sh` reads. |
+| `SWARM_TG_ENV` | The credentials file the bundled `notify.sh` reads, and the command listener too. |
+| `SWARM_TG_API` | The Bot API base URL the command listener polls (default `https://api.telegram.org`). The tests point it at a fake. |
 | `SWARM_SUBMIT_SETTLE` | Seconds typed text gets to render before Enter is sent (default 1.5). Raise it on a slow host. |
 | `SWARM_LOG_ECHO` | Also echo supervisor log lines to stderr. |
 | `SWARM_BIN` | The `swarm` command that detached helpers (`recap`, `operator-triage`, the grace poke) run. A test seam. |

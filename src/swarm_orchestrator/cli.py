@@ -40,12 +40,13 @@ from . import session as session_mod
 from . import state as state_mod
 from . import statuses
 from . import supervisor as sup_mod
-from . import telegram, tmux
+from . import telegram, tgbot, tmux
 from . import usage as usage_mod
 from .web import lifecycle as web_lifecycle
 from .config import Config, load
 from . import logutil
 from .logutil import Log
+from . import master as master_mod
 from .master import build_context
 
 
@@ -289,6 +290,10 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         if cfg.driver != "tmux":
             web_lifecycle.start_detached(cfg)
         _report_web_board(cfg)
+    if cfg.telegram_commands:
+        # A side helper, never part of the run: whatever happens to it, `up` goes on.
+        _, what = tgbot.start_detached(cfg)
+        print(f"telegram bot: {what}")
     if attach:
         _attach(cfg)  # interactive: hand the terminal to the swarm window
     return 0
@@ -306,6 +311,11 @@ def cmd_web(cfg: Config, host: str | None, port: int | None, pidfile: str | None
         pidfile=pidfile,
         explicit_config=explicit,
     )
+
+
+def cmd_telegram_bot(cfg: Config, pidfile: str | None) -> int:
+    """Answer ``/usage`` and ``/help`` from the owner's chat, in the foreground."""
+    return tgbot.serve(cfg, pidfile)
 
 
 def cmd_supervise(cfg: Config) -> int:
@@ -342,6 +352,7 @@ def cmd_down(cfg: Config) -> int:
     # After the teardown: under tmux the board died with its window, and this
     # only clears the pid file; under the headless driver it is what stops it.
     web_lifecycle.stop(cfg)
+    tgbot.stop(cfg)
     ended, left = session_mod.end_processes(cfg, sessions)
     closed = usage_mod.close_run(cfg, "down")
     print("swarm down" + (f" — {_run_line(closed)}" if closed else ""))
@@ -1238,11 +1249,19 @@ def cmd_notify(cfg: Config, message: str) -> int:
     one door: the configured ``[telegram] notify`` script, logged like every other
     swarm ping. Best-effort, like all of them: a failed send is exit 1, never an
     exception.
+
+    Sent from an Overseer pass, it is the pass's summary to the owner, and it
+    ends with the usage block (:func:`usage.brief_for`): where the 5-hour and
+    weekly limits stand and what this run uses per hour.
     """
+    kind = "master-note"
+    if os.environ.get("SWARM_MASTER_KIND") == master_mod.OVERSEER:
+        kind = "overseer-digest"
+        message = telegram.with_footer(message, usage_mod.brief_for(cfg))
     ok = telegram.notify(
         cfg.telegram_notify,
         message,
-        kind="master-note",
+        kind=kind,
         source="cli.notify",
         state_dir=cfg.state_dir,
     )
@@ -1409,6 +1428,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         }
         data["operator_jobs"] = [i.to_dict() for i in opqueue.load_all(cfg)]
         data["web"] = web_lifecycle.status_line(cfg)
+        data["telegram_bot"] = tgbot.status_line(cfg)
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
@@ -1432,6 +1452,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         lines.append(f"push owed: {line}")
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
     lines.append(web_lifecycle.status_line(cfg))
+    lines.append(tgbot.status_line(cfg))
     print("\n".join(lines))
     return 0
 
@@ -1581,6 +1602,10 @@ def _build_parser() -> argparse.ArgumentParser:
     wbp.add_argument("--port", type=int, help="port (default [web] port, 8765; 0 = any)")
     wbp.add_argument("--pidfile", help=argparse.SUPPRESS)  # written only when `up` starts it
     wbp.set_defaults(func=lambda cfg, a: cmd_web(cfg, a.host, a.port, a.pidfile, a.config))
+    tgp = sub.add_parser("telegram-bot",
+                         help="answer /usage and /help from the owner's Telegram chat (foreground)")
+    tgp.add_argument("--pidfile", help=argparse.SUPPRESS)
+    tgp.set_defaults(func=lambda cfg, a: cmd_telegram_bot(cfg, a.pidfile))
 
     dcp = sub.add_parser("doctor", help="diagnose a stuck or unhealthy swarm")
     dcp.add_argument("--json", action="store_true")

@@ -370,6 +370,22 @@ isolation splits the run's averages.
 weekly figures are account-wide, so other Claude sessions on the same account
 during a run count too.
 
+The same numbers, shortened to four lines, reach your phone twice
+(`usage.brief`): at the bottom of the Overseer's summary ping, and as the answer
+to `/usage` (see [Telegram](#telegram-and-asking-the-owner)):
+
+```
+usage (as of 14:05, 3 min ago):
+5-hour 23% · resets 16:00
+weekly 41% · resets Wed 11:00
+this run (6.2 h): 5-hour 2.1 %/h · weekly 0.9 %/h · 14 phases · $/h 11.05
+```
+
+A sample arrives only when some session renders its status line, so the first
+line says how old it is, and `stale` past 30 minutes. With no sample at all the
+first three lines are one line saying so. `swarm usage` prints the same age on its
+`sample` line.
+
 ## Doctor, why and gc
 
 **`swarm doctor [--json]`** answers "what is wrong right now?". It is read-only,
@@ -497,7 +513,9 @@ The swarm has its own sender: `scripts/notify.sh`, with a bot of its own. It rea
 `.env`, which is gitignored; `scripts/resolve-chat-id.sh` fills in the chat id.
 Point `[telegram].notify` at any script that takes the message as `$1`.
 
-Messages are plain text, capped at 3800 characters. Every send, delivered or not,
+Messages are plain text, capped at 3800 characters. A `swarm notify` sent from an
+Overseer pass is its summary: it ends with the usage block, and the summary is cut
+first if the whole would pass the cap. Every send, delivered or not,
 is logged to `<state>/notifications.jsonl`, and the dashboard's alerts tab reads
 that log. `swarm notify "<text>"` is the only way a session should message you.
 
@@ -513,6 +531,7 @@ that log. `swarm notify "<text>"` is the only way a session should message you.
 - a launch given up;
 - a crashed or erroring supervisor;
 - a web board that did not start;
+- the Overseer's summary, with the usage block;
 - the finish summary.
 
 `ok` finishes are silent.
@@ -520,6 +539,34 @@ that log. `swarm notify "<text>"` is the only way a session should message you.
 Question pings start with what the wait costs, for example
 `3 phases blocked behind this · slot held · asked 14:05`, and the question is cut to
 600 characters. The full text is on screen in the asker's pane.
+
+**Commands (`tgbot.py`).** The bot also listens, so you can ask it:
+
+- `/usage`: the usage block above, read when you ask;
+- `/help` (and `/start`): the list.
+
+The listener long-polls `getUpdates` with the same token and answers through the
+same sender. It answers only messages from the chat in `TELEGRAM_CHAT_ID`, and
+ignores every other chat without a reply. It also ignores plain text, edits, and
+commands older than 15 minutes (sent while nothing listened). The next update id
+is saved in `<state>/telegram-bot.offset.json` before an update is answered, so
+none is ever answered twice.
+
+- **Lifecycle:** `swarm up` starts it as a detached process under either driver
+  (no tmux window), with its log in `<state>/logs/telegram-bot.log`. `swarm down`
+  stops it, and its reaping would find it anyway, since it carries the run's
+  `SWARM_STATE_DIR`. `swarm telegram-bot` runs it in the foreground. `swarm status`
+  and `swarm doctor` (`telegram.bot`) say whether it runs and what it is doing.
+  `[telegram].commands = false` turns it off.
+- **One poller per token:** Telegram answers `409 Conflict` when two programs poll
+  one bot (or a webhook is set). Two projects on one box share the bot through
+  this repo's `.env`, so a lock per token (in `$XDG_RUNTIME_DIR`) keeps the second
+  listener waiting to take over, retrying every minute; `/usage` then answers from
+  the project that holds it. A 409 from anything else is logged, shown by
+  doctor, and backed off from 60 s up to 10 minutes. `scripts/resolve-chat-id.sh`
+  polls the same token, so run it while the listener is stopped.
+- **Failures:** network errors back off from 5 s up to 5 minutes, a rejected token
+  waits 10 minutes, a 429 waits as told. None of it touches the supervisor.
 
 ## Reload, layout and check
 

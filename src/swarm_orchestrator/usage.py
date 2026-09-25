@@ -442,6 +442,96 @@ def _in(ts: float | None, now: float) -> str:
     return f"{s / 3600:.1f}h" if s < 48 * 3600 else f"{s / 86400:.1f}d"
 
 
+# -- the short block: the Overseer's footer and the bot's `/usage` reply -------
+#: A newest sample older than this is flagged stale: nothing rendered a status
+#: line since, so the percentages may have moved without anyone seeing it.
+STALE_S = 30 * 60
+
+
+def newest_sample(samples: list[Sample]) -> Sample | None:
+    """The most recent row carrying either figure."""
+    live = [s for s in samples if s.five_pct is not None or s.week_pct is not None]
+    return max(live, key=lambda s: s.ts, default=None)
+
+
+def _clock(ts: float, now: float) -> str:
+    """``16:00`` today, ``Wed 11:00`` within the week, ``09-24 14:05`` beyond."""
+    at, today = time.localtime(ts), time.localtime(now)
+    if (at.tm_year, at.tm_yday) == (today.tm_year, today.tm_yday):
+        return time.strftime("%H:%M", at)
+    fmt = "%a %H:%M" if abs(ts - now) < 7 * 86400 else "%m-%d %H:%M"
+    return time.strftime(fmt, at)
+
+
+def _ago(seconds: float) -> str:
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f} min ago"
+    if seconds < 48 * 3600:
+        return f"{seconds / 3600:.1f} h ago"
+    return f"{seconds / 86400:.1f} d ago"
+
+
+def as_of(samples: list[Sample], now: float) -> str | None:
+    """``as of 14:05, 12 min ago`` for the newest sample; ``None`` when there is none.
+
+    Samples arrive only when some session renders its status line, so a quiet
+    swarm's figures can be hours old; every reader says how old.
+    """
+    s = newest_sample(samples)
+    if s is None:
+        return None
+    age = max(0.0, now - s.ts)
+    return (f"as of {_clock(s.ts, now)}, {_ago(age)}"
+            + (" — stale" if age >= STALE_S else ""))
+
+
+def _window(samples: list[Sample], which: str, label: str, now: float) -> str:
+    for s in reversed(samples):
+        pct, resets = getattr(s, f"{which}_pct"), getattr(s, f"{which}_resets_at")
+        if pct is None:
+            continue
+        if resets is not None and resets <= now:
+            return f"{label} ? · window reset {_clock(resets, now)}, no sample since"
+        when = "reset time unknown" if resets is None else f"resets {_clock(resets, now)}"
+        return f"{label} {pct:.0f}% · {when}"
+    return f"{label} not reported"
+
+
+def brief(samples: list[Sample], cur: dict | None, now: float) -> str:
+    """The few-line usage block the Overseer's ping ends with and ``/usage`` answers.
+
+    ``cur`` is :func:`live_summary`'s result: the open run, or the legacy period.
+    """
+    stamp = as_of(samples, now)
+    if stamp is None:
+        lines = ["usage: no 5-hour/weekly sample yet (one arrives when a session "
+                 "renders its status line)"]
+    else:
+        lines = [f"usage ({stamp}):",
+                 _window(samples, "five", "5-hour", now),
+                 _window(samples, "week", "weekly", now)]
+    if cur is not None:
+        span = "since the last supervisor start" if cur.get("legacy") else "this run"
+        lines.append(
+            f"{span} ({cur['hours']:.1f} h): "
+            f"5-hour {_f(cur['five_pct_per_h'])} %/h · weekly {_f(cur['week_pct_per_h'])} %/h"
+            f" · {cur['phases_finished']} phases · $/h {_f(cur['usd_per_h'], '{:.2f}')}")
+    return "\n".join(lines)
+
+
+def brief_for(cfg, now: float | None = None) -> str:
+    """:func:`brief` for a project, read from disk. Never raises: a ping must
+    not be lost over its footer."""
+    now = time.time() if now is None else now
+    try:
+        src = Sources(cfg)
+        return brief(src.samples, live_summary(cfg, src, now), now)
+    except Exception as exc:  # noqa: BLE001 - diagnostics only, never fatal
+        return f"usage: unavailable ({type(exc).__name__}: {exc})"[:300]
+
+
 def render(cur: dict | None, past: list[dict], samples: list[Sample], now: float) -> str:
     """The text ``swarm usage`` prints: the open run in full, then a table of past ones."""
     lines = []
@@ -454,6 +544,7 @@ def render(cur: dict | None, past: list[dict], samples: list[Sample], now: float
                f" · {cur.get('max_workers')} worker(s) · isolation {cur.get('isolation')}")
         lines.append(f"{head}\n  started {_when(cur['start'])} · {cur['hours']:.1f} h elapsed{cfg}")
         span = "this period" if cur.get("legacy") else "this run"
+        lines.append(f"  sample  {as_of(samples, now) or 'none yet'}")
         for which, label in (("five", "5-hour"), ("week", "weekly")):
             now_fig = latest(samples, which, now)
             state = ("not reported" if now_fig is None

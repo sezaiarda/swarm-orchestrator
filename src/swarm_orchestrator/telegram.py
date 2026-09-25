@@ -46,6 +46,8 @@ KINDS = (
     "master-note",  # cli.notify: the master telling the owner about a blocker it cannot decide
     "overseer",  # supervisor: an Overseer pass hung past its timeout / would not start
     "overseer-ask",  # cli: the Overseer is waiting on an owner-level decision
+    "overseer-digest",  # cli.notify: the Overseer's summary to the owner (+ usage footer)
+    "bot-reply",  # tgbot: an answer to the owner's /usage or /help
     "worktree-fail",  # launch: the phase mirror could not be created
     "spawn-fail",  # launch: the worker process/pane would not start
     "web-board",  # cli.cmd_up: the LAN board's window/process did not come up
@@ -103,6 +105,21 @@ def notify_detail(
     result = _write_sink(sink, text) if sink else _run_script(script, text)
     _record(state_dir, kind, phase, source, result)
     return result
+
+
+def with_footer(message: str, footer: str) -> str:
+    """``message`` then ``footer``, the message cut so the whole fits the cap.
+
+    :func:`_clamp` cuts from the end, which is exactly where a footer sits: a
+    long message would lose it first. Here the message gives way instead.
+    """
+    footer = footer.strip()
+    if not footer:
+        return message
+    room = MAX_MESSAGE_CHARS - len(footer) - 2
+    if len(message) > room:
+        message = message[: max(0, room - len(_TRUNC_MARK))] + _TRUNC_MARK
+    return f"{message}\n\n{footer}"
 
 
 def _clamp(message: str) -> str:

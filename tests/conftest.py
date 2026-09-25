@@ -173,6 +173,14 @@ def _web_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _tg_bot_off(monkeypatch):
+    """The bot's command listener is on by default in a real project; in the
+    suite it is off, so no ``swarm up`` long-polls Telegram. ``tests/test_tgbot.py``
+    turns it back on against a fake API on loopback."""
+    monkeypatch.setenv("SWARM_TG_COMMANDS", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_inprocess_launch(request, monkeypatch):
     """An in-process :class:`Supervisor` records its launches instead of making them.
 

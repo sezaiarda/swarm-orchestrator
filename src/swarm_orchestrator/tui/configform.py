@@ -411,6 +411,7 @@ FIELDS: tuple[Setting, ...] = (
     Setting("exclude", LIST, "phases the swarm must never launch (comma-sep)"),
     # -- [telegram] -------------------------------------------------------
     Setting("telegram_notify", STR, "script that sends the swarm's own Telegram pings"),
+    Setting("telegram_commands", BOOL, "answer /usage and /help sent to the swarm bot"),
     # -- [tmux] -----------------------------------------------------------
     Setting("session", STR, "tmux session name — what you see in `tmux ls`"),
     Setting("tmux_layout", CHOICE,

@@ -124,6 +124,9 @@ POLICY: dict[str, Policy] = {
            "the dashboard pane is respawned once, by session.setup at `swarm up`;"
            " a live dash keeps the command it was started with"),
 
+        _p("telegram_commands", "[telegram]", "commands", RESTART, "SWARM_TG_COMMANDS",
+           "the command listener is started once, by `swarm up`, and stopped by"
+           " `swarm down`; there is no later moment a reload could start or stop it"),
         _p("web_enabled", "[web]", "enabled", RESTART, "SWARM_WEB",
            "the board's window is created once, by `swarm up`; there is no later"
            " moment a reload could start or stop it"),

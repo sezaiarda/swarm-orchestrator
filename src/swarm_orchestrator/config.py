@@ -63,6 +63,7 @@ class Config:
     ledger: str
     exclude: list[str]
     telegram_notify: str
+    telegram_commands: bool
     tui_autostart: bool
     tui_cmd: str
     session: str
@@ -276,6 +277,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             # channel.
             telegram.get("notify", str(_REPO_NOTIFY))
         ),
+        # The bot's command listener (`/usage`, `/help`), started by `swarm up`
+        # beside the run. On by default: it only ever answers the owner's chat.
+        telegram_commands=_bool_env("SWARM_TG_COMMANDS", telegram.get("commands", True)),
         session=os.environ.get(
             "SWARM_SESSION",
             # Default to the project's own name (``myproject``), not a generic

@@ -30,7 +30,7 @@ exact flags.
 | `overseer [--now] [-n N] [--json]` | Recent Overseer passes and pending reasons. `--now` requests a pass. |
 | `tui` | The dashboard (window 0). |
 | `web [--host H] [--port N]` | Serve the read-only board. |
-| `check [--strict]` | Preflight: Telegram, ledger, prompt lint. |
+| `check [--strict]` | Preflight: Telegram, ledger, prompt lint. Exit 1 on a failure or a contradicted prompt line; `--strict` also fails on a wasteful one. |
 
 ## Phases
 

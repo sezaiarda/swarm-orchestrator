@@ -823,8 +823,12 @@ def cmd_overseer_resumed(cfg: Config, answer: str) -> int:
 
 
 def cmd_check(cfg: Config, strict: bool) -> int:
-    """Preflight: config, ledger, telegram, prompts -- without a live supervisor."""
+    """Preflight: config, ledger, telegram, prompts -- without a live supervisor.
+
+    A FAIL (or a contradicted prompt line) exits 1. A wasteful prompt line is a
+    warning: printed, and fatal only under ``strict``."""
     bad = False
+    warned = False
     ok, detail = telegram.check(cfg.telegram_notify)
     print(f"telegram: {'ok' if ok else 'FAIL'} — {detail}")
     bad = bad or not ok
@@ -846,10 +850,15 @@ def cmd_check(cfg: Config, strict: bool) -> int:
             continue
         if findings:
             print(promptlint.render(findings, path=str(path)))
-            bad = bad or any(f.severity == "contradicted" for f in findings)
-    if not bad:
-        print("all checks passed")
-    return 1 if (bad and strict) else (1 if bad else 0)
+            bad = bad or any(f.severity == promptlint.CONTRADICTED for f in findings)
+            warned = warned or any(f.severity != promptlint.CONTRADICTED for f in findings)
+    if bad:
+        return 1
+    if warned:
+        print("passed with warnings" + (" (fatal under --strict)" if strict else ""))
+        return 1 if strict else 0
+    print("all checks passed")
+    return 0
 
 
 def _known_commands() -> set[str]:

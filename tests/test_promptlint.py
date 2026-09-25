@@ -127,3 +127,16 @@ def test_swarm_check_passes_a_worker_prompt_that_is_only_wasteful(swarm):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "sleep-wait" in result.stdout
+    assert "passed with warnings" in result.stdout
+
+
+def test_swarm_check_strict_fails_on_a_wasteful_worker_prompt(swarm):
+    """`--strict` makes a warning fatal; without it, it only prints."""
+    cmd = swarm.project / ".claude" / "commands" / "prime.md"
+    cmd.parent.mkdir(parents=True, exist_ok=True)
+    cmd.write_text("Wait with `sleep 60` between checks.\n", encoding="utf-8")
+
+    result = swarm.cli("check", "--strict", check=False)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "fatal under --strict" in result.stdout

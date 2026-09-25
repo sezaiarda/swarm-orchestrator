@@ -23,12 +23,14 @@ are mysteriously not ready".
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import ledger as ledger_mod
 from . import state as state_mod
+from . import statuses
 from .config import Config
 from .state import State
 
@@ -91,7 +93,14 @@ def explain(cfg: Config, phase: str, st: State | None = None) -> Explanation:
     """
     if st is None:
         st = state_mod.read(cfg)
-    graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
+    path = cfg.project_dir / cfg.ledger
+    graph = ledger_mod.load(path)
+    # Read the done map the launcher reads: a ticked row it holds no record of is
+    # landed. A copy, so the caller's state is never touched.
+    flying = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+    st = dataclasses.replace(
+        st, done=ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(path), flying)
+    )
     exp = _classify(cfg, phase, st, graph)
     if exp.reason != BLOCKED:
         return exp
@@ -180,7 +189,9 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
 
     if phase in st.done:
         status = st.done[phase]
-        if status in ledger_mod.SATISFIES_DEPS:
+        if status == statuses.LEDGER:
+            detail = "ticked `[x]` in the ledger — nothing left to run"
+        elif status in ledger_mod.SATISFIES_DEPS:
             tail = "" if status == "ok" else f" ({status})"
             detail = f"already done{tail} — nothing left to run"
         else:

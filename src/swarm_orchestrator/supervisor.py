@@ -1374,9 +1374,12 @@ class Supervisor:
         ctx = master_mod.build_context(self.cfg, st)
         if any(p not in given_up and p not in backing for p in ctx["ready"]):
             return False
-        graph = ledger_mod.load(self.cfg.project_dir / self.cfg.ledger)
+        path = self.cfg.project_dir / self.cfg.ledger
+        graph = ledger_mod.load(path)
         excluded = set(self.cfg.exclude)
-        return bool(overseer_mod.backlog(graph, st.done, excluded, ovdigest.in_flight(st)))
+        flying = ovdigest.in_flight(st)
+        done = ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(path), flying)
+        return bool(overseer_mod.backlog(graph, done, excluded, flying))
 
     def _doctor_probe(self, st: state_mod.State, now: float) -> dict[str, str] | None:
         """The cheap doctor checks that mean *stuck*, at most every

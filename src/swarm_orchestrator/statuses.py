@@ -31,6 +31,12 @@ SKIP = "skip"
 #: :data:`ALL` and every membership set it belongs to; it is out of
 #: :data:`WRITABLE` only because that is the set ``swarm done`` advertises.
 NEEDS_OWNER = "needs-owner"
+#: Not a ``swarm done`` status and never written anywhere: the in-memory reading
+#: of a ledger row ticked ``[x]`` that the swarm holds no record of (built before
+#: the swarm, or by hand). :func:`ledger.with_ticked` adds it to a *view* of the
+#: done map so the launcher treats the row as landed, exactly as the web board
+#: shows it; a real record, a ``fail`` included, always wins over it.
+LEDGER = "ledger"
 
 #: The statuses ``swarm done`` advertises as an argument.
 WRITABLE = (OK, OPERATOR, FAIL)
@@ -52,9 +58,10 @@ PRECEDENCE = ALL
 INTEGRATES = frozenset({OK, OPERATOR, NEEDS_OWNER})
 #: Statuses that SATISFY a dependent's ``needs:``. ``skip`` counts — the owner
 #: declared the phase unnecessary, which releases its dependents by definition.
+#: So does ``ledger``: the owner's ledger says the row is built.
 #: ``fail`` does NOT: its branch was discarded, so anything built on it would be
 #: built on a main that lacks it.
-SATISFIES_DEPS = INTEGRATES | {SKIP}
+SATISFIES_DEPS = INTEGRATES | {SKIP, LEDGER}
 #: The sentinel note is a brief for the owner, not a sign-off.
 CARRIES_ACTION = frozenset({OPERATOR, NEEDS_OWNER})
 

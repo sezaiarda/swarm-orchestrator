@@ -136,3 +136,78 @@ def test_launch_backstop_is_best_effort_for_unknown_phase(tmp_path, monkeypatch)
         assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["Zzz"]
     finally:
         log.close()
+
+
+# -- a ledger `[x]` row counts as landed (the web board's reading) --------
+TICKED_MD = (
+    "- [x] `P0` · needs:—\n"
+    "- [X] `P1` · needs:`P0`\n"
+    "- [ ] `P2` · needs:`P1`\n"
+    "- [ ] `P3` · needs:—\n"
+)
+
+
+def test_ticked_reads_only_checked_rows():
+    assert ledger.ticked(TICKED_MD) == {"P0", "P1"}
+    assert ledger.ticked("P0\nP1 needs:P0\n") == set()  # the bare format has no boxes
+
+
+def test_with_ticked_never_masks_a_record():
+    view = ledger.with_ticked({"P1": "fail", "P9": "ok"}, {"P0", "P1"})
+    assert view == {"P0": "ledger", "P1": "fail", "P9": "ok"}
+    # a phase in flight is its worker's to finish: its tick releases nothing yet
+    assert "P0" not in ledger.with_ticked({}, {"P0"}, in_flight={"P0"})
+
+
+def test_context_treats_ticked_rows_as_done(tmp_path, monkeypatch):
+    """The launcher's `ready` skips a ticked row and releases its dependents,
+    without any done record being written for it."""
+    from swarm_orchestrator import master as master_mod
+    from swarm_orchestrator import state as state_mod
+
+    cfg = _bare_cfg(tmp_path, monkeypatch, TICKED_MD)
+    state_mod.init_state(cfg)
+    st = state_mod.read(cfg)
+    ctx = master_mod.build_context(cfg, st)
+    assert ctx["ready"] == ["P2", "P3"]
+    assert ctx["done"] == {}  # a view, never a record
+    assert state_mod.read(cfg).done == {}
+
+
+def test_context_keeps_a_ticked_fail_failed(tmp_path, monkeypatch):
+    """A ticked row the swarm recorded `fail` stays failed: not re-offered, and
+    its dependents stay blocked until `swarm retry`."""
+    from swarm_orchestrator import master as master_mod
+    from swarm_orchestrator import state as state_mod
+
+    cfg = _bare_cfg(tmp_path, monkeypatch, TICKED_MD)
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.done = {"P1": "fail"}
+    ctx = master_mod.build_context(cfg, state_mod.read(cfg))
+    assert ctx["ready"] == ["P3"]
+
+
+def test_launch_backstop_accepts_a_ticked_dep(tmp_path, monkeypatch):
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator import state as state_mod
+    from swarm_orchestrator.logutil import Log
+
+    cfg = _bare_cfg(tmp_path, monkeypatch, TICKED_MD)
+    state_mod.init_state(cfg)
+    log = Log(cfg.supervisor_log)
+    try:
+        assert launch_mod.launch(cfg, "P2", log) is True
+    finally:
+        log.close()
+
+
+def test_why_says_a_ticked_row_is_done(tmp_path, monkeypatch):
+    from swarm_orchestrator import state as state_mod
+    from swarm_orchestrator import why
+
+    cfg = _bare_cfg(tmp_path, monkeypatch, TICKED_MD)
+    state_mod.init_state(cfg)
+    exp = why.explain(cfg, "P1")
+    assert exp.reason == why.DONE and "ticked" in exp.detail
+    assert why.explain(cfg, "P2").reason == why.READY

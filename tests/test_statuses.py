@@ -80,10 +80,12 @@ def test_precedence_puts_integrating_statuses_first():
     assert set(order) == set(statuses.ALL)
 
 
-def test_satisfies_deps_is_integrates_plus_skip():
-    """A `fail` had its branch discarded; a `skip` is the owner releasing it."""
-    assert statuses.SATISFIES_DEPS == statuses.INTEGRATES | {statuses.SKIP}
+def test_satisfies_deps_is_integrates_plus_skip_and_ledger():
+    """A `fail` had its branch discarded; a `skip` is the owner releasing it; a
+    `ledger` tick is the owner saying it is built. `ledger` never reaches disk."""
+    assert statuses.SATISFIES_DEPS == statuses.INTEGRATES | {statuses.SKIP, statuses.LEDGER}
     assert statuses.FAIL not in statuses.SATISFIES_DEPS
+    assert statuses.LEDGER not in statuses.ALL
 
 
 # -- the reconcile seed must survive the merge ----------------------------

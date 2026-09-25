@@ -74,7 +74,10 @@ def build_context(cfg: Config, st: State) -> dict:
     # master would relaunch a phase that is already being built off-grid.
     busy_phases = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
     excluded = set(cfg.exclude)
-    ready = ledger_mod.ready(graph, st.done, busy_phases, excluded)
+    # A row ticked `[x]` with no record of ours counts as landed (a view only;
+    # `done` below stays the swarm's own records).
+    done = ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(ledger_path), busy_phases)
+    ready = ledger_mod.ready(graph, done, busy_phases, excluded)
     free = st.free_slots()
     launchable = [] if st.paused else ready[: len(free)]
     return {
@@ -99,7 +102,7 @@ def build_context(cfg: Config, st: State) -> dict:
         # would otherwise silently stall the run — surfaced so the master/owner
         # can see them instead of a phase never becoming ready.
         "ledger_issues": ledger_mod.validate(
-            graph, {p for p, status in st.done.items() if status in ledger_mod.SATISFIES_DEPS}
+            graph, {p for p, status in done.items() if status in ledger_mod.SATISFIES_DEPS}
         ),
     }
 

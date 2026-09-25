@@ -329,6 +329,14 @@ def load_graph(cfg) -> dict[str, set[str]]:
         return {}
 
 
+def load_ticked(cfg) -> set[str]:
+    """The ledger's ``[x]`` rows, or none when the ledger is missing/unreadable."""
+    try:
+        return ledger_mod.load_ticked(Path(cfg.project_dir) / cfg.ledger)
+    except Exception:  # noqa: BLE001 - a broken ledger must not blank the dashboard
+        return set()
+
+
 def phase_progress(
     graph: dict[str, set[str]],
     done: dict[str, str],
@@ -371,6 +379,7 @@ def build_snapshot(
     questions: dict[str, str] | None = None,
     started_at: float | None = None,
     operator: list | None = None,
+    ticked: set[str] | None = None,
 ) -> Snapshot:
     """Join state + ledger + log-derived timings into one render-ready snapshot.
 
@@ -497,7 +506,13 @@ def build_snapshot(
         integ_blocked_repo=_as_str(state.get("integ_blocked_repo")),
         blockers=blockers,
         operator=operator,
-        progress=phase_progress(graph, done, in_flight, set(getattr(cfg, "exclude", []) or [])),
+        # The launcher's done view: a ticked row with no record counts as landed.
+        progress=phase_progress(
+            graph,
+            ledger_mod.with_ticked(done, ticked or set(), in_flight),
+            in_flight,
+            set(getattr(cfg, "exclude", []) or []),
+        ),
         windows=dict(state.get("windows") or {}),
         layout=_as_str(state.get("layout")),
         started_at=started_at,

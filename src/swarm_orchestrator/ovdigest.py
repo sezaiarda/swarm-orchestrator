@@ -225,7 +225,11 @@ def build(
         "ledger_phases": len(graph),
         "excluded": len(cfg.exclude),
     }
-    starve = starvation_map(graph, st.done, set(cfg.exclude), in_flight(st, launching))
+    flying = in_flight(st, launching)
+    done = ledger_mod.with_ticked(
+        st.done, ledger_mod.load_ticked(cfg.project_dir / cfg.ledger), flying
+    )
+    starve = starvation_map(graph, done, set(cfg.exclude), flying)
     starve["blockers"] = starve["blockers"][:MAX_BLOCKERS]
     starve["cycle"] = starve["cycle"][:20]
     return {

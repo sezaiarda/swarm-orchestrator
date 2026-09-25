@@ -49,6 +49,7 @@ Intro prose that is not a row.
 - [x] `be-W4` · needs:— · **ticked only in the ledger.**
 - [ ] `be-W5` · needs:— · **skipped.**
 - [ ] `be-W6` · needs:— · **merged, push owed.** token=ghp_abcdefghijklmnopqrstuvwxyz0123
+- [ ] `be-W7` · needs:`be-W4` · **ready: its dep is ticked, which counts as landed.**
 """
 
 EXPECTED = {
@@ -56,6 +57,7 @@ EXPECTED = {
     "al-W4": "needs_you", "al-W5": "merging", "al-W6": "merging", "al-W7": "operator",
     "al-W8": "failed", "al-W9": "blocked", "be-W1": "excluded", "be-W2": "blocked",
     "be-W3": "needs_you", "be-W4": "done", "be-W5": "done", "be-W6": "merging",
+    "be-W7": "ready",
 }
 
 
@@ -213,7 +215,7 @@ def test_campaign_headers_say_what_it_is_and_how_far(feed):
     assert camps["al"]["about"] == "Alpha exists to put a phase in every column."
     assert (camps["al"]["done"], camps["al"]["total"]) == (1, 10)
     assert camps["be"]["what"] == "beta — owner-run things"
-    assert (camps["be"]["done"], camps["be"]["total"]) == (2, 5)  # be-W1 is excluded
+    assert (camps["be"]["done"], camps["be"]["total"]) == (2, 6)  # be-W1 is excluded
     assert camps["al"]["active"] is True
     assert feed.board["campaigns"][0]["name"] == "al"
 

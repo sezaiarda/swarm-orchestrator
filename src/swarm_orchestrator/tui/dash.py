@@ -48,6 +48,7 @@ from .data import (
     question_index,
     read_state,
     load_graph,
+    load_ticked,
     run_started_at,
     spark,
     utilisation,
@@ -88,6 +89,7 @@ class Dash:
         self.operator: list[opqueue.Item] = []
         self.history: list[PhaseRun] = []
         self.graph: dict = {}
+        self.ticked: set[str] = set()
         self.agents: list = []
         self.panes: dict = {}
         self.tails: dict[str, str] = {}  # pane_id -> last visible lines
@@ -196,6 +198,7 @@ class Dash:
             self.limits = load_limits(self.meters, self.meters_dir / LIMITS_LOG)
         if self._changed("ledger", Path(self.cfg.project_dir) / self.cfg.ledger):
             self.graph = load_graph(self.cfg)
+            self.ticked = load_ticked(self.cfg)
             self.campaign_what = campaign_lines(self.cfg)
             changed.add("ledger")
         if changed & {"state", "log", "notifications", "done", "recaps", "ledger",
@@ -261,6 +264,7 @@ class Dash:
             questions=question_index(self.notifications, self.sentinels),
             started_at=run_started_at(events),
             operator=self.operator,
+            ticked=self.ticked,
         )
         self.history = build_history(
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes

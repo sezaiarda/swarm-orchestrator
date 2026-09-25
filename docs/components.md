@@ -19,6 +19,8 @@ drives the merge queue.
 
 - **Launching.** It launches ready phases straight from the ledger, in ledger
   order, into free slots, one thread per launch. No model decides what starts.
+  A row ticked `[x]` with no record of the swarm's counts as done, as on the web
+  board; a recorded `fail` still wins over a tick.
 - **Merging and finishing.** It merges finished phases through the queue, and it
   finishes the run once nothing is busy, waiting, parked, launching, queued, held,
   owed as a push, or owed as an operator hand-off, and no Overseer pass is due.

@@ -34,8 +34,8 @@ through it every day.
 ## What it can do
 
 - Read a phase ledger (a markdown checklist or a plain one-line format) and work
-  out which phases are ready: never attempted, not excluded, every dependency
-  landed.
+  out which phases are ready: never attempted, not ticked `[x]`, not excluded,
+  every dependency landed (a ticked row counts as landed).
 - Keep N Claude Code sessions busy at once. When one finishes, the next ready
   phase starts in its slot within seconds, with no model in the loop.
 - Give each phase its own copy of the whole workspace (umbrella repo plus every
@@ -500,7 +500,13 @@ stateDiagram-v2
 - **Waiting and parked** phases keep the run open until they finish.
 - **Pause:** `swarm pause` holds new launches while running workers finish.
 - **Done-ness** comes from the swarm's own records (`state.json`, seeded from
-  `done/` sentinels on every `swarm up`), not from the ledger's checkboxes.
+  `done/` sentinels on every `swarm up`), plus the ledger's checkboxes: a row
+  ticked `[x]` that the swarm has no record of counts as done. It is neither
+  launched nor holds back its dependents, exactly as the web board shows it. It
+  is only a reading of the ledger, never written to the records, so a record
+  always wins: a ticked row the swarm recorded `fail` stays failed until
+  `swarm retry`, and a tick on a phase still in flight releases nothing until it
+  lands.
 
 ## Quick start
 
@@ -535,8 +541,10 @@ git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
    separated by ` · `) are its dependencies. Tokens that are not phase ids, such
    as git tags, are ignored.
 
-   **Checkboxes are not read.** Before the first run, `swarm skip` every phase
-   that is already built, or the swarm will build it again.
+   **A ticked row `- [x]` counts as built:** the swarm will not launch it, and
+   its dependents are free to start. Tick the rows that are already built (or
+   `swarm skip` them; the bare format has no checkboxes, so there `swarm skip`
+   is the only way).
 
 4. **Have a worker command:** a Claude Code slash command that builds one phase
    given its id. It is `/prime <phase>` by default, in

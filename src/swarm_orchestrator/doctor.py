@@ -769,7 +769,10 @@ def _check_ledger(cfg: Config, st: State | None = None) -> Check:
         return Check("ledger", WARN, f"ledger unreadable: {exc}")
     if not graph:
         return Check("ledger", OK, f"no machine-readable phases in {cfg.ledger}")
-    landed = {p for p, status in st.done.items() if status in ledger_mod.SATISFIES_DEPS} if st is not None else set()
+    done = ledger_mod.with_ticked(
+        st.done if st is not None else {}, ledger_mod.load_ticked(cfg.project_dir / cfg.ledger)
+    )
+    landed = {p for p, status in done.items() if status in ledger_mod.SATISFIES_DEPS}
     issues = ledger_mod.validate(graph, landed)
     if issues:
         return Check(

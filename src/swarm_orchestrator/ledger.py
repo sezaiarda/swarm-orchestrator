@@ -33,6 +33,7 @@ SATISFIES_DEPS = statuses.SATISFIES_DEPS
 _PHASE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]*$")
 # A markdown checklist item: ``- [x] `phase-id` · …`` / ``* [ ] `phase-id```.
 _CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+(.+)$")
+_TICKED_RE = re.compile(r"^\s*[-*]\s+\[[xX]\]\s+(.+)$")
 _BACKTICK_RE = re.compile(r"`([^`]+)`")
 # Fields of a markdown ledger line are separated by ``space MIDDLE-DOT space``
 # (``- [x] `id` · needs:`dep` · dir:`d` · …``); dep extraction is scoped to the
@@ -150,6 +151,46 @@ def load(path: Path) -> dict[str, set[str]]:
     if not path.is_file():
         return {}
     return parse(path.read_text(encoding="utf-8"))
+
+
+def ticked(text: str) -> set[str]:
+    """Ids of the markdown checklist rows ticked ``[x]`` (none in the bare format)."""
+    out: set[str] = set()
+    for raw in text.splitlines():
+        m = _TICKED_RE.match(raw)
+        if not m:
+            continue
+        ids = _BACKTICK_RE.findall(m.group(1))
+        if ids and _PHASE_RE.match(ids[0]):
+            out.add(ids[0])
+    return out
+
+
+def load_ticked(path: Path) -> set[str]:
+    """:func:`ticked` over a ledger file; empty when it is missing."""
+    if not path.is_file():
+        return set()
+    return ticked(path.read_text(encoding="utf-8"))
+
+
+def with_ticked(
+    done: dict[str, str],
+    ticked_ids: set[str] | frozenset[str],
+    in_flight=frozenset(),
+) -> dict[str, str]:
+    """``done`` plus a :data:`statuses.LEDGER` entry for each ticked row it lacks.
+
+    The ledger's ``[x]`` is the owner's statement that a row is built, and the
+    web board shows such a row as Done; the launcher reads the same view, so a
+    row built before the swarm (or by hand) is neither rebuilt nor left blocking
+    its dependents. It is a *view*, never written back: a real record always
+    wins, so a ticked row recorded ``fail`` stays failed until ``swarm retry``.
+    A phase in flight is its worker's to finish, so a tick that lands while it
+    builds does not release its dependents early.
+    """
+    view = {p: statuses.LEDGER for p in ticked_ids if p not in in_flight}
+    view.update(done)
+    return view
 
 
 def validate(graph: dict[str, set[str]], landed: set[str] | frozenset[str] = frozenset()) -> list[str]:

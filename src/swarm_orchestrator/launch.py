@@ -220,12 +220,16 @@ def session_env(
     return env
 
 
-def _unmet_deps(cfg: Config, phase: str, done: dict[str, str]) -> list[str]:
+def _unmet_deps(
+    cfg: Config, phase: str, done: dict[str, str], in_flight=frozenset()
+) -> list[str]:
     """Known-phase deps of ``phase`` not satisfied by ``done`` (launch backstop).
 
     A dep counts only when its recorded *status* is in :data:`DEP_SATISFYING` —
     membership in ``done`` is not enough. A ``fail`` recorded the phase's work as
     rolled back, so a dependent built on top of it would be building on nothing.
+    A dep ticked ``[x]`` in the ledger that the swarm has no record of counts as
+    landed (:func:`ledger.with_ticked`), unless it is ``in_flight``.
 
     Resolves the same ledger the master reasons over (``cfg.project_dir /
     cfg.ledger``). Best-effort: an empty list — never a block — is returned when
@@ -233,9 +237,11 @@ def _unmet_deps(cfg: Config, phase: str, done: dict[str, str]) -> list[str]:
     with no machine ledger (or a phase the resolver doesn't know) launches exactly
     as before.
     """
-    graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
+    path = cfg.project_dir / cfg.ledger
+    graph = ledger_mod.load(path)
     if phase not in graph:
         return []
+    done = ledger_mod.with_ticked(done, ledger_mod.load_ticked(path), in_flight)
     return sorted(d for d in graph[phase] if done.get(d) not in DEP_SATISFYING)
 
 
@@ -275,7 +281,8 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         # depends on has merged — even if the LLM master mis-reasons over the prose
         # ledger and asks to launch it out of order. Undo the just-claimed slot
         # under the same flock so it isn't stranded.
-        missing = _unmet_deps(cfg, phase, st.done)
+        in_flight = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+        missing = _unmet_deps(cfg, phase, st.done, in_flight)
         if missing:
             st.free_slot_for(phase)
             detail = " ".join(missing)

@@ -24,8 +24,8 @@ a person would want to be told:
 8. **Blocked** — a dependency has not landed; the card names the root.
 9. **Ready** — nothing stands in its way.
 
-Dependency satisfaction is the swarm's own (:data:`statuses.SATISFIES_DEPS` over
-the ``done`` map), so *Blocked* here is exactly what the supervisor will not
+Dependency satisfaction is the launcher's own (:data:`statuses.SATISFIES_DEPS`
+over :func:`ledger.with_ticked`'s view of the ``done`` map), so *Blocked* here is exactly what the supervisor will not
 launch — the board can never disagree with the scheduler about what is ready.
 """
 
@@ -34,7 +34,7 @@ from __future__ import annotations
 import time
 from statistics import median
 
-from .. import opqueue, statuses
+from .. import ledger, opqueue, statuses
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
 from ..tui.data import five_outlook, forecast, limit_outlook, typical_durations
@@ -100,10 +100,12 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
     jobs: dict[str, list] = {}
     for item in snap.operator or []:
         jobs.setdefault(opqueue.owning_phase(item.phase), []).append(item)
-    satisfied = {p for p, s in done.items() if s in statuses.SATISFIES_DEPS}
+    flying = _in_flight(snap, waiting, parked)
+    # The launcher's view: a ticked row with no record of ours has landed.
+    view = ledger.with_ticked(done, {p for p, r in rows.items() if r.checked}, flying)
+    satisfied = {p for p, s in view.items() if s in statuses.SATISFIES_DEPS}
 
-    starve = starvation_map(graph, done, excluded, _in_flight(snap, waiting, parked),
-                            examples=len(graph) + 1)
+    starve = starvation_map(graph, view, excluded, flying, examples=len(graph) + 1)
     roots_of: dict[str, list[dict]] = {}
     for b in starve["blockers"]:
         for p in b["examples"]:

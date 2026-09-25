@@ -242,6 +242,15 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
             file=sys.stderr,
         )
         return 1
+    if cfg.driver == "tmux" and tmux.session_exists(cfg.session):
+        # Checked before anything is touched: session.setup refuses the same
+        # thing, but only after state was reset and the run restarted.
+        print(
+            f"the swarm is already up: tmux session {cfg.session!r} exists -- "
+            f"`tmux attach -t {cfg.session}` to look at it, or `swarm down` first",
+            file=sys.stderr,
+        )
+        return 1
     state_mod.init_state(cfg)
     _start_run(cfg, "up")
     # Every up, whatever the isolation: it is what re-queues a hand-off whose

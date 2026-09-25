@@ -9,7 +9,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass and the board, then attach. |
+| `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass and the board, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
 | `down` | Stop the supervisor, end every session process, tear the session down, close the run. |
 | `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued, unless `--force`. |
 | `pause` / `resume` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. |

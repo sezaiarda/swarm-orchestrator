@@ -92,3 +92,17 @@ def test_doctor_points_a_failed_phase_at_retry(cfg):
 
     check = doctor._check_failed(state_mod.read(cfg))
     assert check.fix_hint.startswith("swarm retry a-P2")
+
+
+# -- swarm up over a live session ------------------------------------------
+def test_up_refuses_an_existing_session_before_touching_state(cfg, monkeypatch, capsys):
+    from swarm_orchestrator import tmux
+
+    cfg.driver = "tmux"
+    monkeypatch.setattr(tmux, "session_exists", lambda name: name == cfg.session)
+    before = cfg.state_path.read_bytes()
+    assert cli.cmd_up(cfg, attach=False) == 1
+    err = capsys.readouterr().err
+    assert "already up" in err and "swarm down" in err and "tmux attach" in err
+    assert cfg.state_path.read_bytes() == before  # nothing was reset
+    assert not cfg.fifo_path.exists()

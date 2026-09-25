@@ -458,8 +458,8 @@ def _dump(obj) -> int:
 def cmd_doctor(cfg: Config, as_json: bool) -> int:
     """Answer "what is wrong with my swarm right now?".
 
-    The supervisor is deliberately watchdog-free, and the failure modes that
-    matter most produce no log line at all -- a held integration, a dead
+    The supervisor is deliberately minimal (its watchdog only reaps dead panes),
+    and the failure modes that matter most produce no log line at all -- a held integration, a dead
     supervisor whose recorded pid still looks alive, a busy slot whose worker
     never received its prompt. Checking for these by hand is slow and error-prone,
     so this command makes the check part of the tool instead of a per-run
@@ -1022,7 +1022,8 @@ def cmd_retry(cfg: Config, phases: list[str], all_failed: bool,
     elif _poke(cfg, "resume"):
         print("supervisor poked — a free slot will pick them up")
     else:
-        print("run `swarm launch <phase>`, or `swarm nudge` once a supervisor is up")
+        print("no supervisor is running: `swarm up` launches them,"
+              " or `swarm launch <phase>` starts one by hand")
     return 0
 
 

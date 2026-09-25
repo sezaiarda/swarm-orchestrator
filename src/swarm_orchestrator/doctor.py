@@ -1,7 +1,9 @@
 """``swarm doctor`` — what is wrong with this swarm *right now*.
 
-The supervisor is deliberately watchdog-free: it reacts to FIFO events and logs
-what it does, and that is all. Every failure mode below shares one property —
+The supervisor is deliberately minimal: it reacts to FIFO events and a few timed
+wakes (park deadlines, launch back-off, the watchdog sweep that reaps dead panes,
+the Overseer and operator timers, gc) and logs what it does, and that is all.
+Every failure mode below shares one property —
 **it produces no log line at all**, so the run looks healthy from every angle the
 tool currently offers. A stale ``supervisor_pid`` reads as alive. A worker whose
 ``/prime`` was never delivered logs a clean ``LAUNCH``. A held integration
@@ -1080,7 +1082,7 @@ def _check_failed(st: State) -> Check:
         "phases.failed",
         WARN,
         f"{len(failed)} phase(s) recorded fail: {failed} — dependents stay blocked",
-        f"swarm launch {failed[0]}  # after fixing whatever failed",
+        f"swarm retry {failed[0]}  # after fixing whatever failed",
     )
 
 

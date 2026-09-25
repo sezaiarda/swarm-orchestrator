@@ -75,3 +75,20 @@ def test_retry_cascade_reads_the_project_ledger_from_another_cwd(cfg, tmp_path, 
     assert cli.cmd_retry(cfg, ["a-P2"], all_failed=False, cascade=True,
                          launch=False, keep_branch=True) == 0
     assert state_mod.read(cfg).done == {}
+
+
+# -- messages that name real commands -------------------------------------
+def test_retry_without_a_supervisor_names_real_commands(cfg, capsys):
+    assert cli.cmd_retry(cfg, ["a-P2"], all_failed=False, cascade=False,
+                         launch=False, keep_branch=True) == 0
+    out = capsys.readouterr().out
+    assert "nudge" not in out and "swarm up" in out
+    for tail in out.split("`swarm ")[1:]:
+        assert tail.split("`")[0].split()[0] in cli._known_commands()
+
+
+def test_doctor_points_a_failed_phase_at_retry(cfg):
+    from swarm_orchestrator import doctor
+
+    check = doctor._check_failed(state_mod.read(cfg))
+    assert check.fix_hint.startswith("swarm retry a-P2")

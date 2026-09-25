@@ -322,13 +322,26 @@ def cmd_down(cfg: Config) -> int:
             except OSError:
                 pass
             _wait_pid_gone(pid, timeout=5.0)
+    # Found BEFORE the teardown, which takes the pane pids with it. Killing the
+    # session only hangs up on its panes, and a claude can outlive its SIGHUP:
+    # some workers, the Overseer and an operator could keep running after
+    # `down` until the owner killed them by hand.
+    roots = tmux.session_pane_pids(cfg.session) if cfg.driver == "tmux" else []
+    sessions = session_mod.session_processes(cfg, roots)
     if cfg.driver == "tmux":
         session_mod.teardown(cfg)
     # After the teardown: under tmux the board died with its window, and this
     # only clears the pid file; under the headless driver it is what stops it.
     web_lifecycle.stop(cfg)
+    ended, left = session_mod.end_processes(cfg, sessions)
     closed = usage_mod.close_run(cfg, "down")
     print("swarm down" + (f" — {_run_line(closed)}" if closed else ""))
+    if ended:
+        print(f"  ended {ended} session process(es)")
+    if left:
+        print(f"swarm down: {len(left)} process(es) survived SIGKILL: "
+              f"{' '.join(map(str, left))}", file=sys.stderr)
+        return 1
     return 0
 
 

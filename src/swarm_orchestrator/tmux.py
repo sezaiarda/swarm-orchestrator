@@ -109,6 +109,12 @@ def kill_session(session: str) -> None:
     run(["kill-session", "-t", f"={session}"])
 
 
+def session_pane_pids(session: str) -> list[int]:
+    """The pid of every pane's process in ``session``, across all its windows."""
+    out = run(["list-panes", "-s", "-t", f"={session}", "-F", "#{pane_pid}"])
+    return [int(ln) for ln in out.stdout.split() if ln.isdigit()]
+
+
 def new_session(session: str) -> str:
     """Create a detached session; return the id of its initial window."""
     out = run(

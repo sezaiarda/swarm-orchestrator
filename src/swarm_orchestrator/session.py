@@ -16,8 +16,12 @@ in-process, so no teammate panes ever appear). Last, when ``[web] enabled``, a
 
 from __future__ import annotations
 
+import os
 import shlex
+import signal
 import subprocess
+import time
+from pathlib import Path
 
 from . import state as state_mod
 from . import tmux
@@ -175,3 +179,106 @@ def teardown(cfg: Config) -> None:
     """Kill the swarm tmux session (idempotent)."""
     if tmux.session_exists(cfg.session):
         tmux.kill_session(cfg.session)
+
+
+#: Seconds a signal gets to work before :func:`end_processes` sends the next,
+#: harder one (SIGHUP, then SIGTERM, then SIGKILL).
+END_WAIT_S = 5.0
+
+
+def _proc_table() -> dict[int, int]:
+    """``{pid: ppid}`` for every live process (zombies are already gone)."""
+    table: dict[int, int] = {}
+    try:
+        entries = [e for e in Path("/proc").iterdir() if e.name.isdigit()]
+    except OSError:
+        return table
+    for entry in entries:
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        rest = stat[stat.rfind(")") + 2 :].split()  # the name may hold spaces
+        if len(rest) > 1 and rest[0] not in ("Z", "X"):
+            table[int(entry.name)] = int(rest[1])
+    return table
+
+
+def _alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat[stat.rfind(")") + 2 :][:1] not in ("Z", "X")
+
+
+def session_processes(cfg: Config, roots: list[int] | tuple[int, ...] = ()) -> set[int]:
+    """Every live process this run spawned, whole trees included.
+
+    Two ways in, because a pane is not a reliable owner: ``respawn-pane -k``
+    (the operator's release, the master's kill) only hangs up on a session, and a
+    ``claude`` that outlives its SIGHUP is left running with no pane at all —
+    several of them survived ``swarm down``. So: every process whose
+    environment carries this run's ``SWARM_STATE_DIR`` (each session gets it at
+    spawn and hands it to everything it starts), plus the trees under ``roots``
+    (the session's pane pids). Never this process or its ancestors: a ``down``
+    typed from inside the session must not signal its own shell first.
+    """
+    table = _proc_table()
+    marker = f"SWARM_STATE_DIR={cfg.state_dir}".encode()
+    found = {p for p in roots if p in table}
+    for pid in table:
+        try:
+            if marker not in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                continue
+            # A tmux server started by an `up` whose shell exported the variable
+            # carries it too — and hosts the owner's other sessions.
+            if not Path(f"/proc/{pid}/comm").read_text().startswith("tmux"):
+                found.add(pid)
+        except OSError:
+            continue  # exited mid-scan, or not ours to read
+    children: dict[int, list[int]] = {}
+    for pid, ppid in table.items():
+        children.setdefault(ppid, []).append(pid)
+    stack = list(found)
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    pid = os.getpid()
+    while pid > 1:
+        found.discard(pid)
+        pid = table.get(pid, 0)
+    return found
+
+
+def end_processes(
+    cfg: Config, pids: set[int], wait: float | None = None
+) -> tuple[int, list[int]]:
+    """End ``pids`` and anything the run spawns meanwhile; confirm they are gone.
+
+    SIGHUP, then SIGTERM, then SIGKILL, each only to what outlived the one
+    before — to the process and, where it leads one, its whole process group.
+    Returns ``(how many were ended, the pids still alive after SIGKILL)``.
+    """
+    wait = END_WAIT_S if wait is None else wait
+    own_group = os.getpgrp()
+    ended: set[int] = set()
+    alive = set(pids)
+    for sig, grace in ((signal.SIGHUP, wait), (signal.SIGTERM, wait), (signal.SIGKILL, 2.0)):
+        alive = {p for p in alive | session_processes(cfg) if _alive(p)}
+        ended |= alive
+        if not alive:
+            break
+        for pid in alive:
+            try:
+                if os.getpgid(pid) == pid and pid != own_group:
+                    os.killpg(pid, sig)
+                os.kill(pid, sig)
+            except OSError:
+                continue  # gone already
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline and any(_alive(p) for p in alive):
+            time.sleep(0.1)
+    return len(ended), sorted(p for p in alive if _alive(p))

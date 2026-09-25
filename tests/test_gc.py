@@ -437,3 +437,16 @@ def test_context_comes_from_the_meters_and_git_runs_every_30s(cfg, monkeypatch):
     assert git == ["/wt/P1", "/wt/P1"]
     assert d.tails == {"%1": "... 900k/1.0M ..."}  # the activity preview still has it
     assert d.context_pct("P1") == pytest.approx(10.0)
+
+
+def test_swarm_gc_yes_reports_a_refusal_at_delete_time(cfg, monkeypatch, capsys):
+    """The delete step re-checks its blockers; a refusal there (a build started
+    after the plan was made) is a clean message and exit 1, not a traceback."""
+    from swarm_orchestrator import cli
+
+    def refuse(plan, log=None):
+        raise gc_mod.GcRefused("a build is running")
+
+    monkeypatch.setattr(gc_mod, "apply", refuse)
+    assert cli.cmd_gc(cfg, gc_mod.GcOptions(yes=True), verbose=False) == 1
+    assert "swarm gc refused: a build is running" in capsys.readouterr().err

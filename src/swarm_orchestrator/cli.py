@@ -503,7 +503,13 @@ def cmd_gc(cfg: Config, opts: gc_mod.GcOptions, verbose: bool) -> int:
         print(f"swarm gc refused: {exc}", file=sys.stderr)
         return 1
     if opts.yes:
-        plan = gc_mod.apply(plan)
+        try:
+            plan = gc_mod.apply(plan)
+        except gc_mod.GcRefused as exc:
+            # Re-checked under the build gate at delete time: a build (or a
+            # phase) can have started since the plan was made. Nothing was deleted.
+            print(f"swarm gc refused: {exc} (nothing deleted)", file=sys.stderr)
+            return 1
     print(gc_mod.render(plan, verbose=verbose))
     return 0
 

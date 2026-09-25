@@ -143,16 +143,25 @@ def probe(cfg, timeout: float = 0.5) -> tuple[str, str | None]:
         with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=timeout) as resp:
             body = json.loads(resp.read())
     except (OSError, ValueError, urllib.error.URLError):
-        if listening(cfg, timeout):
-            return TAKEN, _occupant(port)
-        return CLOSED, None
+        if not listening(cfg, timeout):
+            return CLOSED, None
+        who, pid = _occupant(port)
+        # The listener took the connection but did not answer /healthz in time.
+        # That is not proof of a squatter: ``serve`` binds (and the kernel starts
+        # accepting) before its request loop runs, so a board still starting up
+        # looks exactly like this, and calling it a squatter would tell the owner
+        # another program holds the port while naming its own board's pid. A
+        # board of this project on the port is ours, whatever its answer speed.
+        if pid is not None and _board_of(cfg, pid):
+            return OURS, None
+        return TAKEN, who
     if body.get("app") == APP_ID and body.get("project") == cfg.project_dir.name:
         return OURS, None
-    return TAKEN, _occupant(port)
+    return TAKEN, _occupant(port)[0]
 
 
-def _occupant(port: int) -> str | None:
-    """``command (pid N)`` holding ``port``, from ``ss -ltnp`` where that is
+def _occupant(port: int) -> tuple[str | None, int | None]:
+    """``(command (pid N), N)`` holding ``port``, from ``ss -ltnp`` where that is
     cheaply available. Best-effort: no ``ss``, or an unprivileged caller ``ss``
     redacts the pid for, just means the occupant goes unnamed, not unreported."""
     try:
@@ -160,9 +169,31 @@ def _occupant(port: int) -> str | None:
             ["ss", "-ltnp", f"sport = :{port}"], capture_output=True, text=True, timeout=2,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, None
     m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', out)
-    return f"{m.group(1)} (pid {m.group(2)})" if m else None
+    if not m:
+        return None, None
+    return f"{m.group(1)} (pid {m.group(2)})", int(m.group(2))
+
+
+def _board_of(cfg, pid: int) -> bool:
+    """Is ``pid`` a board serving *this* project — ``swarm web`` for the same
+    project dir, as :func:`command` (or the owner, by hand) starts it?"""
+    try:
+        args = [a.decode(errors="replace")
+                for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
+        cwd = Path(os.readlink(f"/proc/{pid}/cwd"))
+    except OSError:
+        return False
+    if "web" not in args or not any(
+        "swarm_orchestrator" in a or Path(a).name == "swarm" for a in args
+    ):
+        return False
+    where = Path(args[args.index("--project-dir") + 1]) if "--project-dir" in args[:-1] else cwd
+    try:
+        return (cwd / where).resolve() == Path(cfg.project_dir).resolve()
+    except OSError:
+        return False
 
 
 def status_line(cfg) -> str:

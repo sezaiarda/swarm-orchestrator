@@ -227,3 +227,52 @@ def test_up_reports_and_telegrams_when_the_port_is_taken(swarm):
         squatter.terminate()
         squatter.wait(timeout=5)
         swarm.down()
+
+
+_SILENT_LISTENER = (
+    "import socket, sys, time\n"
+    "s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+    "s.bind(('127.0.0.1', int(sys.argv[-1]))); s.listen(5)\n"
+    "time.sleep(60)\n"
+)
+
+
+@pytest.mark.skipif(shutil.which("ss") is None, reason="ss not available")
+def test_probe_calls_its_own_board_ours_while_it_is_still_starting(tmp_path, monkeypatch):
+    """``swarm up`` must not report "port :PORT is held by another program
+    (python (pid 4242))" when 4242 is the board that same ``up`` has just
+    started. ``serve`` binds before its request loop runs, so for a moment the
+    port accepts a connection nobody answers; ``/healthz`` times out and the
+    connect-only fallback would call that a squatter. A listener that is a board of
+    this project is ours; the same silent listener for another project is not."""
+    port = _free_port()
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_WEB", "1")
+    monkeypatch.setenv("SWARM_WEB_PORT", str(port))
+    monkeypatch.setenv("SWARM_WEB_HOST", "127.0.0.1")
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    cfg = load(project_dir=str(project))
+
+    def board_lookalike(where: Path) -> subprocess.Popen:
+        # The argv `lifecycle.command` builds, on a listener that never answers.
+        return subprocess.Popen(
+            [sys.executable, "-c", _SILENT_LISTENER, "swarm_orchestrator",
+             "--project-dir", str(where), "web", "--port", str(port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    for where, want in ((project, lifecycle.OURS), (other, lifecycle.TAKEN)):
+        proc = board_lookalike(where)
+        try:
+            assert _wait(lambda: _listening(port)), "the listener never bound"
+            state, detail = lifecycle.probe(cfg)
+            assert state == want, (where, state, detail)
+            if want == lifecycle.TAKEN:
+                assert detail and f"pid {proc.pid}" in detail
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+        assert _wait(lambda: not _listening(port)), "the listener outlived its turn"

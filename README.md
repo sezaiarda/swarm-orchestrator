@@ -240,9 +240,12 @@ flowchart TD
   - `swarm operator-add`;
   - `swarm operator <phase>`.
 - **Triage:** a cheap model (`triage_model`) answers `now` or `later`, and
-  anything odd counts as `later`.
-- **Hand-offs:** a job opens when its phase has merged (unless triage said
-  `later`), or from the queue sweep on every supervisor wake, oldest first. Only
+  anything odd counts as `later`. `later` means it can wait for the rest of the
+  run: the job is held until nothing is building, launching, ready or merging.
+  `swarm operator <phase>` by hand turns a `later` into `now`.
+- **Hand-offs:** a job never opens before its phase has merged. It opens at the
+  merge (unless triage said `later`), or from the queue sweep on every
+  supervisor wake, oldest due job first. Only
   one job runs at a time, under a lease: 1 h, or 7 days while it waits on you. A
   job gets 3 attempts 5 minutes apart. After that it is `abandoned` and you are
   told once. Under worktree isolation it works in its own mirror (`op-<job>`),

@@ -389,7 +389,7 @@ def on_finished(cfg: Config, phase: str, log: Log) -> bool:
     act on a phantom — the work it was briefed about would not be in ``main`` yet.
 
     A ``later`` triage is the one thing that holds it back; that item drains from
-    :func:`sweep` instead.
+    :func:`sweep` once the run is quiet instead.
     """
     item = opqueue.load(cfg, phase)
     if item is None or item.terminal:
@@ -400,7 +400,23 @@ def on_finished(cfg: Config, phase: str, log: Log) -> bool:
     return dispatch(cfg, phase, log, reason=f"{phase} merged")
 
 
-def sweep(cfg: Config, log: Log, now: float | None = None) -> bool:
+def on_poke(cfg: Config, phase: str, log: Log) -> bool:
+    """Open ``phase``'s session on request: a ``now`` triage, or ``swarm operator``.
+
+    Now, but never before the phase's work is on main — the same rule
+    :func:`on_finished` and :func:`sweep` keep. A triage can answer while its
+    phase still sits in the merge queue; the job is then held, and
+    :func:`on_finished` opens it the moment the merge lands.
+    """
+    if _in_flight(state_mod.read(cfg), phase):
+        log.line(f"OPERATOR-HELD {phase} not merged yet")
+        return False
+    return dispatch(cfg, phase, log, reason="poked")
+
+
+def sweep(
+    cfg: Config, log: Log, now: float | None = None, *, quiet=None
+) -> bool:
     """Reclaim dead leases, then open a session for the oldest due hand-off.
 
     Runs on EVERY supervisor wake, alongside the park deadlines — not from
@@ -412,6 +428,11 @@ def sweep(cfg: Config, log: Log, now: float | None = None) -> bool:
     Oldest first, one at a time, and never a phase's hand-off while that phase
     is still building or merging: the job is briefed about work that must already
     be in main, and under worktree isolation its mirror branches from main.
+
+    A job triaged ``later`` keeps — "it can wait for the rest of the run" — so it
+    opens only once ``quiet()`` says the run has nothing left to build right now
+    (the supervisor's own verdict, which only it can give). Without ``quiet`` a
+    ``later`` job is not opened here at all.
     """
     if not cfg.operator_enabled:
         return False
@@ -419,9 +440,12 @@ def sweep(cfg: Config, log: Log, now: float | None = None) -> bool:
     _reclaim(cfg, log, now)
     st = state_mod.read(cfg)
     due = [i for i in opqueue.ready(cfg, now) if not _in_flight(st, i.phase)]
-    if not due:
+    pick = next((i for i in due if not deferred(i)), None)
+    if pick is None and due and quiet is not None and quiet():
+        pick = due[0]
+    if pick is None:
         return False
-    return dispatch(cfg, due[0].phase, log, reason="queue swept")
+    return dispatch(cfg, pick.phase, log, reason="queue swept")
 
 
 def _in_flight(st: state_mod.State, phase: str) -> bool:

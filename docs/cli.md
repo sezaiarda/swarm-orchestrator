@@ -58,7 +58,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `operator <phase>` | Open an operator session for a phase's hand-off now. Builds the job from its sentinel if needed. |
+| `operator <phase>` | Open an operator session for a phase's hand-off now (or the moment the phase merges, if it has not yet), overriding a `later` triage. Builds the job from its sentinel if needed. |
 | `operator-add "brief" [--phase P]` | Queue an ad-hoc job. |
 | `operator-triage <job>` | Decide `now` or `later` for a queued job. `swarm done` spawns it. |
 | `operator-done <job> ["outcome"]` | The session is finished. Records and telegrams the outcome, merges its mirror. |

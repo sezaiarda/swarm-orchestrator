@@ -577,8 +577,15 @@ def cmd_operator(cfg: Config, phase: str) -> int:
     if item.terminal:
         print(f"swarm operator: {phase} hand-off is already {item.state}", file=sys.stderr)
         return 1
+    if operator_mod.deferred(item):
+        # Asking by hand is the owner saying it cannot keep: a `later` triage
+        # must not hold it past its merge.
+        opqueue.set_triage(cfg, phase, when=opqueue.NOW, why="opened by hand",
+                           group=str(item.triage.get("group", "")), source="owner")
     heard = _poke(cfg, f"operator {phase}")
     print(f"operator {phase}: {item.note or '(no brief)'}")
+    if operator_mod._in_flight(state_mod.read(cfg), phase):
+        print(f"  held until {phase} merges: a job never opens before its work is on main")
     print(f"  supervisor: {'poked' if heard else 'NOT RUNNING — nothing will open'}")
     return 0
 

@@ -180,9 +180,86 @@ def test_a_later_triage_is_not_dispatched_by_the_finish_hook(cfg, log):
 
     assert operator_mod.on_finished(cfg, PHASE, log) is False
     assert state_mod.read(cfg).operator_phase is None
-    # ...but the sweep still drains it, which is the only reason it is not lost.
-    assert operator_mod.sweep(cfg, log) is True
+    # ...and so does the sweep, until the run has nothing left to build: `later`
+    # is "it can wait for the rest of the run".
+    assert operator_mod.sweep(cfg, log) is False
+    assert operator_mod.sweep(cfg, log, quiet=lambda: False) is False
+    assert state_mod.read(cfg).operator_phase is None
+    # ...but a quiet run drains it, which is the only reason it is not lost.
+    assert operator_mod.sweep(cfg, log, quiet=lambda: True) is True
     assert state_mod.read(cfg).operator_phase == PHASE
+
+
+def test_the_sweep_opens_a_due_job_past_an_older_later_one(cfg, log):
+    """A held `later` job does not stand in front of one that may run now."""
+    queue(cfg, PHASE)
+    opqueue.set_triage(cfg, PHASE, when=opqueue.LATER, why="keeps", group="",
+                       source="test")
+    queue(cfg, OTHER, note="restart the unit on the build host")
+    assert operator_mod.sweep(cfg, log, quiet=lambda: False) is True
+    assert state_mod.read(cfg).operator_phase == OTHER
+
+
+def test_the_supervisor_holds_a_later_job_while_a_phase_builds(cfg):
+    queue(cfg, PHASE)
+    opqueue.set_triage(cfg, PHASE, when=opqueue.LATER, why="keeps", group="",
+                       source="test")
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("some-phase")
+    sup = Supervisor(cfg)
+    assert sup._build_quiet() is False
+    sup._check_operator_queue()
+    assert state_mod.read(cfg).operator_phase is None
+
+    with state_mod.transaction(cfg) as st:
+        st.free_slot_for("some-phase")
+    assert sup._build_quiet() is True
+    sup._check_operator_queue()
+    assert state_mod.read(cfg).operator_phase == PHASE
+
+
+def test_a_settled_run_opens_its_later_job(cfg):
+    """Settled but for a `later` job: the finish check opens it, since nothing
+    else may ever wake the loop to."""
+    queue(cfg, PHASE)
+    opqueue.set_triage(cfg, PHASE, when=opqueue.LATER, why="keeps", group="",
+                       source="test")
+    sup = Supervisor(cfg)
+    sup._finish_if_settled(_settled(cfg))
+    assert state_mod.read(cfg).operator_phase == PHASE
+    assert state_mod.read(cfg).finished is False
+
+
+def test_a_poke_never_opens_a_job_before_its_phase_merges(cfg, log):
+    """A `now` triage (or `swarm operator`) can land while the phase is still in
+    the merge queue: held, then opened by the merge itself."""
+    queue(cfg, PHASE)
+    with state_mod.transaction(cfg) as st:
+        st.integ_queue = [PHASE]
+    assert operator_mod.on_poke(cfg, PHASE, log) is False
+    assert state_mod.read(cfg).operator_phase is None
+    assert "OPERATOR-HELD" in cfg.supervisor_log.read_text(encoding="utf-8")
+
+    with state_mod.transaction(cfg) as st:
+        st.integ_queue = []
+    assert operator_mod.on_finished(cfg, PHASE, log) is True
+    assert state_mod.read(cfg).operator_phase == PHASE
+
+
+def test_swarm_operator_by_hand_overrides_a_later_triage(cfg, capsys):
+    from swarm_orchestrator import cli
+
+    queue(cfg, PHASE)
+    opqueue.set_triage(cfg, PHASE, when=opqueue.LATER, why="keeps", group="deploy",
+                       source="test")
+    with state_mod.transaction(cfg) as st:
+        st.integ_queue = [PHASE]
+    assert cli.cmd_operator(cfg, PHASE) == 0
+    item = opqueue.load(cfg, PHASE)
+    assert item.triage["when"] == opqueue.NOW and item.triage["source"] == "owner"
+    assert item.triage["group"] == "deploy"
+    assert "held until" in capsys.readouterr().out
 
 
 # -- the blocker, and the deadlock it must not become ---------------------

@@ -740,8 +740,9 @@ class Supervisor:
 
         The loop is single-threaded, so ``_dispatch`` already serialises this
         against the queue sweep; what stops the two of them opening *two* sessions
-        is the lease, which both take."""
-        operator_mod.dispatch(self.cfg, phase, self.log, reason="poked")
+        is the lease, which both take. Held while ``phase`` is still building or
+        merging: :func:`operator.on_finished` opens it once it lands."""
+        operator_mod.on_poke(self.cfg, phase, self.log)
 
     def _on_operator_done(self, phase: str) -> None:
         """The session signalled its job is finished.
@@ -761,7 +762,7 @@ class Supervisor:
             with state_mod.transaction(self.cfg) as st:
                 st.integ_push(mirror, operator_mod.INTEG_STATUS)
             self._pump_integrations()
-        operator_mod.sweep(self.cfg, self.log)  # next hand-off, if one is due
+        self._check_operator_queue()  # next hand-off, if one is due
         self._finish_if_settled(state_mod.read(self.cfg))
 
     def _check_operator_queue(self) -> None:
@@ -771,7 +772,22 @@ class Supervisor:
         ``idle < watchdog_s``, and :meth:`_handle` refreshes the idle clock on
         every FIFO line, so a swarm that is moving never reaches the quiet point
         — and the queue would drain only once the run was already over."""
-        operator_mod.sweep(self.cfg, self.log)
+        operator_mod.sweep(self.cfg, self.log, quiet=self._build_quiet)
+
+    def _build_quiet(self) -> bool:
+        """Has the run nothing left to build right now? When a ``later`` job opens.
+
+        No slot busy (a waiting worker still holds its slot), nothing launching,
+        nothing merging or held, and no ready phase the launcher will still start.
+        A parked phase does not count: it waits on the owner, not on the swarm."""
+        st = state_mod.read(self.cfg)
+        if st.busy_slots() or st.integ_queue or st.integ_blocked is not None:
+            return False
+        with self._launch_lock:
+            if self._launching:
+                return False
+        ready = master_mod.build_context(self.cfg, st)["ready"]
+        return not any(not self._given_up(p) for p in ready)
 
     def _operator_blocking(self) -> list[str]:
         """Hand-offs that must hold the finish open, checked BESIDE ``pending()``.
@@ -972,6 +988,9 @@ class Supervisor:
         owed = self._operator_blocking()
         if owed:
             self.log.line(f"{tag}-HELD operator={owed}")
+            # Settled but for the hand-offs: the run is quiet, so a `later` job
+            # is due now, and nothing else may wake the loop to open it.
+            self._check_operator_queue()
             return
         self.log.line(f"{tag} settled")
         self._finish_run(ctx)

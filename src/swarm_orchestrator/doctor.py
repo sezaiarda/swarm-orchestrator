@@ -663,8 +663,14 @@ def _check_nudge(st: State, ready: list[str], free: list[int]) -> Check:
     that ended without launching) leaves the swarm idle with work available and
     no timer to notice.
     """
-    if st.finished or st.paused or st.integ_blocked:
-        why = "finished" if st.finished else ("paused" if st.paused else "integration held")
+    if st.finished or st.paused or st.integ_blocked or st.bootstrapping:
+        why = (
+            "finished" if st.finished
+            else "paused" if st.paused
+            else "integration held" if st.integ_blocked
+            # `swarm up` holds the first launch until the init pass is over.
+            else "starting: the first launch waits for the init pass"
+        )
         return Check("run.nudge", OK, f"not applicable ({why})")
     if free and ready:
         return Check(

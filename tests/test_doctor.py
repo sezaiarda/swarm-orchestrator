@@ -314,6 +314,28 @@ def test_a_quiet_swarm_with_a_reason_is_not_a_lost_nudge(flag):
     assert doctor._check_nudge(st, ["P1"], [0]).status == OK
 
 
+def test_the_init_pass_holding_the_first_launch_is_not_a_lost_nudge():
+    """``swarm doctor`` shortly after ``up`` once said "2 free
+    slot(s) and ready [...] but nothing launched — lost nudge". The supervisor
+    was doing exactly what it should: holding the first launch for the init
+    pass, which only its own memory knew. It says so in state now."""
+    st = state_mod.State.fresh(2)
+    st.bootstrapping = True
+    check = doctor._check_nudge(st, ["P1", "P2"], [0, 1])
+    assert check.status == OK and "init pass" in check.detail
+
+
+def test_the_bootstrap_hold_is_recorded_from_up_until_the_first_launch(swarm):
+    swarm.env["FAKE_MASTER_WAIT"] = "3"  # a slow init pass
+    swarm.up()
+    assert swarm.state()["bootstrapping"] is True
+    rows = json.loads(swarm.cli("doctor", "--json", check=False).stdout)
+    nudge = by_name([Check(**r) for r in rows], "run.nudge")
+    assert nudge.status == OK, nudge.detail
+    assert swarm.wait(lambda: swarm.busy_count() > 0, timeout=20), swarm.log_text()
+    assert swarm.state()["bootstrapping"] is False
+
+
 def test_a_long_silence_with_work_in_flight_warns(cfg):
     st = set_state(cfg, last_event_at=time.time() - 2 * 3600)
     busy(st, 0, "P1")

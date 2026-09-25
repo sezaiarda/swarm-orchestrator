@@ -114,6 +114,11 @@ class State:
     # keys it does not know. Optional on both sides, like ``push_owed``.
     run_id: str | None = None
     run_epoch: float = 0.0
+    # True from ``swarm up`` until the supervisor stops holding the first launch
+    # for the init pass (it idled, died, or never started). Written for
+    # ``swarm doctor``: free slots beside ready phases are the plan in that
+    # window, not a lost nudge, and only the supervisor's memory knew it.
+    bootstrapping: bool = False
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -335,6 +340,7 @@ class State:
             overseer_deadline=float(data.get("overseer_deadline") or 0.0),
             run_id=data.get("run_id"),
             run_epoch=float(data.get("run_epoch") or 0.0),
+            bootstrapping=bool(data.get("bootstrapping", False)),
         )
 
     @classmethod
@@ -402,6 +408,7 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
         fresh.done = prior_done
         # A restart does not push anything, so a debt survives it like `done` does.
         fresh.push_owed = dict(state.push_owed)
+        fresh.bootstrapping = True  # the supervisor clears it (see the field)
         state.__dict__.update(fresh.__dict__)
         return state
 

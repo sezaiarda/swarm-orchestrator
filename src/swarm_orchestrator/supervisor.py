@@ -126,6 +126,7 @@ class Supervisor:
         # pass would otherwise take the pane on the very first wake and the init
         # pass would be ignored as "master alive").
         self._bootstrapped = False
+        self._bootstrap_recorded_over = False  # see `_end_bootstrap`
         self.overseer = overseer_mod.Policy(cfg, self.log)
         # The live pass id, from the moment it is reserved (its spawn runs on a
         # thread) until it ends. Guards "one pass at a time" and holds the finish.
@@ -384,11 +385,13 @@ class Supervisor:
         self._bootstrapped = True
         if self.master.is_alive():
             self.log.line("BOOTSTRAP-IGNORED master-alive")
+            self._end_bootstrap()
             return
         if self._spawn_master("init"):
             self._bootstrapping = True
             return
         self.log.line("BOOTSTRAP-NO-MASTER launching without the init pass")
+        self._end_bootstrap()
         self._fill_slots("bootstrap (no init master)")
         self._finish_if_settled()
 
@@ -1162,7 +1165,7 @@ class Supervisor:
             if self.master.is_alive():
                 self.log.line(f"LAUNCH-HELD bootstrap ({reason})")
                 return []
-            self._bootstrapping = False  # the init master died without idling
+            self._end_bootstrap()  # the init master died without idling
         ctx = master_mod.build_context(self.cfg, st)
         busy = set(ctx["busy_slots"].values())
         now = time.time()
@@ -1262,7 +1265,7 @@ class Supervisor:
             self._end_overseer_pass(self._overseer_live, ovrecord.DONE)
             return
         self.master.kill()
-        self._bootstrapping = False
+        self._end_bootstrap()
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False
             paused = st.paused
@@ -1296,6 +1299,18 @@ class Supervisor:
             failed=failed,
             operator=operator_mod.outstanding(self.cfg),
         )
+
+    def _end_bootstrap(self) -> None:
+        """The init pass holds launches no longer: it idled, died, or never ran.
+
+        Recorded in state once (``State.bootstrapping``), because ``swarm doctor``
+        cannot see this process: it once read the init pass's free slots
+        and ready phases, fifteen seconds after ``up``, as a lost nudge."""
+        self._bootstrapping = False
+        if not self._bootstrap_recorded_over:
+            self._bootstrap_recorded_over = True
+            with state_mod.transaction(self.cfg) as st:
+                st.bootstrapping = False
 
     def _spawn_master(self, kind: str) -> bool:
         with state_mod.transaction(self.cfg) as st:
@@ -1393,7 +1408,7 @@ class Supervisor:
         # An init master that died without idling leaves the bootstrap hold set,
         # and with a pass in the pane `_fill_slots` would read that pass as the
         # init master and hold every launch. Settle it the way `_fill_slots` does.
-        self._bootstrapping = False
+        self._end_bootstrap()
         if not self.overseer.due(now):
             return
         self._start_overseer_pass(now)

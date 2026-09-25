@@ -1138,7 +1138,7 @@ def _check_prompts() -> Check:
     """
     packaged = Path(__file__).resolve().parent / "prompts"
     source = Path(__file__).resolve().parent.parent.parent / "prompts"
-    wanted = ("init_master.md", "step_master.md", "resolver.md", "operator.md", "overseer.md")
+    wanted = ("init_master.md", "resolver.md", "operator.md", "overseer.md")
     missing = [
         name
         for name in wanted

@@ -54,7 +54,6 @@ class Config:
     command_template: str
     command_file: str
     env_marker: str
-    done_hook: str
     worker_cmd: str
     ready_marker: str
     worker_settings: str
@@ -62,7 +61,6 @@ class Config:
     done_grace_s: int
     park_after: int
     ledger: str
-    roadmap: str
     exclude: list[str]
     telegram_notify: str
     tui_autostart: bool
@@ -232,7 +230,6 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         command_template=str(worker.get("command_template", "/prime {phase}")),
         command_file=str(worker.get("command_file", ".claude/commands/prime.md")),
         env_marker=str(worker.get("env_marker", "SWARM_PHASE")),
-        done_hook=str(worker.get("done_hook", 'swarm done "$SWARM_PHASE" ok')),
         worker_cmd=os.environ.get(
             "SWARM_WORKER_CMD", worker.get("worker_cmd", "claude -n worker:{phase}")
         ),
@@ -270,7 +267,6 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             "SWARM_PARK_AFTER", worker.get("park_after"), 120, minimum=0
         ),
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
-        roadmap=str(tasks.get("roadmap", "docs/ROADMAP-MASTER.md")),
         exclude=list(tasks.get("exclude", DEFAULT_EXCLUDE)),
         tui_autostart=_bool_env("SWARM_TUI_AUTOSTART", tui.get("autostart", True)),
         tui_cmd=os.environ.get("SWARM_TUI_CMD", str(tui.get("cmd", "swarm tui"))),

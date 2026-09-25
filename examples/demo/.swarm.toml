@@ -12,11 +12,9 @@ command_template = "/prime {phase}"
 worker_cmd = "bash ./fake-worker.sh"
 ready_marker = "fake-ready-marker"
 env_marker = "SWARM_PHASE"
-done_hook = 'swarm done "$SWARM_PHASE" ok'
 
 [tasks]
 ledger = "ledger.txt"
-roadmap = "ledger.txt"
 exclude = []
 
 [telegram]

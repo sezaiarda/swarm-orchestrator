@@ -557,17 +557,6 @@ def notification_row(note: Notification, message_w: int = 56) -> tuple[str, ...]
     )
 
 
-def notification_matches(note: Notification, needle: str) -> bool:
-    """`/` search over every column that carries words."""
-    if not needle:
-        return True
-    low = needle.lower()
-    return any(
-        low in (value or "").lower()
-        for value in (note.text, note.phase, note.kind, note.source, note.error)
-    )
-
-
 def notification_detail(note: Notification) -> str:
     """One ping in full. A failure leads with the error, not with the message."""
     head = (
@@ -628,7 +617,6 @@ class TableTab(Vertical):
         Binding("j", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
         Binding("enter", "open_detail", "detail"),
-        Binding("escape", "clear_filter", "clear filter", show=False),
     ]
 
     # The table sizes to its rows and the detail takes the rest. It used to be
@@ -650,7 +638,6 @@ class TableTab(Vertical):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.rows: list = []
-        self.filter = ""
         self._keys: list[str] = []
         self._cells: list[tuple[str, ...]] = []
         self._dash = None
@@ -821,13 +808,7 @@ class TableTab(Vertical):
         return self.rows[index] if 0 <= index < len(self.rows) else None
 
     def focus_row(self, phase: str) -> None:
-        """Put the cursor on ``phase``, for a drill-in from another screen.
-
-        A filter in force can hide the row being asked for, so clear it rather
-        than silently landing the cursor somewhere else.
-        """
-        if self.filter and not any(getattr(r, "phase", None) == phase for r in self.rows):
-            self.set_filter("")
+        """Put the cursor on ``phase``, for a drill-in from another screen."""
         for index, row in enumerate(self.rows):
             if getattr(row, "phase", None) == phase:
                 try:
@@ -836,15 +817,6 @@ class TableTab(Vertical):
                 except Exception:  # noqa: BLE001 - not mounted yet
                     pass
                 return
-
-    def set_filter(self, needle: str) -> None:
-        self.filter = needle or ""
-        self._keys = []  # the row set changes; force the rebuild path
-        if self._dash is not None:
-            self.update(self._dash)
-
-    def head_suffix(self) -> str:
-        return f"  ·  [{COLOR[WARN]}]/{escape(self.filter)}[/]" if self.filter else ""
 
     # -- keys -------------------------------------------------------------
     def on_data_table_row_highlighted(self) -> None:
@@ -857,10 +829,6 @@ class TableTab(Vertical):
 
     def action_cursor_up(self) -> None:
         self.table.action_cursor_up()
-
-    def action_clear_filter(self) -> None:
-        if self.filter:
-            self.set_filter("")
 
     def action_open_detail(self) -> None:
         if self._dash is None or self.selected is None:
@@ -910,7 +878,7 @@ class Workers(TableTab):
             head.append(paint(f"{len(waiting)} waiting on you", WARN))
         if gone:
             head.append(paint(f"{len(gone)} PANE GONE", BAD))
-        self.set_head("  ·  ".join(head) + self.head_suffix())
+        self.set_head("  ·  ".join(head))
         # The border is the part visible without reading anything: a dead pane
         # turns the whole panel red from across the room.
         panel = self.detail_panel
@@ -946,28 +914,25 @@ class History(TableTab):
 
     def _update(self, dash) -> None:
         history = list(dash.history or [])
-        rows = [run for run in history if run.matches(self.filter)]
+        rows = history
         width = self.flex_width
         self.sync(rows, [history_key(run) for run in rows],
                   lambda run: history_row(run, width))
 
         failed = sum(1 for run in history if run.status == "fail")
         running = sum(1 for run in history if run.running)
-        head = [
-            f"{len(rows)} of {len(history)} run(s)" if self.filter else f"{len(history)} run(s)"
-        ]
+        head = [f"{len(history)} run(s)"]
         if running:
             head.append(paint(f"{running} in flight", INFO))
         if failed:
             head.append(paint(f"{failed} failed", BAD))
-        self.set_head("  ·  ".join(head) + self.head_suffix())
+        self.set_head("  ·  ".join(head))
         self.update_detail(dash)
 
     def detail_text(self, dash) -> str:
         run = self.selected
         if run is None:
-            hint = f" matching /{self.filter}" if self.filter else ""
-            return paint(escape(self.EMPTY_DETAIL + hint), MUTED)
+            return paint(escape(self.EMPTY_DETAIL), MUTED)
         return history_detail(run, dash)
 
     def selected_phase(self) -> str | None:
@@ -1066,9 +1031,8 @@ class Runs(TableTab):
         cur = getattr(dash, "usage", None)
         cur = [cur | {"live": bool(getattr(dash, "run", None))}] if cur else []
         rows = cur + list(getattr(dash, "past_runs", None) or [])
-        rows = [r for r in rows if not self.filter or self.filter.lower() in run_key(r).lower()]
         self.sync(rows, [run_key(r) for r in rows], run_row)
-        self.set_head(f"{len(rows)} run(s)  ·  R resets the open run" + self.head_suffix())
+        self.set_head(f"{len(rows)} run(s)  ·  R resets the open run")
         self.update_detail(dash)
 
     def detail_text(self, dash) -> str:
@@ -1117,7 +1081,6 @@ class Notifications(TableTab):
             pairs = [(i, n) for i, n in pairs if not n.delivered]
         elif self.mode == "delivered":
             pairs = [(i, n) for i, n in pairs if n.delivered]
-        pairs = [(i, n) for i, n in pairs if notification_matches(n, self.filter)]
         pairs.reverse()  # newest first; the file is append-only
 
         width = self.flex_width
@@ -1132,7 +1095,7 @@ class Notifications(TableTab):
         head.append(f"showing [{COLOR[ACCENT]}]{self.mode}[/] (F)")
         if dropped:
             head.append(paint(f"{dropped} NOT DELIVERED", BAD))
-        self.set_head("  ·  ".join(head) + self.head_suffix())
+        self.set_head("  ·  ".join(head))
         panel = self.detail_panel
         panel.set_class(bool(dropped), "-bad")
         self.update_detail(dash)

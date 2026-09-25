@@ -52,6 +52,19 @@ def _by_name(changes, name):
     return next(c for c in changes if c.name == name)
 
 
+# -- retired keys ----------------------------------------------------------
+def test_a_file_that_still_sets_retired_keys_loads_and_reloads(tmp_path, monkeypatch):
+    """`[worker].done_hook` and `[tasks].roadmap` were read by nothing and are
+    gone; a `.swarm.toml` that still sets them must load and diff clean."""
+    text = (_MIN + "[worker]\ndone_hook = 'swarm done \"$SWARM_PHASE\" ok'\n"
+            "[tasks]\nroadmap = \"docs/ROADMAP-MASTER.md\"\n")
+    cfg = _cfg(tmp_path, monkeypatch, text)
+    names = {f.name for f in fields(Config)}
+    assert "done_hook" not in names and "roadmap" not in names
+    assert cfg.max_workers == 4
+    assert [c for c in reload_mod.diff(cfg, cfg, _facts()) if c.old != c.new] == []
+
+
 # -- the matrix must stay exhaustive --------------------------------------
 def test_policy_classifies_every_config_field():
     assert set(reload_mod.POLICY) == {f.name for f in fields(Config) if f.init}

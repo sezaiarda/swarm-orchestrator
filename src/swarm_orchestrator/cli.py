@@ -892,7 +892,7 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
     shipped = Path(__file__).resolve().parent / "prompts"
     if not shipped.is_dir():
         shipped = Path(__file__).resolve().parent.parent.parent / "prompts"
-    for name in ("init_master.md", "step_master.md", "resolver.md", "operator.md", "overseer.md"):
+    for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md"):
         q = shipped / name
         if q.is_file():
             out.append((f"prompts/{name}", q))

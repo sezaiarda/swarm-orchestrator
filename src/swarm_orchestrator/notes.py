@@ -133,20 +133,6 @@ def load_all(cfg: Config) -> dict[str, list[Note]]:
     return out
 
 
-def summary_line(cfg: Config) -> str | None:
-    """One line for the finish telegram, or None when nothing was recorded."""
-    allnotes = load_all(cfg)
-    if not allnotes:
-        return None
-    n = sum(1 for v in allnotes.values() for x in v if x.kind != OWNER_DECISION)
-    owner = sum(1 for v in allnotes.values() for x in v if x.kind == OWNER_DECISION)
-    also = f", {owner} owner answer(s)" if owner else ""
-    return (
-        f"{n} decision(s){also} logged across {len(allnotes)} phase(s) "
-        f"— `swarm report --decisions`"
-    )
-
-
 def owner_answer(cfg: Config, phase: str, answer: str, question: str = "") -> Note | None:
     """Record the owner's answer to ``phase``'s question as an ``owner_decision``.
 

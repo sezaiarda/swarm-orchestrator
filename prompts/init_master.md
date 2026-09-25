@@ -43,8 +43,8 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   target and how to check it — and it is never a question: questions go through
   `swarm waiting`); `fail` = could not complete (rolls the phase back and
   telegrams the owner). The recap is one line — for `ok` it may be omitted. This
-  generalizes `[worker].done_hook` (`swarm done "$SWARM_PHASE" ok`): the
-  self-classified form is the contract the worker follows. If a plain completion
+  generalizes the plain `swarm done "$SWARM_PHASE" ok`: the self-classified form
+  is the contract the worker follows. If a plain completion
   hook, or the retired `needs-owner` status, is present, upgrade it to this form.
 - **Build gate**: when `SWARM_PHASE` is set, every heavy compile/test command
   (`cargo …`, `bun run build|test`, and the like) must run as `swarm build <cmd>`

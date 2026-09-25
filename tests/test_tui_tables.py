@@ -313,16 +313,6 @@ def test_notification_row_survives_an_empty_record():
     assert "unknown" in row[4]
 
 
-def test_notification_matches_searches_every_worded_column():
-    n = note()
-    assert tables.notification_matches(n, "")
-    assert tables.notification_matches(n, "SCHEMA")
-    assert tables.notification_matches(n, "supervisor")
-    assert tables.notification_matches(n, "p1")
-    assert not tables.notification_matches(n, "nothing-like-this")
-    assert tables.notification_matches(note(error="429"), "429")
-
-
 def test_notification_detail_leads_with_the_failure():
     out = tables.notification_detail(note(delivered=False, error="telegram 429"))
     assert out.splitlines()[0].count("NOT DELIVERED")

@@ -152,8 +152,6 @@ POLICY: dict[str, Policy] = {
            " with `swarm resolved <phase>` once the tree is clean"),
         _p("ledger", "[tasks]", "ledger", HOT, None,
            "build_context loads the ledger from disk on every pass"),
-        _p("roadmap", "[tasks]", "roadmap", HOT, None,
-           "only ever handed to the master as a path, read fresh each time"),
         _p("exclude", "[tasks]", "exclude", HOT, None,
            "ledger.ready() takes the exclusion set as an argument on every pass"),
         _p("telegram_notify", "[telegram]", "notify", HOT, None,
@@ -187,8 +185,6 @@ POLICY: dict[str, Policy] = {
         _p("env_marker", "[worker]", "env_marker", NEXT, None,
            "the variable name is written into the worker's environment at spawn;"
            " a live worker still answers to the old one"),
-        _p("done_hook", "[worker]", "done_hook", NEXT, None,
-           "delivered to the worker at launch as the command it must run"),
         _p("worker_cmd", "[worker]", "worker_cmd", NEXT, "SWARM_WORKER_CMD",
            "it is the command a pane is respawned with"),
         _p("ready_marker", "[worker]", "ready_marker", NEXT, "SWARM_READY_MARKER",

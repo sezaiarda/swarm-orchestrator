@@ -134,7 +134,7 @@ class HelpScreen(ModalScreen[None]):
   [{COLOR[OK]}]R[/] reset the run: ETA and usage count from now (asks first)
 
 [b]on their own tab[/b]
-  [{COLOR[OK]}]/[/] filter (workers, history, alerts, commands)   [{COLOR[OK]}]esc[/] clear it
+  [{COLOR[OK]}]/[/] commands: filter   [{COLOR[OK]}]esc[/] clear it
   [{COLOR[OK]}]F[/] alerts: all / failed / delivered
   [{COLOR[OK]}]r[/] disk: rescan   [{COLOR[MUTED]}](it never scans on a timer)[/]
 

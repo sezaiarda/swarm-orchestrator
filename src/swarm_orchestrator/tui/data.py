@@ -836,16 +836,6 @@ class PhaseRun:
     def running(self) -> bool:
         return self.started_at is not None and self.ended_at is None
 
-    def matches(self, needle: str) -> bool:
-        """Whether a `/` search hits this run (case-insensitive, any field)."""
-        if not needle:
-            return True
-        low = needle.lower()
-        return any(
-            low in (value or "").lower()
-            for value in (self.phase, self.status, self.summary, self.note)
-        )
-
 
 def build_history(
     events: list[Event],

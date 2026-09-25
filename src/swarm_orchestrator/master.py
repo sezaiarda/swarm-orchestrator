@@ -32,7 +32,7 @@ _READY_TIMEOUT_S = 30.0
 INIT = "init"
 OVERSEER = "overseer"
 #: The prompt file each kind of pass is pointed at.
-_PROMPTS = {INIT: "init_master.md", "step": "step_master.md", OVERSEER: "overseer.md"}
+_PROMPTS = {INIT: "init_master.md", OVERSEER: "overseer.md"}
 
 # Env vars a master pane needs so its `swarm` calls find this run. Forwarded on
 # the tmux respawn (bare masters inherit the supervisor's env directly).

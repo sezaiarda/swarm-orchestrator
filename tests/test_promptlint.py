@@ -18,7 +18,7 @@ def rules(text: str) -> list[tuple[int, str, str]]:
 
 
 # -- the shipped prompts ----------------------------------------------------
-@pytest.mark.parametrize("name", ["init_master.md", "step_master.md", "resolver.md", "operator.md", "overseer.md"])
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
 def test_every_shipped_prompt_lints_clean(name):
     text = (REPO / "prompts" / name).read_text(encoding="utf-8")
     assert promptlint.lint(text, known_commands=KNOWN) == []

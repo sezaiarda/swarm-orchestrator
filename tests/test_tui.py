@@ -488,12 +488,6 @@ def test_build_history_attaches_the_recap_and_note_to_the_last_run(cfg):
     assert runs[1].summary == "" and runs[1].note == ""
 
 
-def test_phase_run_search_matches_any_field():
-    run = data.PhaseRun("P1", "ok", BASE, BASE + 10, summary="Rewrote the parser.")
-    assert run.matches("") and run.matches("parser") and run.matches("P1")
-    assert not run.matches("telegram")
-
-
 def test_launch_times_keeps_the_most_recent_launch():
     events = data.parse_events(log_text((1, "LAUNCH P1 slot=0"), (60, "LAUNCH P1 slot=1")))
     assert data.launch_times(events)["P1"] == pytest.approx(BASE + 60, abs=0.01)

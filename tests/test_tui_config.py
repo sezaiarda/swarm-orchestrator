@@ -43,7 +43,6 @@ master_model = ""                 # "" = inherit; else "opus"/"sonnet"/...
 
 [worker]
 command_template = "/prime {phase}"          # sent via send-keys into each slot
-done_hook       = 'swarm done "$SWARM_PHASE" ok'
 worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[]}}'
 done_grace_s    = 45   # after a worker signals `done`, it holds its slot this many
                        # seconds (a finish buffer to fully close out the session)
@@ -199,15 +198,15 @@ def test_a_hash_inside_a_string_is_not_mistaken_for_a_comment():
 
 
 def test_a_literal_string_stays_a_literal_string():
-    """``done_hook`` is quoted ``'...'`` because it is full of double quotes.
+    """``worker_settings`` is quoted ``'...'`` because it is full of double quotes.
 
     Re-emitting it as an escaped basic string would parse fine and be unreadable,
     and the owner would have to undo it by hand.
     """
-    out = cf.toml_set_many(CORPUS, {("worker", "done_hook"): 'swarm done "$P" fail'})
-    line = next(x for x in out.split("\n") if x.startswith("done_hook"))
-    assert line == """done_hook       = 'swarm done "$P" fail'"""
-    assert tomllib.loads(out)["worker"]["done_hook"] == 'swarm done "$P" fail'
+    out = cf.toml_set_many(CORPUS, {("worker", "worker_settings"): '{"effort":"low"}'})
+    line = next(x for x in out.split("\n") if x.startswith("worker_settings"))
+    assert line == """worker_settings = '{"effort":"low"}'"""
+    assert tomllib.loads(out)["worker"]["worker_settings"] == '{"effort":"low"}'
 
 
 def test_a_multi_line_array_is_replaced_whole():

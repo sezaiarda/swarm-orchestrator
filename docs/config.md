@@ -5,6 +5,9 @@ the environment variable that overrides it, and what `swarm reload` does with an
 edit to it. The file lives at the project root (or pass `--config`). A missing
 table or key takes the default, so a minimal file works.
 
+A key the loader does not read is ignored, so a file that still sets a retired
+key (`[worker].done_hook`, `[tasks].roadmap`) loads unchanged.
+
 **Precedence:** an environment variable, when set, beats the file, which beats the
 default. An integer that does not parse falls back to the next source instead of
 failing the load. A `SWARM_*` variable set in the supervisor's environment keeps
@@ -42,7 +45,6 @@ why `[operator].enabled`, `triage_model` and `done_grace_s` are "next".
 | `command_template` | `"/prime {phase}"` | | next | The line typed into a worker's pane once `claude` has booted. |
 | `command_file` | `".claude/commands/prime.md"` | | next | The project's slash-command file. The init pass patches it for swarm mode, and `swarm check` lints it. |
 | `env_marker` | `"SWARM_PHASE"` | | next | The variable that carries the phase id into the worker's environment. |
-| `done_hook` | `'swarm done "$SWARM_PHASE" ok'` | | next | The plain completion hook. The init pass upgrades it to the self-classified `ok` / `operator` / `fail` form. No code runs it. |
 | `worker_cmd` | `"claude -n worker:{phase}"` | `SWARM_WORKER_CMD` | next | The base command a slot pane is respawned with, as `cd <cwd> && exec <worker_cmd> --settings … --effort …`. |
 | `ready_marker` | `""` | `SWARM_READY_MARKER` | next | Text that means "claude has booted". `""` means the running `claude --version`, which the boot banner prints; if that cannot be read, `Claude Code`. |
 | `worker_settings` | `'{"teammateMode":"in-process"}'` | `SWARM_WORKER_SETTINGS` | next | JSON merged over the user's settings via `--settings`. The meters status-line tap is added unless this JSON sets its own `statusLine`. Register `scripts/stop-hook.py` here as a `Stop` hook to get recaps (see below). `""` passes no settings. |
@@ -61,7 +63,6 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `ledger` | `"docs/PHASE-LEDGER.md"` | | hot | The phase ledger, relative to the project root. The launcher parses it on every decision. |
-| `roadmap` | `"docs/ROADMAP-MASTER.md"` | | hot | Kept for the settings form. No code reads it. |
 | `exclude` | `[]` | | hot | Phase ids never to launch, for example rows blocked outside the swarm. `swarm why` quotes the comment next to an entry. |
 
 ## `[telegram]`

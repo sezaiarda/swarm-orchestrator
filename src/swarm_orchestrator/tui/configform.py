@@ -190,9 +190,8 @@ def _scan_value(lines: list[str], row: int, col: int) -> tuple[int, int]:
 def _string(value: str, prefer_literal: bool = False) -> str:
     """A TOML string, keeping the file's own quoting habit where it can.
 
-    ``done_hook`` and ``worker_settings`` are written as literal ``'...'`` strings
-    in every real config precisely because their contents are full of double
-    quotes; re-emitting them as escaped basic strings would be valid TOML and
+    ``worker_settings`` is written as a literal ``'...'`` string in every real
+    config precisely because its contents are full of double quotes; re-emitting them as escaped basic strings would be valid TOML and
     completely unreadable, and the owner would have to undo it by hand.
     """
     if "\n" not in value and "'" not in value and (prefer_literal or '"' in value or "\\" in value):
@@ -404,13 +403,11 @@ FIELDS: tuple[Setting, ...] = (
     Setting("worker_settings", STR, "settings JSON merged into each worker's `claude`"),
     Setting("worker_effort", CHOICE, 'claude --effort per worker; "" = inherit yours',
             choices=("", *EFFORTS)),
-    Setting("done_hook", STR, "command a worker runs to signal it finished"),
     Setting("env_marker", STR, "env var carrying the phase name into the worker"),
     Setting("ready_marker", STR,
             '"pane booted" banner; "" = the claude version'),
     # -- [tasks] ----------------------------------------------------------
     Setting("ledger", STR, "phase ledger the master reads (project-relative)"),
-    Setting("roadmap", STR, "roadmap handed to the master as a path"),
     Setting("exclude", LIST, "phases the swarm must never launch (comma-sep)"),
     # -- [telegram] -------------------------------------------------------
     Setting("telegram_notify", STR, "script that sends the swarm's own Telegram pings"),

@@ -16,9 +16,10 @@ Do exactly this, then stop:
    to complete the merge (do not create extra commits).
 3. Run `swarm resolved <phase>` (the exact phase named above). This unblocks the
    merge-queue; the supervisor pushes, prunes the branch(es), and continues.
-4. If you genuinely cannot resolve it correctly, **notify the owner**
-   (`swarm notify "<text>"`) with the specifics and stop —
-   do not run `swarm resolved`. Leave the merge in progress for the owner.
+4. If you genuinely cannot resolve it correctly, **telegram the owner** with
+   `swarm notify "<the specifics>"` (the swarm's own sender, the only way to
+   message the owner) and stop — do not run `swarm resolved`. Leave the merge in
+   progress for the owner.
 
 Work **only** in the repo named above, do NOT `git push` yourself (the supervisor
 pushes with optimistic retry), and do NOT run `swarm launch`/`done`. You resolve,

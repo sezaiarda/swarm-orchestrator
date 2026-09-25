@@ -140,3 +140,15 @@ def test_swarm_check_strict_fails_on_a_wasteful_worker_prompt(swarm):
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "fatal under --strict" in result.stdout
+
+
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+def test_shipped_prompts_message_the_owner_only_through_swarm_notify(name):
+    """`swarm notify` is the swarm's own sender and logs every send; a session
+    told to call some other script pings from another sender, unlogged."""
+    text = (REPO / "prompts" / name).read_text(encoding="utf-8")
+    assert "~/.claude" not in text
+
+
+def test_the_resolver_escalates_with_swarm_notify():
+    assert "swarm notify" in (REPO / "prompts" / "resolver.md").read_text(encoding="utf-8")

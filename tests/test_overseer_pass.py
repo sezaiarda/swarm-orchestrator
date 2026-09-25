@@ -155,9 +155,11 @@ def sup(cfg, monkeypatch):
     s = Supervisor(cfg)
     s._bootstrapped = True
     s.spawned = []
+    s.lines = []
 
     def fake_spawn(kind, pane=None, *, cwd=None, env=None, line=None):
         s.spawned.append((kind, cwd, env))
+        s.lines.append(line)
         return True
 
     monkeypatch.setattr(s.master, "spawn", fake_spawn)
@@ -194,6 +196,22 @@ def test_a_pass_gets_its_digest_record_env_and_state(sup, cfg):
     assert st.overseer_deadline > time.time() + 2600
     log = cfg.supervisor_log.read_text()
     assert f"OVERSEER-PASS-START {pid} reasons=manual" in log
+
+
+def test_the_pane_gets_one_short_line_and_the_brief_goes_to_a_file(sup, cfg):
+    """An Overseer pass once died as "prompt would not submit".
+    Its brief was a long block of state paths typed into the pane, and Claude
+    Code folds pasted text that long into "[Pasted text #1]", so the submit check
+    never saw it land — the failure operator hand-offs had before their brief
+    moved to a file. The pane gets a short pointer; the brief is in the file."""
+    pid = _start(sup)
+    [line] = sup.lines
+    brief = ovrecord.overseer_dir(cfg) / f"{pid}.brief.md"
+    assert len(line) < 300 and str(brief) in line and "\n" not in line
+    text = brief.read_text(encoding="utf-8")
+    assert "overseer.md" in text and f"pass {pid}" in text and "overseer-done" in text
+    assert str(ovrecord.md_path(cfg, pid)) in text
+    assert [r.id for r in ovrecord.load_passes(cfg)] == [pid]  # a .md is never a record
 
 
 def test_no_second_pass_while_one_runs_and_the_pending_one_runs_after(sup, cfg):

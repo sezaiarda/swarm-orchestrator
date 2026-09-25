@@ -1454,7 +1454,12 @@ class Supervisor:
                 "SWARM_OVERSEER_RECORD": str(record),
                 "SWARM_PROJECT": str(cfg.project_dir),
             }
-            line = master_mod.overseer_brief(cfg, pid, digest, record, cwd)
+            brief = overseer_mod.overseer_dir(cfg) / f"{pid}.brief.md"
+            brief.write_text(
+                master_mod.overseer_brief(cfg, pid, digest, record, cwd) + "\n",
+                encoding="utf-8",
+            )
+            line = master_mod.overseer_line(pid, brief)
             pane = state_mod.read(cfg).master_pane
             if self.master.spawn(master_mod.OVERSEER, pane, cwd=cwd, env=env, line=line):
                 outcome = "ok"

@@ -142,7 +142,8 @@ def master_command(cfg: Config, kind: str, cwd: Path | None = None) -> str:
 def overseer_brief(
     cfg: Config, pass_id: str, digest: Path, record: Path, cwd: Path | None
 ) -> str:
-    """The one line an Overseer session is handed (no newlines: tmux submits on each)."""
+    """An Overseer session's brief. Written to a file, never typed into the pane:
+    see :func:`overseer_line`."""
     prompt_file = resolver.prompt_path(_PROMPTS[OVERSEER])
     where = (
         f"Your cwd {cwd} is your own full-workspace mirror (branch swarm/{cwd.name}):"
@@ -156,6 +157,20 @@ def overseer_brief(
         f" {pass_id}, for the project at {cfg.project_dir}. Read your digest first: {digest}."
         f" Write your pass record in {record}. {where} Run swarm commands as `{swarm} <command>`."
         f' When the pass is over run `{swarm} overseer-done "<one-line summary>"`.'
+    )
+
+
+def overseer_line(pass_id: str, brief_file: Path) -> str:
+    """The one short line the Overseer's pane is handed: a pointer to its brief.
+
+    The brief itself runs ~900 characters on a real project (four long state
+    paths), and Claude Code folds pasted text that long into ``[Pasted text #1]``
+    — the submit check then never sees the text land, and the pass
+    died as "prompt would not submit", the same way operator hand-offs did
+    before their brief moved to a file."""
+    return (
+        f"You are the swarm's Overseer, pass {pass_id}. Read your full brief in"
+        f" {brief_file} first, then do exactly what it says."
     )
 
 

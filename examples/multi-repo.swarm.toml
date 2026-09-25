@@ -1,3 +1,6 @@
+# An example .swarm.toml, trimmed. Every section and key (including [overseer],
+# [gc], [web], [tui] and [git].auto_resolve) is in docs/config.md.
+
 [swarm]
 max_workers = 2
 master_model = ""                 # "" = inherit; else "opus"/"sonnet"/...
@@ -15,12 +18,14 @@ done_grace_s    = 30   # after a worker signals `done`, it holds its slot this m
 # ready_marker auto-derives from `claude --version` (its banner). Set only to override.
 
 [tasks]
-ledger  = "docs/PHASE-LEDGER.md"   # master reads this directly (no brittle regex parse)
+ledger  = "docs/PHASE-LEDGER.md"   # the launcher parses it (markdown checklist or bare format)
 roadmap = "docs/ROADMAP-MASTER.md"
 exclude = ["intake-P1","intake-P2","intake-P3","intake-P4","intake-P5",
            "I1","I2","I3","I4","I5","I6"]      # externally blocked
 
 [telegram]
+# Default: this repo's scripts/notify.sh (the swarm's own bot). Any script that
+# takes the message as $1 works.
 notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
 
 [tmux]
@@ -42,7 +47,7 @@ isolation   = "worktree"   # each phase builds against a full isolated MIRROR of
                            # component repo, nested at its real path. A serialized
                            # integrator merges every repo the phase changed into its
                            # `master` on `swarm done` (untouched repos are 0-ahead
-                           # no-ops) and rolls ALL of them back on `fail`. Required
+                           # no-ops) and rolls ALL of them back on `fail`. Recommended
                            # for parallel workers (max_workers > 1) so two phases in
                            # the same repo can't clobber each other. "none" = in place.
 main_branch = "master"

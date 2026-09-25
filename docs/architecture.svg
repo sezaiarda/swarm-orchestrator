@@ -1,89 +1,134 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 470" width="940" height="470"
-     font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif"
-     role="img" aria-label="swarm-orchestrator runtime control loop: a supervisor drives an ephemeral master and four fixed worker slots in one tmux session">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="1000" height="560"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+     role="img" aria-label="swarm-orchestrator at runtime: a detached supervisor reads control.fifo and owns state.json; it opens Claude Code sessions in a tmux session (dashboard, overseer, operator, worker slots, web board), merges each finished phase's branch through a serialized queue into the project's repos, and pings the owner on Telegram">
   <defs>
-    <marker id="ai" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#4f46e5"/></marker>
-    <marker id="ag" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#16a34a"/></marker>
-    <marker id="am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#94a3b8"/></marker>
+    <marker id="amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#F2A541"/></marker>
+    <marker id="ink" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8E8B85"/></marker>
   </defs>
   <style>
-    .m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-    .ink{fill:#1f2933}.mut{fill:#64748b}.ind{fill:#4f46e5}.grn{fill:#16a34a}
-    .lbl{font-size:12.5px}.sm{font-size:11px}.big{font-size:15px;font-weight:600}
-    .eye{font-size:11px;letter-spacing:2.5px}
-    .flow{fill:none;stroke-width:2}
+    .m{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace}
+    .ink{fill:#EDEAE3}.mut{fill:#8E8B85}.amb{fill:#F2A541}
+    .t10{font-size:10.5px}.t11{font-size:11.5px}.t12{font-size:12.5px}.t14{font-size:14.5px;font-weight:600}
+    .eye{font-size:11px;letter-spacing:2.4px}
+    .box{fill:#191C22;stroke:#2E323A;stroke-width:1}
+    .card{fill:#20242B;stroke:#343943;stroke-width:1}
+    .hot{fill:#191C22;stroke:#F2A541;stroke-width:1.5}
+    .free{fill:none;stroke:#3A3F48;stroke-width:1;stroke-dasharray:4 4}
+    .flow{fill:none;stroke-width:1.6}
   </style>
 
-  <rect x="4" y="4" width="932" height="462" rx="16" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="28" y="36" class="m eye mut">SWARM · RUNTIME CONTROL LOOP</text>
+  <rect width="1000" height="560" rx="18" fill="#111318"/>
+  <text x="32" y="40" class="m eye mut">SWARM-ORCHESTRATOR · RUNTIME</text>
 
   <!-- owner -->
-  <rect x="40" y="92" width="92" height="32" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="86" y="112" text-anchor="middle" class="ink lbl">owner</text>
-  <path class="flow" d="M96,124 C92,136 100,142 118,150" stroke="#94a3b8" marker-end="url(#am)"/>
-  <text x="138" y="140" class="m sm mut">swarm up</text>
+  <rect x="32" y="66" width="220" height="34" rx="17" class="box"/>
+  <text x="142" y="87" text-anchor="middle" class="ink t12">owner · terminal or phone</text>
+  <path class="flow" d="M142,100 L142,128" stroke="#8E8B85" marker-end="url(#ink)"/>
+  <text x="152" y="118" class="m t10 mut">swarm CLI</text>
 
   <!-- supervisor -->
-  <rect x="40" y="150" width="212" height="212" rx="12" fill="#ffffff" stroke="#4f46e5" stroke-width="1.5"/>
-  <text x="58" y="180" class="ink big">supervisor</text>
-  <text x="58" y="199" class="m sm mut">sole FIFO reader ·</text>
-  <text x="58" y="213" class="m sm mut">sole state writer · sole killer</text>
-  <rect x="58" y="226" width="176" height="32" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="72" y="246" class="m lbl ink">control.fifo</text>
-  <rect x="58" y="266" width="176" height="32" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="72" y="286" class="m lbl ink">state.json · flock</text>
-  <text x="58" y="324" class="sm mut">four-rule pure-injection lifecycle</text>
-  <text x="58" y="342" class="sm mut">no timers · no watchdog · no retry</text>
+  <rect x="32" y="132" width="220" height="252" rx="12" class="hot"/>
+  <text x="50" y="160" class="ink t14">supervisor</text>
+  <text x="50" y="177" class="t10 mut">detached · one event loop</text>
+  <rect x="50" y="190" width="184" height="26" rx="6" class="card"/>
+  <text x="62" y="207" class="m t11 ink">control.fifo</text>
+  <rect x="50" y="222" width="184" height="26" rx="6" class="card"/>
+  <text x="62" y="239" class="m t11 ink">state.json · flock</text>
+  <text x="50" y="272" class="t11 ink">launcher</text>
+  <text x="156" y="272" class="t10 mut">ledger order</text>
+  <text x="50" y="292" class="t11 ink">merge queue</text>
+  <text x="156" y="292" class="t10 mut">one at a time</text>
+  <text x="50" y="312" class="t11 ink">park timer</text>
+  <text x="156" y="312" class="t10 mut">own window</text>
+  <text x="50" y="332" class="t11 ink">Overseer policy</text>
+  <text x="156" y="332" class="t10 mut">when to review</text>
+  <text x="50" y="352" class="t11 ink">watchdog · gc</text>
+  <text x="156" y="352" class="t10 mut">panes, disk</text>
+  <text x="50" y="372" class="t11 ink">operator sweep</text>
+  <text x="156" y="372" class="t10 mut">hand-offs</text>
 
-  <!-- telegram -->
-  <path class="flow" d="M146,362 L146,398" stroke="#94a3b8" marker-end="url(#am)"/>
-  <text x="156" y="384" class="m sm mut">notify</text>
-  <rect x="86" y="402" width="120" height="34" rx="17" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="146" y="424" text-anchor="middle" class="lbl ink">telegram</text>
+  <!-- state dir -->
+  <path class="flow" d="M142,384 L142,400" stroke="#8E8B85"/>
+  <rect x="32" y="400" width="220" height="126" rx="12" class="box"/>
+  <text x="50" y="424" class="t12 ink">state dir</text>
+  <text x="50" y="441" class="m t10 mut">~/.local/state/swarm-orchestrator/</text>
+  <text x="50" y="457" class="m t10 mut">  &lt;project&gt;-&lt;hash&gt;/</text>
+  <text x="50" y="477" class="m t10 ink">done/  operator/  overseer/</text>
+  <text x="50" y="493" class="m t10 ink">notes/ meters/  history/</text>
+  <text x="50" y="509" class="m t10 ink">logs/  wt/  tmp/  cache/</text>
 
   <!-- tmux session -->
-  <rect x="348" y="64" width="430" height="344" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="366" y="86" class="m lbl mut">tmux session · swarm</text>
+  <rect x="310" y="66" width="658" height="316" rx="14" fill="#15181D" stroke="#2E323A"/>
+  <text x="330" y="90" class="t12 mut">tmux session · one per project</text>
 
-  <!-- master window -->
-  <rect x="366" y="96" width="394" height="60" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="380" y="120" class="m sm mut">master window · 1 pane</text>
-  <text x="380" y="140" class="ink big">ephemeral master — claude</text>
+  <rect x="330" y="102" width="120" height="54" rx="8" class="card"/>
+  <text x="342" y="122" class="m t11 amb">0 dash</text>
+  <text x="342" y="141" class="t10 mut">swarm tui</text>
+  <rect x="460" y="102" width="150" height="54" rx="8" class="card"/>
+  <text x="472" y="122" class="m t11 amb">1 overseer</text>
+  <text x="472" y="141" class="t10 mut">init pass, then reviews</text>
+  <rect x="620" y="102" width="150" height="54" rx="8" class="card"/>
+  <text x="632" y="122" class="m t11 amb">2 operator</text>
+  <text x="632" y="141" class="t10 mut">one hand-off at a time</text>
+  <rect x="780" y="102" width="168" height="54" rx="8" class="card"/>
+  <text x="792" y="122" class="m t11 amb">web · last window</text>
+  <text x="792" y="141" class="t10 mut">read-only LAN board</text>
 
-  <text x="366" y="180" class="m lbl mut">workers window · 4 slots</text>
+  <text x="330" y="182" class="m t11 amb">3 workers</text>
+  <text x="402" y="182" class="t10 mut">slots 0-3 · more slots open workers-2, workers-3 …, 4 panes each</text>
+  <rect x="330" y="192" width="304" height="72" rx="8" class="card"/>
+  <text x="344" y="212" class="t11 ink">slot 0 · claude</text>
+  <text x="344" y="230" class="m t10 amb">/prime api-P3</text>
+  <text x="344" y="248" class="m t10 mut">cwd wt/api-P3 · branch swarm/api-P3</text>
+  <rect x="648" y="192" width="300" height="72" rx="8" class="card"/>
+  <text x="662" y="212" class="t11 ink">slot 1 · claude</text>
+  <text x="662" y="230" class="m t10 amb">/prime web-P2</text>
+  <text x="662" y="248" class="m t10 mut">cwd wt/web-P2 · branch swarm/web-P2</text>
+  <rect x="330" y="274" width="304" height="72" rx="8" class="card"/>
+  <text x="344" y="294" class="t11 ink">slot 2 · claude</text>
+  <text x="344" y="312" class="m t10 amb">/prime db-P1</text>
+  <text x="344" y="330" class="m t10 mut">cwd wt/db-P1 · branch swarm/db-P1</text>
+  <rect x="648" y="274" width="300" height="72" rx="8" class="free"/>
+  <text x="662" y="294" class="t11 mut">slot 3 · free</text>
+  <text x="662" y="312" class="t10 mut">the next ready phase lands here</text>
 
-  <!-- slot 0 -->
-  <rect x="366" y="190" width="190" height="98" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="380" y="216" class="m lbl ink" font-weight="600">slot 0</text>
-  <text x="380" y="240" class="m lbl ind">swarm/pricing-P1</text>
-  <circle cx="385" cy="264" r="4" fill="#16a34a"/><text x="396" y="268" class="sm mut">building</text>
-  <!-- slot 1 -->
-  <rect x="570" y="190" width="190" height="98" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="584" y="216" class="m lbl ink" font-weight="600">slot 1</text>
-  <text x="584" y="240" class="m lbl ind">swarm/webhooks-P0</text>
-  <circle cx="589" cy="264" r="4" fill="#16a34a"/><text x="600" y="268" class="sm mut">building</text>
-  <!-- slot 2 -->
-  <rect x="366" y="302" width="190" height="98" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="380" y="328" class="m lbl ink" font-weight="600">slot 2</text>
-  <text x="380" y="352" class="m lbl ind">swarm/payments-P1</text>
-  <circle cx="385" cy="376" r="4" fill="#16a34a"/><text x="396" y="380" class="sm mut">building</text>
-  <!-- slot 3 free -->
-  <rect x="570" y="302" width="190" height="98" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="4 4"/>
-  <text x="584" y="328" class="m lbl mut" font-weight="600">slot 3</text>
-  <text x="584" y="352" class="m lbl mut">free</text>
+  <text x="330" y="368" class="t10 mut">opened on demand:</text>
+  <text x="446" y="368" class="m t10 ink">wait:&lt;phase&gt;</text>
+  <text x="532" y="368" class="t10 mut">parked worker</text>
+  <text x="618" y="368" class="m t10 ink">resolve-&lt;phase&gt;</text>
+  <text x="718" y="368" class="t10 mut">merge-conflict resolver</text>
 
-  <!-- launch arrow (master -> slots) -->
-  <path class="flow" d="M556,156 L556,188" stroke="#4f46e5" marker-end="url(#ai)"/>
-  <text x="566" y="174" class="m sm ind">swarm launch &lt;phase&gt;</text>
+  <!-- workers -> fifo -->
+  <path class="flow" d="M326,206 C300,206 270,203 238,203" stroke="#8E8B85" marker-end="url(#ink)"/>
+  <text x="256" y="196" class="m t10 mut">done …</text>
+  <!-- launcher -> slot -->
+  <path class="flow" d="M252,268 C290,268 292,300 326,300" stroke="#F2A541" marker-end="url(#amber)"/>
+  <text x="262" y="262" class="m t10 amb">launch</text>
 
-  <!-- spawn / inject (supervisor -> master), label rides ABOVE the arc -->
-  <path class="flow" d="M252,182 C300,152 322,132 364,128" stroke="#4f46e5" marker-end="url(#ai)"/>
-  <text x="260" y="132" class="m sm ind">spawn / inject</text>
+  <!-- merge queue -> repos -->
+  <path class="flow" d="M252,292 C272,292 282,300 282,316 L282,440 C282,452 290,456 302,456 L466,456" stroke="#F2A541" marker-end="url(#amber)"/>
+  <text x="300" y="448" class="m t10 amb">merge + push</text>
 
-  <!-- done (slot -> supervisor), label rides BELOW the arc -->
-  <path class="flow" d="M366,244 C320,260 300,290 254,300" stroke="#16a34a" marker-end="url(#ag)"/>
-  <text x="262" y="318" class="m sm grn">swarm done</text>
+  <!-- pings -->
+  <path class="flow" d="M252,362 C262,362 266,368 266,380 L266,495 C266,503 272,503 306,503" stroke="#8E8B85" stroke-dasharray="4 4" marker-end="url(#ink)"/>
+  <rect x="310" y="486" width="130" height="34" rx="17" class="box"/>
+  <text x="375" y="507" text-anchor="middle" class="ink t12">Telegram</text>
+  <text x="330" y="540" class="m t10 mut">pings: fail, questions, holds, finish</text>
 
-  <!-- integrate note -->
-  <text x="366" y="404" class="sm mut">on <tspan class="m">done ok</tspan> → serialized integrator merges <tspan class="m">swarm/&lt;phase&gt;</tspan> into each repo's main</text>
+  <!-- repos -->
+  <rect x="470" y="410" width="498" height="120" rx="12" class="box"/>
+  <text x="488" y="434" class="t12 ink">project repos</text>
+  <text x="580" y="434" class="t10 mut">umbrella + component repos, each on its main</text>
+  <rect x="488" y="446" width="140" height="68" rx="8" class="card"/>
+  <text x="500" y="466" class="m t11 ink">umbrella</text>
+  <text x="500" y="484" class="m t10 mut">ledger, docs</text>
+  <text x="500" y="500" class="m t10 mut">main</text>
+  <rect x="638" y="446" width="140" height="68" rx="8" class="card"/>
+  <text x="650" y="466" class="m t11 ink">api/</text>
+  <text x="650" y="484" class="m t10 mut">component repo</text>
+  <text x="650" y="500" class="m t10 mut">main</text>
+  <rect x="788" y="446" width="162" height="68" rx="8" class="card"/>
+  <text x="800" y="466" class="m t11 ink">web/</text>
+  <text x="800" y="484" class="m t10 mut">component repo</text>
+  <text x="800" y="500" class="m t10 mut">main</text>
 </svg>

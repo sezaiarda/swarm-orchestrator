@@ -1,446 +1,732 @@
-# swarm-orchestrator
+<p align="center">
+  <img src="assets/logo.svg" alt="swarm-orchestrator logo: a golden-angle swarm of dots around one amber centre" width="128">
+</p>
 
-Run a swarm of `claude` (Claude Code CLI) sessions in tmux to build a project's
-**phases** in parallel — one ephemeral *master* that decides what to launch, a
-configurable pool of *worker* slots (`[swarm].max_workers`) that build, and a
-single long-running *supervisor* that owns the whole lifecycle through one FIFO.
-It is pure glue over tmux and the `claude` CLI, so it drives projects in **any
-language**, configured by a per-project `.swarm.toml`.
+<h1 align="center">swarm-orchestrator</h1>
+
+`swarm` builds the phases of a project's phase ledger in parallel. It runs several
+full Claude Code sessions ("workers") side by side in tmux, one phase each. A small
+supervisor process launches every phase the moment its dependencies have landed.
+It merges each finished phase back into the project, and pings you on Telegram
+only when something needs you. Nothing in it is specific to a language or a
+repository layout: it drives one repo or an umbrella of many, configured by one
+`.swarm.toml`. It is aimed at multi-repo projects that build
+through it every day.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="swarm-orchestrator runtime control loop: an owner runs `swarm up`; a supervisor owns control.fifo and state.json and drives an ephemeral claude master plus a configurable pool of worker slots (paginated into windows of at most four) inside one tmux session; workers signal completion with `swarm done`, the master launches phases, and the supervisor notifies the owner over telegram" width="900">
+  <img src="docs/architecture.svg" alt="swarm-orchestrator at runtime: a detached supervisor reads control.fifo and owns state.json; it launches Claude Code sessions into a tmux session with a dashboard, an overseer window, an operator window, worker slots and a web board; it merges finished phases into the project's repos and pings the owner on Telegram" width="900">
 </p>
+
+## Contents
+
+- [What it can do](#what-it-can-do)
+- [How it works](#how-it-works)
+- [The cast](#the-cast)
+- [A phase's life](#a-phases-life)
+- [Quick start](#quick-start)
+- [Answering the swarm](#answering-the-swarm)
+- [Command reference](#command-reference)
+- [Configuration](#configuration)
+- [Runtime state](#runtime-state)
+- [Tests](#tests)
+- [Design principles](#design-principles)
+
+## What it can do
+
+- Read a phase ledger (a markdown checklist or a plain one-line format) and work
+  out which phases are ready: never attempted, not excluded, every dependency
+  landed.
+- Keep N Claude Code sessions busy at once. When one finishes, the next ready
+  phase starts in its slot within seconds, with no model in the loop.
+- Give each phase its own copy of the whole workspace (umbrella repo plus every
+  component repo) on a `swarm/<phase>` branch. Two phases can then work in the
+  same repo at the same time without touching each other.
+- Merge finished phases back one at a time. Common conflicts (ledger ticks,
+  append-only journals) are settled mechanically. A Claude resolver session is
+  opened only for a real conflict. A failed push does not stop later merges.
+- Stop a worker only for a genuine question. The worker pings you, asks in its
+  own pane, and if you are away, moves to its own window so its slot keeps
+  building something else.
+- Hand leftover work (deploys, post-deploy checks, cross-repo chores) to an
+  **operator** session that carries it out on your behalf.
+- Review the whole run every so often with an **Overseer** session. It retries
+  failures, clears stuck state, reshapes the ledger when slots starve, and sends
+  you a short digest.
+- Cap concurrent heavy builds swarm-wide, so parallel workers cannot run the host
+  out of memory.
+- Show everything live: a terminal dashboard in window 0, a read-only Kanban board
+  for your phone on the LAN, `swarm status`, `swarm doctor`, `swarm why <phase>`,
+  and `swarm report`.
+- Measure every run: phases per hour, 5-hour and weekly subscription usage per
+  hour, and cost per hour. Past runs are kept in a history.
+- Survive crashes. Completion is written to disk before anything else, and
+  `swarm up` finishes or discards whatever a dead run left half done.
 
 ## How it works
 
-`swarm up` builds a tmux session with an **overseer** window (the master pane) and one or
-more **workers** windows holding `[swarm].max_workers` slots, paginated into
-windows of at most four (`workers`, `workers-2`, …), arranged by `[tmux].layout`
-— the default `"auto"` gives a lone slot its whole window, splits two LEFT|RIGHT,
-and tiles three–four into a grid; pin `"top-bottom"` (or any tmux preset) to
-stack them instead, or flip it live with `swarm layout`. It starts a detached
-**supervisor** and runs one **init master** pass (telegram preflight, patch and
-commit the worker command). Then the supervisor itself launches the ledger's
-ready phases, in ledger order, into the free slots — each a real `claude` running
-`/prime <phase>`. When a worker finishes it calls `swarm done`; the supervisor
-launches the next ready phase into the freed slot at once, with no model in the
-loop. Every so often an **Overseer** pass runs in the master pane to review the
-whole swarm and act on it (see below). It loops until nothing is left, then
-telegrams you.
+`swarm up` creates a tmux session named after the project and starts a detached
+**supervisor**. The supervisor first runs one **init pass**: a Claude session in the
+overseer window that checks Telegram, reads the plan, and patches your worker
+command for swarm mode. As soon as the init pass idles, the supervisor launches the
+ledger's ready phases, in ledger order, into the free slots. Each worker is a real
+`claude` that receives `/prime <phase>` (or your `command_template`), exactly as if
+you had typed it.
 
-Slot accounting is **state-based**, not pane-counting: `max_workers` pane ids
-tagged `@swarm_slot N` across a global index, claimed check-and-set under
-`flock(state.json)`. A stray teammate pane can't corrupt the count, and two
-launches can't grab the same slot.
+A worker finishes by running `swarm done <phase> ok|operator|fail "<recap>"`. That
+writes a durable sentinel and pokes the supervisor through a FIFO. The supervisor
+merges the work (under worktree isolation), records the phase done, and starts the
+next ready phase in the freed slot. When nothing is running, ready, merging, owed
+or waiting on you, the run finishes and tells you.
 
-## The lifecycle — the supervisor's rules
+```mermaid
+flowchart TB
+  owner(["owner: terminal or phone"])
 
-The supervisor is the **sole** FIFO reader (so every event is totally ordered),
-the sole writer of `state.json`, and the sole killer of the master pane. It is
-event-driven — no redo, no reconcile pass, no crash watchdog, no auto-retry; its
-only timed wake is a park deadline a `waiting` worker armed (rule 5):
+  subgraph S["tmux session, one per project"]
+    direction LR
+    dash["0 · dash<br/>swarm tui"] ~~~ ovs["1 · overseer<br/>init pass, then<br/>Overseer passes"] ~~~ opw["2 · operator<br/>one job at a time"] ~~~ wk["3+ · workers<br/>one claude per slot"] ~~~ web["last · web<br/>LAN board"]
+  end
 
-1. **`done <phase> <ok|operator|fail>`** — free the slot and **launch** the
-   ready phases into the free slots (each launch on its own thread, reported
-   back as `launched <phase> <outcome>`). (`ok`/`operator` integrate the work;
-   `fail` rolls it back.)
-2. **`master-idle`** — kill the init master pane; the first launch waits for it.
-3. **Finish** (teardown + telegram) once nothing is launchable, launching,
-   `pending`, integrating or owed (an operator hand-off, a push).
-4. Anything in flight keeps the run `pending` so finish can't fire early — a busy
-   slot, a worker `waiting` on you, or a `parked` worker.
-5. **`waiting <phase>`** — a worker needs you. After `[worker].park_after` with no
-   answer it's moved alive into its own `wait:<phase>` window and its slot is
-   freed for a replacement; it stays `pending` until you answer and it runs `done`.
+  fifo[["control.fifo"]]
+  sup{{"supervisor<br/>detached, single-threaded loop"}}
+  sj[("state.json<br/>+ done/ sentinels")]
+  git[("project repos<br/>+ per-phase mirrors")]
+  tg(["Telegram"])
+
+  owner -- "swarm CLI pokes<br/>(resume, resolved, finish, ...)" --> fifo
+  owner -- "launch, skip, free, pause<br/>(direct, under the lock)" --> sj
+  S -- "swarm done / waiting / resumed<br/>overseer-done / operator-done" --> fifo
+  fifo --> sup
+  sup <-- "flock" --> sj
+  sup -- "open panes, type prompts, kill" --> S
+  sup -- "serialized merge queue" --> git
+  S -- "commit on swarm/&lt;phase&gt;" --> git
+  sup -. "pings" .-> tg
+```
+
+Slot accounting lives in `state.json`, not in tmux. Each slot is a record pinned to
+a pane tagged `@swarm_slot N`, and a slot is claimed check-and-set under an
+exclusive `flock`. A stray pane cannot corrupt the count, and two launches cannot
+take the same slot.
+
+## The cast
+
+Each part in a few lines: what it is, when it runs, what it decides and what it may
+not do. **[docs/components.md](docs/components.md)** has the full detail of every
+part.
+
+### Supervisor
+
+- **Is:** one detached Python process (`swarm _supervise`). It is the only reader
+  of `control.fifo`, so every event is handled in one total order. All state
+  changes go through `state.json` under `flock`.
+- **Runs:** from `swarm up` until the run settles, `swarm finish`, or
+  `swarm down`.
+- **Decides:**
+  - which ready phase goes into which free slot, in ledger order, one launch
+    thread each;
+  - when to merge;
+  - when to park a waiting worker;
+  - when an Overseer pass or gc is due;
+  - when the run is finished (nothing busy, waiting, parked, launching, queued,
+    held or owed).
+
+  A launch that fails waits 60 s before the next try. After three failures in a
+  row the phase is given up and you are told once.
+- **May not:** build anything, retry a phase that finished `fail`, or kill or
+  restart a live worker. An error in one handler is logged, telegrammed and stepped over; it
+  never ends the run silently.
+
+### Watchdog
+
+- **Is:** the supervisor's one periodic sweep (`[swarm].watchdog_s`, default 300 s,
+  `0` = off).
+- **Decides:**
+  - frees a busy slot whose pane has died, after two sightings, and rolls back
+    that phase's branch;
+  - relaunches after a full idle interval with free slots and ready phases;
+  - finishes a settled run;
+  - retries owed pushes, at most every 15 minutes.
+- **May not:** touch a swarm that is making progress.
+
+### Workers
+
+- **Are:** full Claude Code sessions, one per slot. Each is started as
+  `<worker_cmd> --settings <worker_settings> --effort <effort>` in the project,
+  or in its mirror. Once `claude` has booted, the supervisor types
+  `/prime <phase>` (`[worker].command_template`) into the pane and checks that it
+  landed.
+- **Environment:** each gets `SWARM_PHASE`, `SWARM_STATE_DIR`, a private on-disk
+  `TMPDIR`, and in-process teammates (so no extra panes).
+- **Decide:** everything inside their phase, following the project's own worker
+  command. They record small calls with `swarm note`, ask the owner the big or
+  doubtful ones (`swarm waiting`), and finish with
+  `swarm done <phase> ok|operator|fail "<recap>"`:
+  - `ok` merges silently;
+  - `operator` merges the same way and hands the recap to an operator job;
+  - `fail` pings you, discards the phase's branch under worktree isolation,
+    and keeps its dependents blocked.
+- **May not:** push (under worktree isolation the integrator does). Nothing else
+  is clamped: tools, permissions and scope are the session's own.
+
+### Init pass and Overseer
+
+Both run in window 1 (`overseer`), never at the same time, spawned and killed only
+by the supervisor.
+
+**The init pass** (`prompts/init_master.md`):
+
+- **Runs:** once per `swarm up`. The first launch waits for it.
+- **Does:**
+  - checks Telegram via `swarm doctor`;
+  - reports ledger cycles with `swarm notify`;
+  - patches your worker command for swarm mode (skip the phase picker, the
+    self-classified `swarm done`, `swarm build`, `note` / `waiting` / `resumed`)
+    and commits it;
+  - idles.
+- **May not:** ask you anything, or launch phases.
+
+**The Overseer** (`prompts/overseer.md`, `[overseer]`, on by default):
+
+- **Is:** a full Claude session that reviews the whole run and acts on it.
+- **Runs:** when triggered (diagram below). One pass at a time, at least
+  `min_gap_s` apart unless the reason is urgent, and killed after `timeout_s`.
+- **Reads:** a digest the supervisor writes, `<state>/overseer/digest-<id>.md`. It
+  holds recaps, notes and failures since the last pass, questions waiting on you,
+  a starvation map of the root blockers, and a RAM, swap and disk snapshot.
+- **Decides:**
+  - retries a failed phase once;
+  - frees dead slots;
+  - clears a hold it fixed;
+  - edits the ledger so free slots have work;
+  - queues operator jobs;
+  - runs gc;
+  - pauses the swarm when the box is in danger;
+  - sends you a digest of six lines at most.
+
+  It works in its own mirror (`ovs-<id>`) under worktree isolation, merged when
+  the pass ends, and leaves a record (*Saw / Did / Left for the owner*).
+- **May not:**
+  - answer a worker's question;
+  - restrain a worker;
+  - lift a pause you made;
+  - run `done`, `up`, `down` or `finish`;
+  - make owner-level calls (money, taste, scope, deleting work, reversing your
+    written decisions). Those go to you through `swarm overseer-ask`.
 
 ```mermaid
 flowchart TD
-  D["worker: swarm done phase ok"] --> FR["free the slot"]
-  FR --> LA["supervisor: launch the ready phases<br/>(ledger order, one thread each)"]
-  LA --> BQ{"anything launching, busy,<br/>integrating or owed?"}
-  BQ -->|yes| WA["stay alive — wait for the next event"]
-  BQ -->|no| FI["finish + telegram"]
+  ev1["a phase fails · the merge queue is held<br/>a push becomes owed · a cheap doctor check FAILs"] --> pend
+  ev2["a phase waits on the owner past owner_wait_s<br/>free slots, nothing launchable, past starve_s"] --> pend
+  ct["every every_finished phases · every every_s seconds"] --> pend
+  mn["swarm overseer --now"] --> pend
+  pend["pending reasons, coalesced<br/>(overseer/policy.json)"] --> due["a pass starts when none is running,<br/>the init pass is over and min_gap_s has passed<br/>(urgent reasons: no gap)"]
+  due --> prep["supervisor writes the digest, record and brief;<br/>worktree mode: builds mirror ovs-&lt;id&gt;"]
+  prep --> pass["Overseer session in window 1:<br/>reads the digest, acts, fills in its record"]
+  pass <-- "overseer-ask / overseer-resumed" --> own(["owner"])
+  pass -- "overseer-done, or killed at timeout_s" --> fin["pane idled, record closed,<br/>mirror merged through the queue,<br/>launcher looks again"]
 ```
 
-A launch that fails (worktree, pane, boot — the boot is retried once) is retried
-after a minute; after three failures in a row the phase is left for you and you
-are told once (`swarm launch <phase>` or `swarm resume` hands it back). With the
-watchdog on, a free slot beside ready phases for `watchdog_s` is filled again.
+### Operator
 
-## Install
+- **Is:** one Claude session in window 2 (`operator`) that carries out work a phase
+  could not wait on: deploys, post-deploy checks, provisioning, cross-repo chores
+  (`prompts/operator.md`). It holds your authority, so it is **off until
+  `[operator].enabled = true`**. While it is off, each hand-off is telegrammed to
+  you as a to-do instead.
+- **Its queue:** one JSON file per job in `<state>/operator/`. Jobs come from:
+  - `swarm done … operator "<recap>"`, where the recap is the whole brief (a
+    recap under 20 characters or 4 words queues nothing);
+  - `swarm operator-add`;
+  - `swarm operator <phase>`.
+- **Triage:** a cheap model (`triage_model`) answers `now` or `later`, and
+  anything odd counts as `later`.
+- **Hand-offs:** a job opens when its phase has merged (unless triage said
+  `later`), or from the queue sweep on every supervisor wake, oldest first. Only
+  one job runs at a time, under a lease: 1 h, or 7 days while it waits on you. A
+  job gets 3 attempts 5 minutes apart. After that it is `abandoned` and you are
+  told once. Under worktree isolation it works in its own mirror (`op-<job>`),
+  merged on `operator-done`, which also telegrams you the outcome.
+- **Decides:** how to do the job. It checks first whether the work is already
+  done, narrates each action, and prefers the step it can undo.
+- **May not:**
+  - ask you anything except money, taste, unrecoverable data loss, or
+    contradicting your written decisions (`swarm operator-ask`);
+  - answer worker questions;
+  - run `done`, `launch` or `finish`;
+  - create branches.
 
-```bash
-uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PATH
+```mermaid
+stateDiagram-v2
+  direction TB
+  [*] --> Queued: swarm done operator (recap is the brief)<br/>or swarm operator-add
+  Queued --> Running: dispatched (lease 1 h, attempt +1)
+  Running --> Waiting: operator-ask (owner pinged, lease 7 days)
+  Waiting --> Running: operator-resumed
+  Running --> Done: operator-done (outcome pinged)
+  Running --> Queued: lease expired or session would not start<br/>(eligible again after 5 min)
+  Running --> Queued: swarm up (the old run is gone)
+  Waiting --> Queued: swarm up
+  Queued --> Abandoned: 3 attempts used (owner pinged once)
+  Running --> Abandoned: 3rd attempt fails
+  Done --> [*]: worktree mode: its mirror is merged
+  Abandoned --> [*]
 ```
 
-## Get started
+### Integrator and merge-conflict resolver
 
-1. **Add a `.swarm.toml`** to your project root — copy
-   [`examples/multi-repo.swarm.toml`](examples/multi-repo.swarm.toml) and trim it.
-2. **Let the init master patch the worker command.** On the first `swarm up` the
-   init master runs **autonomously** — it does *not* ask you to approve anything —
-   and patches the command in `[worker].command_file` (e.g.
-   `.claude/commands/prime.md`) so that, *when `$SWARM_PHASE` is set*, it: (a)
-   **skips** the "which phase?" prompt and builds `$SWARM_PHASE` directly; (b) ends
-   by **self-classifying** its outcome and running
-   `swarm done "$SWARM_PHASE" <status> "<recap>"`, where `<status>` is `ok` (clean
-   success — integrates silently, no ping), `operator` (integrates **exactly**
-   like `ok` but hands the recap to an **operator session** that carries out the
-   action on your behalf — it never pings you), or `fail` (rolls the phase
-   back and telegrams you); (c) routes every heavy compile/test through the **build
-   gate** (`swarm build cargo …`) so parallel worktrees can't OOM the host; and (d)
-   follows the **owner-question contract** — run
-   `swarm waiting "$SWARM_PHASE" "<question>"` *before* opening an AskUserQuestion
-   and `swarm resumed "$SWARM_PHASE"` *after* the answer returns. It commits the
-   patch before launching anything. (Everything is guarded by `$SWARM_PHASE`, so a
-   manual `/prime` stays fully interactive — or make the edits yourself.)
-3. **Run it** from the project root (or pass `--project-dir`):
+- **Is:** under `isolation = "worktree"`, the supervisor's merge queue. It lands one
+  phase at a time, repo by repo (components first, umbrella last), under a
+  per-repo `flock`. Untouched repos are pruned with no network. A push that fails
+  never holds the queue: the repo **owes a push**, you are pinged once, and it is
+  retried after each integration and on the watchdog.
+- **Conflicts:** a conflicted merge is first offered to `[git].auto_resolve`
+  (`automerge.py`), a map from a path glob to a strategy:
+  - `union` keeps both sides, for journals;
+  - `keyed:<regex>` merges record by record, for ledger ticks.
 
-```bash
-cd your-project
-swarm up          # session + supervisor + init master, then attaches you
+  It is all-or-nothing. Only if that fails is the queue **held** and a
+  **resolver** opened: a Claude session in window `resolve-<phase>`, in the
+  conflicted repo (`prompts/resolver.md`).
+- **The resolver may:** resolve every marker so that both sides' intent survives,
+  commit, and run `swarm resolved <phase>`. If it cannot resolve correctly, it
+  tells you and stops.
+- **The resolver may not:** push, launch, or work outside that repo.
+- **A dirty tree:** a canonical repo with uncommitted tracked edits holds the
+  queue too, until you clean it and run `swarm resolved`. That command re-checks
+  the repo before it releases the queue.
+- **`fail`:** a phase that finishes `fail` is rolled back in every repo, with no
+  merge.
+
+```mermaid
+flowchart TD
+  done["swarm done ok / operator"] --> q["merge queue<br/>one phase at a time"]
+  q --> r["next repo: components first,<br/>umbrella last (per-repo flock)"]
+  r --> t{"did the phase<br/>change it?"}
+  t -- "no" --> p["remove worktree + branch"]
+  t -- "yes" --> d{"canonical tree has<br/>uncommitted tracked edits?"}
+  d -- "yes" --> hd["HOLD: dirty<br/>(owner cleans the tree)"]
+  d -- "no" --> m["merge origin/main,<br/>then swarm/&lt;phase&gt;"]
+  m -- "conflict" --> a{"auto_resolve rules<br/>settle every file?"}
+  a -- "no" --> hc["HOLD: conflict<br/>resolver session opens"]
+  a -- "yes" --> push
+  m -- "clean" --> push["push main"]
+  push -- "ok" --> p
+  push -- "refused / unreachable" --> owed["push owed: pinged once,<br/>retried later"] --> p
+  p -- "more repos" --> r
+  p -- "all repos landed" --> fin["record done, drop mirror,<br/>launch into the free slot"]
+  hd --> sr["swarm resolved &lt;phase&gt;"]
+  hc --> sr
+  sr -- "tree clean: retry" --> r
 ```
 
-`swarm up` drops you straight into the tmux session — `Ctrl-b 0` is the master,
-`Ctrl-b 1` is the first `workers` window (`Ctrl-b 2`, … page through the rest),
-`Ctrl-b d` detaches (the supervisor keeps running). Already inside tmux? it switches your client to the session. Scripting
-it? `swarm up --no-attach`. Tear everything down with `swarm down`.
+### Worktree isolation and mirrors
+
+- **Off by default** (`isolation = "none"`): workers commit in the project itself.
+- **With `isolation = "worktree"`:** each phase works in `<state>/wt/<phase>`. That
+  is a worktree of the umbrella on `swarm/<phase>`, with every component repo
+  (`[git].repos`, default every git repo directly under the root) nested at its
+  real path on the same branch.
+  - It looks exactly like the project, so two phases can build in the same repo
+    at once.
+  - A mirror starts from local main (or from `origin/main` when that strictly
+    fast-forwards it), so your unpushed commits are kept.
+  - With `[build].cache`, Rust `target/` dirs share one per-repo cache.
+- **Recovery:** on `swarm up`, leftover branches are settled from the durable
+  sentinels:
+  - finished phases are integrated;
+  - interrupted ones are discarded and rebuilt;
+  - held ones are not marked done.
+
+### Build gate (`swarm build`)
+
+- **Is:** a swarm-wide counting semaphore over heavy builds. At most
+  `[build].max_concurrent` run at once (one `flock` per slot), and for `cargo`
+  it also sets `CARGO_BUILD_JOBS` to `[build].jobs`.
+- **How:** it `exec`s the build, so the build itself holds the lock, and a killed
+  build frees its slot. Workers wrap their gates in it
+  (`swarm build cargo nextest run`). Automatic gc takes every slot first, so it
+  never runs during a build.
+
+### Stop hook, recaps, notes, report
+
+- **Stop hook** (`scripts/stop-hook.py`, opt-in via `worker_settings`): appends
+  each worker turn's final text to `<state>/turns/<phase>.jsonl`. No API call, no
+  output.
+- **Recaps:** one or two sentences per phase, in `<state>/recaps/`. `swarm done`
+  starts one in the background, and `swarm recap` makes one on demand. There is
+  no timer. A short completion note is used as is; otherwise
+  `claude -p --model haiku` writes it.
+- **Notes:** `swarm note` records a decision, assumption or risk without pinging
+  anyone. Your answers relayed by `resumed` / `operator-resumed` /
+  `overseer-resumed` are kept as owner decisions.
+- **`swarm report`:** every phase with status, timings and recap, plus warnings
+  where the records disagree. `--decisions` shows only what carries a judgement
+  call.
+
+### Meters, usage and runs
+
+- **Meters:** each worker's status line is swapped for a tap that records context
+  size, session cost, and the account's 5-hour and weekly usage in
+  `<state>/meters/`. It then runs your own status line, so the pane looks the
+  same.
+- **Runs:** a run lasts from `swarm up` to `swarm down`. `swarm reset` (or `R` in
+  the dashboard) starts a new run without restarting anything, so ETA and usage
+  count from now.
+- **`swarm usage`:** each run's hours, phases, average 5-hour and weekly %/h,
+  windows spanned, and $/h. The figures are account-wide, so other Claude sessions
+  on the same account count too.
+
+### Doctor, why, gc
+
+- **`swarm doctor`:** about 25 read-only checks covering the supervisor, slots,
+  the run, integration, questions waiting on you, the ledger, Telegram, disk,
+  records, the operator, prompts and the web board. Exit 1 on any FAIL.
+- **`swarm why <phase>`:** the one reason a phase is not running, walking unmet
+  dependencies to the root blockers.
+- **`swarm gc`:** reclaims disk. It is a dry run unless you pass `--yes`.
+  - **Always planned:** caches of repos that no longer exist, `incremental/`,
+    `cargo sweep` past `keep_days`, orphan mirrors, stale temp dirs.
+  - **Opt-in:** `--aggressive`, `--transcripts`, `--branches`, `--canonical`.
+  - **Safety:** it holds every build slot while it deletes.
+  - **Automatic:** the supervisor runs it by itself (`[gc]`): daily, plus once
+    per idle stretch.
+
+### Dashboard (`swarm tui`)
+
+A Textual app in window 0. It has a status bar (live, paused or down; slots;
+campaign progress; time since the last event) and a needs-you drawer (`n`). Its
+nine tabs, switched with `1`–`9`, are:
+
+- **home:** ETA, usage outlook, working now, and a feed;
+- **workers**;
+- **history**;
+- **alerts:** Telegram sends;
+- **disk**;
+- **settings:** edits `.swarm.toml` and runs `swarm reload`;
+- **commands:** every subcommand, with a confirmation for the destructive ones;
+- **doctor**;
+- **runs**.
+
+`R` resets the run and `q` quits the dashboard only. It fits an 80×24 terminal.
+
+### Web board (`swarm web`)
+
+- **Is:** a read-only Kanban board for a phone on the LAN, in the last tmux
+  window. `swarm status` prints its address.
+- **Columns:** Needs you, Blocked, Ready, Building, Merging / held, Operator,
+  Done, Failed, Excluded.
+- **Views:** campaign swimlanes, an activity view of Overseer passes and
+  finishes, a detail sheet per card (`#phase=<id>`), and live updates over
+  Server-Sent Events.
+- **Safety:** GET only, no URL maps to a file, and credential-shaped strings are
+  redacted. It is **open on the LAN with no token**, by design. See
+  [docs/components.md](docs/components.md#the-web-board-swarm-web) for the WSL
+  firewall rule.
+
+### Telegram, and asking the owner
+
+- **The sender:** the swarm has its own bot, `scripts/notify.sh`. It reads
+  `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's gitignored `.env`.
+  Every send is logged to `<state>/notifications.jsonl`. `swarm notify` is the
+  only way a session should message you.
+- **What pings you:**
+  - a `fail`;
+  - a question from a worker, the operator or the Overseer;
+  - a park;
+  - a merge hold;
+  - an owed push starting or clearing;
+  - an operator outcome or an abandoned job;
+  - a launch given up;
+  - a supervisor error;
+  - the finish summary.
+
+  `ok` finishes are silent.
+- **Asking:** a worker runs `swarm waiting` / `resumed`, the operator runs
+  `operator-ask` / `operator-resumed`, and the Overseer runs `overseer-ask` /
+  `overseer-resumed`. Each pings you, asks in its own pane, and records your
+  answer (see [Answering the swarm](#answering-the-swarm)).
+
+### Reload, layout, check
+
+- **`swarm reload`:** applies a `.swarm.toml` edit live. Each key is *hot*
+  (applied now), *next* (reaches the next session launched) or *restart*
+  (refused). A file that does not parse changes nothing.
+- **`swarm layout <name>`:** re-arranges the worker panes live (`auto`,
+  `side-by-side`, `top-bottom`, `tiled`, …).
+- **`swarm check`:** a preflight covering the Telegram sender, the ledger, and
+  **promptlint**. Promptlint flags sentences in your worker command or the
+  shipped prompts that the code has made false (for example a subcommand that
+  does not exist), and measured time-wasters (`sleep` loops, status polling).
+
+## A phase's life
+
+```mermaid
+stateDiagram-v2
+  direction TB
+  [*] --> Ready: every dependency landed,<br/>not excluded, never attempted
+  Ready --> Launching: free slot, ledger order
+  Ready --> Skipped: swarm skip
+  Launching --> Building: pane ready, prompt submitted
+  Launching --> BackingOff: launch failed
+  BackingOff --> Ready: after 60 s
+  BackingOff --> GivenUp: 3rd failure in a row<br/>(owner pinged once)
+  GivenUp --> Ready: swarm launch or swarm resume
+
+  Building --> Waiting: swarm waiting (owner pinged)
+  Waiting --> Building: swarm resumed
+  Waiting --> Parked: park_after runs out<br/>own window, slot refilled
+  Parked --> Finishing: swarm done, once answered
+
+  Building --> Finishing: swarm done ok / operator / fail
+  Building --> Ready: pane died (watchdog)<br/>or swarm free
+
+  state Finishing <<choice>>
+  Finishing --> Merging: ok / operator (worktree)
+  Finishing --> Done: ok / operator (in place)
+  Finishing --> Failed: fail (owner pinged)
+  Merging --> Held: conflict or dirty tree
+  Held --> Merging: swarm resolved
+  Merging --> Done: merged
+  Failed --> Ready: swarm retry
+  Done --> [*]
+  Skipped --> [*]
+```
+
+- **Done and skipped** both release a phase's dependents. **Failed** does not: its
+  work was rolled back, so nothing may build on top of it, and it stays out of
+  `ready` until `swarm retry` clears it (`--cascade` also resets dependents that
+  had already run).
+- **Waiting and parked** phases keep the run open until they finish.
+- **Pause:** `swarm pause` holds new launches while running workers finish.
+- **Done-ness** comes from the swarm's own records (`state.json`, seeded from
+  `done/` sentinels on every `swarm up`), not from the ledger's checkboxes.
+
+## Quick start
+
+**Requirements:** Linux, Python 3.12+, [uv](https://docs.astral.sh/uv/), tmux,
+git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
+
+1. **Install:**
+
+   ```bash
+   uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PATH
+   ```
+
+2. **Set up Telegram** (optional; the swarm runs without it): create a bot, put
+   `TELEGRAM_BOT_TOKEN=…` in this repo's `.env`, send the bot any message, then run
+   `scripts/resolve-chat-id.sh`.
+
+3. **Have a phase ledger** in the project, at `docs/PHASE-LEDGER.md` by default.
+   Either format works:
+
+   ```markdown
+   - [ ] `db-P1` · needs:`db-P0` · the schema
+   - [ ] `api-P3` · needs:`db-P1` `api-P2` · the REST surface
+   ```
+
+   ```text
+   db-P1 needs:db-P0
+   api-P3 needs:db-P1,api-P2   optional note
+   ```
+
+   In the markdown form, only checklist items are phases. The first backticked
+   token is the id, and the back-ticked ids in the `needs:` field (fields are
+   separated by ` · `) are its dependencies. Tokens that are not phase ids, such
+   as git tags, are ignored.
+
+   **Checkboxes are not read.** Before the first run, `swarm skip` every phase
+   that is already built, or the swarm will build it again.
+
+4. **Have a worker command:** a Claude Code slash command that builds one phase
+   given its id. It is `/prime <phase>` by default, in
+   `.claude/commands/prime.md`. The init pass adapts it for swarm mode on the
+   first `swarm up`. Every change is guarded by `$SWARM_PHASE`, so running it by
+   hand stays interactive.
+
+5. **Add `.swarm.toml`** at the project root. A minimal one:
+
+   ```toml
+   [swarm]
+   max_workers = 2
+
+   [git]
+   isolation = "worktree"   # omit for in-place work
+   ```
+
+   [`examples/multi-repo.swarm.toml`](examples/multi-repo.swarm.toml) is a fuller
+   example, and [docs/config.md](docs/config.md) lists every key.
+
+6. **Check and run:**
+
+   ```bash
+   cd your-project
+   swarm check           # telegram, ledger, prompt lint
+   swarm up              # session + supervisor + init pass, then attaches you
+   ```
+
+**Moving around:** `Ctrl-b 0` is the dashboard, `1` the overseer window, `2` the
+operator, `3` the first workers window (`4`, … page through the rest), and the
+last window is the web board. `Ctrl-b d` detaches while the supervisor keeps
+running. Inside tmux already, `swarm up` switches your client instead of
+attaching; `swarm up --no-attach` is for scripts.
+
+**Stopping:** `swarm down` stops the supervisor. It then ends every session
+process the run started (SIGHUP, then SIGTERM, then SIGKILL), kills the tmux
+session, and prints the run's summary.
 
 ## Answering the swarm
 
-A worker stops for you only when it genuinely needs a decision it must not guess —
-it never assumes. It runs `swarm waiting "$SWARM_PHASE" "<question>"` (which
-telegram-pings you), then asks in its own pane; switch to its workers window and
-answer there. If it stays unanswered for `[worker].park_after` seconds, the
-supervisor moves the **live** worker into its own `wait:<phase>` window and refills
-its grid slot with a replacement phase — the worker keeps waiting off-grid, its
-dependents stay blocked, and the run won't finish until you answer and it runs
-`swarm done`. Once answered it calls `swarm resumed` to cancel the pending park.
-The master never asks — it runs autonomously. Everything else runs unattended.
+A worker stops only when a call is genuinely yours, or when it is in doubt about
+something that matters. Small, cheap-to-change calls it makes itself and records
+with `swarm note`. When it does need you:
 
-## Commands
+1. It runs `swarm waiting "$SWARM_PHASE" "<question>"`, which telegrams you the
+   question with its cost line.
+2. It asks the same question in its own pane with AskUserQuestion.
+3. You switch to its window and answer there.
+4. It runs `swarm resumed "$SWARM_PHASE" "<your answer>"`. Your answer is saved
+   as an owner decision, and any pending park is cancelled.
 
-| command | what it does |
+If you have not answered within `[worker].park_after` seconds (default 120), the
+supervisor **parks** the worker:
+
+- a fresh pane takes its place in the grid;
+- the live worker moves to its own `wait:<phase>` window;
+- the next ready phase starts in the freed slot.
+
+The parked worker keeps waiting for you. Its dependents stay blocked, and the run
+cannot finish until you answer and the worker runs `swarm done`.
+
+The operator (`operator-ask` / `operator-resumed`) and the Overseer
+(`overseer-ask` / `overseer-resumed`) work the same way. Asking stretches their
+lease or timeout to 7 days, so a question left overnight does not kill them. The
+init pass never asks.
+
+## Command reference
+
+The full list, one line per subcommand and grouped by purpose, is in
+**[docs/cli.md](docs/cli.md)**. The ones you will type most:
+
+| you want to | run |
 |---|---|
-| `swarm up [--no-attach]` | build the session, start the supervisor + init master, then attach |
-| `swarm down` | stop the supervisor and tear the session down; closes the run with its summary |
-| `swarm reset` | close the open run and start a fresh one — ETA and usage count from now; nothing restarts (`R` in the dashboard) |
-| `swarm usage [--json] [-n N]` | the open run's hours, average 5-hour and weekly %/h, 5-hour windows spanned, phases and $/h, then the last N runs (`<state>/history/runs/`, kept forever) |
-| `swarm status` | human-readable state dump — slots, `done`, `paused`, `waiting`/`parked`, the integration queue, the web board's address |
-| `swarm web [--host H] [--port N]` | the read-only Kanban board for a phone or a browser on the LAN (`swarm up` starts it; see [The web board](#the-web-board-web)) |
-| `swarm context` | the JSON snapshot the master reasons over (`ready`, `launchable`, free slots, `waiting`, `parked`, ledger issues) |
-| `swarm pause` / `swarm resume` | hold new launches (in-flight finish) / resume filling free slots |
-| `swarm layout [name]` | re-arrange the live worker panes (`side-by-side`, `top-bottom`, `tiled`, `main-vertical`, `auto`, …); no argument prints the current one and every valid name |
-| `swarm launch <phase>` | claim a free slot and start a phase by hand |
-| `swarm build <cmd…>` | run a heavy build through the swarm-wide concurrency gate — what a worker wraps its gates in |
-| `swarm done <phase> [ok\|operator\|fail] [note]` | signal phase completion (self-classified) — what a worker calls |
-| `swarm waiting <phase> [question]` | a worker self-reports it is blocked on the owner — pings you and, after `[worker].park_after`, frees its slot and moves it to its own window |
-| `swarm resumed <phase>` | the worker got its answer — cancel the pending park |
-| `swarm skip <phase>` | mark a phase done without building it |
-| `swarm free <slot\|phase>` | free a stuck slot (by id or phase) |
-| `swarm resolved <phase>` | after you clear a held integration (conflict / dirty tree / push failure) |
-| `swarm operator-triage <phase>` | decide whether a queued operator hand-off runs `now` or `later` — spawned for you by `swarm done` |
-| `swarm operator-add "<brief>" [--phase P]` | queue an ad-hoc operator job (id `P`, or `op-<epoch>` without `--phase`) |
-| `swarm operator-done <job> ["<outcome>"]` | the operator session's finish — records and telegrams the one-line outcome |
-| `swarm operator-ask <job> "<question>"` / `swarm operator-resumed <job> ["<answer>"]` | the operator waits on your decision (pinged, lease held) / carries on once you answered |
-| `swarm overseer [--now] [--json] [-n N]` | recent Overseer passes (trigger, status, summary, what each left for you) and the pending reasons; `--now` asks for a pass straight away |
-| `swarm overseer-done "<summary>"` | the Overseer's sign-off — records the pass and frees the pane |
-| `swarm overseer-ask "<question>"` / `swarm overseer-resumed ["<answer>"]` | the Overseer waits on an owner-level call (pinged, timeout stretched) / carries on |
-| `swarm integrate <phase>` | manually integrate `swarm/<phase>` into main (worktree mode) |
-| `swarm gc [--yes] [--older-than N] [--aggressive] [--transcripts] [--branches]` | reclaim disk — a dry run unless `--yes`. Sweeps build output unused for `[gc].keep_days` from every real target the cache links to (once each), drops dead `incremental/` dirs, orphan `wt/` mirrors and stale `tmp/` dirs; reports big swarm-looking leftovers in `/tmp`. The supervisor runs it by itself (`[gc]`) |
-| `swarm finish` | ask the supervisor to stop now |
+| start, watch, stop | `swarm up`, `swarm status`, `swarm down` |
+| see what is wrong | `swarm doctor`, `swarm why <phase>` |
+| hold or release launching | `swarm pause`, `swarm resume` |
+| start a phase by hand, skip one, retry a failure | `swarm launch <phase>`, `swarm skip <phase>`, `swarm retry <phase>` |
+| release a held merge queue | `swarm resolved <phase>` |
+| apply a config edit | `swarm reload` |
+| see what was done and what it cost | `swarm report`, `swarm usage` |
+| free disk | `swarm gc`, then `swarm gc --yes` |
 
-`swarm bootstrap` and `swarm master-idle` are low-level FIFO pokes the tooling
-sends for you; you rarely type them.
+## Configuration
 
-## Worktree isolation (opt-in)
+`.swarm.toml` at the project root. The sections are:
 
-By default (`isolation = "none"`) workers commit in place, and you keep them from
-colliding with the phase dependency graph. Opt into `isolation = "worktree"` and
-each phase instead builds against a **full, isolated mirror of the whole
-workspace** on branch `swarm/<phase>`: a worktree of the project (the *umbrella*)
-with a worktree of every component repo nested inside it at its real path. The
-worker's cwd looks exactly like the real project — `cd pricing` just works — but
-nothing it does touches the canonical repos or another phase's mirror. Which repos
-are mirrored is set by `[git].repos` globs (default: every git repo that is a
-direct child of the project root).
+- `[swarm]`: slots, models, the watchdog;
+- `[worker]`: the worker command, settings, effort, parking;
+- `[tasks]`: the ledger, exclusions;
+- `[telegram]`;
+- `[tmux]`: the session name, the layout;
+- `[tui]`;
+- `[git]`: isolation, main branch, repos, `auto_resolve`;
+- `[build]`: the gate, the jobs cap, the target cache;
+- `[operator]`;
+- `[overseer]`: triggers, timeout;
+- `[gc]`;
+- `[web]`.
 
-This suits a **monorepo-of-repos**: an umbrella repo whose tracked files (docs,
-deploy config) every phase edits, gitignoring independent component repos where
-the code lives. Because each phase gets its own worktree per repo, **two phases
-may build in the same repo at once** — there is no per-repo launch gate.
-
-```mermaid
-flowchart LR
-  A["swarm launch<br/>pricing-P3"] --> B["mirror the workspace<br/>umbrella + every repo,<br/>each on swarm/pricing-P3"]
-  B --> C["worker edits inside<br/>the mirror, commits,<br/>never pushes"]
-  C --> D["swarm done ok"]
-  D --> E{"serialized<br/>integrator"}
-  E -->|repo changed| F["merge swarm/pricing-P3<br/>into its main, push"]
-  E -->|untouched| G["0 commits ahead:<br/>prune, no network"]
-  F --> H["remove every<br/>worktree + branch"]
-  G --> H
-```
-
-On `swarm done ok` a single serialized integrator (under a per-repo `flock`)
-merges every repo the phase changed and pushes; repos it didn't touch are 0
-commits ahead and are pruned with no network. A `swarm done ... fail` rolls back
-**every** repo — all worktrees and branches removed, no merge. Integration is
-idempotent and resumable, so a crash mid-run is reconciled on the next `swarm up`
-**from the durable `done` sentinels**: an interrupted phase (no `ok` sentinel) is
-discarded and rebuilt, never silently marked done.
-
-### The build gate (`swarm build`)
-
-Isolated worktrees have a cost: N workers each compile in their own tree, so the
-same crates recompile N times over, and each `cargo` fans out across every core.
-On a memory-capped host that is exactly how the box OOM-thrashes. Two `[build]`
-knobs contain it, without capping the worker count:
-
-- **`swarm build <cmd>`** — a swarm-wide **counting semaphore**: at most
-  `[build].max_concurrent` heavy builds run at once; the rest queue. It *execs*
-  the build, so the build process itself holds the lock — a worker's bash-tool
-  timeout that kills the build **auto-releases** the slot (no daemon, no leak).
-  It also sets `CARGO_BUILD_JOBS` (`[build].jobs`) so one build can't grab every
-  core. Workers wrap their gates in it (`swarm build cargo nextest run`); cheap
-  commands (`fmt`, `git`) run unwrapped. Enabled via the prime / init-master
-  prompt; `max_concurrent = 0` disables the gate.
-- **`[build].cache`** — symlinks each Rust worktree's `target/` to one shared
-  per-repo cache, so only *changed* crates recompile across worktrees. A symlink
-  (not `CARGO_TARGET_DIR`) is used so gate scripts that read a relative
-  `target/release/<bin>` still resolve; `target` is gitignored, so it never
-  dirties the tree, and `discard`/rollback removes only the link, never the cache.
-
-The merge-queue never wedges on a clean tree — it distinguishes four outcomes:
-
-| outcome | meaning | what happens |
-|---|---|---|
-| **merged** | clean, pushed, pruned | slot advances |
-| **conflict** | a repo left mid-merge | resolver pane opens on that repo; `swarm resolved <phase>` finishes it |
-| **dirty** | a repo's canonical tree has *tracked* uncommitted changes | queue held; commit/stash, then `swarm resolved <phase>` |
-| **push_failed** | merged locally, remote unreachable | queue held; fix connectivity, then `swarm resolved <phase>` |
-
-A git error or a hung remote can't crash the sole supervisor — it degrades to a
-hold. (Untracked files never count as dirty; they don't block a clean merge.)
-
-## Config (`.swarm.toml`)
-
-```toml
-[swarm]
-max_workers  = 4
-master_model = ""                 # "" = inherit; else "opus" / "sonnet" / ...
-
-[worker]
-command_template = "/prime {phase}"           # sent via send-keys into each slot
-command_file    = ".claude/commands/prime.md" # init master inspects/patches this
-env_marker      = "SWARM_PHASE"
-done_hook       = 'swarm done "$SWARM_PHASE" ok'   # fallback form; in swarm mode the worker self-classifies ok/operator/fail
-park_after      = 120   # seconds a worker may wait on the owner before its slot is freed + it moves to its own window; 0 disables
-worker_settings = '{"teammateMode":"in-process"}'  # worker teammates run in-process
-effort          = "high"   # claude --effort per worker (low/medium/high/xhigh/max); "" = inherit ~/.claude/settings.json
-
-[tasks]
-ledger  = "docs/PHASE-LEDGER.md"   # the master reads this prose directly
-roadmap = "docs/ROADMAP-MASTER.md"
-exclude = []                        # externally-blocked phases
-
-[telegram]
-notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
-
-[tmux]
-session = "swarm"
-layout  = "auto"    # how the worker windows arrange their slot panes:
-                    #   auto            1 = full window, 2 = LEFT|RIGHT, 3-4 = tiled
-                    #   even-horizontal all side-by-side  (alias: side-by-side)
-                    #   even-vertical   all top-to-bottom (alias: top-bottom)
-                    #   tiled           grid              (alias: grid)
-                    #   main-vertical / main-horizontal   one big pane + the rest
-                    # `swarm layout <name>` changes it live, without a restart.
-
-[build]                             # heavy-build concurrency gate + compile cache
-max_concurrent = 2                  # most concurrent `swarm build` jobs; 0 disables the gate
-jobs           = 6                  # CARGO_BUILD_JOBS cap per build (core fan-out)
-cache          = true               # shared per-repo cargo target cache across worktrees
-
-[gc]                                # the supervisor's automatic `swarm gc`
-auto      = true                    # daily + once per idle stretch; never during a build
-every_s   = 86400                   # at most this often (0 = idle trigger only)
-idle_s    = 1800                    # also when no slot has been busy this long (0 = off)
-keep_days = 3                       # build output used within N days survives the sweep
-
-[git]                               # omit the block for isolation = "none"
-isolation   = "worktree"
-main_branch = "master"
-repos       = ["*"]                 # component repos to mirror; e.g. ["*", "packages/*"]
-
-[operator]                          # what happens after `swarm done <phase> operator`
-enabled      = false                # positive opt-in: true lets the swarm open an
-                                    # autonomous session with your full authority.
-                                    # While false nothing is queued: each hand-off
-                                    # is telegrammed to you as a to-do instead.
-cmd          = ""                   # command an operator session runs; "" = built-in
-model        = ""                   # "" inherits; else "opus" / "sonnet" / ...
-triage_model = "haiku"              # decides now-vs-later; an alias, never a dated build
-```
-
-The ledger is prose the LLM master reads directly. `swarm context` also parses it,
-auto-detecting the shape: a **markdown checklist** (`- [x] \`frontend-P1\` · needs:… · …`)
-yields the phase *set* — only checklist items count, so prose notes never leak in as
-phantom phases — with dependency gating left to the master; a **bare** one-line format
-(`P4 needs:P1,P2`) additionally gives deterministic dep-gating and flags a dependency
-cycle, self-dependency, or unknown dependency rather than stalling on it silently.
-
-### Operator hand-offs (`[operator]`)
-
-`swarm done <phase> operator "<recap>"` is the finish that leaves concrete work
-behind — a deploy or roll, a check after it, a service to restart, a migration to
-apply. The **operator** is a side worker: a full Claude session that does the
-work a phase worker must not wait on, first checking whether later phases already
-did it. It asks you only genuine decisions (money, taste, irreversible data loss,
-contradicting something you decided in writing) and never answers a worker's
-question. The recap is its entire brief, which is why a recap under 20
-characters or 4 words is refused the hand-off (the sentinel is still written —
-durability is never traded for politeness). With `[operator].enabled = false`
-the hand-off is telegrammed to you as a to-do rather than dropped.
-
-One job runs at a time, oldest first. Under `isolation = "worktree"` a job works
-in its own mirror (`op-<job>`, branch `swarm/op-<job>`) and on `operator-done`
-its branch goes through the ordinary merge queue — auto-resolve, resolver, owed
-push and all — and the mirror is removed; under `"none"` it works in the project.
-`swarm operator-ask` pings you and keeps the session alive (its lease stretched
-to a week) while it asks in its pane; `swarm operator-resumed` puts it back to
-work. `swarm operator-add` queues an ad-hoc job. `swarm status` shows the queue;
-`swarm doctor` warns on a job waiting on you over an hour and on abandoned jobs.
-
-The hand-off is durable. `swarm done` writes one JSON item per phase under
-`<state_dir>/operator/`, **after** the sentinel and **before** the FIFO poke: the
-item is re-derivable from the sentinel, so a crash between them costs nothing,
-while a crash after the poke would leave the work merged and recorded `done` with
-nothing queued. `swarm up` (any isolation) rebuilds any item whose sentinel
-outlived it and requeues anything a dead run left `running` or `waiting`; in
-worktree mode it keeps a live job's mirror and lands a finished job's.
-
-It is bounded. Every attempt is counted in the same write that leases the item,
-and after three the item goes terminal `abandoned` and telegrams you once — so a
-note that used to reach a human by definition still does, even when the queue
-cannot do the work.
-
-`swarm operator-triage <phase>` (spawned detached by `swarm done`) asks a cheap
-model whether the session should open `now` or `later`. It fails toward `later`:
-a timeout, prose, or an unrecognised answer never yields `now`, because `now` is
-the branch that opens a session holding your authority.
-
-### The Overseer (`[overseer]`)
-
-The master pane runs the init pass once, then **Overseer** passes for the rest of
-the run: a full Claude session (`[overseer].model`, default the master's) that
-reads a digest of the whole swarm and acts on it — retries a failed phase once,
-frees a stuck slot, resolves a hold it fixed, edits the ledger so free slots have
-work (splitting serial chains, filing follow-up rows from workers' risks and
-decisions), queues operator jobs, runs `swarm gc`, pauses the swarm when RAM or
-disk is dangerous, and sends you a six-line digest. Owner-level calls (money,
-taste, scope, deleting work, reversing your decisions) go to you via
-`swarm overseer-ask`; it never answers a worker's question and never restrains a
-worker. The prompt is `prompts/overseer.md`.
-
-A pass is triggered by events — a phase finishing `fail`, an integration hold, a
-new owed push, a cheap doctor check (`ledger`, `run.nudge`) turning FAIL, a phase
-waiting on you past `owner_wait_s`, starvation (free slots, nothing launchable,
-backlog left) sustained past `starve_s` — and by counters: every
-`every_finished` finished phases and every `every_s`. Reasons coalesce into one
-pending pass; only one runs at a time; passes are `min_gap_s` apart unless a
-reason is urgent (a hold, a doctor FAIL, starvation, `swarm overseer --now`). A
-pass owed or running holds the finish, and one past `timeout_s` is killed and
-logged. Launching never waits on it.
-
-Before each pass the supervisor writes `<state>/overseer/digest-<id>.md` (and a
-`.json` twin): the trigger, the swarm now, the phases finished since the last
-pass with recap, completion note and notes, failures, questions waiting on you, a
-**starvation map** (each root blocker — excluded, failed, parked, building,
-unknown — and how many open phases stand behind it) and a resource snapshot. Each
-pass leaves `<state>/overseer/<id>.md` (Saw / Did / Left for the owner) and
-`<id>.json`; `ovrecord.load_passes()` is the loader the CLI, the TUI and the web
-board read. Under `isolation = "worktree"` a pass works in its own mirror
-(`ovs-<id>`), merged through the ordinary queue when it ends.
-
-```toml
-[overseer]
-enabled        = true    # false = launch and integrate only
-model          = ""      # "" = [swarm].master_model
-min_gap_s      = 600     # between non-urgent passes (start to start)
-every_finished = 3       # a pass every N finished phases (0 = off)
-every_s        = 10800   # and at least this often (0 = off)
-owner_wait_s   = 3600    # a phase waiting on you this long triggers one
-starve_s       = 600     # idle slots with backlog this long triggers one
-timeout_s      = 2700    # a pass past this is killed
-```
-
-### The web board (`[web]`)
-
-`swarm up` starts a read-only Kanban board in a `web` tmux window (the last one; under
-the headless driver, a detached process) and `swarm down` stops it. `swarm status` and
-`swarm doctor` print its LAN address. Every ledger row is on it — backlog, blocked rows
-with the root that holds them, what is building (slot, elapsed, context, the worker's
-last turn), merging, operator jobs, done, failed and owner-run — plus campaign
-swimlanes (what each campaign is, from its ledger heading or governing ADR, and its
-progress), an Activity view (Overseer passes, recent finishes) and a detail sheet per
-card (`#phase=<id>` deep links). Live over Server-Sent Events; phone-first.
-
-```toml
-[web]
-enabled = true        # start it at `swarm up`
-host    = "0.0.0.0"   # every interface: the LAN is the point
-port    = 8765
-```
-
-It is **open on the LAN with no token** (the owner's choice) and read-only: GET only, no
-path is ever mapped to a file, and every string it serves is redacted for anything
-shaped like a credential (`sk-…`, `ghp_…`, `Bearer …`, `key=`/`token=`/`secret=` values).
-Under WSL with mirrored networking a phone reaches it only once Windows lets the port in:
-`New-NetFirewallRule -DisplayName "swarm web" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow`
-(elevated PowerShell), plus the Hyper-V firewall
-(`Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow`) if it still does not answer.
+Every key, with its default, its environment override and its reload class, is
+in **[docs/config.md](docs/config.md)**.
 
 ## Runtime state
 
-State lives outside the repo, under
-`~/.local/state/swarm-orchestrator/<project-slug>/` — `state.json`,
-`control.fifo`, `done/` (durable completion sentinels), `operator/` (the hand-off
-queue), `overseer/` (trigger memory, digests, pass records), `logs/`, `tmp/<name>`
-(each session's `TMPDIR`/`TMP`/`TEMP` — on disk, because `/tmp` may be a RAM
-tmpfs; dropped when the session's work lands), and, in worktree mode, `wt/` (the per-phase mirrors) and `git/`
-(per-repo integration locks). The slug includes a hash of the full project path,
-so two projects that share a folder name never share state.
+State lives outside the project, under
+`~/.local/state/swarm-orchestrator/<folder>-<hash>/`. The hash is of the full
+project path, so two projects with the same folder name never share state.
+`SWARM_STATE_DIR` overrides the location.
+
+| path | what it holds |
+|---|---|
+| `state.json` (+ `.lock`) | Slots, the done map, the merge queue, holds, owed pushes, waiting and parked phases, the operator lease, the live Overseer pass, the run id. Every write is under `flock`. |
+| `control.fifo` | The supervisor's one input. |
+| `config.json` | The config the running supervisor loaded (what `swarm reload` diffs against). |
+| `done/<phase>.<status>`, `done/<phase>.jsonl` | Durable completion sentinels, and every `swarm done` attempt. |
+| `operator/<job>.json`, `.brief.md`, `run.id` | The operator queue. |
+| `overseer/` | `policy.json` (trigger memory), `digest-<id>.md/.json`, pass records `<id>.md/.json`, briefs. |
+| `notes/<phase>.jsonl` | Decisions, assumptions, risks, and owner answers. |
+| `turns/<phase>.jsonl` | Final turn texts from the Stop hook. |
+| `recaps/<phase>.json` | Generated recaps. |
+| `meters/` | Per-phase meters, `limits.jsonl` (5-hour and weekly samples), `sessions.jsonl`. |
+| `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
+| `notifications.jsonl` | Every Telegram send and whether it landed. |
+| `logs/supervisor.log`, `logs/web.log` | Logs. Neither is rotated. |
+| `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
+| `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |
+| `cache/target/<repo>/` | The shared cargo target cache. |
+| `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
+| `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |
 
 ## Tests
-
-Hermetic and LLM-free: a **real supervisor** against **fake** master/worker shell
-scripts, throwaway git repos, a throwaway tmux session, and temp dirs — no
-`claude`, all torn down in `finally`.
 
 ```bash
 uv run pytest
 ```
 
-- **Lifecycle** (`test_lifecycle.py`) — the state machine, FIFO/sentinel plumbing,
-  dep gating, fan-out, injection, convergence, parked-worker deadlock-freedom, and
-  a best-effort `done` that never hangs.
-- **Worktree** (`test_worktree.py`) — real-git integrate, the ledger different-line
-  race, conflict block-and-resolve, push-failure vs conflict, dirty-tree hold,
-  resolvable push-time conflict, sentinel-driven reconcile.
-- **Multi-repo** (`test_multirepo.py`) — repo discovery + globs, the nested
-  workspace mirror, concurrent same-repo phases, untouched-repo no-ops, full
-  rollback, and the supervisor lifecycle guards.
-- **Unit** (`test_state.py`) — slot claim, `flock` under real concurrency, the
-  dependency resolver, config validation, the FIFO line format.
+About 1,900 tests, hermetic and LLM-free. They run a real supervisor against fake
+master and worker shell scripts (`examples/demo/`), in throwaway git repos,
+throwaway tmux sessions and temp state dirs, with no `claude` and every model
+call replaced by an environment seam. Everything is torn down in `finally`. The
+fake scripts need bash (`read -t`).
 
-The fake scripts require **bash** (`read -t`); on the target host `/bin/sh` is
-dash and lacks it.
+**Tiers:**
 
-## Accepted design trade-off
+- lifecycle (`test_lifecycle.py`, `test_launcher.py`, `test_park.py`,
+  `test_recovery.py`);
+- real tmux mechanics (`test_selftest.py`, `test_inject.py`);
+- git (`test_worktree.py`, `test_multirepo.py`, `test_automerge.py`,
+  `test_push_owed.py`);
+- operator and Overseer (`test_opqueue.py`, `test_opsession.py`,
+  `test_overseer_*.py`);
+- the dashboard, which is booted headless at three terminal sizes (`test_tui_*.py`);
+- the web board (`test_web_*.py`);
+- units for every other module.
 
-Pure injection has no safety net — the owner's explicit call. If an injected
-keystroke is ever lost (a tmux `send-keys` phenomenon; the bare-pipe path in tests
-is reliable), that slot's next phase waits until the following worker finishes and
-self-heals on the next `done`; if it was the *last* worker, finish fires with the
-ready phase logged (`FINISH-WITH-READY`) so you can `swarm launch` it by hand.
+## Design principles
+
+These are the owner's rules, and the code follows them.
+
+- **Pure injection, minimal lifecycle.** The supervisor reacts to events. Its only
+  timed wakes are:
+  - a waiting worker's park deadline;
+  - a failed launch's back-off (60 s, 3 tries);
+  - the watchdog sweep (`watchdog_s`, off at `0`);
+  - the Overseer's cadence and timeout;
+  - the operator queue's lease and back-off;
+  - automatic gc;
+  - owed-push retries.
+
+  There are no retry loops, safety timers or re-derivation backstops beyond
+  these. A `fail` is final until someone runs `swarm retry`. A live worker is
+  never killed or restarted. Only a worker whose pane has already died is
+  cleared, and its phase goes back to ready.
+- **Workers are full, unrestrained Claude sessions** with a clear directive. Their
+  tools, permissions and scope are never clamped. The swarm shapes the ledger,
+  the prompt and the environment, never the worker.
+- **Decide the small, ask the big.** Sessions make cheap, reversible calls
+  themselves and record them with `swarm note`. They ask the owner (a Telegram
+  ping, then AskUserQuestion in their pane) for money, taste, scope, irreversible
+  changes, contradicting a written decision, or whenever they are in doubt about
+  something that matters. They never guess an answer that is the owner's, and
+  never answer a question for the owner.
+- **Durable before visible.** A sentinel is written before any poke, and an
+  operator item before the merge it depends on. Recovery works from those records,
+  never from branch shape, and nothing is reported done that did not land.
+- **One writer, total order.** One FIFO reader, one lock over the state, one merge
+  at a time.
+
+**Accepted trade-off:** a worker that received its prompt and then stalls,
+alive but silent, is not detected by the supervisor. Its pane is alive, so the
+watchdog leaves it alone. `swarm doctor` flags a busy slot with no edits or
+commits 20 minutes after launch, and the dashboard shows the time since the last
+event. Freeing or relaunching such a slot is the owner's call.

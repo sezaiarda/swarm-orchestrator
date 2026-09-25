@@ -1350,8 +1350,41 @@ def _operator_lines(cfg: Config, st: state_mod.State) -> list[str]:
     return lines
 
 
+def _done_counts(done: dict[str, str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for status in done.values():
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _done_summary(done: dict[str, str]) -> str:
+    """The done map as counts per status, naming the failures (they need you)."""
+    parts = " ".join(f"{k}={v}" for k, v in _done_counts(done).items())
+    failed = sorted(p for p, s in done.items() if s == statuses.FAIL)
+    tail = f" failed: {' '.join(failed)}" if failed else ""
+    return f"done: {len(done)} ({parts or 'none'}){tail} — `--all` lists every phase"
+
+
 def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> int:
+    """The state, for a person or (``--json``) a script. The done map grows with
+    the ledger — thousands of entries on a long-lived project — so it is counted
+    unless ``--all`` asks for every phase."""
     st = state_mod.read(cfg)
+    if as_json:
+        data = asdict(st)
+        if not show_all:
+            data.pop("done")
+            data["done_counts"] = _done_counts(st.done)
+            data["failed"] = sorted(p for p, s in st.done.items() if s == statuses.FAIL)
+        data["config"] = {
+            "slug": cfg.slug, "driver": cfg.driver, "isolation": cfg.git_isolation,
+            "main_branch": cfg.git_main_branch, "layout": st.layout or cfg.tmux_layout,
+            "state_dir": str(cfg.state_dir),
+        }
+        data["operator_jobs"] = [i.to_dict() for i in opqueue.load_all(cfg)]
+        data["web"] = web_lifecycle.status_line(cfg)
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
     lines = [
         f"slug={cfg.slug} driver={cfg.driver} finished={st.finished} paused={st.paused}"
         f" layout={st.layout or cfg.tmux_layout}",
@@ -1371,7 +1404,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     lines.extend(_operator_lines(cfg, st))
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
-    lines.append(f"done={st.done}")
+    lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
     lines.append(web_lifecycle.status_line(cfg))
     print("\n".join(lines))
     return 0
@@ -1445,7 +1478,8 @@ def _build_parser() -> argparse.ArgumentParser:
     fnp.set_defaults(func=lambda cfg, a: cmd_finish(cfg, a.force))
     stp = sub.add_parser("status", help="human-readable state dump")
     stp.add_argument("--json", action="store_true", help="machine-readable output")
-    stp.add_argument("--all", action="store_true", help="include the full done map")
+    stp.add_argument("--all", action="store_true",
+                     help="include the full done map (default: counts per status)")
     stp.set_defaults(func=lambda cfg, a: cmd_status(cfg, as_json=a.json, show_all=a.all))
     sub.add_parser("pause", help="stop launching new workers (in-flight finish)").set_defaults(
         func=lambda cfg, a: cmd_pause(cfg))

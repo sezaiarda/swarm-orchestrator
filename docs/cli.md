@@ -21,7 +21,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `status` | Slots, merge queue, waiting and parked phases, operator queue, owed pushes, done map, board address. |
+| `status [--all] [--json]` | Slots, merge queue, waiting and parked phases, operator queue, owed pushes, the done map as counts per status (naming failures), board address. `--all` prints the whole done map; `--json` prints the state as JSON. |
 | `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`. |
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |

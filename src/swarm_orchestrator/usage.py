@@ -153,16 +153,24 @@ def window_pace(points, start: float, end: float) -> Pace:
 
     Inside one window only increases count, measured from the window's running
     maximum so a reading that wobbles down and back up is not counted twice. A
-    new window — ``resets_at`` jumping forward, or the figure dropping — starts
-    from zero at its reset, so its first reading is all usage since then.
+    new window — ``resets_at`` jumping forward, or (only when there is no
+    ``resets_at`` to go by) the figure dropping — starts from zero at its reset,
+    so its first reading is all usage since then. With ``resets_at`` known, a
+    drop under the same reset is a stale reading from a session whose status
+    line lags, and a reading carrying an earlier window's reset is stale too:
+    both are skipped. Treating the first as a reset once counted a whole
+    weekly figure as fresh usage.
     """
     pts = sorted(((t, p, r) for t, p, r in points if p is not None and start <= t <= end),
                  key=lambda x: x[0])
     used, windows = 0.0, 0
     top = res = None
     for _, pct, resets in pts:
-        new = top is None or pct < top - 0.5 or (
-            resets is not None and res is not None and resets - res > RESET_JUMP_S)
+        known = resets is not None and res is not None
+        if known and (res - resets > RESET_JUMP_S or (
+                abs(resets - res) <= RESET_JUMP_S and pct < top - 0.5)):
+            continue  # stale: an earlier window, or a lagging reading of this one
+        new = top is None or (resets - res > RESET_JUMP_S if known else pct < top - 0.5)
         if top is None:
             windows = 1
         elif new:

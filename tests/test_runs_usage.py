@@ -141,6 +141,29 @@ def test_a_reset_seen_only_as_a_drop_still_starts_a_window_and_wobbles_do_not_do
     assert pace.windows == 2 and pace.used == pytest.approx(11 + 4)
 
 
+def test_a_stale_reading_under_the_same_reset_is_not_a_new_window():
+    # A lagging status line read 37 % between two 38 %
+    # readings, all under the same reset. Counted as a reset it added 37
+    # points and showed an inflated weekly rate for a run that used little.
+    wk = T0 + 90 * H
+    s = [usage.Sample(T0, week_pct=34, week_resets_at=wk),
+         usage.Sample(T0 + 2 * H, week_pct=38, week_resets_at=wk),
+         usage.Sample(T0 + 3 * H, week_pct=37, week_resets_at=wk),
+         usage.Sample(T0 + 3 * H + 7, week_pct=38, week_resets_at=wk)]
+    pace = usage.week_pace(s, T0, T0 + 3.2 * H)
+    assert pace.windows == 1 and pace.used == pytest.approx(4)
+
+
+def test_a_stale_reading_from_the_previous_window_is_skipped():
+    w1, w2 = T0 + H, T0 + 6 * H
+    s = [usage.Sample(T0, five_pct=70, five_resets_at=w1),
+         usage.Sample(T0 + 1.5 * H, five_pct=3, five_resets_at=w2),
+         usage.Sample(T0 + 1.6 * H, five_pct=72, five_resets_at=w1),  # lagging session
+         usage.Sample(T0 + 2 * H, five_pct=6, five_resets_at=w2)]
+    pace = usage.five_pace(s, T0, T0 + 2 * H)
+    assert pace.windows == 2 and pace.used == pytest.approx(3 + 3)
+
+
 def test_week_pace_is_piecewise_too_and_only_counts_inside_the_run():
     wk1, wk2 = T0 + 3 * H, T0 + 171 * H
     s = [usage.Sample(T0 - 5 * H, week_pct=10, week_resets_at=wk1),  # before the run

@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from statistics import median
 
+from .. import ask as ask_mod
 from .. import keep as keep_mod
 from .. import ledger as ledger_mod
 from .. import opqueue
@@ -1561,6 +1562,49 @@ def kept_rows(records, now: float | None = None) -> list[dict]:
                 "command": shlex.join(str(a) for a in rec.argv or []),
                 "cwd": rec.cwd,
                 "log": rec.log,
+            })
+        except Exception:  # noqa: BLE001 - a malformed record costs its own row
+            continue
+    return out
+
+
+# -- asks: windows where review questions wait on the owner -------------------
+def load_asks(cfg) -> list:
+    """Every ask on record, open first; empty on any failure."""
+    try:
+        return ask_mod.load_all(cfg)
+    except Exception:  # noqa: BLE001 - a bad record must not cost the cockpit
+        return []
+
+
+def ask_rows(asks, now: float | None = None, recent: int = ask_mod.RECENT) -> list[dict]:
+    """One plain dict per ask — the open ones, then the latest answered — for the
+    asks tab and the board. The attach command is the point: it is how the owner
+    gets from the dashboard to the window that waits on them."""
+    now = time.time() if now is None else now
+    asks = list(asks or [])
+    shown = [a for a in asks if a.is_open] + [a for a in asks if not a.is_open][:recent]
+    out: list[dict] = []
+    for ask in shown:
+        try:
+            age = ask.age_s(now)
+            out.append({
+                "name": ask.name,
+                "rows": list(ask.rows),
+                "rows_text": ask_mod.rows_text(ask.rows),
+                "why": ask.why,
+                "open": ask.is_open,
+                "state": "waiting" if ask.is_open else "answered",
+                "opened_at": ask.opened_at,
+                "age_s": age,
+                "age": ask_mod.age_text(age),
+                "by": ask.by,
+                "window": ask.window,
+                "attach": ask.attach(),
+                "brief": ask.brief,
+                "outcome": ask.outcome,
+                "done_at": ask.done_at,
+                "stop_keeps": list(ask.stop_keeps),
             })
         except Exception:  # noqa: BLE001 - a malformed record costs its own row
             continue

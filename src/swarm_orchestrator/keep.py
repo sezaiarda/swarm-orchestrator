@@ -113,7 +113,7 @@ def clean_env(cfg: Config) -> dict[str, str]:
     Without the markers no reaper matches it, and a ``TMPDIR`` under the state dir
     is the session's own temp dir, deleted when the session's work lands."""
     drop = {procs.SESSION_ENV, "SWARM_SESSION", "SWARM_STATE_DIR", "SWARM_PHASE", cfg.env_marker,
-            "SWARM_OPERATOR_JOB", "SWARM_OVERSEER_PASS"}
+            "SWARM_OPERATOR_JOB", "SWARM_OVERSEER_PASS", "SWARM_ASK"}
     state = str(Path(cfg.state_dir).resolve())
     env = {k: v for k, v in os.environ.items() if k not in drop}
     for key in ("TMPDIR", "TMP", "TEMP"):

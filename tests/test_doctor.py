@@ -575,7 +575,7 @@ def test_run_checks_reads_in_a_fixed_order_and_never_raises(cfg, monkeypatch):
         "supervisor.pid", "supervisor.fifo", "supervisor.stray", "slots.panes",
         "run.watchdog", "slots.activity", "integration.blocked", "integration.push",
         "run.finished",
-        "run.nudge", "run.stall", "owner.blocking", "ledger", "telegram.config",
+        "run.nudge", "run.stall", "owner.blocking", "owner.asks", "ledger", "telegram.config",
         "telegram.sends", "disk.state", "disk.incremental", "disk.tmp", "sentinels",
         "recaps.history", "phases.failed", "operator", "prompts", "web.board", "telegram.bot",
         "keep",

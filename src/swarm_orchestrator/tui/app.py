@@ -74,8 +74,9 @@ try:
 except Exception as exc:  # noqa: BLE001
     Home = _missing("home", exc)
 try:
-    from .tables import History, Notifications, Runs, Shells, Workers
+    from .tables import Asks, History, Notifications, Runs, Shells, Workers
 except Exception as exc:  # noqa: BLE001
+    Asks = _missing("asks", exc)
     Workers = _missing("workers", exc)
     History = _missing("history", exc)
     Notifications = _missing("notifications", exc)
@@ -126,7 +127,7 @@ class HelpScreen(ModalScreen[None]):
     HELP = f"""[b]tabs[/b]
   [{COLOR[OK]}]1[/] home      [{COLOR[OK]}]2[/] workers   [{COLOR[OK]}]3[/] history   [{COLOR[OK]}]4[/] alerts
   [{COLOR[OK]}]5[/] disk      [{COLOR[OK]}]6[/] settings  [{COLOR[OK]}]7[/] commands  [{COLOR[OK]}]8[/] doctor
-  [{COLOR[OK]}]9[/] runs      [{COLOR[OK]}]0[/] shells
+  [{COLOR[OK]}]9[/] runs      [{COLOR[OK]}]0[/] shells    [{COLOR[OK]}]a[/] asks
   [{COLOR[MUTED]}]tab / shift+tab cycle[/]
 
 [b]anywhere[/b]
@@ -212,6 +213,7 @@ class SwarmApp(App):
         Binding("8", "tab('doctor')", "doctor"),
         Binding("9", "tab('runs')", "runs"),
         Binding("0", "tab('shells')", "shells"),
+        Binding("a", "tab('asks')", "asks"),
         Binding("R", "reset_run", "reset run", show=False),
         Binding("c", "tab('commands')", "commands", show=False),
         Binding("d", "doctor", "doctor", show=False),
@@ -253,6 +255,8 @@ class SwarmApp(App):
                     yield Runs(id="tab-runs")
                 with TabPane("0 shells", id="shells"):
                     yield Shells(id="tab-shells")
+                with TabPane("a asks", id="asks"):
+                    yield Asks(id="tab-asks")
             if Drawer is not None:
                 yield Drawer(id="drawer")
         yield Footer()

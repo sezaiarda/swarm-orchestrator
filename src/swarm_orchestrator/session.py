@@ -310,7 +310,7 @@ def reap_session(
 ) -> threading.Thread | None:
     """End every process one session started: the session is over.
 
-    ``kind`` is ``worker``, ``operator``, ``overseer`` or ``resolver``. Matches the
+    ``kind`` is ``worker``, ``operator``, ``overseer``, ``resolver`` or ``ask``. Matches the
     session's markers (so a ``setsid``/``nohup`` child that left the pane's tree
     is found too) within this run, and escalates HUP → TERM → KILL like
     ``swarm down``. ``swarm keep`` processes are spared. Off the caller's thread

@@ -87,6 +87,8 @@ class Config:
     operator_model: str
     operator_triage_model: str
     operator_notify: str
+    ask_cmd: str
+    ask_model: str
     overseer_enabled: bool
     overseer_cmd: str
     overseer_model: str
@@ -218,6 +220,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     build = data.get("build", {})
     operator = data.get("operator", {})
     overseer = data.get("overseer", {})
+    ask = data.get("ask", {})
     gc = data.get("gc", {})
     web = data.get("web", {})
 
@@ -367,6 +370,11 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             os.environ.get("SWARM_OPERATOR_NOTIFY", operator.get("notify", OPERATOR_NOTIFY_DEFAULT)),
             OPERATOR_NOTIFY, OPERATOR_NOTIFY_DEFAULT,
         ),
+        # An ask session (`swarm ask`): the window where the owner answers review
+        # questions. "" = the master's model; `cmd` replaces the built-in session
+        # (the tests' seam, as `[operator].cmd` is the operator's).
+        ask_cmd=os.environ.get("SWARM_ASK_CMD", str(ask.get("cmd", ""))),
+        ask_model=os.environ.get("SWARM_ASK_MODEL", str(ask.get("model", ""))),
         # The Overseer: the old master, now a periodic reviewer that acts on what
         # it reads (see overseer.py). On by default -- it is the one part of the
         # swarm that notices a failure, a hold or a starved backlog and does

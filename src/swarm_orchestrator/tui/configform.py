@@ -341,7 +341,7 @@ FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scal
 
 # The order the tables are drawn in — the order the file itself uses.
 SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "git",
-                 "operator", "overseer", "tui", "web", "(cli)")
+                 "operator", "ask", "overseer", "tui", "web", "(cli)")
 
 
 @dataclass(frozen=True)
@@ -450,6 +450,9 @@ FIELDS: tuple[Setting, ...] = (
     Setting("operator_notify", CHOICE,
             "which operator outcomes ping you",
             choices=OPERATOR_NOTIFY),
+    # -- [ask] ------------------------------------------------------------
+    Setting("ask_cmd", STR, 'command an ask window runs; "" = built-in'),
+    Setting("ask_model", STR, 'model for an ask session; "" = master_model'),
     # -- [overseer] -------------------------------------------------------
     Setting("overseer_enabled", BOOL, "run periodic Overseer review passes"),
     Setting("overseer_cmd", STR, 'command an Overseer pass runs; "" = built-in'),

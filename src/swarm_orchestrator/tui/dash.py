@@ -48,6 +48,7 @@ from .data import (
     question_index,
     read_state,
     load_graph,
+    load_asks,
     load_kept,
     load_ticked,
     run_started_at,
@@ -117,6 +118,8 @@ class Dash:
         #: ``swarm keep`` records, alive or dead, by name — the shells tab.
         self.kept: list = []
         self._kept_at = 0.0
+        #: ``swarm ask`` records, open first — the asks tab.
+        self.asks: list = []
         self._live_pass: str | None = None
         self._passes_live: object = ()
         self._samples = usage_mod.SampleTail(cfg.state_dir / METERS_DIR / LIMITS_LOG)
@@ -219,6 +222,9 @@ class Dash:
         now = time.time()
         if self._poll_kept(now):
             changed.add("keep")
+        if self._changed("asks", self.cfg.state_dir / "ask"):
+            self.asks = load_asks(self.cfg)
+            changed.add("asks")
         grew = self._samples.poll()
         if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
             self._usage_at = now

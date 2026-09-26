@@ -18,6 +18,7 @@ import time
 from dataclasses import asdict, fields
 from pathlib import Path
 
+from . import ask as ask_mod
 from . import buildsem
 from . import notes as notes_mod
 from . import operator as operator_mod
@@ -149,6 +150,7 @@ def _reconcile_orphans(cfg: Config) -> None:
             first = result.held[0]
             plan = operator_mod.mirror_plan(cfg)
             passes = ovrecord.mirror_plan(cfg)
+            asks = ask_mod.mirror_plan(cfg)
             with state_mod.transaction(cfg) as s:
                 s.integ_blocked = first.phase
                 s.integ_blocked_kind = first.kind
@@ -160,6 +162,8 @@ def _reconcile_orphans(cfg: Config) -> None:
                         s.integ_push(h.phase, operator_mod.INTEG_STATUS)
                     elif h.phase in passes:
                         s.integ_push(h.phase, ovrecord.INTEG_STATUS)
+                    elif h.phase in asks:
+                        s.integ_push(h.phase, ask_mod.INTEG_STATUS)
             names = ", ".join(f"{h.phase} ({h.kind})" for h in result.held)
             print(f"integration HELD: {names}", file=sys.stderr)
             print("  these phases are NOT marked done — their branches never merged.")
@@ -179,8 +183,9 @@ def _reconcile_orphans(cfg: Config) -> None:
 
 def _mirror_plan(cfg: Config) -> dict[str, str]:
     """Every ``swarm/*`` branch that has no sentinel by design and must not be
-    discarded as an interrupted phase: operator jobs' and Overseer passes'."""
-    return {**operator_mod.mirror_plan(cfg), **ovrecord.mirror_plan(cfg)}
+    discarded as an interrupted phase: operator jobs', Overseer passes' and asks'."""
+    return {**operator_mod.mirror_plan(cfg), **ovrecord.mirror_plan(cfg),
+            **ask_mod.mirror_plan(cfg)}
 
 
 def _attach(cfg: Config) -> None:
@@ -939,7 +944,7 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
     shipped = Path(__file__).resolve().parent / "prompts"
     if not shipped.is_dir():
         shipped = Path(__file__).resolve().parent.parent.parent / "prompts"
-    for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md"):
+    for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md"):
         q = shipped / name
         if q.is_file():
             out.append((f"prompts/{name}", q))
@@ -1182,6 +1187,97 @@ def cmd_keep(cfg: Config, name: str | None, why: str | None, argv: list[str],
     return 0
 
 
+def cmd_ask(cfg: Config, name: str | None, rows: str | None, why: str | None,
+            brief: str, listing: bool = False, reopen: str | None = None,
+            as_json: bool = False) -> int:
+    """Open a window where the owner answers review questions — or list them.
+
+    The record is written first (``<state>/ask/<name>.json``), then the
+    supervisor is poked to open the window; ``swarm up`` opens an unanswered one
+    again from that record. It takes no slot and never times out.
+    """
+    if listing or (not name and not reopen):
+        asks = ask_mod.load_all(cfg)
+        shown = [a for a in asks if a.is_open] + [a for a in asks if not a.is_open][:ask_mod.RECENT]
+        if as_json:
+            return _dump([a.to_dict() for a in shown])
+        print("\n".join(ask_mod.line(a) for a in shown) if shown else "no asks")
+        return 0
+    if reopen:
+        ask = ask_mod.load(cfg, reopen)
+        if ask is None or not ask.is_open:
+            print(f"swarm ask: {reopen} is not an open ask", file=sys.stderr)
+            return 1
+        if ask_mod.session_alive(cfg, ask):
+            print(f"swarm ask: {reopen} is open in window {ask.window} (`{ask.attach()}`)")
+            return 0
+        name = reopen
+        reopened = True
+    else:
+        try:
+            ask, reopened = ask_mod.create(cfg, name, ask_mod.parse_rows(rows or ""),
+                                           why or "", brief)
+        except ask_mod.AskError as exc:
+            print(f"swarm ask: {exc}", file=sys.stderr)
+            return 2
+        graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
+        unknown = [r for r in ask.rows if graph and r not in graph]
+        if unknown:
+            print(f"  warning: not in the ledger: {', '.join(unknown)}", file=sys.stderr)
+    heard = _poke(cfg, f"ask-open {name}")
+    print(f"ask {name} {'opens again' if reopened else 'recorded'}: {ask_mod.rows_text(ask.rows)}")
+    print(f"  why: {ask.why}")
+    print(f"  window: {ask.window} in the swarm's tmux session")
+    print(f"  supervisor: {'poked — the window opens now and the owner is pinged once' if heard else 'NOT RUNNING — it opens at the next swarm up'}")
+    return 0
+
+
+def cmd_ask_done(cfg: Config, name: str, outcome: str = "", stop_keeps: list[str] | None = None,
+                 attention: bool = False) -> int:
+    """The ask session is finished: record the outcome, stop the review's kept
+    processes, then poke the supervisor to close the window and land the mirror.
+
+    The outcome follows the operator's quiet policy (``[operator].notify``): it
+    pings only with ``--attention``, and otherwise reaches the owner in the
+    Overseer's summary.
+    """
+    stop_keeps = [k for k in (stop_keeps or []) if k]
+    ask = ask_mod.complete(cfg, name, outcome, attention, stop_keeps)
+    if ask is None:
+        print(f"swarm ask-done: no open ask {name}", file=sys.stderr)
+        return 1
+    for keep in stop_keeps:
+        rec = keep_mod.stop(cfg, keep)
+        if rec is None:
+            print(f"  keep {keep}: nothing kept under that name")
+        elif rec.alive:
+            print(f"  keep {keep}: pid {rec.pid} survived SIGKILL", file=sys.stderr)
+        else:
+            print(f"  keep {keep}: stopped (pid {rec.pid})")
+    mode = cfg.operator_notify
+    if mode == "attention" and telegram.sends_all(cfg):
+        mode = "all"
+    hold = _operator_done_hold(mode, attention)
+    tail = f" — {ask.outcome}" if ask.outcome else " (no outcome given)"
+    telegram.notify(
+        cfg.telegram_notify,
+        f"swarm: ask {name} ({ask_mod.rows_text(ask.rows)})"
+        f" {'needs you' if attention else 'answered'}{tail}",
+        kind="ask-done",
+        phase=name,
+        source="cli.ask-done",
+        state_dir=cfg.state_dir,
+        suppressed=hold,
+    )
+    print(f"ask-done {name}")
+    print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
+    sys.stdout.flush()
+    # Last: the supervisor closes this very window.
+    heard = _poke(cfg, f"ask-done {name}")
+    print(f"  supervisor: {'poked — the window closes' if heard else 'not running — the next swarm up lands the mirror'}")
+    return 0
+
+
 def cmd_context(cfg: Config) -> int:
     st = state_mod.read(cfg)
     print(json.dumps(build_context(cfg, st)))
@@ -1263,6 +1359,15 @@ def cmd_finish(cfg: Config, force: bool = False) -> int:
                   file=sys.stderr)
         print("drain them with `swarm operator <phase>`, or `swarm finish --force`",
               file=sys.stderr)
+        return 1
+    asks = ask_mod.open_asks(cfg)
+    if asks and not force:
+        # Each waits on the owner in its own window; a stopped supervisor would
+        # never close it, merge its picks or open it again.
+        print(f"{len(asks)} ask(s) still wait on you:", file=sys.stderr)
+        for ask in asks:
+            print(f"  {ask_mod.line(ask)}", file=sys.stderr)
+        print("answer them in their windows, or `swarm finish --force`", file=sys.stderr)
         return 1
     _poke(cfg, "shutdown")
     return 0
@@ -1532,6 +1637,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["web"] = web_lifecycle.status_line(cfg)
         data["telegram_bot"] = tgbot.status_line(cfg)
         data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
+        data["asks"] = [a.to_dict() for a in ask_mod.open_asks(cfg)]
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
@@ -1551,6 +1657,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     # no slot and no pane probe can find it, so these lines are the only place the
     # text UI can say one is running at all.
     lines.extend(_operator_lines(cfg, st))
+    # Asks wait on the owner in their own windows, outside the slot grid.
+    lines.extend(f"ask: {ask_mod.line(a)}" for a in ask_mod.open_asks(cfg))
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
@@ -1660,6 +1768,35 @@ def _build_parser() -> argparse.ArgumentParser:
     kpp.add_argument("argv", nargs=argparse.REMAINDER, help="-- the command to keep running")
     kpp.set_defaults(func=lambda cfg, a: cmd_keep(
         cfg, a.name, a.why, a.argv, a.listing, a.stop, a.cwd, a.json))
+
+    akp = sub.add_parser(
+        "ask", help="open a window where the owner answers review questions (--list shows them)",
+        description=(
+            "`swarm ask --name N --rows R1,R2 --why \"<one line>\" \"<brief>\"` opens an ask "
+            "session in tmux window ask:N: it shows the owner what to look at, asks with "
+            "AskUserQuestion, records the picks in the rows and ends with `swarm ask-done N`. "
+            "It takes no worker slot and never times out."
+        ),
+    )
+    akp.add_argument("--name", help="a unique name (letters, digits, _ -)")
+    akp.add_argument("--rows", help="the ledger row(s) the answer settles, comma-separated")
+    akp.add_argument("--why", help=f"one plain line (≤{ask_mod.WHY_MAX} chars): what the owner decides")
+    akp.add_argument("--list", dest="listing", action="store_true", help="open and recent asks")
+    akp.add_argument("--json", action="store_true", help="with --list: JSON")
+    akp.add_argument("--reopen", metavar="NAME", help="open an open ask's window again (same brief)")
+    akp.add_argument("brief", nargs="*", help="what the owner looks at and where (URLs, files, a kept server)")
+    akp.set_defaults(func=lambda cfg, a: cmd_ask(
+        cfg, a.name, a.rows, a.why, " ".join(a.brief), a.listing, a.reopen, a.json))
+
+    adp = sub.add_parser("ask-done", help="(ask session) the owner's answers are recorded")
+    adp.add_argument("name")
+    adp.add_argument("outcome", nargs="*", help="one line: what the owner picked")
+    adp.add_argument("--stop-keep", action="append", default=[], metavar="KEEP",
+                     help="also stop this kept process (it only existed for the review); repeatable")
+    adp.add_argument("--attention", action="store_true",
+                     help="ping the owner: they still have something to do")
+    adp.set_defaults(func=lambda cfg, a: cmd_ask_done(
+        cfg, a.name, " ".join(a.outcome), a.stop_keep, a.attention), tolerant=True)
 
     lp = sub.add_parser("launch", help="claim a slot and start a worker")
     lp.add_argument("phase")

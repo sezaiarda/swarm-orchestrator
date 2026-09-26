@@ -42,6 +42,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import ask as ask_mod
 from . import gc as gc_mod
 from . import gitq
 from . import keep as keep_mod
@@ -760,6 +761,24 @@ def _check_owner(cfg: Config, st: State) -> Check:
     )
 
 
+def _check_asks(cfg: Config, now: float | None = None) -> Check:
+    """Open asks: windows where review questions wait on the owner.
+
+    Like ``owner.blocking``, never a fault — a WARN, because the run cannot
+    finish until each is answered — with how to reach each window, and the way
+    back when its window is gone."""
+    asks = ask_mod.open_asks(cfg)
+    if not asks:
+        return Check("owner.asks", OK, "no ask waiting on you")
+    now = time.time() if now is None else now
+    gone = [a for a in asks if not ask_mod.session_alive(cfg, a)]
+    bits = [ask_mod.line(a, now) + (" — WINDOW GONE" if a in gone else "") for a in asks]
+    fix = (f"swarm ask --reopen {gone[0].name}" if gone
+           else f"answer there: {asks[0].attach()}")
+    return Check("owner.asks", WARN,
+                 f"{len(asks)} ask(s) wait on you: " + "; ".join(bits), fix)
+
+
 def _check_ledger(cfg: Config, st: State | None = None) -> Check:
     """Structural ledger faults — a cycle or an unknown dep silently strands
     every phase behind it, and reads exactly like a clean finish."""
@@ -1143,7 +1162,7 @@ def _check_prompts() -> Check:
     """
     packaged = Path(__file__).resolve().parent / "prompts"
     source = Path(__file__).resolve().parent.parent.parent / "prompts"
-    wanted = ("init_master.md", "resolver.md", "operator.md", "overseer.md")
+    wanted = ("init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md")
     missing = [
         name
         for name in wanted
@@ -1254,6 +1273,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_nudge(st, ready, free))
     checks.append(_check_stall(cfg, st))
     checks.append(_check_owner(cfg, st))
+    checks.append(_check_asks(cfg))
     checks.append(_check_ledger(cfg, st))
     checks.extend(_check_telegram(cfg))
     checks.extend(_check_disk(cfg))

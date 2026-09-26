@@ -376,6 +376,14 @@ ${camp.what ? `<p class="what">${esc(camp.what)}</p>` : ""}${camp.about ? `<p cl
 function activityView(b) {
   const a = b.activity || {passes: [], finished: []};
   let out = '<div class="feed">';
+  const asks = b.asks || [];
+  if (asks.length) {
+    out += '<h2 class="sec">Waiting on you</h2>';
+    for (const q of asks) {
+      out += `<article class="item"><h3><span class="warn">● ask</span><span class="mono">${esc(q.name)}</span><span class="mu">${esc((q.rows || []).join(", "))} · <span data-since="${+q.opened_at}">${dur(now() - q.opened_at)}</span> · by ${esc(q.by)}</span></h3>
+<p>${esc(q.why)}</p><p class="mu">answer in tmux: <code>${esc(q.attach)}</code></p></article>`;
+    }
+  }
   const kept = b.kept || [];
   if (kept.length) {
     out += '<h2 class="sec">Kept running</h2>';

@@ -69,6 +69,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import ask as ask_mod
 from . import gitq
 from . import operator as operator_mod
 from . import ovrecord
@@ -276,6 +277,11 @@ def _live_names(cfg: Config, st: State) -> set[str]:
         pass
     if st.overseer_pass:
         names.add(ovrecord.mirror_name(st.overseer_pass))
+    try:
+        names |= set(ask_mod.mirror_plan(cfg))  # an open ask's mirror and TMPDIR
+        names |= {ask_mod.mirror_name(n) for n in ask_mod.open_names(cfg)}
+    except (OSError, ValueError):
+        pass
     return names
 
 

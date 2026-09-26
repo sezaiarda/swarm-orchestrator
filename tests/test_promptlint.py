@@ -20,7 +20,7 @@ def rules(text: str) -> list[tuple[int, str, str]]:
 
 
 # -- the shipped prompts ----------------------------------------------------
-@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md"])
 def test_every_shipped_prompt_lints_clean(name):
     text = (REPO / "prompts" / name).read_text(encoding="utf-8")
     assert promptlint.lint(text, known_commands=KNOWN) == []
@@ -144,7 +144,7 @@ def test_swarm_check_strict_fails_on_a_wasteful_worker_prompt(swarm):
     assert "fatal under --strict" in result.stdout
 
 
-@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md"])
 def test_shipped_prompts_message_the_owner_only_through_swarm_notify(name):
     """`swarm notify` is the swarm's own sender and logs every send; a session
     told to call some other script pings from another sender, unlogged."""
@@ -152,7 +152,7 @@ def test_shipped_prompts_message_the_owner_only_through_swarm_notify(name):
     assert "~/.claude" not in text
 
 
-@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md"])
 def test_no_shipped_prompt_tells_a_session_to_use_another_sender(name):
     """Every prompt says `swarm notify` is the door even when a brief names
     another script; a `notify.sh` may appear only inside that prohibition."""
@@ -165,7 +165,7 @@ def test_no_shipped_prompt_tells_a_session_to_use_another_sender(name):
             assert re.search(r"\b(never|not|even when|instead)\b", sentence), sentence
 
 
-@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md"])
 def test_every_session_is_told_its_processes_die_with_it(name):
     """The worker patch (init pass) and every session prompt: everything started
     is ended at the session's end; `swarm keep --why` is the named exception."""

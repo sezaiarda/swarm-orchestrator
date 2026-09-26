@@ -125,6 +125,18 @@ owner's decision, next to the job — without it the history says you asked and
 never what they said. Nobody else will answer: questions go to the owner, not to
 the swarm.
 
+## When the owner must review something
+
+If the job leaves something for the owner to look at and pick from, and
+`owner-run` rows wait on that pick, do not ask it yourself: open an ask with
+
+    swarm ask --name <name> --rows <row>[,<row>…] --why "<one line: what the owner decides>" "<brief>"
+
+It opens a session in its own tmux window that shows the owner what to look at,
+asks them, and records the picks in those rows. The brief says what to look at
+and where; if you keep a server for it with `swarm keep`, name that keep in the
+brief so the ask stops it. Then finish your own job as usual.
+
 ## Worker questions are not yours
 
 Phase workers ask the owner their own questions. If you notice one waiting, leave

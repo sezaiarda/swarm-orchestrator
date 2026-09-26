@@ -37,7 +37,9 @@ from statistics import median
 from .. import ledger, opqueue, statuses
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
-from ..tui.data import five_outlook, forecast, kept_rows, limit_outlook, typical_durations
+from ..tui.data import (
+    ask_rows, five_outlook, forecast, kept_rows, limit_outlook, typical_durations,
+)
 from .rows import clip
 
 NEEDS_YOU = "needs_you"
@@ -143,6 +145,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         "issues": list(getattr(snap.progress, "issues", []) or [])[:20],
         "cycle": starve.get("cycle", [])[:50],
         "kept": _kept(dash, now),
+        "asks": _asks(dash, now),
     }
 
 
@@ -155,6 +158,17 @@ def _kept(dash, now: float) -> list[dict]:
     """``swarm keep`` records, read-only — the processes left running on purpose."""
     return [{k: row[k] for k in _KEPT_KEYS}
             for row in kept_rows(getattr(dash, "kept", None) or [], now)]
+
+
+#: What the board says about an open ask: what the owner decides and where to
+#: answer. Not its brief, which can name files and hosts on the box.
+_ASK_KEYS = ("name", "rows", "why", "opened_at", "window", "attach", "by")
+
+
+def _asks(dash, now: float) -> list[dict]:
+    """Open asks, read-only — "Waiting on you": answer in each one's window."""
+    return [{k: row[k] for k in _ASK_KEYS}
+            for row in ask_rows(getattr(dash, "asks", None) or [], now) if row["open"]]
 
 
 def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:

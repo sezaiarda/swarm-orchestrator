@@ -20,6 +20,7 @@ import shutil
 import time
 from pathlib import Path
 
+from . import ask as ask_mod
 from . import doctor as doctor_mod
 from . import ledger as ledger_mod
 from . import notes as notes_mod
@@ -154,6 +155,9 @@ def owner_questions(cfg: Config, st: State, now: float) -> list[dict]:
             out.append({"who": f"operator {item.phase}", "state": "operator",
                         "age_s": now - item.asked_at if item.asked_at else None,
                         "question": item.question})
+    for ask in ask_mod.open_asks(cfg):
+        out.append({"who": f"ask {ask.name} ({ask_mod.rows_text(ask.rows)})", "state": "ask",
+                    "age_s": ask.age_s(now), "question": ask.why})
     return out
 
 
@@ -250,6 +254,7 @@ def build(
         st.done, ledger_mod.load_ticked(cfg.project_dir / cfg.ledger), flying
     )
     starve = starvation_map(graph, done, set(cfg.exclude), flying)
+    unasked = ask_mod.owner_run_unasked(cfg, graph, done, set(flying))
     starve["blockers"] = starve["blockers"][:MAX_BLOCKERS]
     starve["cycle"] = starve["cycle"][:20]
     return {
@@ -268,6 +273,9 @@ def build(
         "finished": finished_since(cfg, st, since),
         "failures": failures(cfg, st),
         "owner": owner_questions(cfg, st, now),
+        # Owner-run rows whose dependencies have landed and that no open ask
+        # names: open an ask for the ones the owner answers at a keyboard.
+        "owner_run_unasked": unasked,
         "starvation": starve,
         "resources": resources(cfg),
         "last_pass": last_pass,
@@ -361,6 +369,14 @@ def render(d: dict) -> str:
         f"- {q['who']} ({q['state']}, {_age(q['age_s'])}): {q['question'] or '(question not recorded)'}"
         for q in d["owner"]
     ] or ["- nobody"]
+
+    unasked = d.get("owner_run_unasked") or []
+    out += ["", f"## Owner-run rows ready, no ask open ({len(unasked)})"]
+    if unasked:
+        out.append("Their dependencies have landed and no ask names them. Open one"
+                   " (`swarm ask`) for a review or pick the owner makes at a keyboard;"
+                   " leave the physical ones and name them in your summary.")
+    out += [f"- {row}" for row in unasked] or ["- none"]
 
     s = d["starvation"]
     out += ["", "## Starvation map",

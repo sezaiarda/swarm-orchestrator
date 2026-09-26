@@ -47,6 +47,8 @@ KINDS = (
     "overseer",  # supervisor: an Overseer pass hung past its timeout / would not start
     "overseer-ask",  # cli: the Overseer is waiting on an owner-level decision
     "overseer-digest",  # cli.notify: the Overseer's summary to the owner (+ usage footer)
+    "ask",  # ask.open_session: rows wait on the owner in window ask:<name> (once per ask)
+    "ask-done",  # cli.ask-done: an ask's outcome (sent only with --attention)
     "bot-reply",  # tgbot: an answer to the owner's /usage or /help
     "worktree-fail",  # launch: the phase mirror could not be created
     "spawn-fail",  # launch: the worker process/pane would not start

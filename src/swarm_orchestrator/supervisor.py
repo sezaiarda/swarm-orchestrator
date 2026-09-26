@@ -48,6 +48,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from . import ask as ask_mod
 from . import doctor as doctor_mod
 from . import gc as gc_mod
 from . import gitq
@@ -153,6 +154,10 @@ class Supervisor:
         self._gc_idle_since: float | None = None
         self._gc_episode = 0
         self._gc_episode_done = -1
+        # Asks whose window an opener thread is building right now, so a second
+        # poke for the same one does not open two windows.
+        self._ask_lock = threading.Lock()
+        self._asks_opening: set[str] = set()
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -375,6 +380,10 @@ class Supervisor:
                 parts[1] if len(parts) > 1 else "?",
                 parts[2] if len(parts) > 2 else "failed",
             )
+        elif verb == "ask-open":
+            self._on_ask_open(parts[1] if len(parts) > 1 else "?", "asked")
+        elif verb == "ask-done":
+            self._on_ask_done(parts[1] if len(parts) > 1 else "?")
         elif verb == "overseer-now":
             self.overseer.request(
                 overseer_mod.MANUAL, "requested by `swarm overseer --now`", urgent=True
@@ -394,6 +403,10 @@ class Supervisor:
         if no master could be started, happens now. A master that hangs cannot
         hold launching for longer than one watchdog interval."""
         self._bootstrapped = True
+        # Asks that were open when the last run stopped: the owner cannot answer
+        # a dead window, so each opens again with the brief its record holds.
+        for name in ask_mod.open_names(self.cfg):
+            self._on_ask_open(name, "reopened at swarm up")
         if self.master.is_alive():
             self.log.line("BOOTSTRAP-IGNORED master-alive")
             self._end_bootstrap()
@@ -669,6 +682,11 @@ class Supervisor:
                     # An operator job's mirror, not a ledger phase: its work is
                     # landed, and there is nothing to record done or free.
                     self.log.line(f"OPERATOR-INTEGRATED {phase}")
+                elif status == ask_mod.INTEG_STATUS:
+                    # An ask's mirror: the owner's picks and ticks are on main
+                    # now, and a ticked owner-run row can release its dependents.
+                    self.log.line(f"ASK-INTEGRATED {phase}")
+                    self._fill_slots(f"ask answered ({phase})")
                 elif status == ovrecord.INTEG_STATUS:
                     # An Overseer pass's mirror: its ledger edits are on main now,
                     # so the launcher may have new work to pick up.
@@ -846,6 +864,54 @@ class Supervisor:
         launch path returns early — a deadlock, not a guard."""
         return operator_mod.blocking(self.cfg)
 
+    # -- asks: a window where the owner answers review questions ----------
+    def _on_ask_open(self, name: str, reason: str) -> None:
+        """Open an ask's window (``swarm ask``, ``swarm ask --reopen``, ``up``).
+
+        On a thread: building a mirror and booting ``claude`` take tens of
+        seconds the loop must not spend. It takes no slot and has no timer; the
+        record under ``<state>/ask/`` is all the state there is.
+
+        An ask a worker opened before its own ``swarm done`` waits for that
+        phase to land, as an operator hand-off does: its mirror branches from
+        main, and what the owner reviews (and the rows it edits) must be there.
+        :meth:`_advance_done` opens it then."""
+        ask = ask_mod.load(self.cfg, name)
+        phase = ask_mod.opened_by_phase(ask) if ask is not None else None
+        if phase and operator_mod._in_flight(state_mod.read(self.cfg), phase):
+            self.log.line(f"ASK-HELD {name} until {phase} lands")
+            return
+        with self._ask_lock:
+            if name in self._asks_opening:
+                self.log.line(f"ASK-OPEN-BUSY {name}")
+                return
+            self._asks_opening.add(name)
+        self.log.line(f"EVENT ask-open {name} ({reason})")
+        threading.Thread(target=self._ask_open_thread, args=(name, reason),
+                         name=f"ask:{name}", daemon=True).start()
+
+    def _ask_open_thread(self, name: str, reason: str) -> None:
+        try:
+            ask_mod.open_session(self.cfg, name, self.log, reason=reason)
+        except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
+            self.log.line(f"ASK-OPEN-ERROR {name} {exc!r}")
+        finally:
+            with self._ask_lock:
+                self._asks_opening.discard(name)
+
+    def _on_ask_done(self, name: str) -> None:
+        """The ask is answered (its record already says so): close the window
+        and end what the session started BEFORE its mirror is merged and removed,
+        land the mirror through the ordinary queue, re-check the finish."""
+        ask_mod.close_session(self.cfg, name, self.log)
+        mirror = ask_mod.integration_for(self.cfg, name)
+        if mirror is not None:
+            with state_mod.transaction(self.cfg) as st:
+                st.integ_push(mirror, ask_mod.INTEG_STATUS)
+            self._pump_integrations()
+        self.log.line(f"EVENT ask-done {name} mirror={mirror}")
+        self._finish_if_settled()
+
     # -- parking: a worker waiting on the owner vacates its slot after a delay --
     def _on_waiting(self, phase: str) -> None:
         """Arm the park timer for a worker that self-reported it needs the owner.
@@ -1011,8 +1077,8 @@ class Supervisor:
         a launch settling, the init master idling, an operator session ending, a
         resume, a watchdog sweep. It holds while anything is still owed: a busy,
         waiting or parked phase, a launch in flight, an integration queued or
-        held, a push origin does not have yet, an operator hand-off, a live
-        master mid-pass — or a ready phase, because the launcher owns that one
+        held, a push origin does not have yet, an operator hand-off, an open ask
+        (it waits on the owner, like a parked phase), a live master mid-pass — or a ready phase, because the launcher owns that one
         (a phase given up on after :data:`LAUNCH_GIVE_UP` failed launches does
         not hold it; the finish message names it instead)."""
         if st is None:
@@ -1032,6 +1098,12 @@ class Supervisor:
             return
         if st.push_owed:
             self.log.line(f"{tag}-HELD push-owed={sorted(st.push_owed)}")
+            return
+        asks = ask_mod.open_names(self.cfg)
+        if asks:
+            # Waiting on the owner, the way a parked phase is: its window is
+            # where they answer, and finishing would leave that unheard.
+            self.log.line(f"{tag}-HELD asks={asks}")
             return
         owed = self._operator_blocking()
         if owed:
@@ -1198,6 +1270,9 @@ class Supervisor:
         # the first at which the work the session is briefed about is actually in
         # main. A session opened any earlier acts on a phantom.
         operator_mod.on_finished(self.cfg, phase, self.log)
+        for ask in ask_mod.open_asks(self.cfg):
+            if ask_mod.opened_by_phase(ask) == phase and not ask.window_at:
+                self._on_ask_open(ask.name, f"{phase} landed")
         if paused:
             # Paused: the slot is freed but we launch nothing and hold, so
             # in-flight workers drain without advancing.

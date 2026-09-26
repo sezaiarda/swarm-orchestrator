@@ -160,6 +160,28 @@ def kill_window(window_id: str) -> None:
     run(["kill-window", "-t", window_id])
 
 
+def find_window(session: str, name: str) -> str | None:
+    """The id of the window named ``name`` in ``session``, or ``None``.
+
+    By name, not by a recorded id: window ids restart at ``@0`` with every tmux
+    server, so an id recorded before a ``swarm down`` can name another window.
+    """
+    out = run(["list-windows", "-t", f"={session}", "-F", "#{window_id}\t#{window_name}"])
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        wid, _, wname = line.partition("\t")
+        if wname == name:
+            return wid
+    return None
+
+
+def window_alive(window_id: str) -> bool:
+    """Does ``window_id`` exist with a pane whose process is still running?"""
+    out = run(["list-panes", "-t", window_id, "-F", "#{pane_dead}"])
+    return out.returncode == 0 and any(v.strip() == "0" for v in out.stdout.splitlines())
+
+
 def kill_pane(pane_id: str) -> None:
     """Kill one pane by id (used when a window's slot count shrinks)."""
     run(["kill-pane", "-t", pane_id])

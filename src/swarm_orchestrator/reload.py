@@ -158,6 +158,9 @@ POLICY: dict[str, Policy] = {
            " happens, so the next conflict uses the new rules — it cannot"
            " retroactively fix an integration that is already held; retry that one"
            " with `swarm resolved <phase>` once the tree is clean"),
+        _p("git_auto_resolve_check", "[git]", "auto_resolve_check", HOT, None,
+           "gitq._auto_resolve reads the check table right after it settles a"
+           " conflict, so the next automatic merge runs the new checks"),
         _p("ledger", "[tasks]", "ledger", HOT, None,
            "build_context loads the ledger from disk on every pass"),
         _p("exclude", "[tasks]", "exclude", HOT, None,

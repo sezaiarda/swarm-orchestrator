@@ -377,3 +377,33 @@ def test_changelog_union_resolves_in_a_component_repo(monkeypatch, tmp_path):
     lessons = (v / "tasks" / "lessons.md").read_text()
     assert "- P1 lesson" in lessons and "- P2 lesson" in lessons
     assert "AUTORESOLVE" in cfg.supervisor_log.read_text()
+
+
+def test_a_failed_auto_resolve_check_leaves_a_real_conflict(monkeypatch, tmp_path):
+    """The check fails after the journal merged cleanly in memory: the repo must
+    be exactly mid-merge again, markers on disk and the path still unmerged, so
+    the resolver takes it as if no automatic merge had been tried."""
+    project, repos = _make_workspace(tmp_path)
+    v = repos["pricing"]
+    (v / "CHANGELOG.md").write_text("# Changelog\n\n## 0.1.0\n- first\n")
+    _git(v, "add", "-A")
+    _git(v, "commit", "-m", "journal")
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    cfg.git_auto_resolve = {"CHANGELOG.md": "union"}
+    cfg.git_auto_resolve_check = {"CHANGELOG.md": "false"}
+    log = Log(cfg.supervisor_log)
+    try:
+        wts = {p: gitq.worktree_add(cfg, p, log) for p in ("P1", "P2")}
+        for p, wt in wts.items():
+            cl = wt / "pricing" / "CHANGELOG.md"
+            cl.write_text(cl.read_text().replace("\n\n## 0.1.0", f"\n\n## {p}\n\n## 0.1.0"))
+            _git(wt / "pricing", "add", "-A")
+            _git(wt / "pricing", "commit", "-m", p)
+        assert gitq.integrate(cfg, "P1", log) == gitq.MERGED
+        assert gitq.integrate(cfg, "P2", log) == gitq.CONFLICT
+    finally:
+        log.close()
+    assert gitq.blocked_repo(cfg, "P2") == v
+    assert _out(v, "diff", "--name-only", "--diff-filter=U").split() == ["CHANGELOG.md"]
+    assert "<<<<<<<" in (v / "CHANGELOG.md").read_text()
+    assert "AUTORESOLVE-CHECK-FAILED P2 pricing" in cfg.supervisor_log.read_text()

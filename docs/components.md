@@ -356,11 +356,17 @@ a strategy:
 - **`union`:** a real three-way merge that keeps both sides where they differ.
   It suits append-only journals.
 - **`keyed:<regex>`:** splits the file into records keyed by the regex's first
-  group and merges per key. Only a key both sides changed differently is a
-  conflict. It suits a ledger where two phases tick their own adjacent lines.
+  group and merges per key. A record both sides changed is merged line by line,
+  then word by word; two additions at the same place keep both. Only words both
+  sides rewrote differently are a conflict. It suits a ledger where sessions
+  tick rows and append notes to them.
 
-It is all-or-nothing: if any conflicted file has no strategy, or a strategy
-declines, the tree is left exactly as the failed merge left it.
+`[git].auto_resolve_check` can name a command per path glob (the project's
+ledger gate, say). It runs in that repo on the merged text, and a failure counts
+as a decline.
+
+It is all-or-nothing: if any conflicted file has no strategy, or a strategy or
+check declines, the tree is left exactly as the failed merge left it.
 
 A merge can end four ways:
 

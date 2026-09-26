@@ -62,6 +62,7 @@ PUSH_FAILED = "push_failed"
 DONE_INTEGRATE = statuses.INTEGRATES
 
 _GIT_TIMEOUT_S = 120.0
+_CHECK_TIMEOUT_S = 300.0  # an [git].auto_resolve_check run; it holds the repo lock
 _PUSH_ATTEMPTS = 5
 
 #: Where work is kept instead of deleted: ``refs/swarm-attic/<phase>/<utc-stamp>``.
@@ -871,14 +872,21 @@ def _auto_resolve(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
             log.line(f"AUTORESOLVE-DECLINED {phase} {repo.name} {rel} {how}")
             return False
         resolved[rel] = merged
-    staged: list[str] = []
+    left: dict[str, str] = {}  # the failed merge's own text, to put back on a refusal
     for rel, merged in resolved.items():
         try:
+            left[rel] = (repo / rel).read_text(encoding="utf-8")
             (repo / rel).write_text(merged, encoding="utf-8")
         except OSError as exc:
             log.line(f"AUTORESOLVE-WRITE-FAIL {phase} {repo.name} {rel} {exc}")
+            _restore(repo, left)
             return False
-        staged.append(rel)
+    failed = _check_resolved(cfg, repo, list(resolved))
+    if failed:
+        log.line(f"AUTORESOLVE-CHECK-FAILED {phase} {repo.name} {failed}")
+        _restore(repo, left)
+        return False
+    staged = list(resolved)
     for rel in staged:
         _git(repo, "add", "--", rel)
     committed = _git(repo, "commit", "--no-edit", check=False)
@@ -911,6 +919,43 @@ def _merge_failed(repo: Path, phase: str, tag: str, log: Log) -> str:
         return CONFLICT
     log.line(f"INTEGRATE-REFUSED {phase} {repo.name} files in the way")
     return DIRTY
+
+
+def _check_resolved(cfg: Config, repo: Path, paths: list[str]) -> str:
+    """Run the ``[git].auto_resolve_check`` command of every resolved path, in
+    ``repo`` with the merged text on disk. ``""`` = all passed, else what failed.
+
+    A mechanical merge keeps both sides' words but cannot know what they mean
+    together: two rows that merge cleanly can still make two phases on one repo
+    runnable at once. A project that can check such a rule by script names it
+    here, and a failure hands the conflict to the resolver instead."""
+    table = getattr(cfg, "git_auto_resolve_check", {}) or {}
+    cmds = dict.fromkeys(
+        c for c in (automerge.strategy_for(rel, table) for rel in paths) if c
+    )
+    for cmd in cmds:
+        try:
+            ran = subprocess.run(
+                cmd, shell=True, cwd=repo, capture_output=True, text=True,
+                timeout=_CHECK_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"{cmd!r}: {exc}"[:300]
+        if ran.returncode != 0:
+            tail = (ran.stdout + ran.stderr).strip().splitlines()[-1:] or [""]
+            return f"{cmd!r} exit {ran.returncode}: {tail[0]}"[:300]
+    return ""
+
+
+def _restore(repo: Path, texts: dict[str, str]) -> None:
+    """Put back what the failed merge left in each file (markers and all), so
+    the resolver finds the tree exactly as git left it. The index was never
+    touched, so the paths are still unmerged."""
+    for rel, text in texts.items():
+        try:
+            (repo / rel).write_text(text, encoding="utf-8")
+        except OSError:
+            pass
 
 
 def _integrate_one(

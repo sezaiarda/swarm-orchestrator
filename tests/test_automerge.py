@@ -299,8 +299,8 @@ class FakeMerge:
         return any(call[:1] == (verb,) for call in self.calls)
 
 
-def _cfg(table: dict[str, str]):
-    return SimpleNamespace(git_auto_resolve=table)
+def _cfg(table: dict[str, str], checks: dict[str, str] | None = None):
+    return SimpleNamespace(git_auto_resolve=table, git_auto_resolve_check=checks or {})
 
 
 def test_auto_resolve_with_no_strategies_never_touches_git(tmp_path, monkeypatch):
@@ -380,6 +380,48 @@ def test_a_late_decline_leaves_earlier_files_as_the_merge_left_them(tmp_path, mo
 
     assert gitq._auto_resolve(_cfg(table), tmp_path, "P1", _Log()) is False
     assert (tmp_path / "docs/FINDINGS.md").read_text() == MARKERS
+
+
+def _ledger_merge(tmp_path, monkeypatch) -> FakeMerge:
+    fake = FakeMerge(
+        tmp_path,
+        {"docs/PHASE-LEDGER.md": (LEDGER, tick(LEDGER, "P1"), tick(LEDGER, "P2"))},
+    )
+    monkeypatch.setattr(gitq, "_git", fake)
+    return fake
+
+
+def test_a_passing_check_runs_on_the_merged_text_then_commits(tmp_path, monkeypatch):
+    fake = _ledger_merge(tmp_path, monkeypatch)
+    checks = {"docs/PHASE-LEDGER.md": "grep -c 'x\\] `P2`' docs/PHASE-LEDGER.md > seen"}
+
+    assert gitq._auto_resolve(_cfg({"docs/PHASE-LEDGER.md": KEYED}, checks), tmp_path, "P1", _Log())
+
+    assert (tmp_path / "seen").read_text().strip() == "1"  # ran in the repo, on merged text
+    assert fake.did("commit")
+
+
+def test_a_failing_check_hands_the_untouched_conflict_to_the_resolver(tmp_path, monkeypatch):
+    fake = _ledger_merge(tmp_path, monkeypatch)
+    log = _Log()
+    checks = {"docs/PHASE-LEDGER.md": "echo 'two same-repo phases runnable at once'; exit 1"}
+
+    assert gitq._auto_resolve(_cfg({"docs/PHASE-LEDGER.md": KEYED}, checks), tmp_path, "P1", log) is False
+
+    assert (tmp_path / "docs/PHASE-LEDGER.md").read_text() == MARKERS
+    assert not fake.did("add") and not fake.did("commit")
+    failed = [ln for ln in log.lines if ln.startswith("AUTORESOLVE-CHECK-FAILED P1")]
+    assert failed and "same-repo phases" in failed[0], log.lines
+
+
+def test_a_check_runs_only_for_the_paths_it_names(tmp_path, monkeypatch):
+    """A component repo has no ledger gate: its journal merge must not run it."""
+    fake = FakeMerge(tmp_path, {"docs/STATUS.md": ("o\n", "x\no\n", "y\no\n")})
+    monkeypatch.setattr(gitq, "_git", fake)
+    checks = {"docs/PHASE-LEDGER.md": "exit 1"}
+
+    assert gitq._auto_resolve(_cfg({"STATUS.md": "union"}, checks), tmp_path, "P1", _Log())
+    assert fake.did("commit")
 
 
 def test_a_bare_journal_key_matches_that_journal_in_every_repo():

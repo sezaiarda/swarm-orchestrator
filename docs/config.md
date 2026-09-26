@@ -101,6 +101,7 @@ Leave the table out for in-place work (`isolation = "none"`).
 | `main_branch` | `"master"` | `SWARM_GIT_MAIN` | hot, refused while a phase is in flight | The umbrella repo's integration branch. A component repo uses it when the branch exists there, and otherwise the branch it has checked out. |
 | `repos` | `["*"]` | `SWARM_GIT_REPOS` (comma list) | hot, growing only | Globs, relative to the project root, that pick the component repos to mirror. Only directories with a `.git` count, and dot-names never match. A single-repo project matches none and gets an umbrella-only mirror. Dropping a repo while a phase is in flight is refused. |
 | `auto_resolve` | `{}` | | hot | Path glob mapped to `"union"` or `"keyed:<regex>"`. The integrator tries these before it opens a resolver session (see the README). |
+| `auto_resolve_check` | `{}` | | hot | Path glob mapped to a shell command. After `auto_resolve` settles a matching file, the command runs in that repo on the merged text; a non-zero exit (or 5 minutes) puts the conflict back and opens the resolver instead. |
 
 Example:
 
@@ -110,6 +111,7 @@ isolation    = "worktree"
 main_branch  = "master"
 repos        = ["*"]
 auto_resolve = { "docs/PHASE-LEDGER.md" = "keyed:^- \\[[ x]\\] `([A-Za-z0-9_.-]+)`", "CHANGELOG.md" = "union" }
+auto_resolve_check = { "docs/PHASE-LEDGER.md" = "python3 ci/ledger-gate.py" }
 ```
 
 ## `[build]`

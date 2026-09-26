@@ -318,9 +318,11 @@ stateDiagram-v2
 - **Conflicts:** a conflicted merge is first offered to `[git].auto_resolve`
   (`automerge.py`), a map from a path glob to a strategy:
   - `union` keeps both sides, for journals;
-  - `keyed:<regex>` merges record by record, for ledger ticks.
+  - `keyed:<regex>` merges record by record (word by word inside a record both
+    sides changed), for ledger ticks and notes.
 
-  It is all-or-nothing. Only if that fails is the queue **held** and a
+  `[git].auto_resolve_check` can name a command that must pass on the merged
+  text. It is all-or-nothing. Only if that fails is the queue **held** and a
   **resolver** opened: a Claude session in window `resolve-<phase>`, in the
   conflicted repo (`prompts/resolver.md`).
 - **The resolver may:** resolve every marker so that both sides' intent survives,

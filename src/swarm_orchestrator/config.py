@@ -79,6 +79,7 @@ class Config:
     git_main_branch: str
     git_repos: list[str]
     git_auto_resolve: dict[str, str]
+    git_auto_resolve_check: dict[str, str]
     build_max_concurrent: int
     build_jobs: int
     build_cache: bool
@@ -339,6 +340,11 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # is spawned; anything unmatched or genuinely conflicting falls through.
         git_auto_resolve={
             str(k): str(v) for k, v in (git.get("auto_resolve") or {}).items()
+        },
+        # path-glob -> shell command, run in the repo after an auto_resolve of a
+        # matching path; a non-zero exit hands the conflict to the resolver.
+        git_auto_resolve_check={
+            str(k): str(v) for k, v in (git.get("auto_resolve_check") or {}).items()
         },
         git_main_branch=os.environ.get(
             "SWARM_GIT_MAIN", str(git.get("main_branch", "master"))

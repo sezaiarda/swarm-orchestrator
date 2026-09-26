@@ -442,6 +442,8 @@ FIELDS: tuple[Setting, ...] = (
     Setting("git_repos", LIST, "globs picking the child repos a mirror includes"),
     Setting("git_auto_resolve", FROZEN,
             "glob -> union|keyed:<re>, tried before a resolver"),
+    Setting("git_auto_resolve_check", FROZEN,
+            "glob -> command that must pass after one"),
     # -- [operator] -------------------------------------------------------
     Setting("operator_enabled", BOOL,
             "arm autonomous sessions for `operator` finishes"),

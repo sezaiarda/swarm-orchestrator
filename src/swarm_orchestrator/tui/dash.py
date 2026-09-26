@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .. import opqueue, ovrecord
+from .. import bigpic, opqueue, ovrecord
 from .. import runs as runs_mod
 from .. import usage as usage_mod
 from ..meters import LIMITS_LOG, METERS_DIR
@@ -120,6 +120,9 @@ class Dash:
         self._kept_at = 0.0
         #: ``swarm ask`` records, open first — the asks tab.
         self.asks: list = []
+        #: The big-picture pass in a few words, for the headline.
+        self.big_picture = ""
+        self._bigpic = bigpic.Memory()
         self._live_pass: str | None = None
         self._passes_live: object = ()
         self._samples = usage_mod.SampleTail(cfg.state_dir / METERS_DIR / LIMITS_LOG)
@@ -225,6 +228,12 @@ class Dash:
         if self._changed("asks", self.cfg.state_dir / "ask"):
             self.asks = load_asks(self.cfg)
             changed.add("asks")
+        if self._changed("bigpic", bigpic.memory_path(self.cfg)):
+            self._bigpic = bigpic.load(self.cfg)
+        text = bigpic.short_text(self._bigpic, now)
+        if text != self.big_picture:
+            self.big_picture = text
+            changed.add("bigpic")
         grew = self._samples.poll()
         if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
             self._usage_at = now

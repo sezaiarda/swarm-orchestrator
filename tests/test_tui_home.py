@@ -220,6 +220,14 @@ def test_headline_skips_a_campaign_the_ledger_already_ticked():
     assert "read" not in text
 
 
+def test_headline_says_when_the_big_picture_was_refreshed():
+    graph = {f"dash-W{i}": set() for i in range(1, 4)}
+    dash = FakeDash(data.Snapshot(ok=True, slots=[slot(0, "dash-W1")]), graph=graph)
+    assert "big picture" not in plain(home.headline(dash, 76))
+    dash.big_picture = "big picture 2.0h ago"
+    assert "big picture 2.0h ago" in plain(home.headline(dash, 76))
+
+
 def test_headline_carries_an_eta():
     graph = {f"dash-W{i}": set() for i in range(1, 9)}
     dash = FakeDash(

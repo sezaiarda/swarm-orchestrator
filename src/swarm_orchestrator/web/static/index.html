@@ -288,6 +288,8 @@ function header(b) {
   parts.push(`<div class="meter"><b>run</b><span class="sub">${r ? esc((r.id || "") + " · " + dur((r.hours || 0) * 3600) + " · " + (r.finished || 0) + " done" + (r.usd != null ? " · $" + r.usd.toFixed(0) : "")) : "no run open"}</span></div>`);
   const p = h.last_pass;
   parts.push(`<div class="meter"><b>Overseer</b><span class="sub">${p ? esc(p.status + " · " + ago(p.ended_at || p.started_at)) : "no pass yet"}</span></div>`);
+  const bp = h.big_picture;
+  if (bp) parts.push(`<div class="meter"><b>Big picture</b><span class="sub">${esc(bp.text + (bp.at ? " · " + ago(bp.at) : ""))}</span></div>`);
   $("#strip").innerHTML = parts.join("");
 }
 function chips(b) {

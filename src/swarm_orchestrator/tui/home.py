@@ -244,6 +244,8 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
         )
     if not snap.ok:
         counts.append(paint("run not started — `swarm up`", MUTED))
+    if getattr(dash, "big_picture", ""):
+        counts.append(paint(escape(dash.big_picture), MUTED))
     lines = [first]
     if what and not compact:
         lines.append(PAD + paint(escape(clip(what, inner)), MUTED))

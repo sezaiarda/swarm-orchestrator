@@ -34,7 +34,7 @@ from __future__ import annotations
 import time
 from statistics import median
 
-from .. import ledger, opqueue, statuses
+from .. import bigpic, ledger, opqueue, statuses
 from ..drain import line as drain_line
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
@@ -433,6 +433,7 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         "last_pass": {"id": last.id, "status": last.status, "started_at": last.started_at,
                       "ended_at": last.ended_at, "summary": clip(last.summary, 300)}
         if last else None,
+        "big_picture": bigpic.web_view(cfg, bigpic.load(cfg)),
     }
 
 

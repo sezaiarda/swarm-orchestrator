@@ -181,6 +181,7 @@ def test_header_counts_and_slots(feed):
     assert h["eta"]["remaining"] == sum(
         1 for p, col in EXPECTED.items() if col in board_mod.OPEN)
     assert set(h["usage"]) == {"five", "week"}
+    assert h["big_picture"] == {"text": "off · no pass yet", "at": 0.0}  # the suite turns it off
 
 
 def test_ledger_ordering_and_done_newest_first(feed):

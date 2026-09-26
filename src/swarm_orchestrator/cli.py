@@ -1540,17 +1540,13 @@ def cmd_notify(cfg: Config, message: str, attention: bool = False) -> int:
     swarm ping. Best-effort, like all of them: a failed send is exit 1, never an
     exception.
 
-    Sent from an Overseer pass, it is the pass's summary to the owner, and it
-    ends with the usage block (:func:`usage.brief_for`): where the 5-hour and
-    weekly limits stand and what this run uses per hour.
+    Sent from an Overseer pass, it is the pass's summary to the owner.
     """
     kind = "master-note"
     held = None
     if os.environ.get("SWARM_MASTER_KIND") == master_mod.OVERSEER:
         kind = "overseer-digest"
         held = _summary_hold(cfg, attention)
-        if not held:
-            message = telegram.with_footer(message, usage_mod.brief_for(cfg))
     session = os.environ.get(SESSION_ENV, "")
     if session.startswith("resolver:"):
         # A resolver only messages the owner when it gives up on the conflict.

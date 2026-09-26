@@ -1,7 +1,7 @@
-"""The usage block and the bot's command listener.
+"""The bot's ``/usage`` answer and its command listener.
 
-The block (``usage.brief``) is one formatter behind two readers: the footer on
-the Overseer's summary ping and the bot's ``/usage`` answer. The listener is
+The answer (``usage.brief``) is plain and short: both limits, how old the
+reading is, and the usage caps. The listener is
 driven without a network: its API call, reply and clock are injected, and the
 end-to-end ``up``/``down`` test points it at a fake Bot API on loopback.
 """
@@ -41,57 +41,51 @@ def _sample(ts: float, five=23.0, week=41.0) -> Sample:
 
 
 # -- the formatter ---------------------------------------------------------------
-def test_brief_reads_like_the_owner_asked():
-    out = usage_mod.brief([_sample(NOW - 20)], _run(), NOW)
+def test_brief_is_plain_and_short():
+    out = usage_mod.brief([_sample(NOW - 20)], NOW, ["No usage cap reached."])
     assert out.splitlines() == [
-        "usage (as of 14:04, just now):",
-        "5-hour 23% · resets 16:00",
-        "weekly 41% · resets Sat 11:00",
-        "this run (6.2 h): 5-hour 2.1 %/h · weekly 0.9 %/h · 14 phases · $/h 11.05",
+        "Weekly 41%, resets Sat 11:00.",
+        "5-hour 23%, resets 16:00.",
+        "Read at 14:04, just now.",
+        "No usage cap reached.",
     ]
 
 
-def test_brief_says_how_old_a_stale_sample_is():
-    out = usage_mod.brief([_sample(NOW - 3 * 3600)], _run(), NOW)
-    head = out.splitlines()[0]
-    assert "as of 11:05, 3.0 h ago" in head and "stale" in head
+def test_brief_says_how_old_its_reading_is():
+    assert "Read at 11:05, 3.0 h ago." in usage_mod.brief([_sample(NOW - 3 * 3600)], NOW)
 
 
 def test_brief_uses_the_newest_sample_and_not_a_window_that_has_reset_since():
     old = Sample(ts=NOW - 7200, five_pct=80.0, five_resets_at=NOW - 60,
                  week_pct=40.0, week_resets_at=SAT_11)
-    out = usage_mod.brief([old], None, NOW)
-    assert "5-hour ? · window reset 14:04, no sample since" in out
-    assert "weekly 40%" in out
-    out = usage_mod.brief([old, _sample(NOW - 600, five=3.0)], None, NOW)
+    out = usage_mod.brief([old], NOW)
+    assert "5-hour: not known, the window reset at 14:04." in out
+    assert "Weekly 40%" in out
+    out = usage_mod.brief([old, _sample(NOW - 600, five=3.0)], NOW)
     assert "5-hour 3%" in out and "10 min ago" in out
 
 
 def test_brief_without_any_sample_is_one_line():
-    assert usage_mod.brief([], None, NOW) == (
-        "usage: no 5-hour/weekly sample yet (one arrives when a session renders its "
-        "status line)")
-    lines = usage_mod.brief([], _run(), NOW).splitlines()
-    assert len(lines) == 2 and lines[0].startswith("usage: no 5-hour/weekly sample yet")
+    assert usage_mod.brief([], NOW) == (
+        "No usage reading yet. One arrives while a swarm session runs.")
 
 
-def test_brief_names_the_legacy_period_and_dashes_what_is_unknown():
-    cur = _run(legacy=True) | {"five_pct_per_h": None, "usd_per_h": None}
-    last = usage_mod.brief([_sample(NOW)], cur, NOW).splitlines()[-1]
-    assert last.startswith("since the last supervisor start (6.2 h): 5-hour — %/h")
-    assert last.endswith("$/h —")
-
-
-def test_brief_for_never_raises(tmp_path, monkeypatch):
+def test_brief_for_includes_the_cap_state_and_never_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_USAGE", "1")
     cfg = load(project_dir=str(tmp_path))
-    assert usage_mod.brief_for(cfg).startswith("usage: no 5-hour/weekly sample yet")
+    out = usage_mod.brief_for(cfg).splitlines()
+    assert out[0].startswith("No usage reading yet")
+    assert out[1] == ("The swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.")
+    monkeypatch.setenv("SWARM_USAGE", "0")
+    assert usage_mod.brief_for(load(project_dir=str(tmp_path))).endswith("Usage caps are off.")
 
-    def boom(_cfg):
+    def boom(_path):
         raise RuntimeError("disk on fire")
 
-    monkeypatch.setattr(usage_mod, "Sources", boom)
-    assert usage_mod.brief_for(cfg) == "usage: unavailable (RuntimeError: disk on fire)"
+    monkeypatch.setattr(usage_mod, "load_samples", boom)
+    assert usage_mod.brief_for(cfg) == (
+        "Usage is unavailable right now (RuntimeError: disk on fire)")
 
 
 def test_swarm_usage_says_how_old_its_sample_is():
@@ -102,14 +96,6 @@ def test_swarm_usage_says_how_old_its_sample_is():
     assert "sample  as of 13:05, 1.0 h ago — stale" in usage_mod.render(
         cur, [], [_sample(NOW - 3600)], NOW)
     assert "sample  none yet" in usage_mod.render(cur, [], [], NOW)
-
-
-# -- the footer on the Overseer's summary ----------------------------------------
-def test_the_footer_survives_a_message_at_the_cap():
-    footer = "usage (as of 14:05):\n5-hour 23%"
-    out = telegram.with_footer("x" * 5000, footer)
-    assert len(out) <= telegram.MAX_MESSAGE_CHARS and out.endswith(footer)
-    assert telegram.with_footer("short", footer) == f"short\n\n{footer}"
 
 
 @pytest.fixture
@@ -128,7 +114,8 @@ def _ledger(cfg) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def test_the_overseers_summary_ends_with_the_usage_block(cfg, tmp_path, monkeypatch):
+def test_the_overseers_summary_carries_no_usage_footer(cfg, tmp_path, monkeypatch):
+    """Usage reaches the phone only when the owner asks the bot for it."""
     meters = cfg.state_dir / usage_mod.METERS_DIR
     meters.mkdir(parents=True, exist_ok=True)
     row = usage_mod.sample_row(time.time() - 60, None, {"pct": 23, "resets_at": time.time() + 7000},
@@ -137,9 +124,7 @@ def test_the_overseers_summary_ends_with_the_usage_block(cfg, tmp_path, monkeypa
     monkeypatch.setenv("SWARM_MASTER_KIND", "overseer")
     assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "3 done\n1 stuck",
                      "--attention"]) == 0
-    sent = (tmp_path / "tg.log").read_text()
-    assert sent.startswith("3 done\n1 stuck\n\nusage (as of ")
-    assert "5-hour 23% · resets " in sent and "weekly 41% · resets " in sent
+    assert (tmp_path / "tg.log").read_text() == "3 done\n1 stuck\n"
     assert _ledger(cfg)[-1]["kind"] == "overseer-digest"
 
 
@@ -148,14 +133,6 @@ def test_a_notify_from_anyone_else_has_no_footer(cfg, tmp_path, monkeypatch):
     assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "hello"]) == 0
     assert (tmp_path / "tg.log").read_text() == "hello\n"
     assert _ledger(cfg)[-1]["kind"] == "master-note"
-
-
-def test_a_broken_usage_read_never_loses_the_overseers_ping(cfg, tmp_path, monkeypatch):
-    monkeypatch.setenv("SWARM_MASTER_KIND", "overseer")
-    monkeypatch.setattr(usage_mod, "Sources", lambda _c: 1 / 0)
-    assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "summary",
-                     "--attention"]) == 0
-    assert (tmp_path / "tg.log").read_text().startswith("summary\n\nusage: unavailable")
 
 
 # -- the listener ----------------------------------------------------------------
@@ -349,9 +326,9 @@ def test_up_starts_the_listener_and_down_stops_it(swarm, tmp_path):
         assert _wait(pidfile.exists), "the listener never wrote its pid file"
         pid = int(pidfile.read_text())
         # Answered once, to the owner only; the stranger got nothing.
-        assert _wait(lambda: any(line.startswith("usage") for line in swarm.tg_lines()))
+        assert _wait(lambda: any(line.startswith("No usage reading yet") for line in swarm.tg_lines()))
         time.sleep(1.0)
-        assert sum(line.startswith("usage") for line in swarm.tg_lines()) == 1
+        assert sum(line.startswith("No usage reading yet") for line in swarm.tg_lines()) == 1
         doctor = json.loads(swarm.cli("doctor", "--json", check=False).stdout)
         bot = next(c for c in doctor if c["name"] == "telegram.bot")
         assert bot["status"] == "ok" and f"pid {pid}" in bot["detail"]

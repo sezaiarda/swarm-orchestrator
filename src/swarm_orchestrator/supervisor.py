@@ -2047,11 +2047,9 @@ class Supervisor:
                 f"; {len(operator)} operator hand-off(s) undrained: "
                 f"{', '.join(operator[:8])} -- run `swarm operator <phase>`"
             )
-        from . import usage as usage_mod  # the footer only: kept off the hot import path
-
         telegram.notify(
             self.cfg.telegram_notify,
-            telegram.with_footer(msg, usage_mod.brief_for(self.cfg)),
+            msg,
             kind="finish",
             source="supervisor._finish",
         )

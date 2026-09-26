@@ -58,7 +58,7 @@ LOCK_RETRY_S = 60.0  # how often a waiting listener tries to take over
 MAX_AGE_S = 15 * 60
 
 COMMANDS = (
-    ("usage", "5-hour and weekly usage, resets, and this run's averages"),
+    ("usage", "5-hour and weekly usage, and the usage caps"),
     ("help", "this list"),
 )
 HELP = "swarm bot commands:\n" + "\n".join(f"/{c} — {d}" for c, d in COMMANDS)

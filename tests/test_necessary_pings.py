@@ -150,10 +150,10 @@ def _notify(cfg, *args: str) -> int:
 
 
 @pytest.mark.parametrize("key", ["finished", "manual"])
-def test_a_cadence_or_requested_pass_sends_its_summary_with_the_footer(cfg, monkeypatch, key):
+def test_a_cadence_or_requested_pass_sends_its_summary_as_written(cfg, monkeypatch, key):
     _pass(cfg, monkeypatch, key)
     assert _notify(cfg, "10 done, all green") == 0
-    assert sent(cfg).startswith("10 done, all green\n\nusage")
+    assert sent(cfg) == "10 done, all green\n"  # usage only when the owner asks
 
 
 @pytest.mark.parametrize("key", ["every", "starve", "hold:P1", "doctor:x", "owner:P1"])

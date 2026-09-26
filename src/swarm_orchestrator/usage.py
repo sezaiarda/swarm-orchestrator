@@ -450,7 +450,7 @@ def _in(ts: float | None, now: float) -> str:
     return f"{s / 3600:.1f}h" if s < 48 * 3600 else f"{s / 86400:.1f}d"
 
 
-# -- the short block: the Overseer's footer and the bot's `/usage` reply -------
+# -- the short block: the bot's `/usage` reply -----------------------------------
 #: A newest sample older than this is flagged stale: nothing rendered a status
 #: line since, so the percentages may have moved without anyone seeing it.
 STALE_S = 30 * 60
@@ -501,43 +501,39 @@ def _window(samples: list[Sample], which: str, label: str, now: float) -> str:
         if pct is None:
             continue
         if resets is not None and resets <= now:
-            return f"{label} ? · window reset {_clock(resets, now)}, no sample since"
-        when = "reset time unknown" if resets is None else f"resets {_clock(resets, now)}"
-        return f"{label} {pct:.0f}% · {when}"
-    return f"{label} not reported"
+            return f"{label}: not known, the window reset at {_clock(resets, now)}."
+        when = "" if resets is None else f", resets {_clock(resets, now)}"
+        return f"{label} {pct:.0f}%{when}."
+    return f"{label}: not reported."
 
 
-def brief(samples: list[Sample], cur: dict | None, now: float) -> str:
-    """The few-line usage block the Overseer's ping ends with and ``/usage`` answers.
-
-    ``cur`` is :func:`live_summary`'s result: the open run, or the legacy period.
-    """
-    stamp = as_of(samples, now)
-    if stamp is None:
-        lines = ["usage: no 5-hour/weekly sample yet (one arrives when a session "
-                 "renders its status line)"]
+def brief(samples: list[Sample], now: float, cap_lines: list[str] = ()) -> str:
+    """The bot's answer to ``/usage``: both limits, how old they are, and the caps."""
+    s = newest_sample(samples)
+    if s is None:
+        lines = ["No usage reading yet. One arrives while a swarm session runs."]
     else:
-        lines = [f"usage ({stamp}):",
+        lines = [_window(samples, "week", "Weekly", now),
                  _window(samples, "five", "5-hour", now),
-                 _window(samples, "week", "weekly", now)]
-    if cur is not None:
-        span = "since the last supervisor start" if cur.get("legacy") else "this run"
-        lines.append(
-            f"{span} ({cur['hours']:.1f} h): "
-            f"5-hour {_f(cur['five_pct_per_h'])} %/h · weekly {_f(cur['week_pct_per_h'])} %/h"
-            f" · {cur['phases_finished']} phases · $/h {_f(cur['usd_per_h'], '{:.2f}')}")
-    return "\n".join(lines)
+                 f"Read at {_clock(s.ts, now)}, {_ago(max(0.0, now - s.ts))}."]
+    return "\n".join([*lines, *cap_lines])
 
 
 def brief_for(cfg, now: float | None = None) -> str:
-    """:func:`brief` for a project, read from disk. Never raises: a ping must
-    not be lost over its footer."""
+    """:func:`brief` for a project, read from disk. Never raises: the bot must answer."""
+    from . import caps, state as state_mod  # caps imports this module
+
     now = time.time() if now is None else now
     try:
-        src = Sources(cfg)
-        return brief(src.samples, live_summary(cfg, src, now), now)
+        samples = load_samples(Path(cfg.state_dir) / METERS_DIR / LIMITS_LOG)
+        if not cfg.usage_enabled:
+            cap = ["Usage caps are off."]
+        else:
+            cap = (caps.describe_hold(state_mod.read(cfg).usage_hold, now)
+                   or [caps.limits_line(cfg.usage_rules)])
+        return brief(samples, now, cap)
     except Exception as exc:  # noqa: BLE001 - diagnostics only, never fatal
-        return f"usage: unavailable ({type(exc).__name__}: {exc})"[:300]
+        return f"Usage is unavailable right now ({type(exc).__name__}: {exc})"[:300]
 
 
 def render(cur: dict | None, past: list[dict], samples: list[Sample], now: float) -> str:

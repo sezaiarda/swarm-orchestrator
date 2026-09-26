@@ -316,7 +316,7 @@ def test_finish_is_idempotent_and_surfaces_leftover(monkeypatch, tmp_path):
         assert sent.count("swarm finished") == 1
         assert "2 phase(s) done" in tg[0]
         assert "unlaunched" in tg[0] and "P1" in tg[0] and "P7" in tg[0]
-        assert "\n\nusage" in sent  # the run's last word carries the usage footer
+        assert "usage" not in sent  # usage reaches the phone only when asked
         # rule: finish fires exactly once -- a second call is a no-op.
         sup._finish(2, ["P1", "P7"])
         assert (tmp_path / "tg.log").read_text() == sent

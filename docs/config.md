@@ -53,7 +53,7 @@ way, which is why `[operator].notify` is "next" too.
 | `worker_settings` | `'{"teammateMode":"in-process"}'` | `SWARM_WORKER_SETTINGS` | next | JSON merged over the user's settings via `--settings`. The meters status-line tap is added unless this JSON sets its own `statusLine`. Register `scripts/stop-hook.py` here as a `Stop` hook to get recaps (see below). `""` passes no settings. |
 | `effort` | `"high"` | `SWARM_WORKER_EFFORT` | next | `claude --effort` for every worker: one of `low`, `medium`, `high`, `xhigh` or `max`. `""` inherits the user's setting. |
 | `done_grace_s` | `0` | `SWARM_DONE_GRACE` | next | Seconds a worker keeps its slot after `swarm done` before the supervisor is poked. A detached child sleeps and then delivers the poke, so `swarm done` itself returns at once. |
-| `park_after` | `120` | `SWARM_PARK_AFTER` | hot | Seconds a worker may sit in `swarm waiting` before it is parked: its pane moves to `wait:<phase>` and its slot is refilled. `0` disables parking. |
+| `park_after` | `120` | `SWARM_PARK_AFTER` | hot | Seconds any session — worker, operator job or Overseer pass — may sit in `swarm waiting` before it is parked, alive, to its own window, freeing what it held (a worker's slot, the operator window, the master pane). `0` disables parking. |
 
 Registering the Stop hook (the path is wherever this repo lives):
 
@@ -135,20 +135,7 @@ auto_resolve_check = { "docs/PHASE-LEDGER.md" = "python3 ci/ledger-gate.py" }
 | `cmd` | `""` | `SWARM_OPERATOR_CMD` | next | Replaces the built-in session command. With it set, no brief is typed in. |
 | `model` | `""` | | next | `--model` for operator sessions. `""` inherits the user's setting. |
 | `triage_model` | `"haiku"` | | next | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
-| `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | next | Which `operator-done` outcomes ping you. `"attention"` pings none itself: an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed) or `--ask` opens an ask, and the ask's own ping reaches you whatever this says. `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions (`operator-ask`) and abandoned jobs always ping. Any other value counts as `"attention"`. |
-
-## `[ask]`
-
-An ask session (`swarm ask`): the window where the owner answers review
-questions. See [components.md](components.md#asks-where-the-owner-answers-review-questions).
-
-| key | default | env | reload | meaning |
-|---|---|---|---|---|
-| `model` | `""` | `SWARM_ASK_MODEL` | next | `--model` for ask sessions. `""` means `[swarm].master_model` (and, when that is empty too, the user's setting). |
-| `cmd` | `""` | `SWARM_ASK_CMD` | next | Replaces the built-in session command (run as `cd <cwd> && <cmd>`). With it set, no brief is typed in. The tests use it to stand in for `claude`. |
-
-An ask's outcome (`swarm ask-done`) pings by `[operator].notify`: with the default
-`"attention"`, only an outcome passed `--attention`.
+| `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | next | Which `operator-done` outcomes ping you. `"attention"` pings only an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed); a decision only you can make is asked separately, with `swarm waiting <job> "<question>"`, before the job finishes. `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions and abandoned jobs always ping. Any other value counts as `"attention"`. |
 
 ## `[overseer]`
 
@@ -163,7 +150,7 @@ An ask's outcome (`swarm ask-done`) pings by `[operator].notify`: with the defau
 | `owner_wait_s` | `3600` | `SWARM_OVERSEER_OWNER_WAIT` | hot | A phase waiting on you this long triggers a pass, once per phase. |
 | `starve_s` | `600` | `SWARM_OVERSEER_STARVE` | hot | Free slots, nothing launchable and backlog still open for this long triggers a pass, once per episode. |
 | `hold_wait_s` | `600` | `SWARM_OVERSEER_HOLD_WAIT` | hot | A merge conflict the resolver is working on triggers a pass only once it has been held this long. A hold with no resolver, or one the resolver gave up on, triggers at once. |
-| `timeout_s` | `2700` | `SWARM_OVERSEER_TIMEOUT` | next | A pass still running after this is killed, and whatever it committed is merged. `overseer-ask` stretches the deadline while you are being asked. |
+| `timeout_s` | `2700` | `SWARM_OVERSEER_TIMEOUT` | next | A pass still running after this is killed, and whatever it committed is merged. `swarm waiting` stretches the deadline while you are being asked. |
 
 ## `[usage]`
 

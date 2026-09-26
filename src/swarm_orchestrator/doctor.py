@@ -912,7 +912,7 @@ def _auto_gc(cfg: Config, now: float | None = None) -> tuple[bool, str]:
     now = time.time() if now is None else now
     rec = gc_mod.read_record(cfg)
     if rec is None:
-        return True, "automatic gc has not run yet (it runs when the swarm idles and daily)"
+        return True, "automatic gc has not run yet (it runs every [gc].every_s and when the swarm idles)"
     ts = float(rec.get("ts") or 0.0)
     when = _human_age(now - ts)
     if rec.get("outcome") == gc_mod.AUTO_FAILED:

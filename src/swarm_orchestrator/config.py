@@ -407,8 +407,10 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # build caches, which can grow very large. It runs at most
         # once per `every_s` and once per idle episode longer than `idle_s`, only
         # when it can take every build slot without waiting (never during a build).
+        # Every 15 minutes, because a busy run writes a whole superseded generation
+        # of a repo's units per phase; a daily run can let one grow very large.
         gc_auto=_bool_env("SWARM_GC_AUTO", gc.get("auto", True)),
-        gc_every_s=_int_env("SWARM_GC_EVERY", gc.get("every_s"), 86400, minimum=0),
+        gc_every_s=_int_env("SWARM_GC_EVERY", gc.get("every_s"), 900, minimum=0),
         gc_idle_s=_int_env("SWARM_GC_IDLE", gc.get("idle_s"), 1800, minimum=0),
         # Build output untouched this many days goes (`cargo sweep --time N`).
         # Three days keeps every dependency a phase in the current campaign built.

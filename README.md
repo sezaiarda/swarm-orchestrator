@@ -423,11 +423,12 @@ flowchart TD
   dependencies to the root blockers.
 - **`swarm gc`:** reclaims disk. It is a dry run unless you pass `--yes`.
   - **Always planned:** caches of repos that no longer exist, `incremental/`,
-    `cargo sweep` past `keep_days`, orphan mirrors, stale temp dirs.
+    superseded cargo units, `cargo sweep` past `keep_days`, orphan mirrors,
+    stale temp dirs.
   - **Opt-in:** `--aggressive`, `--transcripts`, `--branches`, `--canonical`.
   - **Safety:** it holds every build slot while it deletes.
-  - **Automatic:** the supervisor runs it by itself (`[gc]`): daily, plus once
-    per idle stretch.
+  - **Automatic:** the supervisor runs it by itself (`[gc]`): every 15 minutes,
+    plus once per idle stretch.
 
 ### Dashboard (`swarm tui`)
 

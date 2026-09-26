@@ -188,6 +188,134 @@ def test_a_dry_run_changes_nothing(cfg, tree, sweep_stub):
     assert "DRY RUN" in gc_mod.render(plan)
 
 
+# -- superseded cargo units ------------------------------------------------------
+_OLD = 3 * 3600  # older than the grace window, far younger than keep_days
+
+
+def _unit(
+    profile: Path,
+    pkg: str,
+    h: str,
+    *,
+    by: Path,
+    local: bool = False,
+    stem: str | None = None,
+    kind: str = "lib",
+    features: tuple = (),
+    deps: tuple[str, ...] = (),
+    age: float = _OLD,
+) -> None:
+    """One cargo unit the way cargo lays it out: a fingerprint dir whose hash
+    file holds the unit's fingerprint (little-endian hex, as cargo writes it), a
+    JSON naming its dependencies by fingerprint, an output and a ``.d`` whose
+    first line names the target it was built through (``by``)."""
+    stem = stem or pkg
+    fp = profile / ".fingerprint" / f"{pkg}-{h}"
+    fp.mkdir(parents=True)
+    (fp / f"{kind}-{stem}").write_text(int(h, 16).to_bytes(8, "little").hex())
+    (fp / f"{kind}-{stem}.json").write_text(json.dumps({
+        "features": json.dumps(list(features)), "profile": 1, "target": 2,
+        "compile_kind": 0, "rustflags": [],
+        "deps": [[0, d, False, int(d.rsplit("-", 1)[1], 16)] for d in deps],
+    }))
+    out = profile / "deps" / (f"lib{stem}-{h}.rlib" if kind == "lib" else f"{stem}-{h}")
+    _fill(out)
+    src = f"tests/{stem}.rs" if local else f"/home/u/.cargo/registry/src/{pkg}/lib.rs"
+    dinfo = profile / "deps" / f"{stem}-{h}.d"
+    dinfo.write_text(f"{by}/debug/deps/{out.name}: {src}\n")
+    stamp = time.time() - age
+    for p in (fp, *fp.iterdir(), out, dinfo):
+        os.utime(p, (stamp, stamp))
+
+
+@pytest.fixture
+def cargo_cache(cfg):
+    """A real (unlinked) ``cache/target/<repo>/debug`` holding two finished
+    phases' worth of units, ``P-old`` and ``P-new``."""
+    profile = cfg.build_cache_dir / gitq._slug(cfg.project_dir) / "debug"
+    wt = {p: cfg.wt_dir / p / "webhooks" / "target" for p in ("P-old", "P-new")}
+    # The contract crate, repinned between the two finished phases.
+    _unit(profile, "bundle", "a1" * 8, by=wt["P-old"], age=_OLD + 60)
+    _unit(profile, "bundle", "a2" * 8, by=wt["P-new"])
+    # A third-party crate every phase reuses: one copy, built long ago.
+    _unit(profile, "serde", "5e" * 8, by=wt["P-old"], age=_OLD + 120)
+    # The repo's own crate and a test binary, once per phase.
+    for phase, h, contract in (("P-old", "01", "a1"), ("P-new", "02", "a2")):
+        dep = (f"bundle-{contract * 8}", f"serde-{'5e' * 8}")
+        _unit(profile, "webhooks", h * 8, by=wt[phase], local=True, deps=dep)
+        _unit(profile, "webhooks", h * 4 + "bb" * 4, by=wt[phase], local=True,
+              stem="watch_mark", kind="test-integration-test",
+              deps=(*dep, f"webhooks-{h * 8}"))
+    # A fingerprint-less output (an interrupted build) and a stray non-unit file.
+    _fill(profile / "deps" / f"libghost-{'9f' * 8}.rlib")
+    old = time.time() - _OLD
+    os.utime(profile / "deps" / f"libghost-{'9f' * 8}.rlib", (old, old))
+    _fill(profile / "deps" / "README")
+    return profile
+
+
+def _alive(profile: Path) -> set[str]:
+    return {p.name for p in (profile / ".fingerprint").iterdir()}
+
+
+def test_superseded_units_go_and_the_newest_of_each_kind_stays(cfg, cargo_cache):
+    plan = gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True))
+    (row,) = _kinds(plan)["superseded"]
+    assert row.label == f"cache/target/{gitq._slug(cfg.project_dir)}/debug"
+    assert row.estimate > 0
+
+    gc_mod.apply(plan)
+
+    assert row.error is None and row.reclaimed > 0
+    # The newest contract and the one serde survive; the repinned-away contract
+    # goes, and so does every unit the finished phases built of the repo's own
+    # crate — a fresh worktree rebuilds those whatever the cache holds.
+    assert _alive(cargo_cache) == {f"bundle-{'a2' * 8}", f"serde-{'5e' * 8}"}
+    deps = {p.name for p in (cargo_cache / "deps").iterdir()}
+    assert f"libbundle-{'a2' * 8}.rlib" in deps and f"libserde-{'5e' * 8}.rlib" in deps
+    assert not any("a1" * 8 in n or "01" * 8 in n or "0101" in n for n in deps)
+    assert f"libghost-{'9f' * 8}.rlib" not in deps  # outputs without a fingerprint
+    assert "README" in deps  # not a unit: never touched
+
+
+def test_units_of_an_in_flight_phase_and_their_dependencies_stay(cfg, cargo_cache):
+    wt = cfg.wt_dir / "P-live" / "webhooks" / "target"
+    # The live phase built against the OLD contract (it has not repinned yet),
+    # an hour ago: neither recent nor the newest of its kind, yet it must stay.
+    _unit(cargo_cache, "webhooks", "03" * 8, by=wt, local=True,
+          deps=(f"bundle-{'a1' * 8}", f"serde-{'5e' * 8}"))
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("P-live")
+
+    gc_mod.apply(gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True)))
+
+    alive = _alive(cargo_cache)
+    assert f"webhooks-{'03' * 8}" in alive
+    assert f"bundle-{'a1' * 8}" in alive  # kept because the live unit links it
+    assert (cargo_cache / "deps" / f"libbundle-{'a1' * 8}.rlib").exists()
+    assert f"webhooks-{'01' * 8}" not in alive and f"webhooks-{'02' * 8}" not in alive
+
+
+def test_a_recently_touched_unit_is_never_superseded(cfg, cargo_cache):
+    # Written a minute ago by a build that has not been recorded anywhere yet.
+    _unit(cargo_cache, "bundle", "a3" * 8, by=cfg.wt_dir / "P-gone" / "target", age=60)
+    _unit(cargo_cache, "webhooks", "04" * 8, by=cfg.wt_dir / "P-gone" / "target",
+          local=True, age=60)
+    now_dead = gc_mod.superseded(cfg, cargo_cache, set())
+    names = {p.name for p in now_dead}
+    assert f"bundle-{'a3' * 8}" not in names and f"webhooks-{'04' * 8}" not in names
+    # a3 is now the newest contract, so a2 has become the superseded one.
+    assert f"bundle-{'a2' * 8}" in names
+
+
+def test_a_supersede_target_outside_a_cache_profile_is_refused(cfg, cargo_cache):
+    evil = gc_mod.Target(kind="superseded", label="x", op="supersede", detail="",
+                         path=str(cfg.project_dir))
+    plan = gc_mod.GcPlan(cfg=cfg, opts=gc_mod.GcOptions(yes=True), targets=[evil])
+    gc_mod.apply(plan)
+    assert evil.error and "profile" in evil.error
+
+
 # -- session temp dirs ---------------------------------------------------------
 def test_stale_tmp_goes_and_a_live_sessions_tmp_stays(cfg):
     with state_mod.transaction(cfg) as st:
@@ -374,7 +502,7 @@ def test_the_supervisor_backs_off_after_busy_and_runs_on_the_interval(cfg, monke
     _tick(sup)
     assert len(calls) == 2
     _tick(sup)
-    assert len(calls) == 2  # ran: not due again for a day
+    assert len(calls) == 2  # ran: not due again for [gc].every_s
     rec = gc_mod.read_record(cfg)
     assert rec["outcome"] == gc_mod.AUTO_DONE and rec["reason"] == "interval"
     log = cfg.supervisor_log.read_text()

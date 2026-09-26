@@ -51,8 +51,15 @@ outside such a root is touched without ``--canonical``.
 ``[gc].every_s`` and once per long idle stretch, only when every build slot can
 be taken *without waiting*, and never with the opt-in tiers (``--aggressive``,
 ``--transcripts``, ``--branches``). What it removes is dead by construction:
-build output unused for ``[gc].keep_days``, ``incremental/`` (workers run
-``CARGO_INCREMENTAL=0``), mirrors and ``tmp/`` dirs no live session owns.
+superseded cargo units (:func:`superseded`), build output unused for
+``[gc].keep_days``, ``incremental/`` (workers run ``CARGO_INCREMENTAL=0``),
+mirrors and ``tmp/`` dirs no live session owns.
+
+**Superseded units are what actually fill the disk.** ``cargo sweep --time``
+can reclaim nothing on a very large cache, because every byte of it may be hours
+old: each phase leaves a full generation of units (many test binaries,
+the crate in each feature set, and every contract crate the phase repinned),
+and none is ever read again once the phase lands.
 """
 
 from __future__ import annotations
@@ -95,6 +102,13 @@ NEVER_DELETE_NAMES = (".fingerprint",)
 # CARGO_INCREMENTAL=0, so nothing reads it again — it only ages until swept.
 INCREMENTAL_PROFILES = ("debug", "release")
 
+#: A cargo unit touched this recently may belong to a build that is about to
+#: link against it, so :func:`superseded` never removes one.
+SUPERSEDED_GRACE_S = 600
+
+# A cargo output or fingerprint name: `[lib]<stem>-<16 hex>[.<ext>]`.
+_UNIT_RE = re.compile(r"^(?:lib)?(.+)-([0-9a-f]{16})(\.[^/]*)?$")
+
 #: A ``/tmp`` leftover smaller than this is not worth a line in the report.
 TMP_REPORT_MIN_BYTES = 256 << 20
 
@@ -133,7 +147,7 @@ class Target:
 
     kind: str
     label: str
-    op: str  # rmtree | sweep | branch | prune | discard
+    op: str  # rmtree | supersede | sweep | branch | prune | discard
     detail: str
     path: str | None = None
     repo: str | None = None
@@ -224,11 +238,13 @@ def plan_gc(cfg: Config, opts: GcOptions, st: State | None = None) -> GcPlan:
     swept_by_aggressive: set[Path] = set()
     if opts.aggressive:
         swept_by_aggressive = _plan_aggressive(plan, roots)
-    # Incremental goes before the sweep in the target list, so the sweep's
-    # before/after measures what is left once it is gone.
-    incremental = _plan_incremental(plan, roots, swept_by_aggressive)
+    # Incremental and superseded units go before the sweep in the target list,
+    # so the sweep's before/after measures what is left once they are gone.
+    planned = _plan_incremental(plan, roots, swept_by_aggressive)
+    for root, size in _plan_superseded(plan, cfg, roots, swept_by_aggressive, live).items():
+        planned[root] = planned.get(root, 0) + size
     if opts.sweep_days is not None:
-        _plan_sweep(plan, roots, opts, swept_by_aggressive, incremental)
+        _plan_sweep(plan, roots, opts, swept_by_aggressive, planned)
     if opts.transcripts:
         _plan_transcripts(plan, cfg)
     if opts.branches:
@@ -409,12 +425,220 @@ def _plan_incremental(
     return planned
 
 
+def _plan_superseded(
+    plan: GcPlan,
+    cfg: Config,
+    roots: dict[Path, list[str]],
+    aggressive: set[Path],
+    live: set[str],
+) -> dict[Path, int]:
+    """Superseded cargo units in every profile of every real target (:func:`superseded`).
+
+    Always planned, like ``incremental/``: what it removes can never be read by
+    a build again. A profile ``--aggressive`` drops whole is skipped so nothing
+    is counted twice. Returns the bytes planned per root, which the sweep
+    subtracts.
+    """
+    planned: dict[Path, int] = {}
+    for root, names in roots.items():
+        for profile in _profiles(root):
+            if root in aggressive and profile.name in AGGRESSIVE_SUBDIRS:
+                continue
+            dead = superseded(cfg, profile, live)
+            if not dead:
+                continue
+            estimate = sum(_freed(p) for p in dead)
+            planned[root] = planned.get(root, 0) + estimate
+            before = max(0, du(profile) - du(profile / "incremental"))
+            plan.targets.append(
+                Target(
+                    kind="superseded",
+                    label=f"{_root_label(names)}/{profile.name}",
+                    op="supersede",
+                    detail=f"{len(dead)} superseded build unit file(s); only the live generation stays",
+                    path=str(profile),
+                    repo="+".join(names),
+                    before=before,
+                    estimate=min(estimate, before),
+                )
+            )
+    return planned
+
+
+def _profiles(root: Path) -> list[Path]:
+    """Profile directories (``debug``, ``release`` ...) directly under a target."""
+    try:
+        return sorted(
+            p for p in root.iterdir()
+            if not p.is_symlink() and (p / ".fingerprint").is_dir()
+        )
+    except OSError:
+        return []
+
+
+def superseded(
+    cfg: Config, profile: Path, live: set[str], now: float | None = None
+) -> list[Path]:
+    """Paths of the cargo units in one profile dir no build will read again.
+
+    A shared cache piles up one *generation* of units per phase and never drops
+    the old ones: every phase edits its own crate (each crate unit and all 100+
+    test binaries re-link) and most repin the shared contract to a fresh git
+    tag, which changes the hash of the contract crates and so of everything
+    built on them. The worktree path is *not* in the hash, so a third-party
+    unit one phase built is reused by the next.
+
+    A unit (``.fingerprint/<pkg>-<hash>``, its ``deps/*-<hash>*`` outputs and
+    ``build/<pkg>-<hash>``) is kept when it is, or is a dependency of, a unit
+    that is
+
+    - touched within :data:`SUPERSEDED_GRACE_S`, or has no readable fingerprint;
+    - built by a live phase (its ``deps/*.d`` names ``wt/<live>/``);
+    - the newest of its kind (package, target, features, profile, flags) — but
+      never a workspace crate a finished phase built (its sources are relative
+      in the ``.d``): cargo decides freshness of path crates by mtime, so a
+      fresh worktree always rebuilds them and that copy is dead by construction.
+
+    Everything else goes as a whole unit, fingerprint and outputs together, so
+    cargo simply rebuilds it if asked. Output files whose fingerprint is gone
+    are dead too once past the grace window.
+    """
+    now = time.time() if now is None else now
+    fresh = now - SUPERSEDED_GRACE_S
+    units: dict[str, Path] = {}
+    outputs: dict[str, list[Path]] = {}
+    newest: dict[str, float] = {}
+    for sub in (".fingerprint", "deps", "build", "examples"):
+        for entry in _scan(profile / sub):
+            match = _UNIT_RE.match(entry.name)
+            if match is None:
+                continue
+            h = match.group(2)
+            if sub == ".fingerprint":
+                if entry.is_dir(follow_symlinks=False):
+                    units[h] = Path(entry.path)
+                continue
+            outputs.setdefault(h, []).append(Path(entry.path))
+            newest[h] = max(newest.get(h, 0.0), _mtime(entry))
+
+    wt = [str(cfg.wt_dir) + os.sep, str(cfg.wt_dir.resolve()) + os.sep]
+    by_fp: dict[str, str] = {}
+    deps: dict[str, list[int]] = {}
+    roots: set[str] = set()
+    kinds: dict[tuple, tuple[float, str]] = {}
+    for h, fp in units.items():
+        stamp, key, unit_deps, ok = newest.get(h, 0.0), [fp.name.rsplit("-", 1)[0]], [], False
+        for entry in _scan(fp):
+            stamp = max(stamp, _mtime(entry))
+            if entry.name.endswith(".json"):
+                try:
+                    data = json.loads(Path(entry.path).read_text(encoding="utf-8"))
+                    unit_deps += [int(d[-1]) for d in data.get("deps", [])]
+                except (OSError, ValueError, TypeError, IndexError, AttributeError):
+                    continue
+                ok = True
+                key.append(entry.name)
+                key += [json.dumps(data.get(k), sort_keys=True) for k in (
+                    "features", "profile", "target", "compile_kind", "rustflags")]
+            elif not entry.name.startswith(("dep-", "invoked.")):
+                try:
+                    by_fp[Path(entry.path).read_text(encoding="utf-8").strip()] = h
+                except OSError:
+                    pass
+        deps[h] = unit_deps
+        if stamp >= fresh or not ok:
+            roots.add(h)
+        if not ok:
+            continue
+        out, local = _dep_info(outputs.get(h, []))
+        built_by = next(
+            (out[len(p):].split(os.sep, 1)[0] for p in wt if out.startswith(p)), None
+        )
+        if built_by is not None and built_by in live:
+            roots.add(h)
+        elif not (local and built_by is not None):
+            kind = tuple(key)
+            if kind not in kinds or stamp > kinds[kind][0]:
+                kinds[kind] = (stamp, h)
+    roots |= {h for _, h in kinds.values()}
+
+    keep: set[str] = set()
+    stack = list(roots)
+    while stack:
+        h = stack.pop()
+        if h in keep:
+            continue
+        keep.add(h)
+        for fp_hash in deps.get(h, []):
+            dep = by_fp.get((fp_hash & (2**64 - 1)).to_bytes(8, "little").hex())
+            if dep is not None:
+                stack.append(dep)
+
+    dead: list[Path] = []
+    for h, fp in units.items():
+        if h not in keep:
+            dead += [fp, *outputs.get(h, [])]
+    for h, paths in outputs.items():
+        if h not in units and newest.get(h, now) < fresh:
+            dead += paths
+    return sorted(dead)
+
+
+def _scan(path: Path) -> list[os.DirEntry]:
+    try:
+        with os.scandir(path) as it:
+            return list(it)
+    except OSError:
+        return []
+
+
+def _mtime(entry: os.DirEntry) -> float:
+    try:
+        return entry.stat(follow_symlinks=False).st_mtime
+    except OSError:
+        return 0.0
+
+
+def _dep_info(paths: list[Path]) -> tuple[str, bool]:
+    """``(output path, sources are relative)`` from a unit's ``deps/*.d``.
+
+    rustc writes the output path as cargo gave it — through the building
+    worktree's ``target`` link — and a workspace crate's sources relative to its
+    root, where a registry or git dependency's are absolute.
+    """
+    for path in paths:
+        if path.suffix != ".d":
+            continue
+        try:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                line = fh.readline(65536)
+        except OSError:
+            continue
+        out, sep, rest = line.partition(": ")
+        if not sep:
+            continue
+        srcs = rest.split()
+        return out, bool(srcs) and not srcs[0].startswith(os.sep)
+    return "", False
+
+
+def _freed(path: Path) -> int:
+    """Bytes removing ``path`` gives back; a still-linked file gives back none."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return 0
+    if path.is_dir() and not path.is_symlink():
+        return du(path) + info.st_blocks * 512
+    return info.st_blocks * 512 if info.st_nlink <= 1 else 0
+
+
 def _plan_sweep(
     plan: GcPlan,
     roots: dict[Path, list[str]],
     opts: GcOptions,
     aggressive: set[Path],
-    incremental: dict[Path, int],
+    planned: dict[Path, int],
 ) -> None:
     """``cargo sweep --time <days>`` over every real target directory, once each.
 
@@ -426,9 +650,9 @@ def _plan_sweep(
     against. The shim carries its own ``[workspace]`` table so ``cargo metadata``
     cannot wander into a surrounding workspace.
 
-    ``before`` excludes the incremental dirs planned ahead of it, because they
-    are gone by the time the sweep runs; the estimate is capped by the same
-    figure, since cargo-sweep's own count includes stale incremental files.
+    ``before`` excludes the incremental dirs and superseded units planned ahead
+    of it, because they are gone by the time the sweep runs; the estimate is
+    capped by the same figure, since cargo-sweep's own count includes them.
     """
     days = int(opts.sweep_days or 0)
     binary = _cargo_sweep()
@@ -448,7 +672,7 @@ def _plan_sweep(
                 " what is left in debug/"
             )
             continue
-        before = max(0, du(root) - incremental.get(root, 0))
+        before = max(0, du(root) - planned.get(root, 0))
         if before == 0:
             continue  # an empty cache (a repo with no Rust built yet): nothing to sweep
         estimate = _sweep(binary, root, days, dry_run=True) if opts.estimate else 0
@@ -760,18 +984,30 @@ def _apply_in_gate(plan: GcPlan, log=None) -> None:
             target.reclaimed = 0
             continue
         try:
-            _execute(cfg, target, log)
+            _execute(cfg, target, log, live)
         except (OSError, subprocess.SubprocessError, gitq.GitError) as exc:
             target.error = str(exc)
             target.reclaimed = 0
     plan.applied = True
 
 
-def _execute(cfg: Config, target: Target, log=None) -> None:
+def _execute(cfg: Config, target: Target, log=None, live: set[str] | None = None) -> None:
     """Run one target's action and measure what it actually reclaimed."""
     if target.op == "rmtree":
         path = Path(target.path or "")
         shutil.rmtree(path, ignore_errors=False)
+        target.after = du(path)
+    elif target.op == "supersede":
+        # Re-derived inside the gate, never replayed from the plan: a build
+        # since planning may have made a planned unit live again.
+        path = Path(target.path or "")
+        if live is None:
+            live = _live_names(cfg, state_mod.read(cfg))
+        for dead in superseded(cfg, path, live):
+            if dead.is_dir() and not dead.is_symlink():
+                shutil.rmtree(dead, ignore_errors=True)
+            else:
+                dead.unlink(missing_ok=True)
         target.after = du(path)
     elif target.op == "sweep":
         path = Path(target.path or "")
@@ -836,6 +1072,10 @@ def _protected_reason(
         )
     if path.is_symlink():
         return "it is a symlink; deleting through one could escape the state dir"
+    if target.op == "supersede":
+        real = cache_roots(cfg).keys() if roots is None else roots
+        if path.parent.resolve() not in real or not (path / ".fingerprint").is_dir():
+            return "not a cargo profile directory of a build cache"
 
     protected_exact = {
         cfg.state_dir,

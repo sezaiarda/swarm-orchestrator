@@ -602,6 +602,9 @@ and exits 1 if any check FAILs. It checks:
 - **Always planned:**
   - build caches of repos that no longer exist;
   - `incremental/` directories;
+  - superseded cargo units: every unit that is not recent, not built by a live
+    phase and not the newest of its kind (nor a dependency of one of those),
+    so a shared cache holds about one generation per repo;
   - `cargo sweep` of build output unused for `[gc].keep_days` (needs
     `cargo-sweep`);
   - orphan mirrors in `wt/`;
@@ -616,7 +619,7 @@ and exits 1 if any check FAILs. It checks:
   in a tree it would touch (unless `--force`), and re-checks every path at delete
   time against a protected list.
 - **Automatic runs:** the supervisor runs a conservative gc by itself (`[gc]`) at
-  most daily, plus once per idle stretch, and never during a build.
+  most every 15 minutes, plus once per idle stretch, and never during a build.
 
 ## The dashboard (`swarm tui`)
 

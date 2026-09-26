@@ -162,7 +162,7 @@ An ask's outcome (`swarm ask-done`) pings by `[operator].notify`: with the defau
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `auto` | `true` | `SWARM_GC_AUTO` | hot | Let the supervisor run `swarm gc` by itself. |
-| `every_s` | `86400` | `SWARM_GC_EVERY` | hot | At most this often. `0` leaves only the idle trigger. |
+| `every_s` | `900` | `SWARM_GC_EVERY` | hot | At most this often (a busy build slot defers it a few minutes). `0` leaves only the idle trigger. |
 | `idle_s` | `1800` | `SWARM_GC_IDLE` | hot | Also once per idle stretch (no busy slot) of this length. `0` turns this off. |
 | `keep_days` | `3` | `SWARM_GC_KEEP_DAYS` | hot | Build output used within this many days survives `cargo sweep`. |
 

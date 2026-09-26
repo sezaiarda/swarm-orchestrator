@@ -9,7 +9,9 @@ A ``PreToolUse`` "allow" does not clear these checks; only a
 ``PermissionRequest`` answer does. Verified live on CLI 2.1.283.
 
 Questions to the owner (``AskUserQuestion``, ``ExitPlanMode``) are left alone:
-the hook prints nothing for them, so they wait for a real answer.
+the hook prints nothing for them, so they wait for a real answer. So is an event
+that names no tool (unreadable, or a shape this script does not know): a Yes is
+given only to a box it can name as not a question.
 
 Each approval is appended to ``<SWARM_STATE_DIR>/permissions.jsonl`` so what
 was waved through can be read afterwards. Logging never blocks the answer.
@@ -31,7 +33,8 @@ try:
     event = json.loads(sys.stdin.read() or "{}")
 except Exception:
     event = {}
-if event.get("tool_name") in OWNER_QUESTIONS:
+tool = event.get("tool_name") if isinstance(event, dict) else None
+if not tool or tool in OWNER_QUESTIONS:
     sys.exit(0)
 
 try:

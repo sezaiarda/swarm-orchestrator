@@ -265,10 +265,12 @@ function header(b) {
   if (!h.running) { tone = "mu"; txt = h.state || "stopped"; }
   else if (h.finished) { tone = "ok"; txt = "finished"; }
   else if (h.paused) { tone = "warn"; txt = "paused"; }
+  else if (h.usage_hold) { tone = "warn"; txt = "paused by usage cap"; }
   rs.innerHTML = `<span class="dot" style="background:var(--${tone === "mu" ? "mu" : tone})"></span><span>${esc(txt)}</span>`;
   const nb = $("#needs"); nb.hidden = !h.needs_you; nb.textContent = `${h.needs_you} need${h.needs_you === 1 ? "s" : ""} you`;
   $("#slots").textContent = `${h.slots.busy}/${h.slots.total} slots`;
   const u = h.usage || {}, parts = [];
+  if (h.usage_hold) parts.push(`<div class="meter"><b>usage cap</b><span class="sub warn">${esc(h.usage_hold)}</span></div>`);
   for (const [k, label] of [["five", "5-hour"], ["week", "week"]]) {
     const w = u[k] || {};
     const pct = w.pct == null ? null : Math.max(0, Math.min(100, w.pct));

@@ -35,6 +35,7 @@ from pathlib import Path
 from statistics import median
 
 from .. import ask as ask_mod
+from .. import caps
 from .. import keep as keep_mod
 from .. import ledger as ledger_mod
 from .. import opqueue
@@ -297,6 +298,8 @@ class Snapshot:
     #: ``done`` alone a ticked row looks unbuilt and counts as work left.
     landed: dict[str, str] = field(default_factory=dict)
     paused: bool = False
+    #: Why a usage cap holds new workers, in plain English; "" when none does.
+    usage_hold: str = ""
     finished: bool = False
     master_alive: bool = False
     supervisor_pid: int | None = None
@@ -517,6 +520,7 @@ def build_snapshot(
         done=done,
         landed=landed,
         paused=bool(state.get("paused")),
+        usage_hold=" ".join(caps.describe_hold(state.get("usage_hold") or {}, time.time())),
         finished=bool(state.get("finished")),
         master_alive=bool(state.get("master_alive")),
         supervisor_pid=pid if isinstance(pid, int) else None,

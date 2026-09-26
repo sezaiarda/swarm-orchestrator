@@ -416,6 +416,7 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         "needs_you": cols.get(NEEDS_YOU, 0),
         "slots": {"busy": sum(1 for s in snap.slots if s.busy), "total": workers},
         "paused": bool(snap.paused),
+        "usage_hold": snap.usage_hold,
         "finished": bool(snap.finished),
         "running": bool(snap.ok and snap.supervisor_alive),
         "state": snap.reason if not snap.ok else "",

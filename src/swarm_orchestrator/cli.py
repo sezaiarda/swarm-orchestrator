@@ -19,6 +19,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 
 from . import ask as ask_mod
+from . import caps
 from . import buildsem
 from . import notes as notes_mod
 from . import operator as operator_mod
@@ -1624,11 +1625,31 @@ def cmd_pause(cfg: Config) -> int:
     return 0
 
 
-def cmd_resume(cfg: Config) -> int:
+def cmd_resume(cfg: Config, override_cap: bool = False) -> int:
+    """Lift a pause. A usage cap's hold is not a pause: it stays, and says so,
+    unless ``--override-cap`` runs through it until its window resets."""
+    now = time.time()
     with state_mod.transaction(cfg) as st:
         st.paused = False
+        hold = dict(st.usage_hold)
+        if override_cap:
+            for window, h in hold.items():
+                st.usage_override[window] = h.get("resets_at") or now
+            st.usage_hold = {}
     _poke(cfg, "resume")
-    print("swarm resumed — launching will fill free slots")
+    if hold and not override_cap:
+        for line in caps.describe_hold(hold, now):
+            print(line)
+        print("A usage cap is holding new workers; running workers carry on. To start "
+              "new workers anyway until the reset: swarm resume --override-cap")
+    elif hold:
+        until = ", ".join(f"the {caps.label(w)} reset, {caps.when(h.get('resets_at'), now)}"
+                          for w, h in sorted(hold.items()))
+        print(f"swarm resumed — usage cap overridden: new workers start again until {until}")
+    else:
+        if override_cap:
+            print("no usage cap is holding; nothing to override")
+        print("swarm resumed — launching will fill free slots")
     _warn_if_no_supervisor(cfg, "resume")
     return 0
 
@@ -1763,6 +1784,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     lines.extend(f"ask: {ask_mod.line(a)}" for a in ask_mod.open_asks(cfg))
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
+    lines.extend(caps.summary_for(cfg, st.usage_hold))
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
     lines.append(web_lifecycle.status_line(cfg))
     lines.append(tgbot.status_line(cfg))
@@ -1845,8 +1867,10 @@ def _build_parser() -> argparse.ArgumentParser:
     stp.set_defaults(func=lambda cfg, a: cmd_status(cfg, as_json=a.json, show_all=a.all))
     sub.add_parser("pause", help="stop launching new workers (in-flight finish)").set_defaults(
         func=lambda cfg, a: cmd_pause(cfg))
-    sub.add_parser("resume", help="resume launching workers into free slots").set_defaults(
-        func=lambda cfg, a: cmd_resume(cfg))
+    rsm = sub.add_parser("resume", help="resume launching workers into free slots")
+    rsm.add_argument("--override-cap", action="store_true",
+                     help="also run through a usage cap's hold until its window resets")
+    rsm.set_defaults(func=lambda cfg, a: cmd_resume(cfg, a.override_cap))
 
     bp = sub.add_parser("build", help="run a build command through the concurrency gate")
     bp.add_argument("argv", nargs=argparse.REMAINDER, help="the build command, e.g. cargo nextest run")

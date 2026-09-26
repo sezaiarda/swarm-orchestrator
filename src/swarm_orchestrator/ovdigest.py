@@ -253,6 +253,7 @@ def build(
         "launching": sorted(launching),
         "given_up": list(given_up or []),
         "paused": st.paused,
+        "usage_hold": bool(st.usage_hold),
         "waiting": ctx["waiting"],
         "parked": ctx["parked"],
         "integ_queue": list(st.integ_queue),
@@ -331,6 +332,7 @@ def render(d: dict) -> str:
     out.append(
         f"- slots: {len(c['busy_slots'])} busy {c['busy_slots'] or ''}, {len(c['free_slots'])} free"
         + ("; PAUSED" if c["paused"] else "")
+        + ("; HELD BY A USAGE CAP (the owner's to lift)" if c.get("usage_hold") else "")
     )
     out.append(f"- ready: {c['ready_count']} {c['ready'][:10]}; launchable now: {c['launchable']}")
     if c["launching"] or c["given_up"]:

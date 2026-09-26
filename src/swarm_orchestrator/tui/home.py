@@ -642,6 +642,8 @@ def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None)
         parts.append(("no run yet", MUTED))
     elif snap.paused:
         parts.append(("paused — `swarm resume`", WARN))
+    elif snap.usage_hold:
+        parts.append((snap.usage_hold, WARN))
     elif not snap.supervisor_alive and not snap.finished:
         parts.append(("supervisor down — `swarm up`", BAD))
     if snap.integ_blocked:

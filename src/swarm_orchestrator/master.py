@@ -86,7 +86,7 @@ def build_context(cfg: Config, st: State) -> dict:
     done = ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(ledger_path), busy_phases)
     ready = ledger_mod.ready(graph, done, busy_phases, excluded)
     free = st.free_slots()
-    launchable = [] if st.paused else ready[: len(free)]
+    launchable = [] if st.on_hold else ready[: len(free)]
     return {
         "free_slots": [s.id for s in free],
         "busy_slots": {s.id: s.phase for s in st.busy_slots()},
@@ -94,6 +94,8 @@ def build_context(cfg: Config, st: State) -> dict:
         "ready": ready,
         "launchable": launchable,
         "paused": st.paused,
+        # The usage cap's own hold (see caps.py); only the owner lifts it.
+        "usage_hold": dict(st.usage_hold),
         "ledger": str(ledger_path),
         "master_alive": st.master_alive,
         # Phases whose worker is off-grid awaiting the owner: `waiting` armed a

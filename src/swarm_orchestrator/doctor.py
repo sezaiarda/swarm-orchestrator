@@ -43,6 +43,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import ask as ask_mod
+from . import caps
 from . import gc as gc_mod
 from . import gitq
 from . import keep as keep_mod
@@ -664,10 +665,11 @@ def _check_nudge(st: State, ready: list[str], free: list[int]) -> Check:
     that ended without launching) leaves the swarm idle with work available and
     no timer to notice.
     """
-    if st.finished or st.paused or st.integ_blocked or st.bootstrapping:
+    if st.finished or st.on_hold or st.integ_blocked or st.bootstrapping:
         why = (
             "finished" if st.finished
             else "paused" if st.paused
+            else "held by a usage cap" if st.usage_hold
             else "integration held" if st.integ_blocked
             # `swarm up` holds the first launch until the init pass is over.
             else "starting: the first launch waits for the init pass"
@@ -1211,6 +1213,15 @@ def _check_web(cfg: Config, st: State) -> Check:
     return Check("web.board", OK, f"not running — `swarm up` starts it on :{cfg.web_port}")
 
 
+def _check_usage(cfg: Config, st: State) -> Check:
+    """The usage caps in plain English: a hold is a WARN, since it stops new work."""
+    lines = caps.summary_for(cfg, st.usage_hold)
+    if st.usage_hold:
+        return Check("usage.caps", WARN, " ".join(lines),
+                     "swarm resume --override-cap   # to run anyway until the reset")
+    return Check("usage.caps", OK, " ".join(lines))
+
+
 def _check_tgbot(cfg: Config, st: State) -> Check:
     """Is the bot's command listener (``/usage``) running, and is it being answered?
 
@@ -1284,6 +1295,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_prompts())
     checks.append(_check_web(cfg, st))
     checks.append(_check_tgbot(cfg, st))
+    checks.append(_check_usage(cfg, st))
     checks.append(_check_kept(cfg))
     return checks
 

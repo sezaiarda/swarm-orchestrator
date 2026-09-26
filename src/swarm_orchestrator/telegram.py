@@ -53,6 +53,7 @@ KINDS = (
     "worktree-fail",  # launch: the phase mirror could not be created
     "spawn-fail",  # launch: the worker process/pane would not start
     "web-board",  # cli.cmd_up: the LAN board's window/process did not come up
+    "usage-cap",  # supervisor: a usage cap paused or stopped the swarm, or a pause lifted
     "other",  # unclassified (the default)
 )
 

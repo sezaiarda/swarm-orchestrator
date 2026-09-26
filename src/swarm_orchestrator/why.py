@@ -28,6 +28,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import caps
 from . import ledger as ledger_mod
 from . import state as state_mod
 from . import statuses
@@ -213,6 +214,9 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
         return Explanation(
             phase, READY, "ready — but the swarm is PAUSED (`swarm resume`)"
         )
+    if st.usage_hold:
+        held = " ".join(caps.describe_hold(st.usage_hold, time.time()))
+        return Explanation(phase, READY, f"ready — but {held[0].lower()}{held[1:]}")
     if not st.free_slots():
         return Explanation(
             phase,

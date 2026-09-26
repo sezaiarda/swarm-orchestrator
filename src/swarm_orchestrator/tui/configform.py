@@ -341,7 +341,7 @@ FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scal
 
 # The order the tables are drawn in — the order the file itself uses.
 SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "git",
-                 "operator", "ask", "overseer", "tui", "web", "(cli)")
+                 "operator", "ask", "overseer", "usage", "tui", "web", "(cli)")
 
 
 @dataclass(frozen=True)
@@ -471,6 +471,12 @@ FIELDS: tuple[Setting, ...] = (
     Setting("overseer_hold_wait_s", INT, "merge hold a resolver has before a pass (s)",
             minimum=0),
     Setting("overseer_timeout_s", INT, "seconds before a hung pass is killed", minimum=1),
+    # -- [usage] ----------------------------------------------------------
+    Setting("usage_enabled", BOOL, "pause or stop the swarm at usage limits"),
+    Setting("usage_check_s", INT, "seconds between usage checks", minimum=60),
+    Setting("usage_stale_s", INT, "a reading older than this is not trusted (s)",
+            minimum=300),
+    Setting("usage_rules", FROZEN, "window, percent and action of each cap"),
     # -- [tui] ------------------------------------------------------------
     Setting("tui_autostart", BOOL, "open this dashboard automatically at `swarm up`"),
     Setting("tui_cmd", STR, "command the dashboard pane is respawned with"),
@@ -558,6 +564,9 @@ def render_value(setting: Setting, value: Any) -> Any:
     if setting.kind == LIST:
         return ", ".join(str(v) for v in (value or []))
     if setting.kind == FROZEN:
+        if isinstance(value, list):
+            return ", ".join(" ".join(str(v) for v in item.values()) if isinstance(item, dict)
+                             else str(item) for item in value) or "(none)"
         if isinstance(value, dict):
             return ", ".join(f"{k} = {v}" for k, v in value.items()) or "(none)"
         return str(value)

@@ -43,12 +43,14 @@ import os
 import select
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 from . import ask as ask_mod
+from . import caps
 from . import doctor as doctor_mod
 from . import gc as gc_mod
 from . import gitq
@@ -67,6 +69,7 @@ from . import reload as reload_mod
 from . import runs as runs_mod
 from . import session as session_mod
 from . import telegram, tmux
+from . import usage as usage_mod
 from .config import Config, load
 from . import logutil
 from .logutil import Log
@@ -164,6 +167,11 @@ class Supervisor:
         # poke for the same one does not open two windows.
         self._ask_lock = threading.Lock()
         self._asks_opening: set[str] = set()
+        # Usage caps (see `_usage_tick`): the last check, and the tap's samples
+        # read incrementally, since `limits.jsonl` is never rotated.
+        self._usage_last = 0.0
+        self._usage_tail = usage_mod.SampleTail(
+            cfg.state_dir / usage_mod.METERS_DIR / usage_mod.LIMITS_LOG)
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -234,6 +242,7 @@ class Supervisor:
                 self._dispatch("launch-retry", self._retry_backed_off)
                 self._dispatch("overseer", self._overseer_tick)
                 self._dispatch("gc", self._gc_tick)
+                self._dispatch("usage", self._usage_tick)
                 if self._fifo_fd not in ready:
                     continue
                 try:
@@ -539,7 +548,12 @@ class Supervisor:
         except OSError as exc:
             self.log.line(f"RUN-NOTE-FAILED {exc}")
         self._write_config_snapshot()
-        if not st.paused and not st.finished:
+        # At once, not at the next check: a raised limit or `enabled = false`
+        # should lift its hold now, and a lowered one act now.
+        if self._usage_check(time.time()):
+            return
+        st = state_mod.read(self.cfg)
+        if not st.on_hold and not st.finished:
             self._fill_slots("config reloaded")
 
     def _add_slot_panes(self, slot_ids: list[int]) -> None:
@@ -1026,6 +1040,8 @@ class Supervisor:
         if self._overseer_live is not None and deadline > now:
             stamps.append(deadline)
         stamps.extend(t for t in self._gc_deadlines() if t > now)
+        if self.cfg.usage_enabled and self._usage_last + self.cfg.usage_check_s > now:
+            stamps.append(self._usage_last + self.cfg.usage_check_s)
         if not stamps:
             return None
         return max(0.0, min(stamps) - time.time())
@@ -1116,7 +1132,7 @@ class Supervisor:
                 f"{', '.join(ready[:8])} -- run `swarm up` to resume",
             )
             return
-        if st.paused or st.integ_blocked is not None or not st.free_slots():
+        if st.on_hold or st.integ_blocked is not None or not st.free_slots():
             return
         self.log.line(f"WATCHDOG-RELAUNCH idle={idle:.0f}s ready={ready}")
         self._touch()  # the relaunch counts as movement; don't re-fire next sweep
@@ -1382,7 +1398,7 @@ class Supervisor:
         returns at once. A racing ``swarm launch`` by hand is harmless: whichever
         claims second is refused by :meth:`state.State.claim_slot`."""
         st = state_mod.read(self.cfg)
-        if st.paused or st.finished:
+        if st.on_hold or st.finished:
             return []
         if self._bootstrapping and not force:
             if self.master.is_alive():
@@ -1911,6 +1927,85 @@ class Supervisor:
             f"GC-AUTO {reason} freed={result.freed} ({gc_mod.human(result.freed)})"
             f" {kinds or '-'} errors={result.errors}"
         )
+
+    # -- usage caps (see caps.py) -------------------------------------------
+    def _usage_tick(self) -> None:
+        """Check usage against the caps, at most once per ``[usage].check_s``.
+
+        Runs with the caps off too, so that turning them off lifts a hold."""
+        now = time.time()
+        if now - self._usage_last >= self.cfg.usage_check_s:
+            self._usage_check(now)
+
+    def _usage_check(self, now: float) -> bool:
+        """Read the newest usage, apply the rules, and act on what changed.
+        True when a ``down`` rule has begun stopping the swarm.
+
+        The tap's samples come first. Only when they hold no fresh reading does
+        this ask the usage endpoint, at most once per :data:`caps.API_MIN_GAP_S`
+        across restarts; a failed call is logged and the last reading stands.
+        """
+        self._usage_last = now
+        cfg = self.cfg
+        rules = cfg.usage_rules if cfg.usage_enabled else []
+        self._usage_tail.poll()
+        samples = self._usage_tail.samples
+        if cfg.usage_enabled and caps.needs_api(samples, now, cfg.usage_stale_s):
+            if now - state_mod.read(cfg).usage_api_at >= caps.API_MIN_GAP_S:
+                with state_mod.transaction(cfg) as st:
+                    st.usage_api_at = now
+                row, note = caps.fetch_api(cfg.state_dir, now)
+                self.log.line(f"USAGE-API {note}")
+                if row is not None:
+                    caps.record_api(cfg.state_dir, row)
+                    self._usage_tail.poll()
+                    samples = self._usage_tail.samples
+        reads = caps.readings(samples, now, cfg.usage_stale_s)
+        with state_mod.transaction(cfg) as st:
+            out = caps.evaluate(rules, reads, st.usage_hold, st.usage_fired,
+                                st.usage_override, now)
+            st.usage_hold, st.usage_fired, st.usage_override = out.hold, out.fired, out.override
+            on_hold = st.on_hold
+        figures = " ".join(f"{w}={r.pct:g}%" for w, r in sorted(reads.items())) or "unknown"
+        self.log.line(f"USAGE-CHECK {figures} held={','.join(sorted(out.hold)) or '-'}")
+        for window in out.held:
+            h = out.hold[window]
+            self.log.line(f"USAGE-HOLD {window} {h['pct']:g}% limit={h['at']:g}%")
+            if out.down is None:  # the stop's own ping says it all
+                self._usage_ping(caps.pause_ping(window, h, now))
+        for window in out.lifted:
+            self.log.line(f"USAGE-LIFT {window} window reset")
+            self._usage_ping(caps.lift_ping(window, reads.get(window)))
+        for window in out.released:
+            self.log.line(f"USAGE-RELEASE {window} no rule holds it now")
+        if out.down is not None:
+            d = out.down
+            self.log.line(f"USAGE-DOWN {d['window']} {d['pct']:g}% limit={d['at']:g}%")
+            self._usage_ping(caps.down_ping(d, now, bool(out.hold)))
+            self._usage_down()
+            return True
+        if (out.lifted or out.released) and not on_hold:
+            self._fill_slots("usage cap lifted")
+        return False
+
+    def _usage_ping(self, msg: str) -> None:
+        self._ping("usage-cap", msg, cooldown=0.0, kind="usage-cap",
+                   source="supervisor._usage_check")
+
+    def _usage_down(self) -> None:
+        """Stop the swarm the way ``swarm down`` does, by running it.
+
+        Detached, because ``swarm down`` asks this process to exit and waits
+        for it; the swarm then stays down until the owner runs ``swarm up``."""
+        cfg = self.cfg
+        cfg.log_dir.mkdir(parents=True, exist_ok=True)
+        with (cfg.log_dir / "usage-down.log").open("a", encoding="utf-8") as out:
+            subprocess.Popen(
+                [sys.executable, "-m", "swarm_orchestrator", "--project-dir",
+                 str(cfg.project_dir), "down"],
+                cwd=str(cfg.project_dir), stdin=subprocess.DEVNULL, stdout=out,
+                stderr=subprocess.STDOUT, start_new_session=True,
+            )
 
     # -- finish -----------------------------------------------------------
     def _finish(

@@ -119,6 +119,17 @@ class State:
     # ``swarm doctor``: free slots beside ready phases are the plan in that
     # window, not a lost nudge, and only the supervisor's memory knew it.
     bootstrapping: bool = False
+    # Usage caps (see :mod:`caps`). ``usage_hold`` is the cap's own pause,
+    # ``{window: {at, pct, resets_at, since}}``: kept apart from ``paused`` so
+    # lifting it never undoes a pause the owner made, and ``swarm resume`` never
+    # silently overrides it. ``usage_fired`` remembers which ``down`` rule acted
+    # in which window, ``usage_override`` the windows the owner chose to run
+    # through, and ``usage_api_at`` the last call to the usage endpoint. All four
+    # survive ``swarm up``: a restart must not re-fire a crossing or forget a hold.
+    usage_hold: dict[str, dict] = field(default_factory=dict)
+    usage_fired: dict[str, float] = field(default_factory=dict)
+    usage_override: dict[str, float] = field(default_factory=dict)
+    usage_api_at: float = 0.0
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -126,6 +137,11 @@ class State:
 
     def busy_slots(self) -> list[Slot]:
         return [s for s in self.slots if s.busy]
+
+    @property
+    def on_hold(self) -> bool:
+        """Nothing new may launch: paused by a person, or held by a usage cap."""
+        return self.paused or bool(self.usage_hold)
 
     def any_busy(self) -> bool:
         return any(s.busy for s in self.slots)
@@ -355,6 +371,10 @@ class State:
             run_id=data.get("run_id"),
             run_epoch=float(data.get("run_epoch") or 0.0),
             bootstrapping=bool(data.get("bootstrapping", False)),
+            usage_hold=dict(data.get("usage_hold") or {}),
+            usage_fired=dict(data.get("usage_fired") or {}),
+            usage_override=dict(data.get("usage_override") or {}),
+            usage_api_at=float(data.get("usage_api_at") or 0.0),
         )
 
     @classmethod
@@ -422,6 +442,10 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
         fresh.done = prior_done
         # A restart does not push anything, so a debt survives it like `done` does.
         fresh.push_owed = dict(state.push_owed)
+        fresh.usage_hold = dict(state.usage_hold)
+        fresh.usage_fired = dict(state.usage_fired)
+        fresh.usage_override = dict(state.usage_override)
+        fresh.usage_api_at = state.usage_api_at
         fresh.bootstrapping = True  # the supervisor clears it (see the field)
         state.__dict__.update(fresh.__dict__)
         return state

@@ -290,6 +290,14 @@ POLICY: dict[str, Policy] = {
            "read when the next gc builds its plan", numeric=True),
         _p("gc_attic_days", "[gc]", "attic_days", HOT, "SWARM_GC_ATTIC_DAYS",
            "read when the next gc builds its plan", numeric=True),
+        _p("usage_enabled", "[usage]", "enabled", HOT, "SWARM_USAGE",
+           "a reload re-checks the caps at once; turning them off lifts a usage hold"),
+        _p("usage_check_s", "[usage]", "check_s", HOT, "SWARM_USAGE_CHECK",
+           "the last check's clock is compared against it on every wake", numeric=True),
+        _p("usage_stale_s", "[usage]", "stale_s", HOT, "SWARM_USAGE_STALE",
+           "read by every usage check", numeric=True),
+        _p("usage_rules", "[usage]", "rules", HOT, None,
+           "a reload re-checks the caps at once, so a raised limit lifts its hold"),
     )
 }
 

@@ -109,6 +109,10 @@ class Config:
     web_enabled: bool
     web_host: str
     web_port: int
+    usage_enabled: bool
+    usage_check_s: int
+    usage_stale_s: int
+    usage_rules: list[dict]
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -227,6 +231,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     ask = data.get("ask", {})
     gc = data.get("gc", {})
     web = data.get("web", {})
+    usage = data.get("usage", {})
 
     driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
     max_workers = int(swarm.get("max_workers", 4))
@@ -442,6 +447,14 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         web_enabled=_bool_env("SWARM_WEB", web.get("enabled", True)),
         web_host=os.environ.get("SWARM_WEB_HOST", str(web.get("host", "0.0.0.0"))),
         web_port=_int_env("SWARM_WEB_PORT", web.get("port"), 8765, minimum=0),
+        # Usage caps (see caps.py): the supervisor reads the 5-hour and weekly
+        # figures every `check_s` and applies `rules` at the swarm level. A tap
+        # reading older than `stale_s` is not trusted, and is the one moment the
+        # supervisor asks Claude Code's usage endpoint instead.
+        usage_enabled=_bool_env("SWARM_USAGE", usage.get("enabled", True)),
+        usage_check_s=_int_env("SWARM_USAGE_CHECK", usage.get("check_s"), 600, minimum=60),
+        usage_stale_s=_int_env("SWARM_USAGE_STALE", usage.get("stale_s"), 1800, minimum=300),
+        usage_rules=_usage_rules(usage.get("rules", USAGE_RULES_DEFAULT)),
     )
 
 
@@ -458,6 +471,40 @@ OPERATOR_NOTIFY_DEFAULT = "attention"
 #: ping the swarm has.
 PINGS = ("necessary", "all")
 PINGS_DEFAULT = "necessary"
+
+
+#: ``[usage].rules``: which window, at what percentage, does what.
+USAGE_WINDOWS = ("week", "five_hour")
+USAGE_ACTIONS = ("pause", "down")
+USAGE_RULES_DEFAULT = (
+    {"window": "week", "at": 60, "action": "pause"},
+    {"window": "week", "at": 70, "action": "down"},
+    {"window": "five_hour", "at": 90, "action": "pause"},
+)
+
+
+def _usage_rules(raw: object) -> list[dict]:
+    """Validated ``[usage].rules``. A malformed rule fails the load, like a bad
+    effort: a cap that silently does not apply is worse than a loud error."""
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"[usage].rules must be a list of tables, got {raw!r}")
+    out = []
+    for i, rule in enumerate(raw):
+        where = f"[usage].rules[{i}]"
+        if not isinstance(rule, dict):
+            raise ValueError(f"{where} must be a table, got {rule!r}")
+        window, action, at = rule.get("window"), rule.get("action"), rule.get("at")
+        if window not in USAGE_WINDOWS:
+            raise ValueError(f"{where}.window must be one of {', '.join(USAGE_WINDOWS)}, "
+                             f"got {window!r}")
+        if action not in USAGE_ACTIONS:
+            raise ValueError(f"{where}.action must be one of {', '.join(USAGE_ACTIONS)}, "
+                             f"got {action!r}")
+        if isinstance(at, bool) or not isinstance(at, (int, float)) or not 0 < at <= 100:
+            raise ValueError(f"{where}.at must be a percentage above 0 and at most 100, "
+                             f"got {at!r}")
+        out.append({"window": window, "at": at, "action": action})
+    return out
 
 
 def _choice(value: object, choices: tuple[str, ...], default: str) -> str:

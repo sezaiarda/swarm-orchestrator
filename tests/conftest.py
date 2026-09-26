@@ -177,6 +177,19 @@ def _gc_auto_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _usage_caps_off(monkeypatch):
+    """Usage caps are on by default in a real project; in the suite they are off,
+    so no supervisor under test reads the owner's real limits or calls the usage
+    endpoint with their login. ``tests/test_caps.py`` turns them back on with the
+    endpoint mocked."""
+    from swarm_orchestrator import caps
+
+    monkeypatch.setenv("SWARM_USAGE", "0")
+    # Belt and braces: an in-process check that does run finds no login to send.
+    monkeypatch.setattr(caps, "CREDENTIALS", Path("/nonexistent/.credentials.json"))
+
+
+@pytest.fixture(autouse=True)
 def _web_off(monkeypatch):
     """The web board is on by default in a real project; in the suite it is off.
 

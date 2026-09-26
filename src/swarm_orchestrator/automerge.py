@@ -25,10 +25,11 @@ So two strategies, chosen per path:
 ``keyed:<regex>``
     Segment the file into records introduced by a line matching ``regex`` (group
     1 is the record's key); continuation lines attach to the record above them.
-    Merge per key: whichever side differs from base wins, and only a key that
-    *both* sides changed differently is a real conflict. Verified against all
-    seven ledger conflicts — byte-identical to what the human resolver produced,
-    zero residual conflicts.
+    Merge per key: whichever side differs from base wins. A key *both* sides
+    changed is merged line by line, then word by word, and declines only where
+    both rewrote the same words differently. Tested against ledger
+    conflicts, including same-row ones; the exception is a row whose
+    continuation line both sides rewrote.
 
 Anything without a configured strategy, or any genuine both-sides-changed-the-
 same-key case, resolves nothing and leaves the tree exactly as the failed merge
@@ -60,7 +61,12 @@ def _index_map(base: list[str], side: list[str]) -> dict[int, int]:
 
 
 def merge3(
-    base: list[str], ours: list[str], theirs: list[str], *, union: bool = False
+    base: list[str],
+    ours: list[str],
+    theirs: list[str],
+    *,
+    union: bool = False,
+    inserts: bool = False,
 ) -> list[str] | None:
     """Three-way merge of line lists (diff3-shaped).
 
@@ -70,6 +76,8 @@ def merge3(
     *differently* is a real conflict: with ``union`` it keeps ours-then-theirs
     (two inserts into a journal are not a disagreement), otherwise the merge
     fails and returns ``None`` so the caller falls back rather than guesses.
+    ``inserts`` is the narrow form of ``union``: ours-then-theirs only where
+    both sides added at the same point and neither removed anything there.
 
     Stability is computed from the lines the sides *share with base*, not from
     edit opcodes: a pure insertion occupies a zero-width base range, so opcode
@@ -93,7 +101,7 @@ def merge3(
                 merged.extend(t_chunk)
             elif t_chunk == b_chunk:
                 merged.extend(o_chunk)
-            elif union:
+            elif union or (inserts and not b_chunk):
                 merged.extend(o_chunk)
                 merged.extend(t_chunk)
             else:
@@ -188,6 +196,8 @@ def keyed_merge(base: str, ours: str, theirs: str, pattern: str) -> str | None:
             else:
                 inner = merge3(b or [], o, t, union=False)
                 if inner is None:
+                    inner = _merge_words(b or [], o, t)
+                if inner is None:
                     return None  # both sides edited the same record differently
                 out.extend(inner)
         elif o is not None:
@@ -195,6 +205,28 @@ def keyed_merge(base: str, ours: str, theirs: str, pattern: str) -> str | None:
         elif t is not None:
             out.extend(t)
     return "".join(out)
+
+
+_SPACE = re.compile(r"(\s+)")
+
+
+def _merge_words(base: list[str], ours: list[str], theirs: list[str]) -> list[str] | None:
+    """Merge one record both sides changed, word by word.
+
+    A ledger row is one long physical line that every session appends a dated
+    note to, so two sessions touching the same row collide on that line even
+    when one ticked it and the other added a note, or both appended a note. At
+    word granularity those are edits in different places, or two additions at
+    the same place (kept ours-then-theirs). Base words both sides rewrote
+    differently still decline. Whitespace is kept as its own token, so the
+    record's line breaks survive the round trip.
+    """
+
+    def words(lines: list[str]) -> list[str]:
+        return [w for w in _SPACE.split("".join(lines)) if w]
+
+    merged = merge3(words(base), words(ours), words(theirs), inserts=True)
+    return None if merged is None else ["".join(merged)]
 
 
 # -- strategy dispatch -----------------------------------------------------

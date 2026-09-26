@@ -102,6 +102,14 @@ def test_union_of_two_new_files():
     assert automerge.merge3([], ["x\n"], ["y\n"]) is None
 
 
+def test_inserts_keeps_two_additions_but_not_two_rewrites():
+    base = ["a", "b"]
+    assert automerge.merge3(base, ["a", "x", "b"], ["a", "y", "b"], inserts=True) == [
+        "a", "x", "y", "b",
+    ]
+    assert automerge.merge3(base, ["x", "b"], ["y", "b"], inserts=True) is None
+
+
 # -- keyed_merge ------------------------------------------------------------
 def test_adjacent_ticks_both_land_with_no_stale_line():
     """THE ledger case. Union leaves an extra stale line beside the ticked one."""
@@ -116,10 +124,26 @@ def test_the_same_tick_on_both_sides_is_not_a_conflict():
     assert automerge.keyed_merge(LEDGER, ticked, ticked, LEDGER_KEY) == ticked
 
 
-def test_both_sides_editing_one_record_differently_declines():
-    ours = LEDGER.replace("`P1` parser", "`P1` parser (done by hand)")
-    theirs = LEDGER.replace("`P1` parser", "`P1` parser v2")
+def test_both_sides_rewriting_the_same_words_declines():
+    ours = LEDGER.replace("`P1` parser", "`P1` tokenizer")
+    theirs = LEDGER.replace("`P1` parser", "`P1` grammar")
     assert automerge.keyed_merge(LEDGER, ours, theirs, LEDGER_KEY) is None
+
+
+def test_a_tick_and_a_note_on_one_row_both_land():
+    """One side ticks a row, the other appends a note to the same line: two
+    edits in different places of one record, not a disagreement."""
+    ours = tick(LEDGER, "P2")
+    theirs = LEDGER.replace("`P2` lexer", "`P2` lexer · *(note: rerun)*")
+    got = automerge.keyed_merge(LEDGER, ours, theirs, LEDGER_KEY)
+    assert got == tick(theirs, "P2")
+
+
+def test_two_notes_appended_to_one_row_keep_both_ours_first():
+    ours = LEDGER.replace("`P2` lexer", "`P2` lexer · A")
+    theirs = LEDGER.replace("`P2` lexer", "`P2` lexer · B")
+    got = automerge.keyed_merge(LEDGER, ours, theirs, LEDGER_KEY)
+    assert got == LEDGER.replace("`P2` lexer", "`P2` lexer · A · B")
 
 
 def test_continuation_lines_travel_with_their_record():
@@ -167,6 +191,47 @@ def test_delete_versus_tick_of_one_record_declines():
     ours = LEDGER.replace("- [ ] `P3` codegen\n", "")
     theirs = tick(LEDGER, "P3")
     assert automerge.keyed_merge(LEDGER, ours, theirs, LEDGER_KEY) is None
+
+
+# -- ledger conflict fixtures ------------------------------------------------
+#: Synthetic same-row ledger conflicts of the kind a resolver session would
+#: otherwise splice by hand, cut down to the conflicting record (untouched
+#: stretches of the row removed identically on every side). ``resolved.md`` is
+#: what a resolver would commit.
+CONFLICTS = Path(__file__).parent / "fixtures" / "ledger_conflicts"
+
+
+def _conflict(name: str) -> tuple[str, ...]:
+    return tuple(
+        (CONFLICTS / name / f"{side}.md").read_text(encoding="utf-8")
+        for side in ("base", "ours", "theirs")
+    )
+
+
+@pytest.mark.parametrize("name", ["api-F17", "web-W10-op2", "web-W10-op4"])
+def test_same_row_conflicts_merge_as_a_resolver_would(name):
+    """A tick or Overseer edit against a worker's note, and operator notes
+    appended from mirrors that branched off an older main."""
+    got = automerge.keyed_merge(*_conflict(name), LEDGER_KEY)
+    assert got == (CONFLICTS / name / "resolved.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["web-W10-op3", "ask-web-W10-op3"])
+def test_appended_notes_all_survive(name):
+    """A resolver would tidy these by hand (a separator, a near-duplicate note);
+    the mechanical merge keeps every word each side added."""
+    base, ours, theirs = _conflict(name)
+    got = automerge.keyed_merge(base, ours, theirs, LEDGER_KEY)
+    assert got is not None
+    for side in (ours, theirs):
+        added = set(side.split()) - set(base.split())
+        assert added <= set(got.split())
+
+
+def test_a_row_whose_continuation_lines_both_sides_rewrote_declines():
+    """One side dropped a blank continuation line where the other wrote a new
+    one: a structural edit the resolver has to look at."""
+    assert automerge.keyed_merge(*_conflict("api-F31"), LEDGER_KEY) is None
 
 
 # -- strategy dispatch ------------------------------------------------------
@@ -303,10 +368,10 @@ def test_a_late_decline_leaves_earlier_files_as_the_merge_left_them(tmp_path, mo
         tmp_path,
         {
             "docs/FINDINGS.md": ("o\n", "x\no\n", "y\no\n"),  # union: resolvable
-            "docs/PHASE-LEDGER.md": (  # keyed: same record edited twice -> declines
+            "docs/PHASE-LEDGER.md": (  # keyed: same words rewritten twice -> declines
                 LEDGER,
-                LEDGER.replace("parser", "parser A"),
-                LEDGER.replace("parser", "parser B"),
+                LEDGER.replace("parser", "tokenizer"),
+                LEDGER.replace("parser", "grammar"),
             ),
         },
     )

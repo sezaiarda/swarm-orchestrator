@@ -834,7 +834,7 @@ def _auto_resolve(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
     and the resolver session takes over unchanged.
 
     All-or-nothing on purpose. If ANY conflicted file has no configured strategy,
-    or a strategy declines (both sides edited the same record, both reordered),
+    or a strategy declines (both sides rewrote the same words, both reordered),
     nothing is staged and this returns False. A partial mechanical resolve would
     hand the resolver a half-fixed tree, which is worse than handing it the
     original.

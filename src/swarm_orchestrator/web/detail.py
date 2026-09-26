@@ -17,16 +17,27 @@ from __future__ import annotations
 import time
 
 from .. import ledger as ledger_mod
+from .. import ledgerw
 from .. import notes as notes_mod
 from .. import opqueue
 from ..tui.campaign import campaign_of
 from ..tui.data import load_attempts
 from ..why import _exclude_comment
-from .rows import clip
+from .rows import MAX_ROW_CHARS, clip
 
 #: Note kinds in the order the sheet shows them: what the owner decided outranks
 #: what a worker decided, which outranks what it merely assumed.
 NOTE_ORDER = (notes_mod.OWNER_DECISION, "decision", "assumption", "risk")
+
+
+def _with_history(cfg, pid: str, text: str) -> str:
+    """The row, then what the phase history says about it: the ledger row is
+    state only, and the words that used to be appended to it live there now."""
+    try:
+        hist = ledgerw.history_text(cfg.project_dir, cfg.history_dir, pid)
+    except (AttributeError, OSError, TypeError):
+        hist = ""
+    return (text + "\n\n" + hist.strip()).strip()[:MAX_ROW_CHARS] if hist else text
 
 
 def phase(cfg, dash, board: dict, rows: dict, metas: dict, pid: str,
@@ -67,7 +78,7 @@ def phase(cfg, dash, board: dict, rows: dict, metas: dict, pid: str,
         "campaign": {"name": camp, "what": meta.what if meta else "",
                      "adr": meta.adr if meta else ""},
         "row": {
-            "text": row.text if row else "",
+            "text": _with_history(cfg, pid, row.text if row else ""),
             "line": row.line if row else None,
             "checked": row.checked if row else None,
             "dirs": row.dirs if row else [],

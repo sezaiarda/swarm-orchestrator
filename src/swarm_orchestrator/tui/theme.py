@@ -105,6 +105,7 @@ STATE = {
     "needs_you": YOU,
     # A question is not a failure.
     "operator-ask": YOU,
+    "owner-row": YOU,
     "held": WARN,
     "warn": WARN,
     "operator": OPERATOR,

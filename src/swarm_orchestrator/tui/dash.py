@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .. import bigpic, opqueue, ovrecord
 from .. import runs as runs_mod
+from .. import state as state_mod
 from .. import usage as usage_mod
 from ..meters import LIMITS_LOG, METERS_DIR
 from . import probes
@@ -48,7 +49,6 @@ from .data import (
     question_index,
     read_state,
     load_graph,
-    load_asks,
     load_kept,
     load_ticked,
     run_started_at,
@@ -118,12 +118,10 @@ class Dash:
         #: ``swarm keep`` records, alive or dead, by name — the shells tab.
         self.kept: list = []
         self._kept_at = 0.0
-        #: ``swarm ask`` records, open first — the asks tab.
-        self.asks: list = []
         #: The big-picture pass in a few words, for the headline.
         self.big_picture = ""
         self._bigpic = bigpic.Memory()
-        self._live_pass: str | None = None
+        self._live_pass: tuple[str, ...] = ()
         self._passes_live: object = ()
         self._samples = usage_mod.SampleTail(cfg.state_dir / METERS_DIR / LIMITS_LOG)
         self._all_meters: dict[str, Meter] = {}
@@ -225,15 +223,9 @@ class Dash:
         now = time.time()
         if self._poll_kept(now):
             changed.add("keep")
-        if self._changed("asks", self.cfg.state_dir / "ask"):
-            self.asks = load_asks(self.cfg)
-            changed.add("asks")
-        if self._changed("bigpic", bigpic.memory_path(self.cfg)):
-            self._bigpic = bigpic.load(self.cfg)
-        text = bigpic.short_text(self._bigpic, now)
-        if text != self.big_picture:
-            self.big_picture = text
-            changed.add("bigpic")
+        #: The big-picture pass in a few words, for the headline.
+        self.big_picture = ""
+        self._bigpic = bigpic.Memory()
         grew = self._samples.poll()
         if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
             self._usage_at = now
@@ -293,7 +285,12 @@ class Dash:
     def _rebuild(self) -> None:
         events = self.tail.events
         state = read_state(self.cfg)
-        self._live_pass = (state or {}).get("overseer_pass") if isinstance(state, dict) else None
+        st = state if isinstance(state, dict) else {}
+        # A pass parked on the owner is alive too, in a window of its own.
+        parked = {ident for kind, ident in map(state_mod.waiter, st.get("parked") or [])
+                  if kind == state_mod.OVERSEER}
+        live = {st["overseer_pass"]} if st.get("overseer_pass") else set()
+        self._live_pass = tuple(sorted(parked | live))
         self.snapshot = build_snapshot(
             self.cfg,
             state,

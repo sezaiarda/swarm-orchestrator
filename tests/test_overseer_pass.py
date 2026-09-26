@@ -313,18 +313,52 @@ def test_three_bad_passes_in_a_row_ping_and_a_good_one_resets_the_streak(sup, cf
 def test_asking_the_owner_stretches_the_deadline_and_answering_resets_it(sup, cfg, monkeypatch, tmp_path):
     pid = _start(sup)
     monkeypatch.setenv("SWARM_OVERSEER_PASS", pid)
-    assert cli_main(["--project-dir", str(cfg.project_dir), "overseer-ask", "drop", "the", "look", "campaign?"]) == 0
+    assert cli_main(["--project-dir", str(cfg.project_dir), "waiting", "overseer",
+                     "drop", "the", "look", "campaign?"]) == 0
     assert state_mod.read(cfg).overseer_deadline > time.time() + 6 * 24 * 3600
     assert "the Overseer is waiting on you — drop the look campaign?" in _tg(tmp_path)
+    assert state_mod.read(cfg).waiting == {}  # no FIFO reader here: the poke is lost
     sup._overseer_tick()
     assert sup._overseer_live == pid  # a pass waiting on a person is not hung
-    assert cli_main(["--project-dir", str(cfg.project_dir), "overseer-resumed", "keep", "it"]) == 0
+    assert cli_main(["--project-dir", str(cfg.project_dir), "resumed", "overseer", "keep", "it"]) == 0
     rec = ovrecord.load_json(cfg, pid)
     assert (rec.question, rec.answer) == ("drop the look campaign?", "keep it")
     [owner] = notes_mod.load(cfg, notes_mod.OVERSEER)
     assert owner.kind == notes_mod.OWNER_DECISION
     assert owner.text == "keep it (asked: drop the look campaign?)"
     assert state_mod.read(cfg).overseer_deadline < time.time() + 2800
+
+
+def test_a_pass_left_waiting_is_parked_and_the_next_pass_may_run(sup, cfg, monkeypatch):
+    """Parked like a worker: the pass leaves the master pane, alive, and keeps the
+    run from finishing; a later pass can use the pane; its own end closes it."""
+    pid = _start(sup)
+    monkeypatch.setenv("SWARM_OVERSEER_PASS", pid)
+    assert cli_main(["--project-dir", str(cfg.project_dir), "waiting", "overseer", "ship?"]) == 0
+    key = f"overseer:{pid}"
+    sup._on_waiting(key)
+    with state_mod.transaction(cfg) as st:
+        st.waiting[key] = time.time() - 1
+    sup._check_park_deadlines()
+
+    st = state_mod.read(cfg)
+    assert st.parked == [key] and st.overseer_pass is None and not st.master_alive
+    assert sup._overseer_live is None and st.pending()
+    assert st.live_passes() == {pid}
+    [rec] = ovrecord.load_passes(cfg, live=st.live_passes())
+    assert rec.status == ovrecord.RUNNING and rec.question == "ship?"
+    assert f"PARK {key} window=wait:overseer-{pid}" in cfg.supervisor_log.read_text()
+
+    sup.overseer.request(ov.MANUAL, "again", urgent=True)
+    sup._overseer_tick()
+    assert sup._overseer_live not in (None, pid)  # the pane is free for the next pass
+
+    assert cli_main(["--project-dir", str(cfg.project_dir), "resumed", "overseer", "yes"]) == 0
+    assert cli_main(["--project-dir", str(cfg.project_dir), "overseer-done", "shipped"]) == 0
+    sup._end_overseer_pass(pid, ovrecord.DONE)
+    st = state_mod.read(cfg)
+    assert st.parked == [] and ovrecord.load_json(cfg, pid).status == ovrecord.DONE
+    assert f"UNPARK {key}" in cfg.supervisor_log.read_text()
 
 
 def test_a_pass_that_will_not_start_gives_its_reasons_back(sup, cfg, tmp_path):

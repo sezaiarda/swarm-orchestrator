@@ -80,18 +80,17 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   `swarm keep --name <name> --why "<one plain line a non-developer can read>" --cwd "$SWARM_PROJECT" -- <command...>`
   (never its mirror, which is removed when the phase merges), and it says so in
   its `swarm done` recap: the name, what it serves, and `swarm keep --stop <name>`.
-- **Owner review (asks)**: when `SWARM_PHASE` is set and the phase produces
-  something for the owner to review (mockups, a page, a recording, options to
-  choose between) and `owner-run` rows depend on it, the worker opens an ask
-  *before* its own `swarm done`:
-  `swarm ask --name <name> --rows <row>[,<row>…] --why "<one line: what the owner decides>" "<brief>"`.
-  The swarm then opens a small session in its own tmux window, `ask:<name>`, that
-  shows the owner what to look at, asks with AskUserQuestion, records the picks
-  in those rows and ticks them. The brief says what to look at and where (URLs,
-  file paths). If the worker started a server for the review, it keeps it with
-  `swarm keep --why …` and names that keep in the brief, so the ask stops it when
-  the owner has answered. The worker never waits for the answer itself: it opens
-  the ask and finishes. If the file already says this, leave it.
+- **Owner review**: when `SWARM_PHASE` is set and the phase produces something
+  for the owner to review (mockups, a page, a recording, options to choose
+  between) and `owner-run` rows depend on it, the worker finishes with
+  `swarm done "$SWARM_PHASE" operator "<brief>"`, the brief saying what to show
+  the owner, where (URLs, file paths), and which rows their pick settles. An
+  operator session then shows the owner, asks them in its own window and records
+  the picks in those rows. If the worker started a server for the review, it
+  keeps it with `swarm keep --why …` and names that keep in the brief. The worker
+  never waits for the answer itself. If the file already says this, leave it;
+  if it still tells workers to open an ask, replace that clause with this one —
+  asks no longer exist.
 - **Cost rules** (each line below is a known
   time or cost sink). Add whichever the file does not already say:
   - Subagents come back immediately — an `Agent` call returns in a second and

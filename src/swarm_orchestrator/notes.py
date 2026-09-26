@@ -38,7 +38,7 @@ from .config import Config
 KINDS = ("decision", "assumption", "risk")
 
 #: The owner's answer to a question a session asked, recorded by ``swarm
-#: resumed`` / ``operator-resumed`` / ``overseer-resumed``. Not in :data:`KINDS`
+#: resumed`` (a worker's, an operator job's or the Overseer's). Not in :data:`KINDS`
 #: because no session writes one with ``swarm note``: it is the owner's call,
 #: relayed, and the history is only worth reading if the two never blur.
 OWNER_DECISION = "owner_decision"

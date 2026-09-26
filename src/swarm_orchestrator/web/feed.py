@@ -13,7 +13,7 @@ What is watched, and how often:
   re-reads, the same code the dashboard runs): ``state.json``, the supervisor
   log, ``done/``, ``notes/``, ``recaps/``, the operator queue, the run record,
   ``meters/`` and ``limits.jsonl``, the ledger, the Overseer's pass records,
-  ``keep/`` (what ``swarm keep`` left running), ``ask/`` (what waits on the owner).
+  ``keep/`` (what ``swarm keep`` left running).
 * Here: ``history/``, ``.swarm.toml`` (the exclude
   list lives there — it is re-loaded like ``swarm reload`` would) and the last
   captured turn of each busy worker.
@@ -52,7 +52,7 @@ FORCE_S = 20.0
 
 #: Dash sources whose change always rebuilds; the rest are the slow ones.
 _FAST = {"state", "log", "notifications", "done", "recaps", "notes", "operator", "run",
-         "ledger", "overseer", "keep", "asks"}
+         "ledger", "overseer", "keep"}
 
 
 class Feed:

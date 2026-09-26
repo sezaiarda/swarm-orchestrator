@@ -20,13 +20,13 @@ import shutil
 import time
 from pathlib import Path
 
-from . import ask as ask_mod
 from . import doctor as doctor_mod
 from . import ledger as ledger_mod
 from . import notes as notes_mod
 from . import opqueue
 from . import pushowed
 from . import recap as recap_mod
+from . import state as state_mod
 from . import statuses, telegram
 from .config import Config
 from .master import build_context
@@ -140,24 +140,29 @@ def failures(cfg: Config, st: State) -> list[dict]:
     return out
 
 
+def _workers(keys) -> list[str]:
+    """The worker phases among ``waiting``/``parked`` keys (the rest are listed
+    from their own records)."""
+    return [k for k in keys if state_mod.waiter(k)[0] == state_mod.WORKER]
+
+
 def owner_questions(cfg: Config, st: State, now: float) -> list[dict]:
     """Every question the owner has not answered yet, and how long it has waited."""
     out: list[dict] = []
-    for phase, deadline in sorted(st.waiting.items()):
-        asked = float(deadline) - cfg.park_after
+    for phase in sorted(_workers(st.waiting)):
+        asked = float(st.waiting[phase]) - cfg.park_after
         out.append({"who": phase, "state": "waiting", "age_s": now - asked,
                     "question": doctor_mod.waiting_question(cfg, phase)})
-    for phase in sorted(st.parked):
+    for phase in sorted(_workers(st.parked)):
         out.append({"who": phase, "state": "parked", "age_s": None,
                     "question": doctor_mod.waiting_question(cfg, phase)})
     for item in opqueue.load_all(cfg):
         if item.state == opqueue.WAITING:
-            out.append({"who": f"operator {item.phase}", "state": "operator",
+            key = state_mod.waiter_key(state_mod.OPERATOR, item.phase)
+            out.append({"who": f"operator {item.phase}",
+                        "state": "operator, parked" if key in st.parked else "operator",
                         "age_s": now - item.asked_at if item.asked_at else None,
                         "question": item.question})
-    for ask in ask_mod.open_asks(cfg):
-        out.append({"who": f"ask {ask.name} ({ask_mod.rows_text(ask.rows)})", "state": "ask",
-                    "age_s": ask.age_s(now), "question": ask.why})
     return out
 
 
@@ -177,24 +182,6 @@ def operator_outcomes(items: list[opqueue.Item], since: float) -> list[dict]:
         {"job": i.phase, "at": i.done_at, "attention": i.attention,
          "outcome": i.outcome[:400]}
         for i in done
-    ]
-
-
-def answered_asks(cfg: Config, since: float) -> list[dict]:
-    """Every ask answered since ``since``, newest first.
-
-    What the operator said has to reach something that acts on it. An ask session
-    queues the follow-up work itself (``swarm operator-add``), but an answer
-    that session left unacted on would otherwise be read by nobody: the Overseer
-    sees each one here and picks up what is still owed.
-    """
-    done = [a for a in ask_mod.load_all(cfg) if not a.is_open and a.done_at >= since]
-    done.sort(key=lambda a: -a.done_at)
-    return [
-        {"name": a.name, "rows": list(a.rows), "by": a.by, "at": a.done_at,
-         "attention": a.attention, "question": (a.question or a.why)[:300],
-         "outcome": a.outcome[:400]}
-        for a in done[:MAX_OUTCOMES]
     ]
 
 
@@ -273,7 +260,7 @@ def build(
         st.done, ledger_mod.load_ticked(cfg.project_dir / cfg.ledger), flying
     )
     starve = starvation_map(graph, done, set(cfg.exclude), flying)
-    unasked = ask_mod.owner_run_unasked(cfg, graph, done, set(flying))
+    mine = ledger_mod.owner_rows(graph, done, set(cfg.exclude), set(flying))
     starve["blockers"] = starve["blockers"][:MAX_BLOCKERS]
     starve["cycle"] = starve["cycle"][:20]
     return {
@@ -292,10 +279,9 @@ def build(
         "finished": finished_since(cfg, st, since),
         "failures": failures(cfg, st),
         "owner": owner_questions(cfg, st, now),
-        "answered": answered_asks(cfg, since),
-        # Owner-run rows whose dependencies have landed and that no open ask
-        # names: open an ask for the ones the owner answers at a keyboard.
-        "owner_run_unasked": unasked,
+        # Rows only the owner can do, ready, holding other rows up: the owner
+        # was pinged about each and sees them under "Needs you".
+        "owner_rows": [{"row": r, "blocks": n} for r, n in mine],
         "starvation": starve,
         "resources": resources(cfg),
         "last_pass": last_pass,
@@ -391,25 +377,13 @@ def render(d: dict) -> str:
         for q in d["owner"]
     ] or ["- nobody"]
 
-    answered = d.get("answered") or []
-    out += ["", f"## Asks the owner answered since {since} ({len(answered)})"]
-    if answered:
-        out.append("Check each answer was acted on (a row recorded, a follow-up job"
-                   " queued); queue what is still owed with `swarm operator-add`.")
-    for a in answered:
-        mark = "**[needs the owner]** " if a["attention"] else ""
-        out.append(f"- {mark}{a['name']} ({', '.join(a['rows'])}, by {a['by']}):"
-                   f" asked {a['question']} — answered: {a['outcome'] or '(no outcome given)'}")
-    if not answered:
-        out.append("- none")
-
-    unasked = d.get("owner_run_unasked") or []
-    out += ["", f"## Owner-run rows ready, no ask open ({len(unasked)})"]
-    if unasked:
-        out.append("Their dependencies have landed and no ask names them. Open one"
-                   " (`swarm ask`) for a review or pick the owner makes at a keyboard;"
-                   " leave the physical ones and name them in your summary.")
-    out += [f"- {row}" for row in unasked] or ["- none"]
+    mine = d.get("owner_rows") or []
+    out += ["", f"## Rows only the owner can do, holding others up ({len(mine)})"]
+    if mine:
+        out.append("The owner has been told about each and sees them under Needs you."
+                   " For a review or pick they make at a keyboard, an operator job can"
+                   " walk them through it (`swarm operator-add --phase <row>`).")
+    out += [f"- {r['row']} holds up {r['blocks']}" for r in mine] or ["- none"]
 
     s = d["starvation"]
     out += ["", "## Starvation map",

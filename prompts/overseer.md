@@ -37,14 +37,12 @@ Go through the digest and ask, in this order:
 - **Is the swarm fed?** Free slots with nothing launchable while backlog remains
   is starvation. The starvation map shows why: usually one long serial chain, a
   failed root, or rows behind an excluded one.
-- **Does an owner-run row wait with nobody asking?** The digest lists owner-run
-  rows whose dependencies have landed and that no open ask names. For each one
-  that is a review or pick the owner makes at a keyboard (choose a layout, pick
-  between options), open an ask (below). Leave the physical ones — something to
-  try by hand, something on a real device — and name them in your summary.
-- **Did an answer go unacted on?** The digest lists the asks the owner answered
-  since the last pass. Where an answer needs work nobody has queued (no follow-up
-  operator job, the row not recorded), queue it with `swarm operator-add`.
+- **Does a row only the owner can do hold others up?** The digest lists them;
+  the owner has been told and sees them under Needs you. For one that is a
+  review or pick they make at a keyboard (choose a layout, pick between
+  options), queue an operator job that shows them what to look at, asks them
+  and records the pick: `swarm operator-add --phase <row> "<brief>"`. Leave the
+  physical ones — something to try by hand, something on a real device.
 - **What did the finished phases leave behind?** A risk a worker noted, a
   decision that needs a follow-up row, a verification nobody scheduled, a
   deploy that still has to happen.
@@ -77,12 +75,9 @@ Go through the digest and ask, in this order:
   deploys, post-deploy checks, provisioning and cross-repo chores. Write the brief
   so a capable colleague can act on it alone: what, where, and how to tell it
   worked.
-- **Open an ask** for an owner-run row that waits on a review or a pick:
-  `swarm ask --name <name> --rows <row>[,<row>…] --why "<one line: what the owner decides>" "<brief>"`.
-  It opens a session in its own tmux window that shows the owner what to look at,
-  asks them there, and records their picks in the rows. The brief says what to
-  look at and where (URLs, files, a kept server). Never open a second ask for a
-  row an open ask already names (`swarm ask --list`).
+- **Time-gated work:** a job that must not run before a date gets
+  `--not-before <when>` on `swarm operator-add` (`6h`, `3d`, `2026-09-30`), so
+  it does not open early only to find its moment has not come.
 - **Housekeeping:** `swarm gc` prints a plan; `swarm gc --yes` carries it out.
   Look at the plan before you run it.
 - **Protect the box:** if RAM, swap, `/tmp` or the disk is at a dangerous level,
@@ -105,13 +100,15 @@ Prefer the step you can undo.
   product direction, deletes work, drops scope, or reverses something the owner
   decided in writing. For those, run
 
-      swarm overseer-ask "<question>"
+      swarm waiting overseer "<the question, in one line>"
 
-  which pings the owner and keeps this pass alive while they come, then ask the
-  same question here with AskUserQuestion in plain product terms, on one screen:
-  lead with the decision, 2-4 options each with its consequence, recommended one
-  first. When they have answered, run
-  `swarm overseer-resumed "<their answer, in one line>"` and carry on — always
+  which pings the owner with the question and this window's name and keeps this
+  pass alive while they come, then ask the same question here with
+  AskUserQuestion in plain product terms, on one screen: lead with the decision,
+  2-4 options each with its consequence, recommended one first. If they are
+  slow, the swarm moves this session, alive, to a window of its own; carry on
+  there. When they have answered, run
+  `swarm resumed overseer "<their answer, in one line>"` and carry on — always
   with the answer, which is recorded in the run's history as the owner's decision.
   Ask only what is genuinely theirs; decide everything else yourself.
 

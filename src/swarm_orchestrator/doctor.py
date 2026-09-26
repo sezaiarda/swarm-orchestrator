@@ -42,7 +42,6 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import ask as ask_mod
 from . import caps
 from . import gc as gc_mod
 from . import gitq
@@ -717,7 +716,9 @@ def _waiting_question(cfg: Config, phase: str) -> str:
         if row.get("kind") == "waiting" and row.get("phase") == phase:
             text = str(row.get("text", ""))
             _, sep, tail = text.partition(" — ")
-            return tail.strip() if sep else text.strip()
+            # The ping's last line says which window to open, not what is asked.
+            lines = (tail if sep else text).strip().splitlines()
+            return lines[0] if lines else ""
     return ""
 
 
@@ -762,24 +763,6 @@ def _check_owner(cfg: Config, st: State) -> Check:
         "you are the blocker: " + "; ".join(bits),
         f"answer in its pane, then `swarm resumed {target} '<the answer>'` (or `swarm done {target} ...`)",
     )
-
-
-def _check_asks(cfg: Config, now: float | None = None) -> Check:
-    """Open asks: windows where review questions wait on the owner.
-
-    Like ``owner.blocking``, never a fault — a WARN, because the run cannot
-    finish until each is answered — with how to reach each window, and the way
-    back when its window is gone."""
-    asks = ask_mod.open_asks(cfg)
-    if not asks:
-        return Check("owner.asks", OK, "no ask waiting on you")
-    now = time.time() if now is None else now
-    gone = [a for a in asks if not ask_mod.session_alive(cfg, a)]
-    bits = [ask_mod.line(a, now) + (" — WINDOW GONE" if a in gone else "") for a in asks]
-    fix = (f"swarm ask --reopen {gone[0].name}" if gone
-           else f"answer there: {asks[0].attach()}")
-    return Check("owner.asks", WARN,
-                 f"{len(asks)} ask(s) wait on you: " + "; ".join(bits), fix)
 
 
 def _check_ledger(cfg: Config, st: State | None = None) -> Check:
@@ -1116,10 +1099,11 @@ def _check_failed(st: State) -> Check:
 def _check_operator(cfg: Config) -> Check:
     """Operator jobs that need the owner: waiting on a decision, or given up on.
 
-    A waiting job holds the single operator lease, so every later job queues
-    behind the owner's answer; an abandoned one will never run again unless
-    someone acts on it. Neither is a fault of the swarm — both are the owner's
-    to clear, which is why they are warnings with the way out spelled out.
+    A waiting job holds the single operator window until it is parked in one of
+    its own, so later jobs queue behind it meanwhile; an abandoned one will
+    never run again unless someone acts on it. Neither is a fault of the swarm —
+    both are the owner's to clear, which is why they are warnings with the way
+    out spelled out.
     """
     items = opqueue.load_all(cfg)
     now = time.time()
@@ -1142,9 +1126,12 @@ def _check_operator(cfg: Config) -> Check:
         for i in dropped
     ]
     if slow:
+        key = state_mod.waiter_key(state_mod.OPERATOR, slow[0].phase)
+        window = (state_mod.wait_window(key) if key in state_mod.read(cfg).parked
+                  else "operator")
         fix = (
-            f"answer in the operator window; the session then runs"
-            f" `swarm operator-resumed {slow[0].phase}`"
+            f"answer in tmux window {window}; the session then runs"
+            f" `swarm resumed {slow[0].phase}`"
         )
     else:
         fix = (
@@ -1165,7 +1152,7 @@ def _check_prompts() -> Check:
     """
     packaged = Path(__file__).resolve().parent / "prompts"
     source = Path(__file__).resolve().parent.parent.parent / "prompts"
-    wanted = ("init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md")
+    wanted = ("init_master.md", "resolver.md", "operator.md", "overseer.md")
     missing = [
         name
         for name in wanted
@@ -1285,7 +1272,6 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_nudge(st, ready, free))
     checks.append(_check_stall(cfg, st))
     checks.append(_check_owner(cfg, st))
-    checks.append(_check_asks(cfg))
     checks.append(_check_ledger(cfg, st))
     checks.extend(_check_telegram(cfg))
     checks.extend(_check_disk(cfg))

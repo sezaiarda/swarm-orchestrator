@@ -363,6 +363,14 @@ class Master:
         if not tmux.send_submit(self.pane, text):
             self.log.line("ACTION inject-lost")
 
+    def detach(self) -> None:
+        """Let go of a session that goes on without the master pane: an Overseer
+        pass parked on the owner in its own window. It is no longer this master,
+        so a later :meth:`kill` must not reach it; its own end reaps it."""
+        self.proc = None
+        self.pane = None
+        self.log.line("ACTION detach-master")
+
     def kill(self) -> None:
         """Terminate the master (bare) or clear its pane (tmux)."""
         if self.cfg.driver == "bare":

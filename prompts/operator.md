@@ -118,55 +118,40 @@ outcome. Ask the owner only when the choice is genuinely theirs:
 - it settles what counts as done — a target, a threshold, whether a result
   passes — that the brief and the project's documents leave open.
 
-**A decision always goes to the owner as a question, never inside an outcome
-line.** The owner answers only through a question window; a call written into
-your outcome ("closing the row needs a call on X") reaches them as a ping with
-nowhere to answer, because by then your session has ended and the operator
-window is running another job.
+Ask it here, while you can still act on the answer — never inside an outcome
+line, where nobody can answer it. First run
 
-If you need the answer to finish this job, ask it now, while you are here. Run
+    swarm waiting <job> "<the question, in one line>"
 
-    swarm operator-ask <job> "<question>"
+which pings the owner with the question and this window's name. Then ask the
+same question here with AskUserQuestion, in plain product terms and on one
+screen: lead with the decision, give 2-4 options each with its consequence,
+recommended one first — no quoted source lines. Then wait. If the owner is slow,
+the swarm moves this session, alive, to a window of its own so the next job can
+use the operator window; nothing changes for you. When they have answered, run
 
-which pings the owner and keeps this session alive for as long as they take.
-Then ask the same question here with AskUserQuestion, in plain product terms and
-on one screen: lead with the decision, give 2-4 options each with its
-consequence, recommended one first — no quoted source lines; the owner answers
-from a phone. When they have answered, run
-
-    swarm operator-resumed <job> "<their answer, in one line>"
+    swarm resumed <job> "<their answer, in one line>"
 
 and carry on. Always pass the answer: it is recorded in the run's history as the
-owner's decision, next to the job — without it the history says you asked and
-never what they said. Nobody else will answer: questions go to the owner, not to
-the swarm.
+owner's decision. Nobody else will answer: questions go to the owner, not to the
+swarm.
 
-If the job is otherwise finished and the decision is about what happens next
-(it can wait for the owner without holding this session and the operator window
-for hours), finish with the question instead:
+The same goes for a review: if the job is to show the owner something and get
+their pick (mockups, a page, a recording), show them where to look, ask with
+`swarm waiting` and AskUserQuestion, record the pick in the ledger row, commit,
+and finish.
 
-    swarm operator-done <job> "<one-line outcome>" --ask "<the question>"
+## Not yet: work whose moment has not come
 
-That opens an ask: a window of its own that waits for the owner once your work
-has landed, shows them your outcome, puts the question with AskUserQuestion and
-records the answer; its one ping carries your question and where to answer it.
-Write the question the way you would ask it here: plain product terms, one
-screen, the decision first, then the options with what each one means, the one
-you recommend first, for example "row X passed 9 of 10 checks and the last one
-needs a nightly run. Count it as passed (the row closes), or wait for the next
-nightly run (the row stays open a day)?".
+If the job depends on a date or a state that has not arrived (a rollback kit
+kept until the 30th, a read that needs tomorrow's data), do not ask the owner
+and do not queue a new job. Put this one back:
 
-## When the owner must review something
+    swarm operator-done <job> "<what it waits for>" --not-before <when>
 
-If the job leaves something for the owner to look at and pick from, and
-`owner-run` rows wait on that pick, do not ask it yourself: open an ask with
-
-    swarm ask --name <name> --rows <row>[,<row>…] --why "<one line: what the owner decides>" "<brief>"
-
-It opens a session in its own tmux window that shows the owner what to look at,
-asks them, and records the picks in those rows. The brief says what to look at
-and where; if you keep a server for it with `swarm keep`, name that keep in the
-brief so the ask stops it. Then finish your own job as usual.
+`<when>` is `6h`, `3d`, `2026-09-30` or `"2026-09-30 08:00"`. The job opens
+again then, with this line in its brief. Work you queue for later with
+`swarm operator-add` takes `--not-before` too.
 
 ## Worker questions are not yours
 
@@ -196,11 +181,8 @@ mentions it. Add `--attention` only when:
 
     swarm operator-done <job> "<one-line outcome>" --attention
 
-`--attention` opens an ask window too, because the owner answers only there;
-with no question given, that session works out from your outcome what to put to
-them. So when there is a decision in it, name it yourself with
-`--ask "<the question>"` (see *Asking the owner*) — never leave it inside the
-outcome line for someone to find.
+`--attention` sends the outcome to the owner's phone; it is not a question. A
+decision you need is asked before you finish (see *Asking the owner*).
 
 "Already done, nothing to do" and "done and verified" never get `--attention`.
 

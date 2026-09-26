@@ -11,7 +11,7 @@ from pathlib import Path
 
 #: Every session the swarm spawns carries ``SWARM_SESSION_ID=<kind>:<id>`` (a
 #: worker ``worker:<phase>``, the operator ``operator:<job>``, an Overseer pass
-#: ``overseer:<pass>``, a resolver ``resolver:<phase>``, an ask ``ask:<name>``), and
+#: ``overseer:<pass>``, and a resolver ``resolver:<phase>``), and
 #: hands it to everything it starts. When the session ends, whatever still carries it is ended too.
 #: (Not ``SWARM_SESSION``: that one names the tmux session.)
 SESSION_ENV = "SWARM_SESSION_ID"

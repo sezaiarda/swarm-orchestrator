@@ -118,6 +118,7 @@ NEED_LABEL = {
     "operator-ask": "operator asks",
     "operator-abandoned": "operator gave up",
     OVERSEER: "overseer asks",
+    "owner-row": "yours to do",
 }
 
 

@@ -353,3 +353,29 @@ def blocked_behind(
                 nxt.append(dep)
         frontier = nxt
     return len(seen)
+
+
+def owner_rows(graph: dict[str, set[str]], done: dict[str, str],
+               excluded: set[str] | frozenset[str],
+               in_flight: set[str] | frozenset[str] = frozenset()) -> list[tuple[str, int]]:
+    """``[(row, rows it holds up)]``: owner-run rows the owner can do now that
+    hold other rows up, the most-blocking first.
+
+    ``done`` is the launcher's view (ledger ticks included). A row is the
+    owner's to do once every row it needs has landed and it has not landed
+    itself; one that holds nothing up is left out — it costs nobody anything to
+    wait for the owner's own time.
+    """
+    satisfied = {p for p, s in done.items() if s in SATISFIES_DEPS}
+    order = {p: i for i, p in enumerate(graph)}
+    out = []
+    for row in excluded:
+        if row not in graph or row in done or row in in_flight:
+            continue
+        if not graph[row] <= satisfied:
+            continue
+        n = blocked_behind(graph, row, done, excluded)
+        if n:
+            out.append((row, n))
+    out.sort(key=lambda r: (-r[1], order.get(r[0], 0)))
+    return out

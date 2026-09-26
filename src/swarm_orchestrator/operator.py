@@ -41,12 +41,10 @@ every other claim uses and therefore correct across processes.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 import time
 from pathlib import Path
 
-from . import ask as ask_mod
 from . import gitq
 from . import launch as launch_mod
 from . import opqueue
@@ -180,17 +178,19 @@ def brief(cfg: Config, item: opqueue.Item, cwd: Path | None = None) -> str:
     if item.question:
         answered = f" The owner answered: {item.answer}" if item.answer else " It was not answered."
         earlier = f" An earlier attempt asked the owner: {item.question}.{answered}"
+    if item.last_error:
+        earlier += f" The last attempt ended: {item.last_error.rstrip('.')}."
     return (
         f"Read {prompt_file} and follow it exactly. You are operator job {job}:"
         f" {origin}, in the project at {cfg.project_dir}, on the owner's behalf."
         f" {where} The brief, in full: {note}{earlier} When the job is"
         f' finished run `swarm operator-done {job} "<one-line outcome>"`, adding'
         f" `--attention` only if the owner must act, something is still owed or a"
-        f" check came back bad (see the prompt); if you hit"
-        f' a genuine decision run `swarm operator-ask {job} "<question>"`, ask it'
-        f" with AskUserQuestion, then `swarm operator-resumed {job} \"<answer>\"`;"
-        " a decision about what happens after the job ends goes in"
-        ' `--ask "<question>"` on operator-done, never inside the outcome line.'
+        f" check came back bad (see the prompt). If what the job waits on has not"
+        f' happened yet, run `swarm operator-done {job} "<why>" --not-before <when>`'
+        f" instead. If you hit a genuine decision, run"
+        f' `swarm waiting {job} "<the question, one line>"`, ask it with'
+        f' AskUserQuestion, then `swarm resumed {job} "<answer>"`.'
     )
 
 
@@ -316,75 +316,6 @@ def job_mirror(cfg: Config, job: str) -> str:
     return item.mirror if item is not None and item.mirror else mirror_name(job)
 
 
-def landing(cfg: Config, st: state_mod.State, job: str) -> bool:
-    """Is ``job``'s session still live, or its mirror still on its way to main?
-
-    An ask the job opened waits for this to clear, as a worker's waits for its
-    phase to land: the ask's mirror branches from main, and what the owner is
-    shown (and the rows the ask edits) must already be there.
-    """
-    return st.operator_phase == job or _in_flight(st, job_mirror(cfg, job))
-
-
-# -- a job that ends needing the owner ------------------------------------
-def ask_name(job: str) -> str:
-    """The ask a finished job opens for the owner: ``op-<job>``, ask-safe."""
-    return re.sub(r"[^A-Za-z0-9_-]", "-", mirror_name(job))[:48]
-
-
-def _clip(text: str, limit: int) -> str:
-    text = " ".join((text or "").split())
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
-
-
-def _ask_brief(item: opqueue.Item, question: str) -> str:
-    row = opqueue.owning_phase(item.phase)
-    put = question or (
-        "the operator did not phrase one. Read its outcome below, work out what the"
-        " owner has to decide or do, and ask exactly that."
-    )
-    return (
-        f"Operator job {item.phase} has finished, and its outcome needs the owner. Its"
-        " session has ended and the operator window has moved on to other jobs, so this"
-        " window is the only place the owner answers it.\n\n"
-        f"The question: {put}\n\n"
-        f"The operator's outcome, in full: {item.outcome or '(none given)'}\n\n"
-        f"The job it was doing: {item.note or '(no brief)'}\n\n"
-        f"Once the owner has answered, record the answer on row {row} (see the ask"
-        " prompt's section on asks opened by an operator job). If acting on the answer"
-        " needs work (a run, a deploy, a check, a fix), do not do it here: queue it with"
-        f' `swarm operator-add "<what to do, with the owner\'s answer in it>" --phase {row}`'
-        " and name that job in your ask-done outcome. The ask-done outcome is recorded as"
-        " the owner's decision, so lead it with their answer."
-    )
-
-
-def ask_owner(cfg: Config, item: opqueue.Item, question: str = "") -> ask_mod.Ask:
-    """Open an ask for a finished job whose outcome needs the owner.
-
-    ``operator-done --attention`` alone would be a Telegram line and nothing else:
-    "operator job api-W5 needs you", sent as its session ended. The operator
-    pane is reused for the next job, so the owner, going there to
-    answer, would meet a worker that rightly knew of nothing to ask; ``swarm ask
-    --list`` would say "no asks". An outcome that needs the owner therefore ends in
-    an ask: a window of its own that waits for them, shows them the outcome and
-    asks the question, whose one ping says what is asked and where to answer.
-    With no question put (``--attention`` alone) the ask session works it out
-    from the outcome. Raises :class:`ask.AskError` (an open ask of that name
-    whose window is alive).
-    """
-    question = " ".join((question or "").split())
-    head = question or (
-        f"Operator job {item.phase} left this for you: {item.outcome or '(no outcome given)'}"
-    )
-    ask, _ = ask_mod.create(
-        cfg, ask_name(item.phase), [opqueue.owning_phase(item.phase)],
-        _clip(head, ask_mod.WHY_MAX), _ask_brief(item, question),
-        by=f"operator:{item.phase}", question=head,
-    )
-    return ask
-
-
 #: What :func:`mirror_plan` asks ``swarm up``'s reconcile to do with a mirror.
 KEEP = "keep"
 INTEGRATE = "integrate"
@@ -411,14 +342,19 @@ def mirror_plan(cfg: Config) -> dict[str, str]:
     return plan
 
 
-def release(cfg: Config, log: Log) -> str | None:
-    """End the current session: drop the lease, return the pane to idle.
+def release(cfg: Config, log: Log, job: str | None = None) -> str | None:
+    """End the session in the operator window: drop the lease, return the pane
+    to idle.
 
     Returns the phase the lease held. Idempotent, and safe to call on a run that
     never opened one — which is what lets the supervisor's ``finally`` call it
-    unconditionally rather than deciding whether it has to.
+    unconditionally rather than deciding whether it has to. With ``job``, only
+    that job's session is ended: a parked job finishing in its own window must
+    never end the next job, which has the operator window by then.
     """
     with state_mod.transaction(cfg) as st:
+        if job is not None and st.operator_phase != job:
+            return None
         pane = st.operator_pane
         phase = st.release_operator()
     if phase is None:
@@ -448,8 +384,9 @@ def blocking(cfg: Config) -> list[str]:
     therefore already reached the owner, or is one lease from doing so) stops
     blocking. A blocker with no bound is just a hang with a better name.
 
-    A job waiting on the owner blocks too: its session is alive in the operator
-    window, and finishing the run would kill it with the question unanswered.
+    A job waiting on the owner blocks too: its session is alive, in the operator
+    window or parked in its own, and finishing the run would kill it with the
+    question unanswered.
     """
     return sorted(
         i.phase
@@ -554,7 +491,9 @@ def _reclaim(cfg: Config, log: Log, now: float) -> None:
 
     A session waiting on the owner holds :data:`opqueue.WAIT_LEASE_S` on both
     sides (:func:`hold_lease`), so it is only reclaimed if it has waited out that
-    too — never merely because the owner has not reached a keyboard yet.
+    too — never merely because the owner has not reached a keyboard yet. A
+    parked job holds only the item side; reclaiming it also drops it from the
+    parked set, or the run could never finish.
     """
     with state_mod.transaction(cfg) as st:
         stale = st.operator_phase if (
@@ -566,4 +505,10 @@ def _reclaim(cfg: Config, log: Log, now: float) -> None:
     for item in opqueue.load_all(cfg):
         if item.state in opqueue.LEASED and 0 < item.lease_until <= now:
             opqueue.release(cfg, item.phase, "the operator session outlived its lease")
+            key = state_mod.waiter_key(state_mod.OPERATOR, item.phase)
+            with state_mod.transaction(cfg) as st:
+                st.clear_pending(key)
+                win = st.windows.pop(state_mod.wait_window(key), None)
+            if win and cfg.driver == "tmux":
+                tmux.kill_window(win)
             log.line(f"OPERATOR-REQUEUED {item.phase}")

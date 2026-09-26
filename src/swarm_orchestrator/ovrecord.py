@@ -226,8 +226,10 @@ def sections(text: str) -> dict[str, str]:
     return out
 
 
-def load(cfg: Config, pass_id: str, live: str | None = None) -> PassRecord | None:
-    """One pass, prose included. ``live`` is the pass the supervisor is running."""
+def load(cfg: Config, pass_id: str, live=None) -> PassRecord | None:
+    """One pass, prose included. ``live`` is the pass the supervisor is running,
+    or every pass still alive (the one in the master pane, and any parked on
+    the owner in a window of its own)."""
     rec = load_json(cfg, pass_id)
     if rec is None:
         return None
@@ -237,12 +239,13 @@ def load(cfg: Config, pass_id: str, live: str | None = None) -> PassRecord | Non
         text = ""
     for name, body in sections(text).items():
         setattr(rec, name, body)
-    if rec.status == RUNNING and pass_id != live:
+    alive = {live} if isinstance(live, str) else set(live or ())
+    if rec.status == RUNNING and pass_id not in alive:
         rec.status = INTERRUPTED
     return rec
 
 
-def load_passes(cfg: Config, limit: int | None = 20, live: str | None = None) -> list[PassRecord]:
+def load_passes(cfg: Config, limit: int | None = 20, live=None) -> list[PassRecord]:
     """Recent passes, newest first — what ``swarm overseer``, the TUI and the
     web board list."""
     try:

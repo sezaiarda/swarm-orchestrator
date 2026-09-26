@@ -34,7 +34,6 @@ from datetime import datetime
 from pathlib import Path
 from statistics import median
 
-from .. import ask as ask_mod
 from .. import caps
 from .. import keep as keep_mod
 from .. import ledger as ledger_mod
@@ -254,7 +253,8 @@ class Blocker:
     """
 
     phase: str
-    #: waiting | parked | integ | needs-owner | operator-ask | operator-abandoned.
+    #: waiting | parked | integ | needs-owner | operator-ask | operator-abandoned |
+    #: owner-row (an owner-run row that holds other rows up).
     #: Note what is NOT here: a live ``operator`` hand-off. It never needs the
     #: owner — that is the whole point of the status — so it has its own list on
     #: the snapshot and only reaches this one when its session waits on an owner
@@ -450,7 +450,16 @@ def build_snapshot(
     landed = ledger_mod.with_ticked(done, ticked or set(), in_flight)
 
     blockers: list[Blocker] = []
+    from .. import state as state_mod  # deferred, like the reader's
+
+    # An operator job's or an Overseer pass's key is listed from its own record
+    # (the queue item below, the pass in the timeline), not as a worker.
+    def worker(key: str) -> bool:
+        return state_mod.waiter(key)[0] == state_mod.WORKER
+
     for phase, deadline in sorted(waiting.items()):
+        if not worker(phase):
+            continue
         blockers.append(
             Blocker(
                 phase=phase,
@@ -461,6 +470,8 @@ def build_snapshot(
             )
         )
     for phase in parked:
+        if not worker(phase):
+            continue
         blockers.append(
             Blocker(
                 phase=phase,
@@ -498,13 +509,15 @@ def build_snapshot(
     # version, asked and ended), or the queue tried MAX_ATTEMPTS times and gave up.
     for item in operator:
         if item.state == opqueue.WAITING:
+            key = state_mod.waiter_key(state_mod.OPERATOR, item.phase)
+            window = state_mod.wait_window(key) if key in parked else "operator"
             blockers.append(
                 Blocker(
                     phase=item.phase,
                     kind="operator-ask",
                     question=item.question,
                     since=item.asked_at or item.queued_at or None,
-                    detail=f"answer in the operator window · the job: {item.note}",
+                    detail=f"answer in tmux window {window} · the job: {item.note}",
                 )
             )
         elif item.state == opqueue.ABANDONED:
@@ -518,6 +531,16 @@ def build_snapshot(
                     else (item.last_error or "the operator queue gave up on it"),
                 )
             )
+
+    # Rows only the owner can do that hold other rows up: nothing else would
+    # ever ask about them.
+    for row, n in ledger_mod.owner_rows(graph, landed, set(getattr(cfg, "exclude", []) or []),
+                                        in_flight):
+        blockers.append(
+            Blocker(phase=row, kind="owner-row",
+                    question=f"only you can do this, and it holds up {n} row{'' if n == 1 else 's'}",
+                    detail="tick it in the ledger, or `swarm skip` it, once it is done")
+        )
 
     pid = state.get("supervisor_pid")
     return Snapshot(
@@ -1584,49 +1607,6 @@ def kept_rows(records, now: float | None = None) -> list[dict]:
                 "command": shlex.join(str(a) for a in rec.argv or []),
                 "cwd": rec.cwd,
                 "log": rec.log,
-            })
-        except Exception:  # noqa: BLE001 - a malformed record costs its own row
-            continue
-    return out
-
-
-# -- asks: windows where review questions wait on the owner -------------------
-def load_asks(cfg) -> list:
-    """Every ask on record, open first; empty on any failure."""
-    try:
-        return ask_mod.load_all(cfg)
-    except Exception:  # noqa: BLE001 - a bad record must not cost the cockpit
-        return []
-
-
-def ask_rows(asks, now: float | None = None, recent: int = ask_mod.RECENT) -> list[dict]:
-    """One plain dict per ask — the open ones, then the latest answered — for the
-    asks tab and the board. The attach command is the point: it is how the owner
-    gets from the dashboard to the window that waits on them."""
-    now = time.time() if now is None else now
-    asks = list(asks or [])
-    shown = [a for a in asks if a.is_open] + [a for a in asks if not a.is_open][:recent]
-    out: list[dict] = []
-    for ask in shown:
-        try:
-            age = ask.age_s(now)
-            out.append({
-                "name": ask.name,
-                "rows": list(ask.rows),
-                "rows_text": ask_mod.rows_text(ask.rows),
-                "why": ask.why,
-                "open": ask.is_open,
-                "state": "waiting" if ask.is_open else "answered",
-                "opened_at": ask.opened_at,
-                "age_s": age,
-                "age": ask_mod.age_text(age),
-                "by": ask.by,
-                "window": ask.window,
-                "attach": ask.attach(),
-                "brief": ask.brief,
-                "outcome": ask.outcome,
-                "done_at": ask.done_at,
-                "stop_keeps": list(ask.stop_keeps),
             })
         except Exception:  # noqa: BLE001 - a malformed record costs its own row
             continue

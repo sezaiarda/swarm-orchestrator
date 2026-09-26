@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from swarm_orchestrator import config as config_mod
-from swarm_orchestrator import launch, statuses, telegram
+from swarm_orchestrator import launch, owner, statuses, telegram
 from swarm_orchestrator.config import load
 
 
@@ -357,18 +357,18 @@ def test_a_dropped_fail_ping_is_reported_by_done(cfg, tmp_path, monkeypatch):
 
 
 def test_waiting_pings_the_question_under_its_own_kind(cfg, sink):
-    launch.waiting(cfg, "P1", "  which\n schema? ")
-    cost, head = sent(sink)
+    owner.waiting(cfg, "P1", "  which\n schema? ")
+    cost, head = sent(sink)[:2]
     assert head == "swarm: P1 is waiting on you — which schema?"
     # The first line says what waiting costs (unit-tested in test_owner_history).
     assert "slot held · asked " in cost
     [row] = ledger(cfg.state_dir)
-    assert (row["kind"], row["phase"], row["source"]) == ("waiting", "P1", "launch.waiting")
+    assert (row["kind"], row["phase"], row["source"]) == ("waiting", "P1", "cli.waiting")
 
 
 def test_call_site_kinds_are_declared():
     """The dashboard renders from KINDS; a kind nobody declared is a blank label."""
-    for kind in ("worker-done", "waiting", "operator-ask", "operator-abandoned",
+    for kind in ("worker-done", "waiting", "owner-row", "operator-abandoned",
                  "integrate-hold", "worktree-fail", "spawn-fail", "other"):
         assert kind in telegram.KINDS
 

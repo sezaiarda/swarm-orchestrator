@@ -38,6 +38,36 @@ class Slot:
     retiring: bool = False
 
 
+#: The kinds of session that can wait on the owner besides a worker.
+OPERATOR = "operator"
+OVERSEER = "overseer"
+WORKER = "worker"
+
+
+def waiter_key(kind: str, ident: str) -> str:
+    """The ``waiting``/``parked`` key of a session: a worker's is its phase, any
+    other's ``<kind>:<id>``. A phase id never holds ``:``, so the two never meet."""
+    return ident if kind == WORKER else f"{kind}:{ident}"
+
+
+def waiter(key: str) -> tuple[str, str]:
+    """``(kind, id)`` of a ``waiting``/``parked`` key — the inverse of :func:`waiter_key`."""
+    kind, sep, ident = key.partition(":")
+    return (kind, ident) if sep else (WORKER, key)
+
+
+def wait_window(key: str) -> str:
+    """The window a parked session moves to: ``wait:<phase>``, ``wait:op-<job>``,
+    ``wait:overseer-<pass>``. No second ``:``, so the owner can type it after the
+    session's name."""
+    kind, ident = waiter(key)
+    if kind == OPERATOR:
+        return f"wait:{ident if ident.startswith('op-') else 'op-' + ident}"
+    if kind == OVERSEER:
+        return f"wait:overseer-{ident}"
+    return f"wait:{ident}"
+
+
 @dataclass
 class State:
     """The whole swarm's durable state (serialised to ``state.json``)."""
@@ -75,12 +105,14 @@ class State:
     # version skew: an older state file loads with none, and an older supervisor
     # drops the key on its next write — the next failed push records it again.
     push_owed: dict[str, dict] = field(default_factory=dict)
-    # A worker that needs the owner self-reports via `swarm waiting`. Its phase is
-    # recorded in ``waiting`` with a park DEADLINE (epoch seconds, so it survives a
-    # supervisor restart); when the deadline fires the supervisor ``park``s it —
-    # moving its live pane to its own window and freeing the grid slot — and the
-    # phase moves to ``parked``. A ``parked`` worker owes the owner an answer but
-    # no longer holds a slot; it clears only on ``swarm done``.
+    # A session that needs the owner self-reports via `swarm waiting`. Its key
+    # (:func:`waiter_key`: a worker's phase, else ``operator:<job>`` or
+    # ``overseer:<pass>``) is recorded in ``waiting`` with a park DEADLINE (epoch
+    # seconds, so it survives a supervisor restart); when the deadline fires the
+    # supervisor ``park``s it — moving its live pane to its own window and freeing
+    # what it held (a grid slot, the operator window, the master pane) — and the
+    # key moves to ``parked``. A parked session owes the owner an answer but holds
+    # nothing else; it clears when it finishes.
     waiting: dict[str, float] = field(default_factory=dict)
     parked: list[str] = field(default_factory=list)
     # Live pane arrangement of the worker windows, set by ``swarm layout``.
@@ -102,7 +134,8 @@ class State:
     operator_pane: str | None = None
     # The Overseer pass running in the master pane, if any, and the moment it is
     # killed as hung. The deadline stretches while the pass waits on the owner
-    # (`swarm overseer-ask`) and resets when they answer. Both are wiped by
+    # (`swarm waiting overseer`) and resets when they answer; a pass parked in a
+    # window of its own is in ``parked`` and no longer here. Both are wiped by
     # ``init_state`` on ``up``: a restart means no pass is running. Optional on
     # both sides of a version skew, like ``push_owed``.
     overseer_pass: str | None = None
@@ -221,16 +254,23 @@ class State:
         self.done[phase] = status
 
     def park(self, phase: str) -> None:
-        """Move a waiting phase off the grid into the parked set.
+        """Move a waiting session off the grid into the parked set.
 
-        Frees its busy slot (``free_slot_for`` nulls the phase but keeps the slot's
-        ``pane_id``, so a replacement worker can respawn into it) and records the
-        phase as parked — its worker keeps building/waiting on ``swarm/<phase>`` in
-        its own window. Idempotent on the parked list."""
+        For a worker, frees its busy slot (``free_slot_for`` nulls the phase but
+        keeps the slot's ``pane_id``, so a replacement worker can respawn into it)
+        and records the phase as parked — its worker keeps building/waiting on
+        ``swarm/<phase>`` in its own window. Any other key holds no slot, so this
+        only moves it. Idempotent on the parked list."""
         self.free_slot_for(phase)
         self.waiting.pop(phase, None)
         if phase not in self.parked:
             self.parked.append(phase)
+
+    def live_passes(self) -> set[str]:
+        """Overseer passes still alive: the one in the master pane, and any parked
+        on the owner in a window of its own."""
+        parked = {ident for kind, ident in map(waiter, self.parked) if kind == OVERSEER}
+        return parked | ({self.overseer_pass} if self.overseer_pass else set())
 
     def clear_pending(self, phase: str) -> bool:
         """Drop a finished phase from the waiting/parked tracking. Returns whether

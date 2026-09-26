@@ -77,7 +77,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import ask as ask_mod
 from . import backup as backup_mod
 from . import gitq
 from . import ledger as ledger_mod
@@ -301,11 +300,6 @@ def _live_names(cfg: Config, st: State) -> set[str]:
 
     if bigpic.load(cfg).live:
         names.add(bigpic.WINDOW)  # the big-picture session's TMPDIR
-    try:
-        names |= set(ask_mod.mirror_plan(cfg))  # an open ask's mirror and TMPDIR
-        names |= {ask_mod.mirror_name(n) for n in ask_mod.open_names(cfg)}
-    except (OSError, ValueError):
-        pass
     return names
 
 

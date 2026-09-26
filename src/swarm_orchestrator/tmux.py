@@ -295,6 +295,11 @@ def window_of(pane_id: str) -> str:
     return run(["display-message", "-p", "-t", pane_id, "#{window_id}"]).stdout.strip()
 
 
+def window_name_of(pane_id: str) -> str:
+    """The name of the window that currently holds ``pane_id`` ("" if none)."""
+    return run(["display-message", "-p", "-t", pane_id, "#{window_name}"]).stdout.strip()
+
+
 def apply_layout(window_id: str, count: int, layout: str = AUTO_LAYOUT) -> None:
     """Re-apply ``layout``'s preset to an EXISTING window (no splitting) — used
     after a pane is broken out so the survivors re-tidy, and by ``swarm layout``
@@ -316,13 +321,14 @@ def split_one(window_id: str, hold: str = "sleep infinity") -> str:
 def park_pane(
     window_id: str,
     old_pane: str,
-    slot_id: int,
+    slot_id: int | None,
     wait_name: str,
     session: str,
     layout: str = AUTO_LAYOUT,
 ) -> tuple[str, str]:
     """Move the LIVE ``old_pane`` into its own window ``wait_name`` while leaving
-    ``window_id``'s slot filled by a fresh replacement pane tagged ``slot_id``.
+    ``window_id``'s slot filled by a fresh replacement pane tagged ``slot_id``
+    (``None``: the operator or master window, which carry no slot tag).
 
     Split-FIRST (add the replacement BEFORE breaking the waiter out) so the window
     always carries >= 2 panes at break time: :func:`break_pane` on a *single*-pane
@@ -331,7 +337,8 @@ def park_pane(
     replacement = split_one(window_id)
     wait_win = break_pane(old_pane, wait_name, session)
     apply_layout(window_id, len(list_panes(window_id)), layout)
-    set_slot(replacement, slot_id)
+    if slot_id is not None:
+        set_slot(replacement, slot_id)
     return wait_win, replacement
 
 

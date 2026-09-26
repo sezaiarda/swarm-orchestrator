@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import launch, ledger, opqueue, ovdigest
+from swarm_orchestrator import launch, ledger, opqueue, ovdigest, owner
 from swarm_orchestrator import notes as notes_mod
 from swarm_orchestrator import report as report_mod
 from swarm_orchestrator import state as state_mod
@@ -104,8 +104,8 @@ def test_a_long_question_is_cut_to_one_screen_and_says_where_the_rest_is():
 def test_the_waiting_ping_leads_with_the_cost_from_the_live_ledger(cfg, tmp_path):
     with state_mod.transaction(cfg) as st:
         st.done = {"D": "ok"}
-    launch.waiting(cfg, "A", "roll now or later? " + "x" * 900)
-    cost, body = _sent(tmp_path)
+    owner.waiting(cfg, "A", "roll now or later? " + "x" * 900)
+    cost, body = _sent(tmp_path)[:2]
     assert cost.startswith("3 phases blocked behind this · slot held · asked ")
     assert body.startswith("swarm: A is waiting on you — roll now or later?")
     assert body.endswith("(full question in its window)")
@@ -122,7 +122,7 @@ def test_operator_and_overseer_pings_are_trimmed_the_same_way():
 
 # -- the owner's answer goes into history -------------------------------------
 def test_resumed_with_an_answer_records_an_owner_decision(cfg):
-    launch.waiting(cfg, "B", "close it and file the leftovers as new rows?")
+    owner.waiting(cfg, "B", "close it and file the leftovers as new rows?")
     assert _cli(cfg, "resumed", "B", "yes,", "file", "them") == 0
     [note] = notes_mod.load(cfg, "B")
     assert note.kind == notes_mod.OWNER_DECISION

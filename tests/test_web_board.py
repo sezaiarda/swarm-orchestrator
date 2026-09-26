@@ -43,7 +43,7 @@ Intro prose that is not a row.
 
 ### beta (owner-run things)
 
-- [ ] `be-W1` · needs:— · **owner-run.**
+- [ ] `be-W1` · needs:— · **owner-run, and it holds a row up.**
 - [ ] `be-W2` · needs:`be-W1` · **blocked behind an excluded row.**
 - [ ] `be-W3` · needs:— · **operator asks.**
 - [x] `be-W4` · needs:— · **ticked only in the ledger.**
@@ -51,14 +51,15 @@ Intro prose that is not a row.
 - [ ] `be-W6` · needs:— · **merged, push owed.** token=ghp_abcdefghijklmnopqrstuvwxyz0123
 - [ ] `be-W7` · needs:`be-W4` · **ready: its dep is ticked, which counts as landed.**
 - [x] `be-W8` · needs:— · **owner-run, and the owner ticked it.**
+- [ ] `be-W9` · needs:— · **owner-run, holding nothing up.**
 """
 
 EXPECTED = {
     "al-W0": "done", "al-W1": "ready", "al-W2": "building", "al-W3": "needs_you",
     "al-W4": "needs_you", "al-W5": "merging", "al-W6": "merging", "al-W7": "operator",
-    "al-W8": "failed", "al-W9": "blocked", "be-W1": "excluded", "be-W2": "blocked",
+    "al-W8": "failed", "al-W9": "blocked", "be-W1": "needs_you", "be-W2": "blocked",
     "be-W3": "needs_you", "be-W4": "done", "be-W5": "done", "be-W6": "merging",
-    "be-W7": "ready", "be-W8": "done",
+    "be-W7": "ready", "be-W8": "done", "be-W9": "excluded",
 }
 
 
@@ -73,7 +74,7 @@ def make_run(tmp_path: Path, monkeypatch) -> config_mod.Config:
     (project / "docs").mkdir(parents=True)
     (project / "docs" / "LEDGER.md").write_text(LEDGER, encoding="utf-8")
     (project / ".swarm.toml").write_text(
-        '[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "be-W8"]\n', encoding="utf-8")
+        '[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "be-W8", "be-W9"]\n', encoding="utf-8")
     state_dir = tmp_path / "state"
     monkeypatch.setenv("SWARM_STATE_DIR", str(state_dir))
     cfg = config_mod.load(project_dir=str(project))
@@ -176,7 +177,8 @@ def test_non_phase_cards_join_the_board(feed):
 
 def test_header_counts_and_slots(feed):
     h = feed.board["header"]
-    assert h["needs_you"] == 4  # waiting, parked, operator ask, Overseer ask
+    # waiting, parked, operator ask, Overseer ask, an owner-run row holding one up
+    assert h["needs_you"] == 5
     assert h["slots"] == {"busy": 2, "total": 3}
     assert h["eta"]["remaining"] == sum(
         1 for p, col in EXPECTED.items() if col in board_mod.OPEN)
@@ -214,7 +216,7 @@ def test_the_header_says_a_drain_in_words(feed):
 
 def test_an_edited_exclude_list_moves_the_card(feed):
     toml = feed.cfg.project_dir / ".swarm.toml"
-    toml.write_text('[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "al-W1"]\n')
+    toml.write_text('[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "be-W8", "be-W9", "al-W1"]\n')
     feed.refresh()
     assert _cards(feed.board)["al-W1"]["col"] == "excluded"
 
@@ -226,8 +228,9 @@ def test_campaign_headers_say_what_it_is_and_how_far(feed):
     assert camps["al"]["about"] == "Alpha exists to put a phase in every column."
     assert (camps["al"]["done"], camps["al"]["total"]) == (1, 10)
     assert camps["be"]["what"] == "beta — owner-run things"
-    # be-W1 is excluded; be-W8 is excluded too, but ticked, so it counts as done.
-    assert (camps["be"]["done"], camps["be"]["total"]) == (3, 7)
+    # be-W9 is excluded; be-W8 is excluded too, but ticked, so it counts as done;
+    # be-W1 is the owner's to do, so it counts.
+    assert (camps["be"]["done"], camps["be"]["total"]) == (3, 8)
     assert camps["al"]["active"] is True
     assert feed.board["campaigns"][0]["name"] == "al"
 
@@ -286,7 +289,7 @@ def test_detail_of_a_building_and_a_waiting_phase(feed):
     assert w["jobs"][0]["state"] == opqueue.WAITING
     n = json.loads(feed.detail("al-W9"))
     assert [x["id"] for x in n["needs"]] == ["al-W8"] and n["needs"][0]["col"] == "failed"
-    x = json.loads(feed.detail("be-W1"))
+    x = json.loads(feed.detail("be-W8"))
     assert x["card"]["col"] == "excluded"
 
 

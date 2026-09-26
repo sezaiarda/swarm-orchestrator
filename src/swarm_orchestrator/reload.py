@@ -254,11 +254,6 @@ POLICY: dict[str, Policy] = {
            "read by the session's own `swarm operator-done`, which under worktree"
            " isolation runs in its mirror and reads the .swarm.toml copy branched"
            " when the job opened; the next job reads this one"),
-        _p("ask_cmd", "[ask]", "cmd", NEXT, "SWARM_ASK_CMD",
-           "read when `swarm ask` opens a window; an open ask keeps the command"
-           " it was spawned with"),
-        _p("ask_model", "[ask]", "model", NEXT, "SWARM_ASK_MODEL",
-           "baked into an ask session's command line when its window is opened"),
         _p("overseer_enabled", "[overseer]", "enabled", HOT, "SWARM_OVERSEER",
            "the supervisor's trigger policy reads it on every wake; a pass"
            " already running is left to finish"),

@@ -1141,26 +1141,3 @@ def _blocked_behind(cfg: Config, phase: str) -> int | None:
     if phase not in graph:
         return None
     return ledger_mod.blocked_behind(graph, phase, done, set(cfg.exclude))
-
-
-def waiting(cfg: Config, phase: str, note: str = "") -> None:
-    """Signal that the worker for ``phase`` is blocked on the owner.
-
-    Mirror of :func:`done`'s ping path: telegram the owner the question *from the
-    worker itself* (``note`` in hand, so they can answer in the pane), then a
-    best-effort non-blocking FIFO poke asking the supervisor to arm the park timer.
-    Never hangs the worker if the supervisor is down. The note is NOT sent over the
-    FIFO — only ``waiting <phase>`` — since parking keys on the phase alone.
-    """
-    recap = ping_question(note)
-    tail = f" — {recap}" if recap else ""
-    cost = cost_line(_blocked_behind(cfg, phase), "slot held", time.time())
-    telegram.notify(
-        cfg.telegram_notify,
-        f"{cost}\nswarm: {phase} is waiting on you{tail}",
-        kind="waiting",
-        phase=phase,
-        source="launch.waiting",
-        state_dir=cfg.state_dir,
-    )
-    _poke_fifo(cfg, f"waiting {phase}\n")

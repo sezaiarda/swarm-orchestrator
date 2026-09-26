@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import ask as ask_mod
 from swarm_orchestrator import notes as notes_mod
 from swarm_orchestrator import operator as operator_mod
 from swarm_orchestrator import opqueue, promptlint
@@ -383,22 +382,20 @@ def test_operator_done_on_a_phase_with_no_hand_off_is_refused(cfg):
     assert cli(cfg, "operator-done", PHASE).returncode == 1
 
 
-def test_operator_ask_pings_once_and_keeps_the_session_waiting(cfg, log):
-    """The ask is a ping plus a held lease — the session stays and asks in its pane.
+KEY = f"operator:{PHASE}"
 
-    It used to abandon the job and end the session, so the owner's answer arrived
-    to nobody and the groundwork already done was thrown away.
-    """
+
+def test_waiting_pings_once_and_keeps_the_session_waiting(cfg, log):
+    """A ping plus a held lease — the session stays and asks in its own window."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
-    result = cli(cfg, "operator-ask", PHASE, "which", "host", "is", "the", "gateway")
+    result = cli(cfg, "waiting", KEY, "which", "host", "is", "the", "gateway")
 
     assert result.returncode == 0, result.stderr
-    assert "AskUserQuestion" in result.stdout and "operator-resumed" in result.stdout
-    asked = [ln for ln in tg_lines(cfg) if PHASE in ln]
-    assert len(asked) == 1
-    assert "which host is the gateway" in asked[0] and "waiting on you" in asked[0]
+    assert "AskUserQuestion" in result.stdout and "swarm resumed" in result.stdout
+    asked = [ln for ln in tg_lines(cfg) if "waiting on you" in ln]
+    assert asked == [f"swarm: operator job {PHASE} is waiting on you — which host is the gateway"]
     item = opqueue.load(cfg, PHASE)
     assert item.state == opqueue.WAITING and not item.terminal
     st = state_mod.read(cfg)
@@ -409,20 +406,29 @@ def test_operator_ask_pings_once_and_keeps_the_session_waiting(cfg, log):
     assert Supervisor(cfg)._operator_blocking() == [PHASE]
 
 
-def test_operator_ask_does_not_telegram_a_second_time(cfg, log):
+def test_inside_the_session_the_job_id_alone_is_enough(cfg, log, monkeypatch):
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
-    cli(cfg, "operator-ask", PHASE, "which host")
+    monkeypatch.setenv(operator_mod.JOB_ENV, PHASE)
+
+    assert cli(cfg, "waiting", PHASE, "which host").returncode == 0
+    assert opqueue.load(cfg, PHASE).state == opqueue.WAITING
+
+
+def test_waiting_does_not_telegram_a_second_time(cfg, log):
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+    cli(cfg, "waiting", KEY, "which host")
     before = len(tg_lines(cfg))
 
-    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+    assert cli(cfg, "waiting", KEY, "which host").returncode == 0
     assert len(tg_lines(cfg)) == before
 
 
-def test_operator_ask_on_a_job_that_is_not_running_is_refused(cfg):
+def test_waiting_on_a_job_that_is_not_running_is_refused(cfg):
     queue(cfg, PHASE)  # queued, never dispatched
 
-    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 1
+    assert cli(cfg, "waiting", KEY, "which host").returncode == 1
     assert tg_lines(cfg) == []
 
 
@@ -430,7 +436,7 @@ def test_a_waiting_session_survives_the_sweep_past_its_ordinary_lease(cfg, log):
     """The owner answers when they reach a keyboard; an hour is not a verdict."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
-    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+    assert cli(cfg, "waiting", KEY, "which host").returncode == 0
 
     operator_mod.sweep(cfg, log, now=time.time() + opqueue.LEASE_S * 5)
 
@@ -443,7 +449,7 @@ def test_a_waiting_session_still_lets_go_after_the_wait_lease(cfg, log):
     """A week, not forever: a session that truly vanished must free the queue."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
-    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+    assert cli(cfg, "waiting", KEY, "which host").returncode == 0
 
     operator_mod.sweep(cfg, log, now=time.time() + opqueue.WAIT_LEASE_S + 60)
 
@@ -451,12 +457,12 @@ def test_a_waiting_session_still_lets_go_after_the_wait_lease(cfg, log):
     assert state_mod.read(cfg).operator_phase is None
 
 
-def test_operator_resumed_puts_the_session_back_on_an_ordinary_lease(cfg, log):
+def test_resumed_puts_the_session_back_on_an_ordinary_lease(cfg, log):
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
-    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+    assert cli(cfg, "waiting", KEY, "which host").returncode == 0
 
-    result = cli(cfg, "operator-resumed", PHASE, "the", "staging", "box")
+    result = cli(cfg, "resumed", KEY, "the", "staging", "box")
 
     assert result.returncode == 0, result.stderr
     item = opqueue.load(cfg, PHASE)
@@ -465,7 +471,7 @@ def test_operator_resumed_puts_the_session_back_on_an_ordinary_lease(cfg, log):
     assert st.operator_phase == PHASE
     assert st.operator_lease_until == item.lease_until
     assert st.operator_lease_until <= time.time() + opqueue.LEASE_S + 1
-    assert cli(cfg, "operator-resumed", PHASE).returncode == 1  # not waiting now
+    assert cli(cfg, "resumed", KEY).returncode == 1  # not waiting now
     # The owner's call is history, filed under the job's phase.
     [owner] = notes_mod.load(cfg, opqueue.owning_phase(PHASE))
     assert (owner.kind, owner.text) == (
@@ -498,10 +504,9 @@ def test_a_routine_operator_outcome_is_recorded_but_pings_nobody(cfg, log):
     assert "not pinged" in result.stdout
 
 
-def test_an_outcome_flagged_for_attention_becomes_an_ask(cfg, log):
-    """Its one ping is the ask's, when the window opens (tests/test_operator_owner_ask.py):
-    a "needs you" line sent as the session ended pointed at a pane already
-    running the next job."""
+def test_an_outcome_flagged_for_attention_is_sent(cfg, log):
+    """``--attention`` is the outcome on the phone, not a question: a decision is
+    asked with ``swarm waiting`` while the session can still act on it."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
@@ -509,11 +514,7 @@ def test_an_outcome_flagged_for_attention_becomes_an_ask(cfg, log):
 
     assert result.returncode == 0, result.stderr
     assert opqueue.load(cfg, PHASE).attention is True
-    assert ask_mod.load(cfg, operator_mod.ask_name(PHASE)).is_open
-    assert tg_lines(cfg) == []
-    [row] = ledger_rows(cfg)
-    assert row["delivered"] is False and "window ask:" in row["suppressed"]
-    assert "api-F26 NOT rolled; roll owed" in row["text"]
+    assert tg_lines(cfg) == [f"swarm: operator job {PHASE} needs you — api-F26 NOT rolled; roll owed"]
 
 
 def test_notify_all_pings_every_outcome(cfg, log, monkeypatch):
@@ -541,8 +542,8 @@ def test_notify_none_silences_even_attention_but_not_questions_or_abandons(
     monkeypatch.setenv("SWARM_OPERATOR_NOTIFY", "none")
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
-    assert cli(cfg, "operator-ask", PHASE, "which", "host?").returncode == 0
-    assert cli(cfg, "operator-resumed", PHASE, "staging").returncode == 0
+    assert cli(cfg, "waiting", KEY, "which", "host?").returncode == 0
+    assert cli(cfg, "resumed", KEY, "staging").returncode == 0
     assert cli(cfg, "operator-done", PHASE, "roll owed", "--attention").returncode == 0
     queue(cfg, OTHER)
     opqueue.abandon(cfg, OTHER, "three crashes")
@@ -552,7 +553,7 @@ def test_notify_none_silences_even_attention_but_not_questions_or_abandons(
     assert "ABANDONED" in sent and OTHER in sent
     assert "roll owed" not in sent
     assert [(r["kind"], r["delivered"]) for r in ledger_rows(cfg)] == [
-        ("operator-ask", True), ("operator-done", False), ("operator-abandoned", True)]
+        ("waiting", True), ("operator-done", False), ("operator-abandoned", True)]
 
 
 def test_an_unknown_flag_never_fails_operator_done(cfg, log):
@@ -580,7 +581,8 @@ def test_the_brief_carries_the_job_its_exits_and_an_earlier_question(cfg):
 
     assert "\n" not in line  # send-keys submits on every newline
     assert NOTE in line and f"swarm operator-done {PHASE}" in line
-    assert f"swarm operator-ask {PHASE}" in line and "operator-resumed" in line
+    assert f"swarm waiting {PHASE}" in line and f"swarm resumed {PHASE}" in line
+    assert f"swarm operator-done {PHASE} " in line and "--not-before" in line
     assert "project itself" in line
 
     item.question, item.answer = "which host?", ""
@@ -652,7 +654,7 @@ def test_status_shows_the_queue_counts_and_the_job_waiting_on_you(cfg, log):
     queue(cfg, PHASE)
     queue(cfg, OTHER, note="restart the unit on the build host")
     assert operator_mod.dispatch(cfg, PHASE, log) is True
-    assert cli(cfg, "operator-ask", PHASE, "which host").returncode == 0
+    assert cli(cfg, "waiting", KEY, "which host").returncode == 0
 
     out = cli(cfg, "status").stdout
 

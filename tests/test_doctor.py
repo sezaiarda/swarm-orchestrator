@@ -31,7 +31,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from swarm_orchestrator import doctor, launch
+from swarm_orchestrator import doctor, owner
 from swarm_orchestrator import state as state_mod
 from swarm_orchestrator import telegram
 from swarm_orchestrator.config import load
@@ -350,7 +350,7 @@ def test_silence_with_nothing_in_flight_is_fine(cfg):
 # -- the owner as the blocker -----------------------------------------------
 def test_a_waiting_worker_shows_its_question_from_the_ledger(cfg):
     """`swarm waiting` stores the question nowhere but the telegram it sends."""
-    launch.waiting(cfg, "P1", "which  schema\nshould I use?")
+    owner.waiting(cfg, "P1", "which  schema\nshould I use?")
     asked = time.time() - 20 * 60
     st = set_state(cfg, waiting={"P1": asked + cfg.park_after})
     check = doctor._check_owner(cfg, st)
@@ -575,7 +575,7 @@ def test_run_checks_reads_in_a_fixed_order_and_never_raises(cfg, monkeypatch):
         "supervisor.pid", "supervisor.fifo", "supervisor.stray", "slots.panes",
         "run.watchdog", "slots.activity", "integration.blocked", "integration.push",
         "run.finished",
-        "run.nudge", "run.stall", "owner.blocking", "owner.asks", "ledger", "telegram.config",
+        "run.nudge", "run.stall", "owner.blocking", "ledger", "telegram.config",
         "telegram.sends", "disk.state", "disk.incremental", "disk.tmp", "sentinels",
         "recaps.history", "phases.failed", "operator", "prompts", "web.board", "telegram.bot",
         "usage.caps", "keep",

@@ -18,13 +18,13 @@ import time
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from . import ask as ask_mod
 from . import caps
 from . import backup as backup_mod
 from . import bigpic as bigpic_mod
 from . import buildsem
 from . import notes as notes_mod
 from . import operator as operator_mod
+from . import owner as owner_mod
 from . import opqueue
 from . import overseer as overseer_mod
 from . import ovrecord
@@ -157,7 +157,6 @@ def _reconcile_orphans(cfg: Config) -> None:
             first = result.held[0]
             plan = operator_mod.mirror_plan(cfg)
             passes = ovrecord.mirror_plan(cfg)
-            asks = ask_mod.mirror_plan(cfg)
             with state_mod.transaction(cfg) as s:
                 s.integ_blocked = first.phase
                 s.integ_blocked_kind = first.kind
@@ -169,8 +168,6 @@ def _reconcile_orphans(cfg: Config) -> None:
                         s.integ_push(h.phase, operator_mod.INTEG_STATUS)
                     elif h.phase in passes:
                         s.integ_push(h.phase, ovrecord.INTEG_STATUS)
-                    elif h.phase in asks:
-                        s.integ_push(h.phase, ask_mod.INTEG_STATUS)
                     else:
                         s.integ_push(h.phase, seed.get(h.phase, "ok"))
             names = ", ".join(f"{h.phase} ({h.kind})" for h in result.held)
@@ -192,9 +189,8 @@ def _reconcile_orphans(cfg: Config) -> None:
 
 def _mirror_plan(cfg: Config) -> dict[str, str]:
     """Every ``swarm/*`` branch that has no sentinel by design and must not be
-    discarded as an interrupted phase: operator jobs', Overseer passes' and asks'."""
-    return {**operator_mod.mirror_plan(cfg), **ovrecord.mirror_plan(cfg),
-            **ask_mod.mirror_plan(cfg)}
+    discarded as an interrupted phase: operator jobs' and Overseer passes'."""
+    return {**operator_mod.mirror_plan(cfg), **ovrecord.mirror_plan(cfg)}
 
 
 def _attach(cfg: Config) -> None:
@@ -800,50 +796,44 @@ def _operator_done_hold(mode: str, attention: bool) -> str | None:
 
 def cmd_operator_done(
     cfg: Config, phase: str, outcome: str = "", attention: bool = False,
-    question: str = "",
+    not_before: str = "",
 ) -> int:
     """The session signals its job is finished, with a one-line outcome.
 
     The outcome is recorded on the item, in the notification ledger and in the
     next Overseer digest. Routine outcomes arrive folded into the Overseer's
-    summary, unless ``[operator].notify`` says otherwise.
+    summary, unless ``[operator].notify`` says otherwise; ``--attention`` sends
+    it. A decision the owner has to make is never an outcome: the session asks
+    it with ``swarm waiting`` while it is still there to act on the answer.
 
-    One that needs the owner (``--attention``, or ``--ask "<question>"``, which
-    implies it) opens an ask (:func:`operator.ask_owner`): the owner answers in
-    that window, and its one ping carries the question and where to answer it.
-    The outcome's own "needs you" line used to be the whole of it, sent as the
-    session ended, so an owner could go to answer one phase in an
-    operator pane already running a different phase and found no question anywhere.
+    ``--not-before`` is "not yet": the job goes back in the queue until then
+    (:func:`opqueue.later`) instead of being finished, for work whose moment has
+    not come — a date the owner set, data that lands tomorrow.
     """
-    question = " ".join((question or "").split())
-    attention = attention or bool(question)
+    if not_before:
+        try:
+            when = opqueue.parse_not_before(not_before)
+        except ValueError as exc:
+            print(f"swarm operator-done: {exc}", file=sys.stderr)
+            return 2
+        item = opqueue.later(cfg, phase, when, outcome)
+        if item is None:
+            print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
+            return 1
+        heard = _poke(cfg, f"operator-done {phase}")
+        print(f"operator-done {phase}: queued again, not before {_clock(when)}")
+        print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
+        return 0
     item = opqueue.complete(cfg, phase, outcome, attention)
     if item is None:
         print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
         return 1
     tail = f" — {item.outcome}" if item.outcome else " (no outcome given)"
-    asked, failed = None, ""
-    if attention:
-        try:
-            asked = operator_mod.ask_owner(cfg, item, question)
-        except ask_mod.AskError as exc:
-            failed = str(exc)
     mode = cfg.operator_notify
     if mode == "attention" and telegram.sends_all(cfg):
         mode = "all"  # `[telegram].pings = "all"` restores every ping, this one too
-    if asked is not None:
-        # One ping, not two: the ask's, sent when its window opens, which says
-        # what is asked and where. This line saying "needs you" beside it would
-        # point at a session that has already ended.
-        hold = f"its question goes out when window {asked.window} opens"
-        head = f"swarm: operator job {phase} done, question opened in {asked.window}"
-    elif attention:
-        hold = _operator_done_hold(mode, attention)
-        head = (f"swarm: operator job {phase} needs you, but no question window could"
-                f" open ({failed}); its session has ended")
-    else:
-        hold = _operator_done_hold(mode, attention)
-        head = f"swarm: operator job {phase} done"
+    hold = _operator_done_hold(mode, attention)
+    head = f"swarm: operator job {phase} {'needs you' if attention else 'done'}"
     telegram.notify(
         cfg.telegram_notify,
         f"{head}{tail}",
@@ -853,23 +843,18 @@ def cmd_operator_done(
         state_dir=cfg.state_dir,
         suppressed=hold,
     )
-    # The ask is poked before the job's end: the end respawns this very pane,
-    # and a poke that never leaves would leave the question unopened until the
-    # next `swarm up`. The supervisor holds it until the job's work has landed.
-    ask_heard = _poke(cfg, f"ask-open {asked.name}") if asked is not None else False
     # The item is settled whatever happens next; only the session's own lease
     # (and, under worktree isolation, the merge of its mirror) rides on the
     # poke, and a lost one holds the lease until it expires. Say so.
     heard = _poke(cfg, f"operator-done {phase}")
     print(f"operator-done {phase}")
-    if asked is not None:
-        print(f"  owner: asked in window {asked.window} (`swarm ask --list`):"
-              f" {asked.question}")
-        print(f"  question: {'opens once this job has landed, then pings the owner once' if ask_heard else 'opens at the next swarm up'}")
-    else:
-        print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
+    print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
     print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
     return 0
+
+
+def _clock(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
 
 def _job_brief(note: str, limit: int = 160) -> str:
@@ -877,60 +862,13 @@ def _job_brief(note: str, limit: int = 160) -> str:
     return note if len(note) <= limit else note[: limit - 1].rstrip() + "…"
 
 
-def cmd_operator_ask(cfg: Config, phase: str, question: str) -> int:
-    """The session hit a genuine decision: ping the owner and wait for them.
-
-    The session stays alive and asks in its own pane (AskUserQuestion), exactly
-    as a worker does after ``swarm waiting``; this call is the ping that gets the
-    owner to that pane, plus the lease that keeps the session alive until they
-    arrive (:data:`opqueue.WAIT_LEASE_S`, on the item and in ``state.json``). It
-    used to end the session instead, so every answer arrived to nobody.
-    """
-    if not question.strip():
-        print("swarm operator-ask: empty question", file=sys.stderr)
-        return 2
-    item, fresh = opqueue.wait_on_owner(cfg, phase, question)
-    if item is None:
-        print(f"swarm operator-ask: no running operator job {phase}", file=sys.stderr)
-        return 1
-    operator_mod.hold_lease(cfg, phase, item.lease_until)
-    if fresh:
-        telegram.notify(
-            cfg.telegram_notify,
-            launch_mod.cost_line(None, "operator session held", item.asked_at or time.time())
-            + f"\nswarm: operator job {phase} is waiting on you"
-            f" — {launch_mod.ping_question(item.question)}"
-            f" (the job: {_job_brief(item.note or 'no brief')})",
-            kind="operator-ask",
-            phase=phase,
-            source="cli.operator-ask",
-            state_dir=cfg.state_dir,
-        )
-    told = "has been pinged" if fresh else "already has this question"
-    print(f"operator-ask {phase}: the owner {told}")
-    print("  now ask it with AskUserQuestion in this pane and wait for the answer;")
-    print(f'  then run: swarm operator-resumed {phase} "<the answer>"')
-    return 0
-
-
-def cmd_operator_resumed(cfg: Config, phase: str, answer: str = "") -> int:
-    """The owner answered: record it and put the session back on a normal lease."""
-    item = opqueue.resume(cfg, phase, answer)
-    if item is None:
-        print(f"swarm operator-resumed: {phase} is not waiting on the owner", file=sys.stderr)
-        return 1
-    operator_mod.hold_lease(cfg, phase, item.lease_until)
-    if notes_mod.owner_answer(cfg, opqueue.owning_phase(phase), item.answer, item.question):
-        print("  recorded as an owner decision (`swarm report --decisions`)")
-    print(f"operator-resumed {phase}: carry on")
-    return 0
-
-
-def cmd_operator_add(cfg: Config, brief: str, phase: str | None = None) -> int:
+def cmd_operator_add(cfg: Config, brief: str, phase: str | None = None,
+                     not_before: str = "") -> int:
     """Queue an ad-hoc operator job — the Overseer's (and the owner's) way in.
 
     It joins the same queue as a phase's hand-off and is dispatched by the same
     sweep, oldest first; the poke only wakes the supervisor to look.
+    ``--not-before`` holds it until then.
     """
     if not cfg.operator_enabled:
         print(
@@ -945,12 +883,19 @@ def cmd_operator_add(cfg: Config, brief: str, phase: str | None = None) -> int:
     if phase is not None and not opqueue.ID_RE.match(phase):
         print(f"swarm operator-add: {phase!r} is not a phase id", file=sys.stderr)
         return 2
-    item = opqueue.add_adhoc(cfg, brief, phase)
+    try:
+        when = opqueue.parse_not_before(not_before) if not_before else 0.0
+    except ValueError as exc:
+        print(f"swarm operator-add: {exc}", file=sys.stderr)
+        return 2
+    item = opqueue.add_adhoc(cfg, brief, phase, not_before=when)
     if item is None:
         print("swarm operator-add: could not queue the job", file=sys.stderr)
         return 1
     heard = _poke(cfg, f"operator-queued {item.phase}")
     print(f"queued operator job {item.phase}: {item.note}")
+    if when:
+        print(f"  not before {_clock(when)}")
     print(f"  supervisor: {'poked' if heard else 'NOT RUNNING — it runs on the next swarm up'}")
     return 0
 
@@ -973,7 +918,7 @@ def cmd_overseer(cfg: Config, now: bool, as_json: bool, limit: int) -> int:
         print(f"  supervisor: {'poked — it starts once the pane is free' if heard else 'NOT RUNNING'}")
         return 0 if heard else 1
     st = state_mod.read(cfg)
-    passes = ovrecord.load_passes(cfg, limit=limit, live=st.overseer_pass)
+    passes = ovrecord.load_passes(cfg, limit=limit, live=st.live_passes())
     pending = overseer_mod.Policy(cfg).pending
     if as_json:
         return _dump({
@@ -1060,66 +1005,14 @@ def cmd_overseer_done(cfg: Config, summary: str) -> int:
     summary = " ".join(summary.split())
     ovrecord.update(cfg, pid, status=ovrecord.DONE, ended_at=time.time(), summary=summary)
     ovrecord.append_summary(cfg, pid, summary or "(no summary)")
-    if st.overseer_pass != pid:
+    parked = state_mod.waiter_key(state_mod.OVERSEER, pid) in st.parked
+    if st.overseer_pass != pid and not parked:
         print(f"swarm overseer-done: pass {pid} is no longer live (timed out?) — recorded only",
               file=sys.stderr)
         return 1
     heard = _poke(cfg, f"overseer-done {pid}")
     print(f"overseer-done {pid}")
     print(f"  supervisor: {'poked' if heard else 'not running — the pass ends on the next swarm up'}")
-    return 0
-
-
-def cmd_overseer_ask(cfg: Config, question: str) -> int:
-    """The Overseer hit an owner-level call: ping the owner and wait for them.
-
-    Like ``swarm waiting`` for a worker: the session stays alive and asks in its
-    own pane (AskUserQuestion); this is the ping that brings the owner there, and
-    the deadline stretch that stops the timeout killing a pass that is only
-    waiting on a person."""
-    question = " ".join(question.split())
-    if not question:
-        print("swarm overseer-ask: empty question", file=sys.stderr)
-        return 2
-    pid, st = _live_pass(cfg)
-    rec = ovrecord.load_json(cfg, pid) if pid else None
-    if rec is None or st.overseer_pass != pid:
-        print("swarm overseer-ask: no Overseer pass is running", file=sys.stderr)
-        return 1
-    fresh = rec.question != question or bool(rec.answer)
-    ovrecord.update(cfg, pid, question=question, asked_at=time.time(), answer="")
-    with state_mod.transaction(cfg) as s:
-        if s.overseer_pass == pid:
-            s.overseer_deadline = time.time() + opqueue.WAIT_LEASE_S
-    if fresh:
-        telegram.notify(
-            cfg.telegram_notify,
-            launch_mod.cost_line(None, "Overseer pass held", time.time())
-            + f"\nswarm: the Overseer is waiting on you — {launch_mod.ping_question(question)}",
-            kind="overseer-ask",
-            source="cli.overseer-ask",
-            state_dir=cfg.state_dir,
-        )
-    print(f"overseer-ask {pid}: the owner {'has been pinged' if fresh else 'already has this question'}")
-    print("  now ask it with AskUserQuestion in this pane and wait for the answer;")
-    print('  then run: swarm overseer-resumed "<the answer>"')
-    return 0
-
-
-def cmd_overseer_resumed(cfg: Config, answer: str) -> int:
-    """The owner answered: record it and put the pass back on its normal timeout."""
-    pid, st = _live_pass(cfg)
-    rec = ovrecord.load_json(cfg, pid) if pid else None
-    if rec is None or st.overseer_pass != pid or not rec.question:
-        print("swarm overseer-resumed: the Overseer is not waiting on the owner", file=sys.stderr)
-        return 1
-    ovrecord.update(cfg, pid, answer=" ".join(answer.split()) or "(answered)")
-    with state_mod.transaction(cfg) as s:
-        if s.overseer_pass == pid:
-            s.overseer_deadline = time.time() + cfg.overseer_timeout_s
-    if notes_mod.owner_answer(cfg, notes_mod.OVERSEER, answer, rec.question):
-        print("  recorded as an owner decision (`swarm report --decisions`)")
-    print(f"overseer-resumed {pid}: carry on")
     return 0
 
 
@@ -1189,7 +1082,7 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
     shipped = Path(__file__).resolve().parent / "prompts"
     if not shipped.is_dir():
         shipped = Path(__file__).resolve().parent.parent.parent / "prompts"
-    for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md",
+    for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md",
                  "big_picture.md"):
         q = shipped / name
         if q.is_file():
@@ -1489,103 +1382,6 @@ def cmd_keep(cfg: Config, name: str | None, why: str | None, argv: list[str],
     return 0
 
 
-def cmd_ask(cfg: Config, name: str | None, rows: str | None, why: str | None,
-            brief: str, listing: bool = False, reopen: str | None = None,
-            as_json: bool = False) -> int:
-    """Open a window where the owner answers review questions — or list them.
-
-    The record is written first (``<state>/ask/<name>.json``), then the
-    supervisor is poked to open the window; ``swarm up`` opens an unanswered one
-    again from that record. It takes no slot and never times out.
-    """
-    if listing or (not name and not reopen):
-        asks = ask_mod.load_all(cfg)
-        shown = [a for a in asks if a.is_open] + [a for a in asks if not a.is_open][:ask_mod.RECENT]
-        if as_json:
-            return _dump([a.to_dict() for a in shown])
-        print("\n".join(ask_mod.line(a) for a in shown) if shown else "no asks")
-        return 0
-    if reopen:
-        ask = ask_mod.load(cfg, reopen)
-        if ask is None or not ask.is_open:
-            print(f"swarm ask: {reopen} is not an open ask", file=sys.stderr)
-            return 1
-        if ask_mod.session_alive(cfg, ask):
-            print(f"swarm ask: {reopen} is open in window {ask.window} (`{ask.attach()}`)")
-            return 0
-        name = reopen
-        reopened = True
-    else:
-        try:
-            ask, reopened = ask_mod.create(cfg, name, ask_mod.parse_rows(rows or ""),
-                                           why or "", brief)
-        except ask_mod.AskError as exc:
-            print(f"swarm ask: {exc}", file=sys.stderr)
-            return 2
-        graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
-        unknown = [r for r in ask.rows if graph and r not in graph]
-        if unknown:
-            print(f"  warning: not in the ledger: {', '.join(unknown)}", file=sys.stderr)
-    heard = _poke(cfg, f"ask-open {name}")
-    print(f"ask {name} {'opens again' if reopened else 'recorded'}: {ask_mod.rows_text(ask.rows)}")
-    print(f"  why: {ask.why}")
-    print(f"  window: {ask.window} in the swarm's tmux session")
-    print(f"  supervisor: {'poked — the window opens now and the owner is pinged once' if heard else 'NOT RUNNING — it opens at the next swarm up'}")
-    return 0
-
-
-def cmd_ask_done(cfg: Config, name: str, outcome: str = "", stop_keeps: list[str] | None = None,
-                 attention: bool = False) -> int:
-    """The ask session is finished: record the outcome, stop the review's kept
-    processes, then poke the supervisor to close the window and land the mirror.
-
-    The outcome follows the operator's quiet policy (``[operator].notify``): it
-    pings only with ``--attention``, and otherwise reaches the owner in the
-    Overseer's summary.
-    """
-    stop_keeps = [k for k in (stop_keeps or []) if k]
-    ask = ask_mod.complete(cfg, name, outcome, attention, stop_keeps)
-    if ask is None:
-        print(f"swarm ask-done: no open ask {name}", file=sys.stderr)
-        return 1
-    job = ask_mod.opened_by_operator(ask)
-    # An operator job's question: the answer is the owner's decision on the
-    # job's phase, in the run's history beside what the job itself reported.
-    if job and notes_mod.owner_answer(cfg, opqueue.owning_phase(job), ask.outcome,
-                                      ask.question or ask.why):
-        print("  recorded as an owner decision (`swarm report --decisions`)")
-    for keep in stop_keeps:
-        rec = keep_mod.stop(cfg, keep)
-        if rec is None:
-            print(f"  keep {keep}: nothing kept under that name")
-        elif rec.alive:
-            print(f"  keep {keep}: pid {rec.pid} survived SIGKILL", file=sys.stderr)
-        else:
-            print(f"  keep {keep}: stopped (pid {rec.pid})")
-    mode = cfg.operator_notify
-    if mode == "attention" and telegram.sends_all(cfg):
-        mode = "all"
-    hold = _operator_done_hold(mode, attention)
-    tail = f" — {ask.outcome}" if ask.outcome else " (no outcome given)"
-    telegram.notify(
-        cfg.telegram_notify,
-        f"swarm: ask {name} ({ask_mod.rows_text(ask.rows)})"
-        f" {'needs you' if attention else 'answered'}{tail}",
-        kind="ask-done",
-        phase=name,
-        source="cli.ask-done",
-        state_dir=cfg.state_dir,
-        suppressed=hold,
-    )
-    print(f"ask-done {name}")
-    print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
-    sys.stdout.flush()
-    # Last: the supervisor closes this very window.
-    heard = _poke(cfg, f"ask-done {name}")
-    print(f"  supervisor: {'poked — the window closes' if heard else 'not running — the next swarm up lands the mirror'}")
-    return 0
-
-
 def cmd_context(cfg: Config) -> int:
     st = state_mod.read(cfg)
     print(json.dumps(build_context(cfg, st)))
@@ -1604,14 +1400,23 @@ def cmd_resolved(cfg: Config, phase: str) -> int:
     return 0
 
 
-def cmd_waiting(cfg: Config, phase: str, note: str) -> int:
-    """Self-report that this worker is blocked on the owner (pings + may park)."""
-    launch_mod.waiting(cfg, phase, note)
-    print(f"waiting {phase}")
+def cmd_waiting(cfg: Config, who: str, note: str) -> int:
+    """Self-report that this session is blocked on the owner: one ping saying
+    what is asked and which window to open, then a park deadline
+    (:mod:`owner`). Workers, operator jobs and the Overseer alike."""
+    try:
+        key = owner_mod.resolve(cfg, who)
+        what = owner_mod.waiting(cfg, key, note)
+    except owner_mod.WaitError as exc:
+        print(f"swarm waiting: {exc}", file=sys.stderr)
+        return 1
+    print(f"waiting {key}: the owner has been told ({what})")
+    print("  now ask it here with AskUserQuestion and wait for the answer;")
+    print(f'  then run: swarm resumed {who} "<the answer, in one line>"')
     return 0
 
 
-def cmd_resumed(cfg: Config, phase: str, answer: str = "") -> int:
+def cmd_resumed(cfg: Config, who: str, answer: str = "") -> int:
     """Signal the owner answered — cancel a pending park (distinct from `resume`).
 
     ``answer`` is the owner's answer in one line. It is recorded as an
@@ -1619,11 +1424,14 @@ def cmd_resumed(cfg: Config, phase: str, answer: str = "") -> int:
     not a supervisor is listening; without it the owner's calls were the one kind
     of decision the history never held.
     """
-    if answer.strip():
-        notes_mod.owner_answer(cfg, phase, answer, doctor_mod.waiting_question(cfg, phase))
-    _poke(cfg, f"resumed {phase}")
-    print(f"resumed {phase}")
-    if answer.strip():
+    try:
+        key = owner_mod.resolve(cfg, who)
+        recorded = owner_mod.resumed(cfg, key, answer)
+    except owner_mod.WaitError as exc:
+        print(f"swarm resumed: {exc}", file=sys.stderr)
+        return 1
+    print(f"resumed {key}")
+    if recorded:
         print("  recorded as an owner decision (`swarm report --decisions`)")
     return 0
 
@@ -1667,15 +1475,6 @@ def cmd_finish(cfg: Config, force: bool = False) -> int:
                   file=sys.stderr)
         print("drain them with `swarm operator <phase>`, or `swarm finish --force`",
               file=sys.stderr)
-        return 1
-    asks = ask_mod.open_asks(cfg)
-    if asks and not force:
-        # Each waits on the owner in its own window; a stopped supervisor would
-        # never close it, merge its picks or open it again.
-        print(f"{len(asks)} ask(s) still wait on you:", file=sys.stderr)
-        for ask in asks:
-            print(f"  {ask_mod.line(ask)}", file=sys.stderr)
-        print("answer them in their windows, or `swarm finish --force`", file=sys.stderr)
         return 1
     _poke(cfg, "shutdown")
     return 0
@@ -1931,6 +1730,15 @@ def _operator_lines(cfg: Config, st: state_mod.State) -> list[str]:
         f" waiting-on-owner={counts[opqueue.WAITING]} done={counts[opqueue.DONE]}"
         f" abandoned={counts[opqueue.ABANDONED]}"
     ]
+    for i in items:
+        if i.phase == st.operator_phase:
+            continue
+        if i.state == opqueue.WAITING:
+            key = state_mod.waiter_key(state_mod.OPERATOR, i.phase)
+            lines.append(f"  {i.phase} [WAITING ON YOU in {state_mod.wait_window(key)}]:"
+                         f" {i.question}")
+        elif i.state == opqueue.QUEUED and i.run_after > time.time():
+            lines.append(f"  {i.phase} [not before {_clock(i.run_after)}] — {_job_brief(i.note)}")
     current = next((i for i in items if i.phase == st.operator_phase), None)
     if current is not None:
         what = (
@@ -1979,9 +1787,10 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["web"] = web_lifecycle.status_line(cfg)
         data["telegram_bot"] = tgbot.status_line(cfg)
         data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
-        data["asks"] = [a.to_dict() for a in ask_mod.open_asks(cfg)]
         data["drain_line"] = drain_mod.line(st.drain)
         data["big_picture"] = bigpic_mod.status_text(cfg, bigpic_mod.load(cfg))
+        data["owner_rows"] = [{"row": r, "blocks": n}
+                              for r, n in owner_mod.current_owner_rows(cfg, st)]
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
@@ -2003,8 +1812,9 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     # no slot and no pane probe can find it, so these lines are the only place the
     # text UI can say one is running at all.
     lines.extend(_operator_lines(cfg, st))
-    # Asks wait on the owner in their own windows, outside the slot grid.
-    lines.extend(f"ask: {ask_mod.line(a)}" for a in ask_mod.open_asks(cfg))
+    # Rows only the owner can do, that hold other rows up: nothing asks about them.
+    lines.extend(f"yours to do: {r} (holds up {n})"
+                 for r, n in owner_mod.current_owner_rows(cfg, st))
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.extend(caps.summary_for(cfg, st.usage_hold))
@@ -2071,16 +1881,18 @@ def _build_parser() -> argparse.ArgumentParser:
     rp.set_defaults(func=lambda cfg, a: cmd_resolved(cfg, a.phase))
 
     wp = sub.add_parser(
-        "waiting", help="report this worker is blocked on the owner (may park its slot)"
+        "waiting", help="report this session is blocked on the owner (pings; may park it)"
     )
-    wp.add_argument("phase")
+    wp.add_argument("phase", metavar="who",
+                    help="a worker's phase, an operator job id, or `overseer`")
     wp.add_argument("note", nargs="*", default=[], help="the question, for the owner ping")
     wp.set_defaults(func=lambda cfg, a: cmd_waiting(cfg, a.phase, " ".join(a.note)))
 
     rsp = sub.add_parser(
         "resumed", help="report the owner answered — cancel a pending park"
     )
-    rsp.add_argument("phase")
+    rsp.add_argument("phase", metavar="who",
+                     help="a worker's phase, an operator job id, or `overseer`")
     rsp.add_argument("answer", nargs="*", default=[],
                      help="the owner's answer in one line — recorded in the history")
     rsp.set_defaults(func=lambda cfg, a: cmd_resumed(cfg, a.phase, " ".join(a.answer)))
@@ -2126,35 +1938,6 @@ def _build_parser() -> argparse.ArgumentParser:
     kpp.add_argument("argv", nargs=argparse.REMAINDER, help="-- the command to keep running")
     kpp.set_defaults(func=lambda cfg, a: cmd_keep(
         cfg, a.name, a.why, a.argv, a.listing, a.stop, a.cwd, a.json))
-
-    akp = sub.add_parser(
-        "ask", help="open a window where the owner answers review questions (--list shows them)",
-        description=(
-            "`swarm ask --name N --rows R1,R2 --why \"<one line>\" \"<brief>\"` opens an ask "
-            "session in tmux window ask:N: it shows the owner what to look at, asks with "
-            "AskUserQuestion, records the picks in the rows and ends with `swarm ask-done N`. "
-            "It takes no worker slot and never times out."
-        ),
-    )
-    akp.add_argument("--name", help="a unique name (letters, digits, _ -)")
-    akp.add_argument("--rows", help="the ledger row(s) the answer settles, comma-separated")
-    akp.add_argument("--why", help=f"one plain line (≤{ask_mod.WHY_MAX} chars): what the owner decides")
-    akp.add_argument("--list", dest="listing", action="store_true", help="open and recent asks")
-    akp.add_argument("--json", action="store_true", help="with --list: JSON")
-    akp.add_argument("--reopen", metavar="NAME", help="open an open ask's window again (same brief)")
-    akp.add_argument("brief", nargs="*", help="what the owner looks at and where (URLs, files, a kept server)")
-    akp.set_defaults(func=lambda cfg, a: cmd_ask(
-        cfg, a.name, a.rows, a.why, " ".join(a.brief), a.listing, a.reopen, a.json))
-
-    adp = sub.add_parser("ask-done", help="(ask session) the owner's answers are recorded")
-    adp.add_argument("name")
-    adp.add_argument("outcome", nargs="*", help="one line: what the owner picked")
-    adp.add_argument("--stop-keep", action="append", default=[], metavar="KEEP",
-                     help="also stop this kept process (it only existed for the review); repeatable")
-    adp.add_argument("--attention", action="store_true",
-                     help="ping the owner: they still have something to do")
-    adp.set_defaults(func=lambda cfg, a: cmd_ask_done(
-        cfg, a.name, " ".join(a.outcome), a.stop_keep, a.attention), tolerant=True)
 
     lp = sub.add_parser("launch", help="claim a slot and start a worker")
     lp.add_argument("phase")
@@ -2326,38 +2109,24 @@ def _build_parser() -> argparse.ArgumentParser:
     odp.add_argument("outcome", nargs="*", help="one line: what was done or skipped")
     odp.add_argument(
         "--attention", action="store_true",
-        help="the owner must act, something is still owed, or a check failed:"
-             " opens an ask window for them")
+        help="ping the owner: they must act, something is still owed, or a check failed")
     odp.add_argument(
-        "--ask", dest="question", default="", metavar="QUESTION",
-        help="a decision only the owner can make: opens an ask window that puts it to them")
+        "--not-before", default="", metavar="WHEN",
+        help="not yet: queue the job again until WHEN (6h, 3d, 2026-09-30, '2026-09-30 08:00')")
     odp.set_defaults(
         func=lambda cfg, a: cmd_operator_done(
-            cfg, a.phase, " ".join(a.outcome), a.attention, a.question),
+            cfg, a.phase, " ".join(a.outcome), a.attention, a.not_before),
         tolerant=True)
-
-    oap = sub.add_parser(
-        "operator-ask",
-        help="ping the owner with a genuine decision; the session waits for the answer")
-    oap.add_argument("phase", help="the operator job id")
-    oap.add_argument("question", nargs="+", help="what you need to know")
-    oap.set_defaults(
-        func=lambda cfg, a: cmd_operator_ask(cfg, a.phase, " ".join(a.question)))
-
-    orp = sub.add_parser(
-        "operator-resumed",
-        help="the owner answered an operator question; the session carries on")
-    orp.add_argument("phase", help="the operator job id")
-    orp.add_argument("answer", nargs="*", help="the owner's answer, as given")
-    orp.set_defaults(
-        func=lambda cfg, a: cmd_operator_resumed(cfg, a.phase, " ".join(a.answer)))
 
     oad = sub.add_parser(
         "operator-add", help="queue an ad-hoc operator job")
     oad.add_argument("brief", nargs="+", help="the job, as the session will read it")
     oad.add_argument("--phase", help="the phase this job belongs to (default: a fresh op-<ts> id)")
+    oad.add_argument(
+        "--not-before", default="", metavar="WHEN",
+        help="hold the job until WHEN (6h, 3d, 2026-09-30, '2026-09-30 08:00')")
     oad.set_defaults(
-        func=lambda cfg, a: cmd_operator_add(cfg, " ".join(a.brief), a.phase))
+        func=lambda cfg, a: cmd_operator_add(cfg, " ".join(a.brief), a.phase, a.not_before))
 
     ovp = sub.add_parser("overseer", help="recent Overseer passes; --now asks for one")
     ovp.add_argument("--now", action="store_true", help="request a pass straight away")
@@ -2369,16 +2138,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "overseer-done", help="(Overseer) signal the pass is over, with a one-line summary")
     ovd.add_argument("summary", nargs="*", help="what the pass did, in one line")
     ovd.set_defaults(func=lambda cfg, a: cmd_overseer_done(cfg, " ".join(a.summary)))
-
-    ova = sub.add_parser(
-        "overseer-ask", help="(Overseer) an owner-level call: ping the owner and wait")
-    ova.add_argument("question", nargs="+")
-    ova.set_defaults(func=lambda cfg, a: cmd_overseer_ask(cfg, " ".join(a.question)))
-
-    ovr = sub.add_parser(
-        "overseer-resumed", help="(Overseer) the owner answered; back to the normal timeout")
-    ovr.add_argument("answer", nargs="*")
-    ovr.set_defaults(func=lambda cfg, a: cmd_overseer_resumed(cfg, " ".join(a.answer)))
 
     bpp = sub.add_parser("big-picture", help="the big-picture doc's last refresh; --now asks for one")
     bpp.add_argument("--now", action="store_true", help="request a pass straight away")

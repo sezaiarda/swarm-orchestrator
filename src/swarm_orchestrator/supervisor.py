@@ -49,7 +49,6 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from . import ask as ask_mod
 from . import caps
 from . import backup as backup_mod
 from . import bigpic as bigpic_mod
@@ -62,6 +61,7 @@ from . import launch as launch_mod
 from . import master as master_mod
 from . import operator as operator_mod
 from . import opqueue
+from . import owner as owner_mod
 from . import overseer as overseer_mod
 from . import ovdigest
 from . import ovrecord
@@ -170,10 +170,6 @@ class Supervisor:
         self._gc_idle_since: float | None = None
         self._gc_episode = 0
         self._gc_episode_done = -1
-        # Asks whose window an opener thread is building right now, so a second
-        # poke for the same one does not open two windows.
-        self._ask_lock = threading.Lock()
-        self._asks_opening: set[str] = set()
         # Usage caps (see `_usage_tick`): the last check, and the tap's samples
         # read incrementally, since `limits.jsonl` is never rotated.
         self._usage_last = 0.0
@@ -417,10 +413,6 @@ class Supervisor:
                 parts[1] if len(parts) > 1 else "?",
                 parts[2] if len(parts) > 2 else "failed",
             )
-        elif verb == "ask-open":
-            self._on_ask_open(parts[1] if len(parts) > 1 else "?", "asked")
-        elif verb == "ask-done":
-            self._on_ask_done(parts[1] if len(parts) > 1 else "?")
         elif verb == "ledger":
             # `swarm record` / a follow-up or lesson filed outside its phase.
             if self._flush_ledger({}):
@@ -448,10 +440,6 @@ class Supervisor:
         self._bootstrapped = True
         # Reports queued before the last stop: their phases may have landed.
         self._flush_ledger(dict(state_mod.read(self.cfg).done))
-        # Asks that were open when the last run stopped: the owner cannot answer
-        # a dead window, so each opens again with the brief its record holds.
-        for name in ask_mod.open_names(self.cfg):
-            self._on_ask_open(name, "reopened at swarm up")
         if self.master.is_alive():
             self.log.line("BOOTSTRAP-IGNORED master-alive")
             self._end_bootstrap()
@@ -809,13 +797,9 @@ class Supervisor:
                 if status == operator_mod.INTEG_STATUS:
                     # An operator job's mirror, not a ledger phase: its work is
                     # landed, and there is nothing to record done or free.
+                    # A ticked row can release its dependents.
                     self.log.line(f"OPERATOR-INTEGRATED {phase}")
-                    self._open_operator_asks(mirror=phase)
-                elif status == ask_mod.INTEG_STATUS:
-                    # An ask's mirror: the owner's picks and ticks are on main
-                    # now, and a ticked owner-run row can release its dependents.
-                    self.log.line(f"ASK-INTEGRATED {phase}")
-                    self._fill_slots(f"ask answered ({phase})")
+                    self._fill_slots(f"operator job landed ({phase})")
                 elif status == ovrecord.INTEG_STATUS:
                     # An Overseer pass's mirror: its ledger edits are on main now,
                     # so the launcher may have new work to pick up.
@@ -950,39 +934,31 @@ class Supervisor:
         merging: :func:`operator.on_finished` opens it once it lands."""
         operator_mod.on_poke(self.cfg, phase, self.log)
 
-    def _on_operator_done(self, phase: str) -> None:
-        """The session signalled its job is finished.
+    def _on_operator_done(self, job: str) -> None:
+        """The session signalled its job is finished (or put back until later).
 
         The item was already settled by the CLI that sent this — durably, before
         the poke, for the same reason ``swarm done`` writes its sentinel first.
-        What is left: end the session (drop the lease, idle the pane — BEFORE its
-        mirror is merged and removed, so no live process ever loses its cwd), land
-        whatever it committed in its own mirror through the ordinary merge queue,
-        open the next job, and re-check the finish the job was holding open."""
-        released = operator_mod.release(self.cfg, self.log)
-        self.log.line(f"EVENT operator-done {phase} released={released}")
-        # The pane is idle again, so nothing is using the job's TMPDIR any more.
-        launch_mod.drop_session_tmp(self.cfg, operator_mod.mirror_name(phase))
-        mirror = operator_mod.integration_for(self.cfg, phase)
+        What is left: end the session — in the operator window, or in its own
+        wait window if it was parked — BEFORE its mirror is merged and removed, so
+        no live process ever loses its cwd; land whatever it committed in its own
+        mirror through the ordinary merge queue, open the next job, and re-check
+        the finish the job was holding open."""
+        released = operator_mod.release(self.cfg, self.log, job)
+        key = state_mod.waiter_key(state_mod.OPERATOR, job)
+        parked = self._end_parked(key) if released is None else False
+        with state_mod.transaction(self.cfg) as st:
+            st.clear_pending(key)  # a question it never had to wait long for
+        self.log.line(f"EVENT operator-done {job} released={released} parked={parked}")
+        # The session is gone, so nothing is using the job's TMPDIR any more.
+        launch_mod.drop_session_tmp(self.cfg, operator_mod.mirror_name(job))
+        mirror = operator_mod.integration_for(self.cfg, job)
         if mirror is not None:
             with state_mod.transaction(self.cfg) as st:
                 st.integ_push(mirror, operator_mod.INTEG_STATUS)
-            self._pump_integrations()  # its merge opens the job's asks
-        else:
-            self._open_operator_asks(job=phase)  # nothing to land: open them now
+            self._pump_integrations()
         self._check_operator_queue()  # next hand-off, if one is due
         self._finish_if_settled(state_mod.read(self.cfg))
-
-    def _open_operator_asks(self, *, job: str | None = None, mirror: str | None = None) -> None:
-        """Open the asks an operator job left for the owner, now its work has
-        landed: by the job, or by the mirror that just merged. Each was held by
-        :meth:`_on_ask_open` while the job ran and its mirror merged."""
-        for ask in ask_mod.open_asks(self.cfg):
-            owner = ask_mod.opened_by_operator(ask)
-            if not owner or ask.window_at:
-                continue
-            if owner == job or (mirror and operator_mod.job_mirror(self.cfg, owner) == mirror):
-                self._on_ask_open(ask.name, f"operator job {owner} landed")
 
     def _check_operator_queue(self) -> None:
         """Drain the operator queue. Runs on every wake, like the park deadlines.
@@ -1017,85 +993,34 @@ class Supervisor:
         launch path returns early — a deadlock, not a guard."""
         return operator_mod.blocking(self.cfg)
 
-    # -- asks: a window where the owner answers review questions ----------
-    def _on_ask_open(self, name: str, reason: str) -> None:
-        """Open an ask's window (``swarm ask``, ``swarm ask --reopen``, ``up``).
+    # -- parking: a session waiting on the owner vacates what it holds ----
+    def _on_waiting(self, key: str) -> None:
+        """Arm the park timer for a session that self-reported it needs the owner.
 
-        On a thread: building a mirror and booting ``claude`` take tens of
-        seconds the loop must not spend. It takes no slot and has no timer; the
-        record under ``<state>/ask/`` is all the state there is.
-
-        An ask a worker opened before its own ``swarm done`` waits for that
-        phase to land, as an operator hand-off does: its mirror branches from
-        main, and what the owner reviews (and the rows it edits) must be there.
-        :meth:`_advance_done` opens it then. An operator job's ask waits the same
-        way for the job's own end and merge (:meth:`_open_operator_asks`)."""
-        ask = ask_mod.load(self.cfg, name)
-        phase = ask_mod.opened_by_phase(ask) if ask is not None else None
-        if phase and operator_mod._in_flight(state_mod.read(self.cfg), phase):
-            self.log.line(f"ASK-HELD {name} until {phase} lands")
-            return
-        # The same for an operator job's ask (`operator-done --ask/--attention`):
-        # it waits for the job to end and its mirror to merge, then
-        # :meth:`_open_operator_asks` opens it.
-        job = ask_mod.opened_by_operator(ask) if ask is not None else None
-        if job and operator_mod.landing(self.cfg, state_mod.read(self.cfg), job):
-            self.log.line(f"ASK-HELD {name} until operator job {job} lands")
-            return
-        with self._ask_lock:
-            if name in self._asks_opening:
-                self.log.line(f"ASK-OPEN-BUSY {name}")
-                return
-            self._asks_opening.add(name)
-        self.log.line(f"EVENT ask-open {name} ({reason})")
-        threading.Thread(target=self._ask_open_thread, args=(name, reason),
-                         name=f"ask:{name}", daemon=True).start()
-
-    def _ask_open_thread(self, name: str, reason: str) -> None:
-        try:
-            ask_mod.open_session(self.cfg, name, self.log, reason=reason)
-        except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
-            self.log.line(f"ASK-OPEN-ERROR {name} {exc!r}")
-        finally:
-            with self._ask_lock:
-                self._asks_opening.discard(name)
-
-    def _on_ask_done(self, name: str) -> None:
-        """The ask is answered (its record already says so): close the window
-        and end what the session started BEFORE its mirror is merged and removed,
-        land the mirror through the ordinary queue, re-check the finish."""
-        ask_mod.close_session(self.cfg, name, self.log)
-        mirror = ask_mod.integration_for(self.cfg, name)
-        if mirror is not None:
-            with state_mod.transaction(self.cfg) as st:
-                st.integ_push(mirror, ask_mod.INTEG_STATUS)
-            self._pump_integrations()
-        self.log.line(f"EVENT ask-done {name} mirror={mirror}")
-        self._finish_if_settled()
-
-    # -- parking: a worker waiting on the owner vacates its slot after a delay --
-    def _on_waiting(self, phase: str) -> None:
-        """Arm the park timer for a worker that self-reported it needs the owner.
-
-        The FIFO poke already woke ``select``; recording the deadline re-arms the
-        loop's timeout on the next pass. ``park_after == 0`` disables parking (the
-        waiting worker just holds its slot, unchanged from before)."""
+        ``key`` is a worker's phase, ``operator:<job>`` or ``overseer:<pass>``
+        (:func:`state.waiter_key`). The FIFO poke already woke ``select``;
+        recording the deadline re-arms the loop's timeout on the next pass.
+        ``park_after == 0`` disables parking (the session just holds what it
+        holds), and one already parked is in its own window for good."""
         if self.cfg.park_after <= 0:
-            self.log.line(f"WAITING-IGNORED {phase} parking-disabled")
+            self.log.line(f"WAITING-IGNORED {key} parking-disabled")
             return
         with state_mod.transaction(self.cfg) as st:
-            st.waiting[phase] = time.time() + self.cfg.park_after
-        self.log.line(f"EVENT waiting {phase} park_after={self.cfg.park_after}")
+            if key in st.parked:
+                self.log.line(f"WAITING-IGNORED {key} already-parked")
+                return
+            st.waiting[key] = time.time() + self.cfg.park_after
+        self.log.line(f"EVENT waiting {key} park_after={self.cfg.park_after}")
 
-    def _on_resumed(self, phase: str) -> None:
+    def _on_resumed(self, key: str) -> None:
         """The owner answered before the park fired: cancel the pending park.
 
-        Distinct from the ``resume`` (unpause) verb. A phase that was ALREADY
+        Distinct from the ``resume`` (unpause) verb. A session that was ALREADY
         parked is not in ``waiting``, so this is a no-op for it — it stays in its
-        own window until ``swarm done``."""
+        own window until it finishes."""
         with state_mod.transaction(self.cfg) as st:
-            cancelled = st.waiting.pop(phase, None) is not None
-        self.log.line(f"EVENT resumed {phase} cancelled={cancelled}")
+            cancelled = st.waiting.pop(key, None) is not None
+        self.log.line(f"EVENT resumed {key} cancelled={cancelled}")
 
     def _next_timeout(self) -> float | None:
         """Seconds until the earliest scheduled deadline, or ``None`` when nothing
@@ -1256,8 +1181,8 @@ class Supervisor:
         a launch settling, the init master idling, an operator session ending, a
         resume, a watchdog sweep. It holds while anything is still owed: a busy,
         waiting or parked phase, a launch in flight, an integration queued or
-        held, a push origin does not have yet, an operator hand-off, an open ask
-        (it waits on the owner, like a parked phase), a live master mid-pass — or a ready phase, because the launcher owns that one
+        held, a push origin does not have yet, an operator hand-off, a live master
+        mid-pass — or a ready phase, because the launcher owns that one
         (a phase given up on after :data:`LAUNCH_GIVE_UP` failed launches does
         not hold it; the finish message names it instead)."""
         if st is None:
@@ -1277,12 +1202,6 @@ class Supervisor:
             return
         if st.push_owed:
             self.log.line(f"{tag}-HELD push-owed={sorted(st.push_owed)}")
-            return
-        asks = ask_mod.open_names(self.cfg)
-        if asks:
-            # Waiting on the owner, the way a parked phase is: its window is
-            # where they answer, and finishing would leave that unheard.
-            self.log.line(f"{tag}-HELD asks={asks}")
             return
         owed = self._operator_blocking()
         if owed:
@@ -1375,25 +1294,65 @@ class Supervisor:
         session_mod.reap_session(self.cfg, "worker", phase, self.log)
 
     def _check_park_deadlines(self) -> None:
-        """Park every waiting phase whose deadline has fired. Runs on every wake;
-        a no-op when nothing is due (so a spurious/FIFO wake is harmless)."""
+        """Park every waiting session whose deadline has fired. Runs on every
+        wake; a no-op when nothing is due (so a spurious/FIFO wake is harmless)."""
         now = time.time()
         due = [
-            p for p, deadline in state_mod.read(self.cfg).waiting.items() if deadline <= now
+            k for k, deadline in state_mod.read(self.cfg).waiting.items() if deadline <= now
         ]
-        for phase in due:
-            self._park(phase)
+        for key in due:
+            self._park(key)
 
-    def _park(self, phase: str) -> None:
-        """Move a waiting worker to its own window, free its grid slot, relaunch.
+    def _park(self, key: str) -> None:
+        """Move a waiting session to its own window and free what it held.
 
-        Split-FIRST pane mechanic (driver-guarded, so the bare hermetic path is
-        PURE STATE): grow the slot's window with a fresh replacement pane BEFORE
-        breaking the live waiter out to ``wait:<phase>`` (so ``break-pane`` never
-        sees a single-pane window and renames in place), re-tidy the survivors, and
-        tag the replacement with the slot. Then ``st.park`` frees the slot record —
-        keeping its now-replacement ``pane_id`` — and ``_fill_slots`` fills it with
-        the next ready phase (the parked phase is excluded from ``ready``)."""
+        A worker frees its grid slot, an operator job the operator window (so the
+        next job runs), an Overseer pass the master pane (so the next pass can
+        run). Each goes on waiting for the owner, alive, in ``wait:<...>``
+        (:func:`state.wait_window`), and finishes there."""
+        kind, ident = state_mod.waiter(key)
+        if kind == state_mod.OPERATOR:
+            self._park_operator(key, ident)
+        elif kind == state_mod.OVERSEER:
+            self._park_overseer(key, ident)
+        else:
+            self._park_worker(ident)
+
+    def _move_off(self, key: str, pane: str | None, slot: int | None, layout: str) -> str | None:
+        """Break ``key``'s live pane out to its own window, leaving a fresh holding
+        pane where it was; return that replacement. Split-FIRST (tmux.park_pane),
+        so ``break-pane`` never sees a single-pane window. Driver-guarded: on the
+        bare driver this is a no-op and parking is pure state."""
+        if self.cfg.driver != "tmux" or not pane:
+            return None
+        name = state_mod.wait_window(key)
+        wait_win, replacement = tmux.park_pane(
+            tmux.window_of(pane), pane, slot, name, self.cfg.session, layout
+        )
+        if wait_win:
+            with state_mod.transaction(self.cfg) as st:
+                st.windows[name] = wait_win
+        return replacement or None
+
+    def _parked_ping(self, key: str, who: str) -> None:
+        name = state_mod.wait_window(key)
+        self.log.line(f"PARK {key} window={name}")
+        telegram.notify(
+            self.cfg.telegram_notify,
+            f"swarm: {who} moved to its own window {name} (still waiting on you)",
+            kind="park",
+            phase=key,
+            source="supervisor._park",
+            # You were asked when it started waiting; a park only moves windows.
+            suppressed=telegram.hold(self.cfg, "you were already asked; a park only moves windows"),
+        )
+
+    def _park_worker(self, phase: str) -> None:
+        """Free the waiting worker's grid slot and relaunch into it: grow the
+        slot's window with a replacement pane, break the waiter out, re-tidy,
+        tag the replacement with the slot. ``st.park`` then frees the slot record
+        — keeping its now-replacement ``pane_id`` — and ``_fill_slots`` fills it
+        with the next ready phase (the parked phase is excluded from ``ready``)."""
         with state_mod.transaction(self.cfg) as st:
             slot = next((s for s in st.slots if s.busy and s.phase == phase), None)
             if slot is None:
@@ -1403,40 +1362,76 @@ class Supervisor:
                 return
             sid, old_pane = slot.id, slot.pane_id
             layout = st.layout or self.cfg.tmux_layout
-        wait_win: str | None = None
-        replacement: str | None = None
-        if self.cfg.driver == "tmux" and old_pane:
-            wait_win, replacement = tmux.park_pane(
-                tmux.window_of(old_pane),
-                old_pane,
-                sid,
-                f"wait:{phase}",
-                self.cfg.session,
-                layout,
-            )
+        replacement = self._move_off(phase, old_pane, sid, layout)
         with state_mod.transaction(self.cfg) as st:
-            if wait_win:
-                st.windows[f"wait:{phase}"] = wait_win
             if replacement:
                 s = st.slot_by_id(sid)
                 if s is not None:
                     s.pane_id = replacement
             st.park(phase)
             paused = st.on_hold
-        self.log.line(f"PARK {phase} slot={sid}")
-        telegram.notify(
-            self.cfg.telegram_notify,
-            f"swarm: {phase} moved to its own window (still waiting on you)",
-            kind="park",
-            phase=phase,
-            source="supervisor._park",
-            # You were asked when it started waiting; a park only moves windows.
-            suppressed=telegram.hold(self.cfg, "you were already asked; a park only moves windows"),
-        )
+        self._parked_ping(phase, phase)
         if paused:
             self.log.line("PARK-PAUSED holding — no launch")
             return
         self._fill_slots(f"{phase} parked (slot {sid} free)")
+
+    def _park_operator(self, key: str, job: str) -> None:
+        """Free the operator window for the next job. The lease goes with it: the
+        parked job's item stays ``waiting`` and holds the finish, and only its own
+        ``operator-done`` (or a lease that finally runs out) ends it."""
+        with state_mod.transaction(self.cfg) as st:
+            if st.operator_phase != job:
+                st.waiting.pop(key, None)
+                self.log.line(f"PARK-SKIP {key} not-in-the-operator-window")
+                return
+            pane = st.operator_pane
+        replacement = self._move_off(key, pane, None, self.cfg.tmux_layout)
+        with state_mod.transaction(self.cfg) as st:
+            if replacement:
+                st.operator_pane = replacement
+            st.release_operator()
+            st.park(key)
+        self._parked_ping(key, f"operator job {job}")
+        self._check_operator_queue()
+
+    def _park_overseer(self, key: str, pid: str) -> None:
+        """Free the master pane: the pass stops being the live one, so a later
+        pass may run; this one ends with its own ``overseer-done``."""
+        if pid != self._overseer_live:
+            with state_mod.transaction(self.cfg) as st:
+                st.waiting.pop(key, None)
+            self.log.line(f"PARK-SKIP {key} not-the-live-pass")
+            return
+        pane = state_mod.read(self.cfg).master_pane
+        replacement = self._move_off(key, pane, None, self.cfg.tmux_layout)
+        self.master.detach()
+        self._overseer_live = None
+        with state_mod.transaction(self.cfg) as st:
+            if replacement:
+                st.master_pane = replacement
+            st.master_alive = False
+            st.overseer_pass = None
+            st.overseer_deadline = 0.0
+            st.park(key)
+        self.overseer.end(time.time())
+        self._parked_ping(key, "the Overseer")
+
+    def _end_parked(self, key: str) -> bool:
+        """End a parked operator job or Overseer pass: close its window and every
+        process its session started. False if ``key`` was not parked."""
+        name = state_mod.wait_window(key)
+        with state_mod.transaction(self.cfg) as st:
+            if key not in st.parked:
+                return False
+            st.clear_pending(key)
+            win = st.windows.pop(name, None)
+        if win and self.cfg.driver == "tmux":
+            tmux.kill_window(win)
+        kind, ident = state_mod.waiter(key)
+        session_mod.reap_session(self.cfg, kind, ident, self.log)
+        self.log.line(f"UNPARK {key}")
+        return True
 
     # -- rule 1 core: free the slot, launch what is ready -----------------
     def _advance_done(self, phase: str, status: str) -> None:
@@ -1475,9 +1470,6 @@ class Supervisor:
         # the first at which the work the session is briefed about is actually in
         # main. A session opened any earlier acts on a phantom.
         operator_mod.on_finished(self.cfg, phase, self.log)
-        for ask in ask_mod.open_asks(self.cfg):
-            if ask_mod.opened_by_phase(ask) == phase and not ask.window_at:
-                self._on_ask_open(ask.name, f"{phase} landed")
         if paused:
             # Paused: the slot is freed but we launch nothing and hold, so
             # in-flight workers drain without advancing.
@@ -1508,8 +1500,17 @@ class Supervisor:
 
         Each pick runs :func:`launch.launch_outcome` on its own thread; this
         returns at once. A racing ``swarm launch`` by hand is harmless: whichever
-        claims second is refused by :meth:`state.State.claim_slot`."""
+        claims second is refused by :meth:`state.State.claim_slot`.
+
+        Every call is also a moment the ledger may have moved, so an owner-run
+        row that has just started holding rows up is told to the owner here
+        (once per row, :func:`owner.ping_owner_rows`), paused or not."""
         st = state_mod.read(self.cfg)
+        if not st.finished:
+            try:
+                owner_mod.ping_owner_rows(self.cfg, st)
+            except Exception as exc:  # noqa: BLE001 - a ping must never stop a launch
+                self.log.line(f"OWNER-ROWS-ERROR {exc!r}")
         if st.on_hold or st.finished:
             return []
         if self._bootstrapping and not force:
@@ -1890,26 +1891,29 @@ class Supervisor:
         self._end_overseer_pass(pid, ovrecord.TIMEOUT)
 
     def _end_overseer_pass(self, pid: str, status: str) -> None:
-        """End a pass: kill the pane BEFORE its mirror is merged and removed (no
+        """End a pass — the live one, or one parked on the owner in its own
+        window: kill its session BEFORE its mirror is merged and removed (no
         live process may lose its cwd), settle the record, land the mirror
         through the ordinary queue, and let the launcher and the finish look
         again — the pass may have changed the ledger or retried a phase."""
-        if pid != self._overseer_live:
+        now = time.time()
+        if pid == self._overseer_live:
+            self._overseer_live = None
+            self.master.kill()
+            session_mod.reap_session(self.cfg, "overseer", pid, self.log)  # and what it started
+            with state_mod.transaction(self.cfg) as st:
+                st.master_alive = False
+                st.overseer_pass = None
+                st.overseer_deadline = 0.0
+                st.clear_pending(state_mod.waiter_key(state_mod.OVERSEER, pid))
+            self.overseer.end(now)
+        elif not self._end_parked(state_mod.waiter_key(state_mod.OVERSEER, pid)):
             self.log.line(f"OVERSEER-DONE-IGNORED expected={self._overseer_live} got={pid}")
             return
-        now = time.time()
-        self._overseer_live = None
-        self.master.kill()
-        session_mod.reap_session(self.cfg, "overseer", pid, self.log)  # and what it started
         launch_mod.drop_session_tmp(self.cfg, ovrecord.mirror_name(pid))  # session gone
-        with state_mod.transaction(self.cfg) as st:
-            st.master_alive = False
-            st.overseer_pass = None
-            st.overseer_deadline = 0.0
         rec = ovrecord.update(self.cfg, pid, status=status, ended_at=now)
         if status == ovrecord.DONE:
             self._overseer_bad = 0
-        self.overseer.end(now)
         self.log.line(f"OVERSEER-PASS-END {pid} {rec.status if rec else status}")
         if self.cfg.git_isolation == "worktree":
             name = ovrecord.mirror_name(pid)

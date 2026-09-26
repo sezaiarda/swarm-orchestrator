@@ -13,7 +13,8 @@ column, chosen by the first rule that fits, in this order — the order in which
 a person would want to be told:
 
 1. **Needs you** — a worker waiting or parked on a question, a retired
-   ``needs-owner`` finish, or an operator job asking (or given up).
+   ``needs-owner`` finish, an operator job asking (or given up), or an
+   owner-run row that holds other rows up.
 2. **Building** — it holds a slot.
 3. **Merging / held** — in the merge queue, holding it, or pushed-but-owed.
 4. **Operator** — a hand-off job queued or running for it.
@@ -39,7 +40,7 @@ from ..drain import line as drain_line
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
 from ..tui.data import (
-    ask_rows, five_outlook, forecast, kept_rows, limit_outlook, typical_durations,
+    five_outlook, forecast, kept_rows, limit_outlook, typical_durations,
 )
 from .rows import clip
 
@@ -147,7 +148,6 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         "issues": ledger.validate(graph, satisfied)[:20],
         "cycle": starve.get("cycle", [])[:50],
         "kept": _kept(dash, now),
-        "asks": _asks(dash, now),
     }
 
 
@@ -160,17 +160,6 @@ def _kept(dash, now: float) -> list[dict]:
     """``swarm keep`` records, read-only — the processes left running on purpose."""
     return [{k: row[k] for k in _KEPT_KEYS}
             for row in kept_rows(getattr(dash, "kept", None) or [], now)]
-
-
-#: What the board says about an open ask: what the owner decides and where to
-#: answer. Not its brief, which can name files and hosts on the box.
-_ASK_KEYS = ("name", "rows", "why", "opened_at", "window", "attach", "by")
-
-
-def _asks(dash, now: float) -> list[dict]:
-    """Open asks, read-only — "Waiting on you": answer in each one's window."""
-    return [{k: row[k] for k in _ASK_KEYS}
-            for row in ask_rows(getattr(dash, "asks", None) or [], now) if row["open"]]
 
 
 def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:
@@ -246,6 +235,8 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
         else:
             sub = "built"
         return DONE, {"sub": sub, "st": status}
+    if blocker is not None and blocker.kind == "owner-row":
+        return NEEDS_YOU, {"sub": "only you can do this", "q": blocker.question}
     if pid in excluded:
         return EXCLUDED, {"sub": "owner-run"}
     if status == statuses.FAIL:

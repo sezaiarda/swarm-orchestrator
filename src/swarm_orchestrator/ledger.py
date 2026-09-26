@@ -31,6 +31,9 @@ from . import statuses
 SATISFIES_DEPS = statuses.SATISFIES_DEPS
 
 _PHASE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/-]*$")
+# What a phase id may be when it names paths and refs (``wt/<id>``,
+# ``swarm/<id>``, ``done/<id>.<status>``): no slash, no leading dot, no ``..``.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # A markdown checklist item: ``- [x] `phase-id` · …`` / ``* [ ] `phase-id```.
 _CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[[ xX]\]\s+(.+)$")
 _TICKED_RE = re.compile(r"^\s*[-*]\s+\[[xX]\]\s+(.+)$")
@@ -39,6 +42,12 @@ _BACKTICK_RE = re.compile(r"`([^`]+)`")
 # (``- [x] `id` · needs:`dep` · dir:`d` · …``); dep extraction is scoped to the
 # single ``needs:``-prefixed field so ``dir:``/``TAG:`` back-ticks never leak in.
 _FIELD_SEP = " · "
+
+
+def safe_id(phase: str) -> bool:
+    """Whether ``phase`` is safe to act on by name: a command that removes a
+    phase's worktree must never be handed ``..`` or a path."""
+    return bool(_SAFE_ID_RE.match(phase)) and ".." not in phase
 
 
 def parse(text: str) -> dict[str, set[str]]:

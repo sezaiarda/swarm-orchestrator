@@ -471,13 +471,39 @@ def cmd_done(cfg: Config, phase: str, status: str, note: str, force: bool = Fals
 
     A worker that can see the sentinel path, the ping verdict and whether anything
     was listening has no reason to retry.
+
+    Refused before anything is written when the call cannot be about a live
+    worker: a malformed id, a phase not in flight, or a worker session naming a
+    phase other than its own. A ``fail`` removes the phase's worktree, and the
+    supervisor ends the named phase's session, so a stray call must not reach it.
     """
+    st = state_mod.read(cfg)
+    if phase in st.done and not st.in_flight(phase) and ledger_mod.safe_id(phase):
+        print(f"{phase} is already recorded {st.done[phase]}; nothing to do")
+        return 0
+    refusal = _done_refusal(cfg, phase, st)
+    if refusal is not None:
+        print(f"swarm done refused: {refusal}", file=sys.stderr)
+        return 2
     result = launch_mod.done(cfg, phase, status, note, force=force)
     print(result.render())
     # Exit non-zero only when a ping the owner was owed did not go out. A missing
     # supervisor is NOT a failure: the sentinel is durable and `swarm up`
     # reconciles from it, which is precisely what the last line of render() says.
     return 1 if result.ping == "failed" else 0
+
+
+def _done_refusal(cfg: Config, phase: str, st: state_mod.State) -> str | None:
+    """Why ``swarm done <phase>`` must not run, or None."""
+    if not ledger_mod.safe_id(phase):
+        return f"{phase!r} is not a phase id (letters, digits, '.', '_', '-')"
+    own = os.environ.get(cfg.env_marker)
+    if own and own != phase:
+        return (f"this session is the worker for {own}; it cannot report {phase}."
+                f" Did you mean `swarm done {own} ...`?")
+    if not st.in_flight(phase):
+        return f"{phase} is not in flight (no worker is running it)"
+    return None
 
 
 def _dump(obj) -> int:

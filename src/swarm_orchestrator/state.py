@@ -137,6 +137,14 @@ class State:
         finish until it runs ``swarm done``."""
         return self.any_busy() or bool(self.parked) or bool(self.waiting)
 
+    def in_flight(self, phase: str) -> bool:
+        """``phase`` has a live worker: in a slot, waiting on the owner, or parked."""
+        return (
+            phase in self.parked
+            or phase in self.waiting
+            or any(s.busy and s.phase == phase for s in self.slots)
+        )
+
     def integrating(self) -> set[str]:
         """Phases whose finished work is queued or held for merging. Their
         branch is the only copy of that work, so they are never launched again."""

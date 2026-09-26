@@ -48,7 +48,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `done <phase> [ok\|operator\|fail] ["recap"] [--force]` | Signal completion. Writes the sentinel, then pings, routes and pokes as the status says. |
+| `done <phase> [ok\|operator\|fail] ["recap"] [--force]` | Signal completion. Writes the sentinel, then pings, routes and pokes as the status says. Refused, before anything is written, for a malformed phase id, a phase no worker is running, or (inside a worker) a phase other than the worker's own. A repeat for a phase already recorded is a no-op. |
 | `waiting <phase> ["question"]` | Tell the owner you are blocked on them. Arms the park timer. |
 | `resumed <phase> ["answer"]` | The owner answered. Records the answer and cancels the park. |
 | `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |

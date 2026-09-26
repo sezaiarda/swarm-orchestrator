@@ -600,7 +600,19 @@ class Supervisor:
 
         Whatever the status, the worker's session is over: :meth:`_end_worker`
         ends it and everything it started, before the slot can be refilled.
+
+        Ignored for a malformed id and for a phase with no worker, merge or
+        record: ending a session and removing a worktree by that name would act
+        on something no worker reported.
         """
+        with state_mod.transaction(self.cfg) as st:
+            known = (
+                ledger_mod.safe_id(phase)
+                and (st.in_flight(phase) or phase in st.done or phase in st.integrating())
+            )
+        if not known:
+            self.log.line(f"DONE-REFUSED {phase!r} {status} not a phase in flight")
+            return
         self._end_worker(phase)
         if self.cfg.git_isolation != "worktree":
             self._advance_done(phase, status)

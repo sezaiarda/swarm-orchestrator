@@ -619,3 +619,57 @@ def test_tmux_calls_time_out_instead_of_hanging(monkeypatch):
     assert tmux.pane_states("s") is None
     with pytest.raises(subprocess.CalledProcessError):
         tmux.run(["respawn-pane"], check=True)
+
+
+# -- `swarm done` acts only on a live worker's own phase ---------------------
+@pytest.mark.parametrize("phase", ["..", ".", "a/b", "-x", ""])
+def test_swarm_done_refuses_a_malformed_phase(tmp_path, monkeypatch, capsys, phase):
+    from swarm_orchestrator import cli
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    state_mod.init_state(cfg)
+    monkeypatch.delenv(cfg.env_marker, raising=False)
+    assert cli.cmd_done(cfg, phase, "fail", "") == 2
+    assert "not a phase id" in capsys.readouterr().err
+    assert not any(cfg.done_dir.iterdir())
+
+
+def test_swarm_done_refuses_a_phase_not_in_flight(tmp_path, monkeypatch, capsys):
+    from swarm_orchestrator import cli
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    state_mod.init_state(cfg)
+    monkeypatch.delenv(cfg.env_marker, raising=False)
+    assert cli.cmd_done(cfg, "P1", "fail", "") == 2
+    assert "not in flight" in capsys.readouterr().err
+    assert not (cfg.done_dir / "P1.fail").exists()
+
+
+def test_a_worker_cannot_report_another_phase(tmp_path, monkeypatch, capsys):
+    from swarm_orchestrator import cli
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("P0")
+        st.claim_slot("R1")
+    monkeypatch.setenv(cfg.env_marker, "P0")
+    assert cli.cmd_done(cfg, "R1", "fail", "") == 2
+    assert "worker for P0" in capsys.readouterr().err
+    assert not (cfg.done_dir / "R1.fail").exists()
+
+
+def test_the_supervisor_ignores_done_for_a_phase_with_no_worker(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch, isolation="worktree")
+    state_mod.init_state(cfg)
+    touched: list[str] = []
+    monkeypatch.setattr(gitq, "discard", lambda c, p, l: touched.append(p))
+    sup = Supervisor(cfg)
+    try:
+        sup._on_done("..", "fail")
+        sup._on_done("P1", "fail")
+    finally:
+        sup.log.close()
+    assert touched == []
+    log = cfg.supervisor_log.read_text(encoding="utf-8")
+    assert "DONE-REFUSED '..'" in log and "DONE-REFUSED 'P1'" in log

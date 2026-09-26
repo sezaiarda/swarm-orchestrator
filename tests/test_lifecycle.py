@@ -155,10 +155,28 @@ def test_duplicate_done_is_ignored(swarm):
     ), swarm.log_text()
 
     busy_before = sorted(swarm.busy_phases())
-    swarm.cli("done", "P0", "ok")  # duplicate -> must be ignored
+    again = swarm.cli("done", "P0", "ok")  # duplicate -> must be ignored
     time.sleep(1.5)
     assert sorted(swarm.busy_phases()) == busy_before  # nothing disturbed
-    assert "DONE-DUPLICATE" in swarm.log_text()
+    assert "already recorded ok" in again.stdout
+
+
+def _seed_in_flight(swarm, phase: str) -> None:
+    """Record ``phase`` in a slot, as a running swarm's state would have it."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "from swarm_orchestrator import state as s\n"
+        "from swarm_orchestrator.config import load\n"
+        "c = load(project_dir=sys.argv[1])\n"
+        "s.init_state(c)\n"
+        "with s.transaction(c) as st:\n"
+        "    st.claim_slot(sys.argv[2])\n"
+    )
+    subprocess.run([sys.executable, "-c", code, str(swarm.project), phase],
+                   env=swarm.env, check=True, capture_output=True)
 
 
 def test_done_never_hangs_when_supervisor_down(swarm):
@@ -167,6 +185,7 @@ def test_done_never_hangs_when_supervisor_down(swarm):
 
     swarm.state_dir.mkdir(parents=True, exist_ok=True)
     os.mkfifo(swarm.state_dir / "control.fifo")  # exists, but no reader (ENXIO)
+    _seed_in_flight(swarm, "P0")  # its worker outlived the supervisor
 
     start = time.monotonic()
     proc = swarm.cli("done", "P0", "ok", timeout=5)

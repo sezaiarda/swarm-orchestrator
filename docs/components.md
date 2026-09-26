@@ -345,6 +345,45 @@ stateDiagram-v2
   Done --> [*]: window closed, session reaped,<br/>mirror merged through the queue
 ```
 
+## The big-picture pass
+
+**Why it exists.** Every worker used to start by spawning a read-only survey of
+the project (ledger, roadmap, repo statuses) before its first edit, and then read
+most of the same files again itself: a large part of a worker's cost went on
+orientation. The survey now happens at swarm level, every so often, and its
+result is an ordinary doc in the project.
+
+**What it is.** A Claude session (prompt: `prompts/big_picture.md`) in its own
+tmux window, `big-picture`, that rewrites one bounded document
+(`[big_picture].doc`, default `docs/BIG-PICTURE.md`): where the project stands,
+what just landed, what is next and eligible, cross-repo contracts and hot spots,
+and the conventions workers keep rediscovering. Its brief names the doc, the
+ledger, the worker command file, the umbrella commit of the last pass and every
+phase finished since, with recaps and notes.
+
+**When.** Every `[big_picture].every` integrated phases (default 10), and, with
+`max_age_h` set, once the doc is that old and something has landed since. The
+first pass runs as soon as the doc does not exist. `swarm big-picture --now`
+starts one by hand. One pass at a time; it takes no worker slot, and no launch,
+merge or finish ever waits on it. A pass that produces nothing (it would not
+start, ran past 40 minutes, ended without a draft, or wrote one over the 16 KB
+cap) gives its counted phases back and the next one waits 15 minutes.
+
+**How the doc lands.** The session changes nothing in the project: it works in a
+scratch directory, writes its draft to `<state>/bigpic/<id>.md` and ends with
+`swarm big-picture-done`. The supervisor then closes the window and commits the
+draft to the target branch itself, under the umbrella's integration lock,
+committing only the doc's path. A project that is mid-merge, on another branch,
+or holding uncommitted edits to the doc is waited out, never overwritten; no new
+pass starts while a draft waits. The commit goes out with the next integration's
+push. The swarm never hands the doc to a worker: every mirror branched after it
+lands has it, and the worker's command file tells it the doc exists.
+
+`swarm status`, the dashboard headline and the web board's header show when it
+was last refreshed. `<state>/bigpic/state.json` holds the counter, the last
+pass and any draft waiting to land, so a restart loses none of them; a pass
+running when the supervisor stops is ended with it.
+
 ## Integrator and merge-conflict resolver
 
 Under `isolation = "worktree"` a finished phase joins the **merge queue**

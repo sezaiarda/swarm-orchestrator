@@ -23,13 +23,14 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `status [--all] [--json]` | A drain and what it still waits for, slots, merge queue, waiting and parked phases, operator queue, open asks, owed pushes, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
+| `status [--all] [--json]` | A drain and what it still waits for, slots, merge queue, waiting and parked phases, operator queue, open asks, owed pushes, the big-picture doc's last refresh, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
 | `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`. |
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |
 | `report [--decisions] [--phase P] [--json]` | What every phase did, with its recap and timings. |
 | `usage [-n N] [--json]` | This run's and past runs' usage per hour, and how old the newest sample is. |
 | `overseer [--now] [-n N] [--json]` | Recent Overseer passes and pending reasons. `--now` requests a pass. |
+| `big-picture [--now] [--json]` | When the big-picture doc was last refreshed and how that pass ended. `--now` requests a pass. |
 | `tui` | The dashboard (window 0). |
 | `web [--host H] [--port N]` | Serve the read-only board. |
 | `telegram-bot` | Answer `/usage` and `/help` from the owner's Telegram chat, in the foreground. `swarm up` starts it detached. |
@@ -89,6 +90,12 @@ Where the owner answers review questions: a session in its own tmux window,
 | `overseer-done ["summary"]` | End the pass. Records the summary and merges its mirror. |
 | `overseer-ask "question"` | Ping the owner and hold the pass while it asks. |
 | `overseer-resumed ["answer"]` | The owner answered. Records the answer, back to the normal timeout. |
+
+## Big-picture pass
+
+| command | what it does |
+|---|---|
+| `big-picture-done ["summary"]` | The draft is written. Refused while the draft is missing or over the size cap, so the session can fix it; otherwise the swarm closes the window and commits the doc. |
 
 ## Housekeeping
 

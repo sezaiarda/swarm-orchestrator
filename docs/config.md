@@ -189,6 +189,20 @@ rules = [
 workers carry on. `down` runs `swarm down` once per window; the swarm stays down
 until you run `swarm up`.
 
+## `[big_picture]`
+
+The big-picture pass: a session that rewrites one bounded project doc so workers
+read where the project stands instead of surveying it. See
+[components.md](components.md#the-big-picture-pass).
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `every` | `10` | `SWARM_BIG_PICTURE_EVERY` | hot | Refresh the doc every N integrated phases. `0` turns the counter off. With both this and `max_age_h` at `0` no pass runs by itself (`swarm big-picture --now` still starts one). |
+| `max_age_h` | `0` | `SWARM_BIG_PICTURE_MAX_AGE_H` | hot | Also refresh a doc this many hours old, once a phase has landed since. `0` turns this off. |
+| `doc` | `"docs/BIG-PICTURE.md"` | | hot | Where the doc lives, relative to the project root. The swarm commits it to the target branch. When it does not exist yet, the first pass runs straight away. |
+| `model` | `"opus"` | | next | `--model` for the session. `""` inherits the user's setting. |
+| `cmd` | `""` | `SWARM_BIG_PICTURE_CMD` | next | Replaces the built-in session command (run as `cd <cwd> && <cmd>`). With it set, no brief is typed in. The tests use it to stand in for `claude`. |
+
 ## `[gc]`
 
 | key | default | env | reload | meaning |

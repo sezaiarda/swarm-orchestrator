@@ -59,6 +59,8 @@ class StatusBar(Static):
             parts.append(f"[{COLOR[WARN]}]● paused[/]")
         elif snap.usage_hold:
             parts.append(f"[{COLOR[WARN]}]● paused by usage cap[/]")
+        elif snap.drain:
+            parts.append(f"[{COLOR[WARN]}]● draining[/]")
         else:
             parts.append(f"[{COLOR[OK]}]● live[/]")
         parts.append(f"[b]{self.app.cfg.session}[/b]")

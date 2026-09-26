@@ -750,9 +750,10 @@ class Supervisor:
                 )
         elif kind == gitq.DIRTY:
             where = f" in {repo.name}" if repo is not None else ""
-            msg = detail or (
+            msg = detail or gitq.off_main_reason(self.cfg, repo, phase) or (
                 f"swarm: {phase} held -- the working tree{where} has uncommitted"
-                f" changes; commit or stash them, then `swarm resolved {phase}`"
+                f" changes or files in the way of the merge; commit, stash or move"
+                f" them, then `swarm resolved {phase}`"
             )
         else:  # PUSH_FAILED
             msg = (

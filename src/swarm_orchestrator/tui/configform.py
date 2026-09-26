@@ -433,6 +433,7 @@ FIELDS: tuple[Setting, ...] = (
     Setting("gc_every_s", INT, "auto gc at most this often (s); 0 = idle-only", minimum=0),
     Setting("gc_idle_s", INT, "also once per idle stretch this long (s); 0 = off", minimum=0),
     Setting("gc_keep_days", INT, "keep build output used within N days", minimum=1),
+    Setting("gc_attic_days", INT, "keep set-aside work (swarm-attic refs) N days", minimum=1),
     # -- [git] ------------------------------------------------------------
     Setting("git_isolation", CHOICE,
             "worktree = own mirror + queue; none = in place",

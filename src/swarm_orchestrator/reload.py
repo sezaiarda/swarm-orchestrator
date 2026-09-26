@@ -280,6 +280,8 @@ POLICY: dict[str, Policy] = {
            "the idle episode's age is compared against it on every wake", numeric=True),
         _p("gc_keep_days", "[gc]", "keep_days", HOT, "SWARM_GC_KEEP_DAYS",
            "read when the next gc builds its plan", numeric=True),
+        _p("gc_attic_days", "[gc]", "attic_days", HOT, "SWARM_GC_ATTIC_DAYS",
+           "read when the next gc builds its plan", numeric=True),
     )
 }
 

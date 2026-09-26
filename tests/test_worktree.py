@@ -245,8 +245,9 @@ def test_push_with_retry_rebases_external_commit(monkeypatch, tmp_path):
 def test_reconcile_uses_sentinel_not_topology(monkeypatch, tmp_path):
     """A leftover branch is integrated only when its worker actually FINISHED
     (durable `ok` sentinel). A committed-but-unsignalled branch is an interrupted
-    build: discarded and left NOT done so the master rebuilds it — never silently
-    declared complete off branch topology (the H3 misclassification)."""
+    build: kept for its next launch and left NOT done — never silently declared
+    complete off branch topology (the H3 misclassification), and never thrown
+    away."""
     from swarm_orchestrator import launch as launch_mod
 
     project, origin = _make_project(tmp_path)
@@ -263,11 +264,17 @@ def test_reconcile_uses_sentinel_not_topology(monkeypatch, tmp_path):
         assert _out(project, "branch", "--list", "swarm/P1").strip() == ""
 
         # (2) INTERRUPTED: committed real work but NO `swarm done` sentinel ->
-        # discarded, NOT integrated, NOT done, so the master rebuilds it.
-        _worker(cfg, "P2", {"p2.txt": "2"}, log)
+        # kept, NOT integrated, NOT done; its uncommitted edit becomes a commit.
+        wt2 = _worker(cfg, "P2", {"p2.txt": "2"}, log)
+        (wt2 / "p2-wip.txt").write_text("half")
         assert gitq.reconcile_orphans(cfg, {}, log) == []
-        assert _out(project, "branch", "--list", "swarm/P2").strip() == ""
-        assert "p2.txt" not in _tree(project)  # partial work dropped, not merged
+        assert "p2.txt" not in _tree(project)  # not merged
+        assert {"p2.txt", "p2-wip.txt"} <= set(_tree(project, "swarm/P2").split())
+        # The next launch resumes on the same branch, both files there.
+        again = gitq.worktree_add(cfg, "P2", log)
+        assert (again / "p2.txt").read_text() == "2"
+        assert (again / "p2-wip.txt").read_text() == "half"
+        gitq.discard(cfg, "P2", log)
 
         # (2b) The 0-commit case (H3): a branch created at launch but never even
         # ticked -> also interrupted, discarded, never phantom-marked done.
@@ -275,11 +282,14 @@ def test_reconcile_uses_sentinel_not_topology(monkeypatch, tmp_path):
         assert gitq.reconcile_orphans(cfg, {}, log) == []
         assert _out(project, "branch", "--list", "swarm/P4").strip() == ""
 
-        # (3) A phase already RECORDED done -> GC'd, NOT re-integrated.
+        # (3) A phase already RECORDED done -> GC'd, NOT re-integrated, and its
+        # unmerged commits kept in the attic rather than deleted.
         _worker(cfg, "P3", {"p3.txt": "3"}, log)
         assert gitq.reconcile_orphans(cfg, {"P3": "ok"}, log) == []
         assert _out(project, "branch", "--list", "swarm/P3").strip() == ""
         assert "p3.txt" not in _tree(project)  # its work was not merged
+        attic = [r for r, _ in gitq.attic_refs(project) if "/P3/" in r]
+        assert len(attic) == 1 and "p3.txt" in _tree(project, attic[0])
     finally:
         log.close()
 

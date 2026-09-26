@@ -391,6 +391,40 @@ def test_orphan_mirrors_are_pruned_the_way_reconcile_would(gitcfg):
     assert gitq.branch_exists(cfg.project_dir, "swarm/P-finished")
 
 
+def test_an_interrupted_phase_holding_work_is_left_for_its_next_launch(gitcfg):
+    from test_worktree import _git
+
+    cfg = gitcfg
+    ledger = cfg.project_dir / cfg.ledger
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("L1\nL2 needs:L1\n")
+    log = Log(cfg.supervisor_log)
+    wt = gitq.worktree_add(cfg, "L2", log)
+    (wt / "half.txt").write_text("half")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-m", "half done")
+    plan = gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True))
+    log.close()
+    assert "orphan-mirror" not in _kinds(plan)
+    assert any("L2" in p and "resumes" in p for p in plan.protected)
+
+
+def test_old_attic_refs_go_and_recent_ones_stay(gitcfg):
+    from test_worktree import _git, _out
+
+    cfg = gitcfg
+    project = cfg.project_dir
+    head = _out(project, "rev-parse", "HEAD").strip()
+    old = time.strftime(gitq.ATTIC_STAMP, time.gmtime(time.time() - 31 * 86400))
+    new = time.strftime(gitq.ATTIC_STAMP, time.gmtime(time.time() - 29 * 86400))
+    _git(project, "update-ref", f"refs/swarm-attic/P1/{old}", head)
+    _git(project, "update-ref", f"refs/swarm-attic/P1/{new}", head)
+    plan = gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True))
+    assert [t.extra["ref"] for t in _kinds(plan)["attic"]] == [f"refs/swarm-attic/P1/{old}"]
+    gc_mod.apply(plan)
+    assert [r for r, _ in gitq.attic_refs(project)] == [f"refs/swarm-attic/P1/{new}"]
+
+
 # -- TMPDIR per session kind ---------------------------------------------------
 def _tmp_of(env: dict, cfg, name: str) -> Path:
     want = str(cfg.tmp_dir / name)

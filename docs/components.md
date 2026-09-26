@@ -377,11 +377,21 @@ The **resolver** is a Claude session (prompt: `prompts/resolver.md`) that:
   progress;
 - never pushes and never launches.
 
-`swarm resolved` re-checks the repo (no merge in progress, clean tree) before
-releasing the queue. A premature call keeps the hold and pings again.
+`swarm resolved` re-checks the repo (no merge in progress, clean tree, on main)
+before releasing the queue. A premature call keeps the hold and pings again.
+
+The merge happens in your checkout but never switches its branch. A checkout on
+another branch holds the queue, with a message saying so, until you switch it
+back and run `swarm resolved`.
 
 A phase that finishes `fail` is rolled back in every repo: worktrees and branches
 are removed, with no merge.
+
+**Nothing is destroyed.** Whenever a worktree or branch holding work that is not
+on main is removed (a `fail`, a reaped worker, `swarm retry`, gc of an orphan
+mirror), its uncommitted edits are first committed onto the branch and the tip is
+kept at `refs/swarm-attic/<phase>/<utc-stamp>`, logged as `ATTIC`. If that fails,
+nothing is removed. gc drops attic refs older than `[gc].attic_days` (30).
 
 [The integration flow diagram](../README.md#integrator-and-merge-conflict-resolver) is in the README.
 
@@ -472,8 +482,10 @@ time, one nesting level at a time. `[git].repos` globs pick the component repos
 - Two phases may build in the same repo at the same time.
 - A mirror starts from local main, unless `origin/main` strictly fast-forwards it,
   so unpushed commits of yours are never dropped.
-- A mirror is all-or-nothing: if any repo fails to check out, every repo is
-  discarded.
+- A mirror is all-or-nothing: if any repo fails to check out, the mirror is
+  discarded, unless an earlier attempt left work in it, which is kept.
+- A mirror an earlier attempt left holding work is resumed as it is: the worker
+  starts on the same branch, with those commits.
 - With `[build].cache`, a Rust worktree's `target/` is a symlink to one shared
   per-repo cache, so only changed crates recompile. This happens only where the
   repo gitignores `target`.
@@ -485,8 +497,9 @@ On `swarm up`, leftover `swarm/*` branches are reconciled from the durable
 sentinels, never from branch shape:
 
 - A phase with an `ok` or `operator` sentinel has its integration completed.
-- A branch with no sentinel was interrupted mid-build. It is discarded and the
-  phase is rebuilt.
+- A branch with no sentinel was interrupted mid-build. Its uncommitted edits are
+  saved as a commit, the branch and worktree are kept, and the phase's next
+  launch resumes on them. One with nothing in it is discarded.
 - A phase whose integration is still held is **not** recorded done. The run
   starts visibly held instead.
 

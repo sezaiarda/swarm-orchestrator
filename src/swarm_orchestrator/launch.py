@@ -354,7 +354,8 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         with state_mod.transaction(cfg) as st:
             st.free_slot_for(phase)
         if worktree is not None:
-            gitq.discard(cfg, phase, log)  # don't leak the worktree on start failure
+            # An empty mirror goes; one an earlier attempt left work in stays.
+            gitq.set_aside(cfg, phase, log)
         telegram.notify(
             cfg.telegram_notify,
             f"swarm: worker {phase} failed to start",

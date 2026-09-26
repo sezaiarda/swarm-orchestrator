@@ -17,6 +17,12 @@ ahead and are dropped without any network. On ``fail`` (or a launch failure) all
 of the phase's worktrees and branches are removed with no merge — a clean
 rollback. Every repo mutation is serialized by an ``flock`` keyed per repo.
 
+Nothing a worker made is ever destroyed. Before a worktree or branch holding
+work that is not on main goes, its uncommitted edits are committed onto the
+branch and the tip is kept under :data:`ATTIC` (``swarm gc`` prunes old ones).
+An interrupted phase is not removed at all: :func:`set_aside` keeps its mirror
+and its next launch resumes on the same branch.
+
 Statuses: :data:`MERGED` (all repos clean, pushed, pruned), :data:`CONFLICT` (a
 repo left mid-merge for a resolver), :data:`DIRTY` (a repo's canonical tree had
 uncommitted changes — held), :data:`PUSH_FAILED` (merged locally, push failed —
@@ -27,10 +33,12 @@ branches from, so the push is recorded as *owed* and the integration counts.
 
 from __future__ import annotations
 
+import calendar
 import fcntl
 import os
 import shutil
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -55,6 +63,12 @@ DONE_INTEGRATE = statuses.INTEGRATES
 
 _GIT_TIMEOUT_S = 120.0
 _PUSH_ATTEMPTS = 5
+
+#: Where work is kept instead of deleted: ``refs/swarm-attic/<phase>/<utc-stamp>``.
+#: Not a branch, so reconcile, launch and branch listings never see it.
+ATTIC = "refs/swarm-attic"
+ATTIC_STAMP = "%Y%m%dT%H%M%SZ"
+_WIP_MESSAGE = "swarm: unfinished work on {phase}, saved before its worktree was set aside"
 
 # git env that makes remote ops fail fast instead of blocking on an interactive
 # credential / host-key prompt (which capture_output can never answer).
@@ -144,6 +158,22 @@ def _commits_ahead(repo: Path, base: str, tip: str) -> int:
         return 0
 
 
+def _unmerged(repo: Path, main: str, branch: str) -> bool:
+    """True when ``branch`` has a commit ``main`` lacks. An answer git cannot give
+    (``main`` missing, a timeout) counts as True: the caller is deciding whether
+    deleting ``branch`` loses anything, and "unknown" must mean "keep it"."""
+    try:
+        out = _git(repo, "rev-list", "--count", f"{main}..{branch}", check=False)
+    except GitError:
+        return True
+    if out.returncode != 0:
+        return True
+    try:
+        return int(out.stdout.strip() or "0") > 0
+    except ValueError:
+        return True
+
+
 def _merge_in_progress(repo: Path) -> bool:
     return _ref_exists(repo, "MERGE_HEAD")
 
@@ -173,6 +203,16 @@ def _dirty(repo: Path) -> bool:
 
 def _current_branch(repo: Path) -> str:
     return _git(repo, "rev-parse", "--abbrev-ref", "HEAD", check=False).stdout.strip()
+
+
+def _off_main(repo: Path, main: str) -> str | None:
+    """The branch the owner's checkout is on when it is not ``main``, else None
+    (also when git cannot say). Integration merges in that checkout and must
+    never switch it for them."""
+    cur = _current_branch(repo)
+    if not cur or cur == main:
+        return None
+    return "a detached HEAD" if cur == "HEAD" else cur
 
 
 def _local_ahead_of_origin(repo: Path, main: str) -> bool:
@@ -244,23 +284,124 @@ def _wt_for(cfg: Config, repo: Path, phase: str) -> Path:
 _GC_TIMEOUT_S = 900.0
 
 
+def _is_worktree(wt: Path) -> bool:
+    """``wt`` is a checkout's own top level, not a directory inside another one.
+
+    A component worktree nests inside the umbrella's, so ``git -C`` on a missing
+    component path silently answers for the umbrella instead."""
+    return (wt / ".git").exists()
+
+
+def _nested_repos(cfg: Config, repo: Path) -> list[str]:
+    """Component repos nested under ``repo``, relative to it: separate
+    worktrees inside this one that its own ``git add`` must never pick up."""
+    root = cfg.project_dir.resolve()
+    here = repo.resolve().relative_to(root)
+    out: list[str] = []
+    for other in discovered_repos(cfg):
+        rel = other.resolve().relative_to(root)
+        if rel != here and (here == Path(".") or here in rel.parents):
+            out.append(str(rel.relative_to(here)))
+    return out
+
+
+def _wt_changes(cfg: Config, repo: Path, wt: Path) -> str | None:
+    """``git status --porcelain`` of one worktree, nested repos left out; None
+    when it cannot be read."""
+    excludes = [f":(exclude){p}" for p in _nested_repos(cfg, repo)]
+    try:
+        out = _git(wt, "status", "--porcelain", "--", ".", *excludes, check=False)
+    except GitError:
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def _save_wip(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
+    """Commit what the phase's worktree in ``repo`` has not committed yet onto
+    its branch. Caller holds the repo lock.
+
+    True when nothing uncommitted is left to lose (saved, already clean, or no
+    worktree); False when the tree could not be read or the commit failed, and
+    the caller must then leave the worktree alone. ``--no-verify`` because hooks
+    judge finished work, and this is unfinished work being kept.
+    """
+    wt = _wt_for(cfg, repo, phase)
+    if not _is_worktree(wt):
+        return True
+    changes = _wt_changes(cfg, repo, wt)
+    if changes is None:
+        log.line(f"WIP-SAVE-FAILED {phase} {repo.name}: status unreadable")
+        return False
+    if not changes:
+        return True
+    excludes = [f":(exclude){p}" for p in _nested_repos(cfg, repo)]
+    try:
+        _git(wt, "add", "-A", "--", ".", *excludes)
+        staged = _git(wt, "diff", "--cached", "--quiet", check=False)
+        if staged.returncode == 0:
+            return True  # only nested repos differed; they save themselves
+        commit = _git(
+            wt, "commit", "--no-verify", "-q", "-m", _WIP_MESSAGE.format(phase=phase),
+            check=False,
+        )
+    except GitError as exc:
+        log.line(f"WIP-SAVE-FAILED {phase} {repo.name}: {exc}")
+        return False
+    if commit.returncode != 0:
+        log.line(f"WIP-SAVE-FAILED {phase} {repo.name}: {commit.stderr.strip()[:200]}")
+        return False
+    log.line(f"WIP-SAVED {phase} {repo.name}")
+    return True
+
+
+def _archive(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
+    """Keep ``swarm/<phase>`` under :data:`ATTIC` if it holds commits the repo's
+    main lacks. Caller holds the repo lock.
+
+    True when deleting the branch now loses nothing (archived, or nothing to
+    archive); False when the attic ref could not be written.
+    """
+    branch = f"swarm/{phase}"
+    if not _branch_exists(repo, branch):
+        return True
+    main = _repo_main(cfg, repo)
+    if not _unmerged(repo, main, branch):
+        return True
+    tip = _git(repo, "rev-parse", "--verify", "--quiet", branch, check=False).stdout.strip()
+    stamp = time.strftime(ATTIC_STAMP, time.gmtime())
+    ref, n = f"{ATTIC}/{phase}/{stamp}", 1
+    while _ref_exists(repo, ref):
+        n += 1
+        ref = f"{ATTIC}/{phase}/{stamp}-{n}"
+    made = _git(repo, "update-ref", ref, tip, check=False) if tip else None
+    if made is None or made.returncode != 0:
+        why = made.stderr.strip() if made is not None else "no tip"
+        log.line(f"ATTIC-FAILED {phase} {repo.name}: {why}")
+        return False
+    log.line(f"ATTIC {phase} {repo.name} {ref} (not on {main})")
+    return True
+
+
 def _gc(cfg: Config, repo: Path, phase: str, log: Log) -> None:
     """Remove one repo's ``swarm/<phase>`` worktree then delete its branch.
 
     Caller holds the repo lock. Uniform across umbrella and components (every
-    repo has a per-phase worktree now).
+    repo has a per-phase worktree now). Work not on main is saved first
+    (:func:`_save_wip`, :func:`_archive`); if it cannot be, nothing is removed.
 
     **Never raises.** This is housekeeping that runs *after* a merge has already
-    succeeded, so its failure must not fail the integration — a
-    `worktree remove` on a large repo could time out at 120 s and the merged, pushed
-    A phase could be reported to the owner as a blocked, dirty integration holding
-    the whole queue. `check=False` was not enough: a timeout raises regardless of
-    `check`. A leftover worktree is harmless and is reconciled on the next
-    `swarm up`; a blocked queue is not.
+    succeeded, so its failure must not fail the integration: a `worktree remove`
+    that timed out once turned a merged, pushed phase into a blocked, dirty
+    integration holding the whole queue. `check=False` was not enough: a timeout
+    raises regardless of `check`. A leftover worktree is harmless and is
+    reconciled on the next `swarm up`; a blocked queue is not.
     """
     branch = f"swarm/{phase}"
     wt = _wt_for(cfg, repo, phase)
     try:
+        if not (_save_wip(cfg, repo, phase, log) and _archive(cfg, repo, phase, log)):
+            log.line(f"WORKTREE-GC-KEPT {phase} {repo.name}: its work could not be saved")
+            return
         if wt.exists():
             _git(
                 repo,
@@ -279,26 +420,83 @@ def _gc(cfg: Config, repo: Path, phase: str, log: Log) -> None:
         log.line(f"WORKTREE-GC-FAILED {phase} {repo.name}: {exc}")
 
 
+def _mirror_dir(cfg: Config, phase: str) -> Path | None:
+    """``wt/<phase>``, or None for a name that would reach outside :attr:`wt_dir`
+    (``..``, ``.``, a slash): the mirror dir is ``rmtree``'d."""
+    if cfg.session_tmp(phase) is None:  # the same name rule
+        return None
+    path = cfg.wt_dir / phase
+    try:
+        inside = path.resolve().parent == cfg.wt_dir.resolve()
+    except OSError:
+        return None
+    return path if inside else None
+
+
 def _rmtree_mirror(cfg: Config, phase: str) -> None:
     """Best-effort remove the phase's umbrella worktree directory shell (any
     empty nesting dirs a component worktree left behind) and the session's
     ``TMPDIR`` (``launch.tmp_env``) — both end when the mirror's work has landed
-    or been dropped, which is exactly when this runs (merged or discarded)."""
-    shutil.rmtree(cfg.wt_dir / phase, ignore_errors=True)
+    or been dropped, which is exactly when this runs (merged or discarded).
+
+    A shell that still holds a checkout is left alone: its removal was refused
+    because the work in it could not be saved."""
+    path = _mirror_dir(cfg, phase)
+    if path is not None and not any(
+        _is_worktree(_wt_for(cfg, repo, phase)) for repo, _m in _repos(cfg)
+    ):
+        shutil.rmtree(path, ignore_errors=True)
     tmp = cfg.session_tmp(phase)
     if tmp is not None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def discard(cfg: Config, phase: str, log: Log) -> None:
-    """Drop a phase's work everywhere with NO merge (launch failure / failed
-    build). Components first (nested), umbrella last, then wipe the mirror dir —
-    a clean rollback that leaves no half-built worktree or branch behind."""
+    """Drop a phase's mirror with NO merge (a failed build, a phase recorded
+    done elsewhere). Components first (nested), umbrella last, then the mirror
+    dir. Work not on main is archived first (:func:`_gc`), never lost."""
+    if _mirror_dir(cfg, phase) is None:
+        log.line(f"WORKTREE-DISCARD-REFUSED {phase!r} not a mirror name")
+        return
     for repo, _main in _repos(cfg):
         with repo_lock(cfg, repo):
             _gc(cfg, repo, phase, log)
     _rmtree_mirror(cfg, phase)
     log.line(f"WORKTREE-DISCARD {phase}")
+
+
+def set_aside(cfg: Config, phase: str, log: Log) -> bool:
+    """Keep an unfinished phase's mirror for its next attempt. True when kept.
+
+    Uncommitted edits become a commit on the branch, and the worktrees and
+    branches stay, so the next :func:`worktree_add` for the phase resumes on
+    them. A mirror with nothing in it is discarded instead: keeping it would
+    only hand the next attempt a stale base.
+    """
+    saved = True
+    for repo, _main in _repos(cfg):
+        with repo_lock(cfg, repo):
+            saved = _save_wip(cfg, repo, phase, log) and saved
+    if saved and _mirror_empty(cfg, phase):
+        discard(cfg, phase, log)
+        return False
+    log.line(f"WORKTREE-KEPT {phase}")
+    return True
+
+
+def attic_refs(repo: Path) -> list[tuple[str, float]]:
+    """Every :data:`ATTIC` ref in ``repo`` with the UTC time it was made (from
+    its name). A name that does not parse is left out, so it is never pruned."""
+    out = _git(repo, "for-each-ref", "--format=%(refname)", ATTIC, check=False)
+    refs: list[tuple[str, float]] = []
+    for ref in out.stdout.split():
+        stamp = ref.rsplit("/", 1)[-1].split("-", 1)[0]
+        try:
+            made = float(calendar.timegm(time.strptime(stamp, ATTIC_STAMP)))
+        except ValueError:
+            continue
+        refs.append((ref, made))
+    return refs
 
 
 # -- worktree creation ----------------------------------------------------
@@ -372,14 +570,44 @@ def _mirror_base(repo: Path, main: str) -> str:
 WORKTREE_ADD_WORKERS = 6
 
 
+def _holds_work(cfg: Config, repo: Path, phase: str, base: str) -> bool:
+    """``swarm/<phase>`` in ``repo`` has commits past ``base``, or its worktree
+    has edits: an earlier attempt's work, which the next attempt resumes."""
+    if _unmerged(repo, base, f"swarm/{phase}"):
+        return True
+    wt = _wt_for(cfg, repo, phase)
+    return _is_worktree(wt) and _wt_changes(cfg, repo, wt) != ""
+
+
+def _resume_one(cfg: Config, repo: Path, phase: str, log: Log) -> None:
+    """Put the existing ``swarm/<phase>`` back in its worktree (or keep the one
+    that is there), so an earlier attempt's commits are where the worker starts."""
+    branch = f"swarm/{phase}"
+    wt = _wt_for(cfg, repo, phase)
+    if _is_worktree(wt):
+        head = _git(wt, "symbolic-ref", "--short", "-q", "HEAD", check=False).stdout.strip()
+        if head != branch:
+            raise GitError(f"{wt} holds work but is on {head or 'a detached HEAD'}, not {branch}")
+    else:
+        _git(repo, "worktree", "prune", check=False)
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        _git(repo, "worktree", "add", str(wt), branch)
+    _link_target_cache(cfg, wt, repo, log)
+    log.line(f"WORKTREE-RESUME {phase} {repo.name}")
+
+
 def _add_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> None:
-    """Create one repo's ``swarm/<phase>`` worktree under its own repo lock."""
+    """Create one repo's ``swarm/<phase>`` worktree under its own repo lock, or
+    resume the one an earlier attempt left holding work."""
     branch = f"swarm/{phase}"
     wt = _wt_for(cfg, repo, phase)
     with repo_lock(cfg, repo):
         base = _mirror_base(repo, main)
+        if _branch_exists(repo, branch) and _holds_work(cfg, repo, phase, base):
+            _resume_one(cfg, repo, phase, log)
+            return
         if _branch_exists(repo, branch) or wt.exists():
-            _gc(cfg, repo, phase, log)  # stale leftover -> start clean
+            _gc(cfg, repo, phase, log)  # empty leftover -> start from a fresh base
         wt.parent.mkdir(parents=True, exist_ok=True)
         _git(repo, "worktree", "add", str(wt), "-b", branch, base)
         _link_target_cache(cfg, wt, repo, log)
@@ -395,13 +623,13 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
     depth at a time, so a repo configured *inside* another component's path never
     races its parent's checkout. Each branches off :func:`_mirror_base` — local
     ``main`` unless ``origin/<main>`` strictly fast-forwards it — so unpushed
-    owner commits are never dropped from the mirror. A stale leftover from a
-    prior run is GC'd first.
+    owner commits are never dropped from the mirror. A leftover from a prior
+    attempt that holds work is resumed as it is; an empty one is GC'd first.
 
-    All or nothing: if any repo fails, every repo's worktree and branch for the
-    phase is discarded (the ones that did get built too) and the first failure
-    is raised as :class:`GitError`. A half mirror is worse than none — a worker
-    started in it would find some repos missing and build against nothing.
+    All or nothing: if any repo fails, the phase's mirror is set aside
+    (:func:`set_aside`: discarded unless an earlier attempt's work is in it) and
+    the first failure is raised as :class:`GitError`. A half mirror is worse
+    than none — a worker started in it would find some repos missing.
     """
     root = cfg.project_dir.resolve()
     components = [(r, m) for (r, m) in _repos(cfg) if r.resolve() != root]
@@ -420,7 +648,7 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
                 fut.result()  # re-raise the first failure, after all have settled
     except (GitError, OSError) as exc:
         log.line(f"WORKTREE-ADD-FAIL {phase} {exc}")
-        discard(cfg, phase, log)
+        set_aside(cfg, phase, log)
         if isinstance(exc, GitError):
             raise
         raise GitError(f"worktree add {phase}: {exc}") from exc
@@ -673,6 +901,18 @@ def _auto_resolve(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
     return True
 
 
+def _merge_failed(repo: Path, phase: str, tag: str, log: Log) -> str:
+    """Classify a merge that failed and was not auto-resolved. A real conflict
+    leaves a mid-merge for a resolver; a merge git refused to even start (an
+    untracked file in the owner's checkout it would overwrite) leaves nothing to
+    resolve, so it holds like a dirty tree."""
+    if _merge_in_progress(repo):
+        log.line(f"{tag} {phase} {repo.name}")
+        return CONFLICT
+    log.line(f"INTEGRATE-REFUSED {phase} {repo.name} files in the way")
+    return DIRTY
+
+
 def _integrate_one(
     cfg: Config,
     repo: Path,
@@ -682,6 +922,9 @@ def _integrate_one(
     pushes: dict[Path, PushResult] | None = None,
 ) -> str:
     """Land ``swarm/<phase>`` into ``main`` for a single repo. Serialized.
+
+    The merge happens in the owner's checkout, which is never switched to
+    another branch: one that is not on ``main`` holds as :data:`DIRTY`.
 
     Untouched-by-this-phase repos are the common case in a big workspace: the
     branch is 0 commits ahead of a not-behind main, so they are pruned with **no
@@ -722,7 +965,11 @@ def _integrate_one(
         if _dirty(repo):
             log.line(f"INTEGRATE-DIRTY {phase} {repo.name}")
             return DIRTY
-        _git(repo, "checkout", main)
+        other = _off_main(repo, main)
+        if other is not None:
+            # The owner's checkout, on a branch they chose: never switched for them.
+            log.line(f"INTEGRATE-OFF-MAIN {phase} {repo.name} on={other}")
+            return DIRTY
         if _has_remote(repo):
             _git(repo, "fetch", "origin", check=False)
             if _ref_exists(repo, f"origin/{main}") and _commits_ahead(
@@ -730,13 +977,11 @@ def _integrate_one(
             ) > 0:
                 base = _git(repo, "merge", "--no-edit", f"origin/{main}", check=False)
                 if base.returncode != 0 and not _auto_resolve(cfg, repo, phase, log):
-                    log.line(f"INTEGRATE-BASE-CONFLICT {phase} {repo.name}")
-                    return CONFLICT
+                    return _merge_failed(repo, phase, "INTEGRATE-BASE-CONFLICT", log)
         if has_branch and _commits_ahead(repo, main, branch) > 0:
             merge = _git(repo, "merge", "--no-ff", "--no-edit", branch, check=False)
             if merge.returncode != 0 and not _auto_resolve(cfg, repo, phase, log):
-                log.line(f"INTEGRATE-CONFLICT {phase} {repo.name}")
-                return CONFLICT
+                return _merge_failed(repo, phase, "INTEGRATE-CONFLICT", log)
         if _has_remote(repo):
             pushed = _push_result(repo, main, log)
             if pushes is not None and pushed.status != CONFLICT:
@@ -773,22 +1018,48 @@ def integrate(
 
 
 def blocked_repo(cfg: Config, phase: str) -> Path | None:
-    """The repo currently mid-merge / mid-rebase / dirty for ``phase``, if any.
-    A :data:`CONFLICT` or :data:`DIRTY` leaves one; a :data:`PUSH_FAILED` does not."""
-    for repo, _main in _repos(cfg):
-        if _merge_in_progress(repo) or _rebase_in_progress(repo) or _dirty(repo):
+    """The repo currently mid-merge / mid-rebase / dirty / off main for
+    ``phase``, if any. A :data:`CONFLICT` or :data:`DIRTY` leaves one; a
+    :data:`PUSH_FAILED` does not."""
+    for repo, main in _repos(cfg):
+        if (
+            _merge_in_progress(repo)
+            or _rebase_in_progress(repo)
+            or _dirty(repo)
+            or _off_main(repo, main) is not None
+        ):
             return repo
     return None
 
 
+def off_main_reason(cfg: Config, repo: Path | None, phase: str) -> str | None:
+    """Plain words for a hold caused by the owner's checkout sitting on another
+    branch, or None when that is not why ``repo`` is held."""
+    if repo is None:
+        return None
+    main = _repo_main(cfg, repo)
+    other = _off_main(repo, main)
+    if other is None:
+        return None
+    return (
+        f"swarm: {phase} is finished but not merged -- the {repo.name} checkout is on"
+        f" {other}, not {main}, and the swarm will not switch it for you. Switch it"
+        f" back to {main} when you are ready, then run `swarm resolved {phase}`."
+    )
+
+
 def resolve_ready(cfg: Config, repo: Path) -> bool:
-    """True once a held repo is safe to re-integrate: no merge/rebase in progress
-    and a clean tree. A premature ``swarm resolved`` fails this."""
+    """True once a held repo is safe to re-integrate: no merge/rebase in
+    progress, a clean tree, and back on main. A premature ``swarm resolved``
+    fails this."""
     if repo is None:
         return True
     with repo_lock(cfg, repo):
         return not (
-            _merge_in_progress(repo) or _rebase_in_progress(repo) or _dirty(repo)
+            _merge_in_progress(repo)
+            or _rebase_in_progress(repo)
+            or _dirty(repo)
+            or _off_main(repo, _repo_main(cfg, repo)) is not None
         )
 
 
@@ -830,7 +1101,7 @@ def _mirror_empty(cfg: Config, phase: str) -> bool:
     that cannot be read counts as not empty."""
     branch = f"swarm/{phase}"
     for repo, main in _repos(cfg):
-        if _branch_exists(repo, branch) and _commits_ahead(repo, main, branch) > 0:
+        if _branch_exists(repo, branch) and _unmerged(repo, main, branch):
             return False
         wt = _wt_for(cfg, repo, phase)
         if wt.is_dir():
@@ -838,6 +1109,11 @@ def _mirror_empty(cfg: Config, phase: str) -> bool:
             if status.returncode != 0 or status.stdout.strip():
                 return False
     return True
+
+
+def holds_work(cfg: Config, phase: str) -> bool:
+    """Whether ``swarm/<phase>`` holds anything not on main, in any repo."""
+    return not _mirror_empty(cfg, phase)
 
 
 def _all_swarm_phases(cfg: Config) -> set[str]:
@@ -878,11 +1154,13 @@ def reconcile(
 ) -> ReconcileResult:
     """Reconcile leftover ``swarm/*`` branches at ``swarm up`` (sentinel-driven).
 
-    A phase already recorded done is cleaned up. A phase with a completed sentinel
-    (``ok``/``needs-owner`` — worker finished, supervisor died before integrating)
-    has its integration completed. A leftover branch with **no** completed sentinel
-    was interrupted mid-build — discarded and left NOT done so the master rebuilds
-    it, never declared complete off branch topology.
+    A phase already recorded done is cleaned up (anything unmerged archived). A
+    phase with a completed sentinel (``ok``/``needs-owner`` — worker finished,
+    supervisor died before integrating) has its integration completed. A leftover
+    branch with **no** completed sentinel was interrupted mid-build: it is set
+    aside (:func:`set_aside`) with its uncommitted edits saved as a commit, left
+    NOT done, and its next launch resumes on it. Never declared complete off
+    branch topology.
 
     Reports the HELD phases as well as the integrated ones, because they are not
     the same thing and the caller cannot tell them apart from the integrated list
@@ -927,9 +1205,10 @@ def reconcile(
                 repo = blocked_repo(cfg, phase) if result in (CONFLICT, DIRTY) else None
                 held.append(Held(phase=phase, kind=result, repo=repo))
                 log.line(f"RECONCILE-HELD {phase} {result} repo={repo}")
+        elif set_aside(cfg, phase, log):
+            log.line(f"RECONCILE-KEEP {phase} interrupted; its next launch resumes it")
         else:
-            discard(cfg, phase, log)
-            log.line(f"RECONCILE-DISCARD {phase} interrupted")
+            log.line(f"RECONCILE-DISCARD {phase} interrupted with nothing to keep")
     return ReconcileResult(
         integrated=integrated,
         held=held,

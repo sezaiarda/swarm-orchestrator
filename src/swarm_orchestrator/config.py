@@ -102,6 +102,7 @@ class Config:
     gc_every_s: int
     gc_idle_s: int
     gc_keep_days: int
+    gc_attic_days: int
     web_enabled: bool
     web_host: str
     web_port: int
@@ -415,6 +416,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # Build output untouched this many days goes (`cargo sweep --time N`).
         # Three days keeps every dependency a phase in the current campaign built.
         gc_keep_days=_int_env("SWARM_GC_KEEP_DAYS", gc.get("keep_days"), 3, minimum=1),
+        # Work set aside under refs/swarm-attic (a discarded or failed phase's
+        # commits) stays this long before gc drops the ref.
+        gc_attic_days=_int_env("SWARM_GC_ATTIC_DAYS", gc.get("attic_days"), 30, minimum=1),
         # The read-only web board (`swarm web`), started by `swarm up` in its own
         # window. On by default so the run can be followed from a
         # phone; bound to every interface because the LAN is the point, and open

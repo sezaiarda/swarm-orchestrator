@@ -53,7 +53,8 @@ be taken *without waiting*, and never with the opt-in tiers (``--aggressive``,
 ``--transcripts``, ``--branches``). What it removes is dead by construction:
 superseded cargo units (:func:`superseded`), build output unused for
 ``[gc].keep_days``, ``incremental/`` (workers run ``CARGO_INCREMENTAL=0``),
-mirrors and ``tmp/`` dirs no live session owns.
+mirrors and ``tmp/`` dirs no live session owns, and set-aside work under
+``refs/swarm-attic`` older than ``[gc].attic_days``.
 
 **Superseded units are what actually fill the disk.** ``cargo sweep --time``
 can reclaim nothing on a very large cache, because every byte of it may be hours
@@ -78,6 +79,7 @@ from pathlib import Path
 
 from . import ask as ask_mod
 from . import gitq
+from . import ledger as ledger_mod
 from . import operator as operator_mod
 from . import ovrecord
 from . import state as state_mod
@@ -147,7 +149,7 @@ class Target:
 
     kind: str
     label: str
-    op: str  # rmtree | supersede | sweep | branch | prune | discard
+    op: str  # rmtree | supersede | sweep | branch | prune | discard | attic
     detail: str
     path: str | None = None
     repo: str | None = None
@@ -250,6 +252,7 @@ def plan_gc(cfg: Config, opts: GcOptions, st: State | None = None) -> GcPlan:
     if opts.branches:
         _plan_branches(plan, cfg, live)
     _plan_mirrors(plan, cfg, st, live)
+    _plan_attic(plan, cfg)
     _plan_tmp(plan, cfg, live)
     _report_tmp(plan)
 
@@ -730,12 +733,18 @@ def _plan_mirrors(plan: GcPlan, cfg: Config, st: State, live: set[str]) -> None:
     anything ``swarm up`` would not: a name already in ``done`` is discarded, and
     so is one with no completion sentinel (an interrupted build, an abandoned
     job, a stale pass). A finished-but-unmerged phase is left for reconcile to
-    land. Removal goes through :func:`gitq.discard` — the same worktree-remove,
-    branch-delete and prune the integrator uses, with its generous timeout.
+    land, and an interrupted ledger phase's mirror that holds work is left for
+    its next launch to resume. Removal goes through :func:`gitq.discard` — the
+    same worktree-remove, branch-delete and prune the integrator uses, with its
+    generous timeout, and it archives anything not on main.
     """
     if not cfg.wt_dir.is_dir():
         return
     sentinels = gitq.sentinel_done(cfg)
+    try:
+        phases = set(ledger_mod.load(cfg.project_dir / cfg.ledger))
+    except (OSError, ValueError):
+        phases = set()
     for entry in sorted(cfg.wt_dir.iterdir()):
         name = entry.name
         if not entry.is_dir() or entry.is_symlink() or name in live:
@@ -743,6 +752,11 @@ def _plan_mirrors(plan: GcPlan, cfg: Config, st: State, live: set[str]) -> None:
         if name not in st.done and sentinels.get(name) in gitq.DONE_INTEGRATE:
             plan.protected.append(
                 f"{entry} — {name} finished but is not merged yet; `swarm up` lands it"
+            )
+            continue
+        if name in phases and name not in st.done and gitq.holds_work(cfg, name):
+            plan.protected.append(
+                f"{entry} — {name} was interrupted; its next launch resumes this work"
             )
             continue
         size = du(entry)
@@ -758,6 +772,30 @@ def _plan_mirrors(plan: GcPlan, cfg: Config, st: State, live: set[str]) -> None:
                 extra={"name": name},
             )
         )
+
+
+def _plan_attic(plan: GcPlan, cfg: Config) -> None:
+    """``refs/swarm-attic`` refs older than ``[gc].attic_days``.
+
+    The attic is where discarded work goes instead of being deleted; after the
+    grace period nobody is coming back for it. Dropping the ref frees no disk by
+    itself (git's own gc collects the objects later), so nothing is estimated.
+    """
+    cutoff = time.time() - cfg.gc_attic_days * 86400
+    for repo in _workspace_repos(cfg):
+        for ref, made in gitq.attic_refs(repo):
+            if made >= cutoff:
+                continue
+            plan.targets.append(
+                Target(
+                    kind="attic",
+                    label=f"{repo.name}:{ref}",
+                    op="attic",
+                    detail=f"set aside more than {cfg.gc_attic_days} days ago",
+                    repo=str(repo),
+                    extra={"ref": ref},
+                )
+            )
 
 
 def _plan_tmp(plan: GcPlan, cfg: Config, live: set[str]) -> None:
@@ -1026,6 +1064,11 @@ def _execute(cfg: Config, target: Target, log=None, live: set[str] | None = None
         with gitq.repo_lock(cfg, repo):
             gitq._git(repo, "worktree", "prune", check=False)
         target.after = 0
+    elif target.op == "attic":
+        repo = Path(target.repo or "")
+        with gitq.repo_lock(cfg, repo):
+            gitq._git(repo, "update-ref", "-d", target.extra["ref"])
+        target.after = 0
     elif target.op == "discard":
         # Worktrees, branches and the mirror dir, the way a failed phase is
         # rolled back — never a bare rmtree, which would strand git metadata.
@@ -1049,6 +1092,10 @@ def _protected_reason(
     hand-edited, or replayed, and none of the rules below are ones we want to
     depend on an earlier function having remembered.
     """
+    if target.op == "attic":
+        if not str(target.extra.get("ref", "")).startswith(gitq.ATTIC + "/"):
+            return "not a swarm-attic ref"
+        return None
     if target.op in ("branch", "prune"):
         phase = str(target.extra.get("branch", ""))[len("swarm/") :]
         if phase and phase in live:

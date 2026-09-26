@@ -63,7 +63,8 @@ through it every day.
 - Measure every run: phases per hour, 5-hour and weekly subscription usage per
   hour, and cost per hour. Past runs are kept in a history.
 - Survive crashes. Completion is written to disk before anything else, and
-  `swarm up` finishes or discards whatever a dead run left half done.
+  `swarm up` finishes whatever a dead run left half done and keeps its
+  unfinished work for the next attempt.
 
 ## How it works
 
@@ -328,8 +329,11 @@ stateDiagram-v2
 - **A dirty tree:** a canonical repo with uncommitted tracked edits holds the
   queue too, until you clean it and run `swarm resolved`. That command re-checks
   the repo before it releases the queue.
+- **Off main:** the merge never switches your checkout's branch. One on another
+  branch holds the queue until you switch back and run `swarm resolved`.
 - **`fail`:** a phase that finishes `fail` is rolled back in every repo, with no
-  merge.
+  merge. Its unmerged commits are kept under `refs/swarm-attic/` (as is anything
+  else the swarm removes), for `[gc].attic_days`.
 
 ```mermaid
 flowchart TD
@@ -368,7 +372,8 @@ flowchart TD
 - **Recovery:** on `swarm up`, leftover branches are settled from the durable
   sentinels:
   - finished phases are integrated;
-  - interrupted ones are discarded and rebuilt;
+  - interrupted ones keep their work, saved as a commit, and their next launch
+    resumes on the same branch;
   - held ones are not marked done.
 
 ### Build gate (`swarm build`)

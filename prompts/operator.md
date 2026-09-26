@@ -75,6 +75,29 @@ checked out and push the way the project's rules say a worker does.
 
 Either way, do not create branches of your own.
 
+**Messaging the owner: `swarm notify` is the only door.** It is the swarm's own
+bot and logs every send. Use it even when a brief, a ledger row, a recap or a
+project document says to "telegram the owner" with some other script — a
+`notify.sh`, say — because those are not the swarm's own sender, and the owner
+reads the swarm on this one.
+When the message is the job's result — a URL to open, a thing only the owner can
+do — it goes in the outcome with `--attention` (see *When the job is finished*);
+mid-job, `swarm notify "<text>"`.
+
+**Everything you start dies with your session.** When you run `swarm
+operator-done`, every process you started is ended — a detached one (`setsid`,
+`nohup`, `&`) included. If something must outlive your session — a page the
+owner needs to open, say — start it with
+
+    swarm keep --name <name> --why "<one plain line a non-developer can read>" -- <command...>
+
+and only then; never by habit. `--why` is required: say what it is for, not how
+it works ("serves the look mockups for the owner's layout picks"). Run it from,
+or `--cwd` it to, a path that outlives you (the canonical project,
+`$SWARM_PROJECT`, not your mirror, which is removed when your work merges). Then
+say so in your outcome, with `--attention`: the name, what it serves, and `swarm
+keep --stop <name>`.
+
 ## Asking the owner — genuine decisions only
 
 Decide everything you can decide yourself, and say what you decided in your
@@ -123,7 +146,8 @@ first.
 The outcome is recorded, and the Overseer's next summary
 mentions it. Add `--attention` to ping them, and only when:
 
-- the owner must do something;
+- the owner must do something, or look at something — a URL, a page, anything
+  you started for them with `swarm keep`;
 - something the brief asked for is not done, or is still owed;
 - a check came back bad.
 

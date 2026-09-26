@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 import pytest
@@ -148,6 +150,34 @@ def test_shipped_prompts_message_the_owner_only_through_swarm_notify(name):
     told to call some other script pings from another sender, unlogged."""
     text = (REPO / "prompts" / name).read_text(encoding="utf-8")
     assert "~/.claude" not in text
+
+
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+def test_no_shipped_prompt_tells_a_session_to_use_another_sender(name):
+    """Every prompt says `swarm notify` is the door even when a brief names
+    another script; a `notify.sh` may appear only inside that prohibition."""
+    text = (REPO / "prompts" / name).read_text(encoding="utf-8")
+    assert "~/.claude" not in text
+    assert "swarm notify" in text
+    flat = " ".join(text.split())
+    for sentence in re.split(r"(?<=[.;:])\s+", flat):
+        if "notify.sh" in sentence:
+            assert re.search(r"\b(never|not|even when|instead)\b", sentence), sentence
+
+
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+def test_every_session_is_told_its_processes_die_with_it(name):
+    """The worker patch (init pass) and every session prompt: everything started
+    is ended at the session's end; `swarm keep --why` is the named exception."""
+    flat = " ".join((REPO / "prompts" / name).read_text(encoding="utf-8").split())
+    assert "swarm keep --name" in flat and "--why" in flat
+    assert "swarm keep --stop" in flat
+
+
+def test_an_operator_url_for_the_owner_is_an_attention_outcome():
+    flat = " ".join((REPO / "prompts" / "operator.md").read_text(encoding="utf-8").split())
+    assert "look at something — a URL" in flat
+    assert "--attention" in flat
 
 
 def test_the_resolver_escalates_with_swarm_notify():

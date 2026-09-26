@@ -68,6 +68,18 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   It never waits on a deploy/roll, post-build verification, another repo's gate or
   an overnight measurement — that is an `operator` finish with an actionable brief.
   If the file already says this, leave it.
+- **Messaging the owner**: when `SWARM_PHASE` is set, the worker messages the
+  owner only through `swarm notify "<text>"` (the swarm's own bot) — never a
+  `notify.sh` or any other sender, even when the ledger
+  row, a brief or a project document names one. Questions still go through
+  `swarm waiting`.
+- **Processes die with the session**: when `SWARM_PHASE` is set, every process
+  the worker starts — detached ones (`setsid`, `nohup`, `&`) included — is ended
+  when it runs `swarm done`. Only when something must outlive the session (a page
+  the owner needs to open) does it start it with
+  `swarm keep --name <name> --why "<one plain line a non-developer can read>" --cwd "$SWARM_PROJECT" -- <command...>`
+  (never its mirror, which is removed when the phase merges), and it says so in
+  its `swarm done` recap: the name, what it serves, and `swarm keep --stop <name>`.
 - **Cost rules** (each line below is a known
   time or cost sink). Add whichever the file does not already say:
   - Subagents come back immediately — an `Agent` call returns in a second and

@@ -97,6 +97,26 @@ Prefer the step you can undo.
 
 Do not run `swarm done`, `swarm up`, `swarm down` or `swarm finish`.
 
+**Messaging the owner: `swarm notify` is the only door.** It is the swarm's own
+bot and logs every send. Use it even when a brief, a ledger row, a recap or a
+project document says to "telegram the owner" with some other script — a
+`notify.sh`, say — because those are not the swarm's own sender, and the owner
+reads the swarm on this one.
+
+**Everything you start dies with your session.** When you run `swarm
+overseer-done`, every process you started is ended — a detached one (`setsid`,
+`nohup`, `&`) included. If something must outlive your session — a page the
+owner needs to open, say — start it with
+
+    swarm keep --name <name> --why "<one plain line a non-developer can read>" -- <command...>
+
+and only then; never by habit. `--why` is required: say what it is for, not how
+it works ("serves the look mockups for the owner's layout picks"). Run it from,
+or `--cwd` it to, a path that outlives you (the canonical project,
+`$SWARM_PROJECT`, not your mirror, which is removed when your work merges). Then
+say so in your summary (with `--attention`) and your pass record: the name, what
+it serves, and `swarm keep --stop <name>`.
+
 ## 5. Report and sign off
 
 1. **Tell the owner, only when it is worth a message.** Send only necessary messages.

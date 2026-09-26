@@ -190,6 +190,15 @@ def _usage_caps_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _backup_off(monkeypatch):
+    """Backup pushes are on by default in a real project; in the suite they are
+    off, so no supervisor or ``swarm down`` under test pushes anywhere.
+    ``tests/test_backup.py`` calls them directly against local bare remotes."""
+    monkeypatch.setenv("SWARM_BACKUP_EVERY", "0")
+    monkeypatch.setenv("SWARM_BACKUP_ON_DOWN", "0")
+
+
+@pytest.fixture(autouse=True)
 def _web_off(monkeypatch):
     """The web board is on by default in a real project; in the suite it is off.
 

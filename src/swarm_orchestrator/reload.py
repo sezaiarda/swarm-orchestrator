@@ -298,6 +298,11 @@ POLICY: dict[str, Policy] = {
            "read by every usage check", numeric=True),
         _p("usage_rules", "[usage]", "rules", HOT, None,
            "a reload re-checks the caps at once, so a raised limit lifts its hold"),
+        _p("backup_every_s", "[backup]", "every_s", HOT, "SWARM_BACKUP_EVERY",
+           "the last-pass clock is compared against it on every wake; a pass"
+           " already running is left to finish", numeric=True),
+        _p("backup_on_down", "[backup]", "on_down", HOT, "SWARM_BACKUP_ON_DOWN",
+           "read by `swarm down` itself, which loads the file afresh"),
     )
 }
 

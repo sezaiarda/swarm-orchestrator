@@ -199,6 +199,22 @@ until you run `swarm up`.
 | `keep_days` | `3` | `SWARM_GC_KEEP_DAYS` | hot | Build output used within this many days survives `cargo sweep`. |
 | `attic_days` | `30` | `SWARM_GC_ATTIC_DAYS` | hot | Work the swarm set aside instead of deleting (a discarded phase's commits, under `refs/swarm-attic/<phase>/<utc-stamp>`) is kept this many days before gc drops the ref. |
 
+## `[backup]`
+
+Backup pushes copy every unmerged phase's work to the `origin` each repo already
+pushes to (worktree isolation only): the phase branch as `swarm/<phase>` when it
+holds commits main lacks, its uncommitted edits as a snapshot commit
+`swarm-wip/<phase>` (built in a throwaway index; the worker's files and index are
+untouched), and each kept `refs/swarm-attic/<phase>/<stamp>` as the branch
+`swarm-attic/<phase>-<stamp>`. Pushes use `--force-with-lease` and skip pre-push
+hooks. A backup whose work has reached main is deleted on the next pass. A
+failure is logged (`BACKUP` in `supervisor.log`) and never holds anything up.
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `every_s` | `1800` | `SWARM_BACKUP_EVERY` | hot | A pass this often, on a supervisor thread, the first one a full interval after start-up. `0` turns the periodic pass off. |
+| `on_down` | `true` | `SWARM_BACKUP_ON_DOWN` | hot | `swarm down` (and so a drain) runs a pass once its sessions have ended, for at most about 5 minutes. |
+
 ## `[web]`
 
 | key | default | env | reload | meaning |

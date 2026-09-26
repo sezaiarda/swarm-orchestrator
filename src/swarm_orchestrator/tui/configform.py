@@ -340,7 +340,7 @@ CHOICE = "choice"
 FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scalar
 
 # The order the tables are drawn in — the order the file itself uses.
-SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "git",
+SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "backup", "git",
                  "operator", "ask", "overseer", "usage", "tui", "web", "(cli)")
 
 
@@ -435,6 +435,10 @@ FIELDS: tuple[Setting, ...] = (
     Setting("gc_idle_s", INT, "also once per idle stretch this long (s); 0 = off", minimum=0),
     Setting("gc_keep_days", INT, "keep build output used within N days", minimum=1),
     Setting("gc_attic_days", INT, "keep set-aside work (swarm-attic refs) N days", minimum=1),
+    # -- [backup] ---------------------------------------------------------
+    Setting("backup_every_s", INT, "back up unmerged work to origin every N s; 0 = off",
+            minimum=0),
+    Setting("backup_on_down", BOOL, "push unmerged work to origin on `swarm down`"),
     # -- [git] ------------------------------------------------------------
     Setting("git_isolation", CHOICE,
             "worktree = own mirror + queue; none = in place",

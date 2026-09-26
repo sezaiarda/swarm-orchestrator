@@ -106,6 +106,8 @@ class Config:
     gc_idle_s: int
     gc_keep_days: int
     gc_attic_days: int
+    backup_every_s: int
+    backup_on_down: bool
     web_enabled: bool
     web_host: str
     web_port: int
@@ -230,6 +232,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     overseer = data.get("overseer", {})
     ask = data.get("ask", {})
     gc = data.get("gc", {})
+    backup = data.get("backup", {})
     web = data.get("web", {})
     usage = data.get("usage", {})
 
@@ -439,6 +442,12 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # Work set aside under refs/swarm-attic (a discarded or failed phase's
         # commits) stays this long before gc drops the ref.
         gc_attic_days=_int_env("SWARM_GC_ATTIC_DAYS", gc.get("attic_days"), 30, minimum=1),
+        # Backup pushes (see backup.py): every unmerged phase's commits, its
+        # uncommitted edits as a snapshot, and its kept attic refs, copied to the
+        # repo's origin so a lost machine loses no work. Every `every_s` (0 = no
+        # periodic pass) and once more by `swarm down` while `on_down` is set.
+        backup_every_s=_int_env("SWARM_BACKUP_EVERY", backup.get("every_s"), 1800, minimum=0),
+        backup_on_down=_bool_env("SWARM_BACKUP_ON_DOWN", backup.get("on_down", True)),
         # The read-only web board (`swarm web`), started by `swarm up` in its own
         # window. On by default so the run can be followed from a
         # phone; bound to every interface because the LAN is the point, and open

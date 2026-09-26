@@ -1484,15 +1484,23 @@ def cmd_skip(cfg: Config, phase: str) -> int:
     maps, and ``pending()`` is ``any_busy() or parked or waiting`` — so the run
     could never finish, with no CLI able to clear it. Skipping a *busy* phase left
     its slot claimed forever, permanently losing capacity.
+
+    It also writes the ``done/<phase>.skip`` sentinel and pokes a launch pass.
+    Without the sentinel a skip lived only in ``state.json``, so the next
+    ``swarm up`` forgot it and every dependent re-blocked (a skipped standing target
+    starved every dependent after a restart). Without the poke
+    a dependent the skip made ready waited for some unrelated event to launch.
     """
     with state_mod.transaction(cfg) as st:
         was_parked = st.clear_phase(phase, "skip")
         wait_win = st.windows.pop(f"wait:{phase}", None)
     if was_parked and wait_win and cfg.driver == "tmux":
         tmux.kill_window(wait_win)
+    launch_mod._write_sentinel(cfg, phase, "skip", "skipped with `swarm skip`")
     print(f"skipped {phase}")
     if was_parked:
         print("  (it was parked waiting on you — its window is closed)")
+    _poke(cfg, "resume")
     return 0
 
 

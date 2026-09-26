@@ -106,3 +106,14 @@ def test_up_refuses_an_existing_session_before_touching_state(cfg, monkeypatch, 
     assert "already up" in err and "swarm down" in err and "tmux attach" in err
     assert cfg.state_path.read_bytes() == before  # nothing was reset
     assert not cfg.fifo_path.exists()
+
+
+# -- swarm skip ------------------------------------------------------------
+def test_a_skip_survives_the_next_swarm_up(cfg):
+    # A skip once lived only in state.json, so a restart forgot it and
+    # rows re-blocked behind the skipped phase with a slot free.
+    from swarm_orchestrator import gitq
+
+    assert cli.cmd_skip(cfg, "a-P7") == 0
+    assert gitq.sentinel_done(cfg)["a-P7"] == "skip"
+    assert state_mod.read(cfg).done["a-P7"] == "skip"

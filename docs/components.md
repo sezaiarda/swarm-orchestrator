@@ -441,7 +441,12 @@ recap, the operator triage) are spawned without the session's markers, so they
 finish their job after the worker is gone.
 
 **`swarm down`** still ends everything carrying the run's `SWARM_STATE_DIR`,
-orphaned sessions and whatever detached from them included.
+orphaned sessions and whatever detached from them included. It tears down only
+a tmux session this swarm created (marked with its state dir; a session made
+before that marker counts when state records its windows), and signals the
+recorded supervisor pid only while that pid is still this project's
+`swarm _supervise`. Every tmux call has a 15 s timeout, so a hung tmux server
+cannot freeze the supervisor.
 
 **`swarm keep`** is the one sanctioned way to leave something running, and
 sessions are told to use it only when something must outlive them, such as a page

@@ -164,3 +164,28 @@ def test_set_aside_saves_each_repo_but_never_adds_a_nested_repo(monkeypatch, tmp
         assert _out(pricing, "show", "swarm/P1:code.txt") == "changed\n"
     finally:
         log.close()
+
+
+def test_down_then_up_resumes_every_repo_of_an_interrupted_phase(monkeypatch, tmp_path):
+    """The hard-cap path: workers killed mid-phase, then `swarm up`. Nothing
+    they made, committed or not, in any repo, may be lost, and the relaunch
+    starts where they stopped."""
+    project, repos = _make_workspace(tmp_path)
+    cfg = _mr_cfg(monkeypatch, tmp_path, project)
+    log = Log(cfg.supervisor_log)
+    try:
+        wt = gitq.worktree_add(cfg, "P1", log)
+        (wt / "pricing" / "code.txt").write_text("committed\n")
+        _git(wt / "pricing", "commit", "-am", "pricing half")
+        (wt / "webhooks" / "new.txt").write_text("uncommitted\n")
+        (wt / "notes.txt").write_text("umbrella draft\n")
+
+        assert gitq.reconcile(cfg, {}, log).integrated == []  # no sentinel: interrupted
+
+        again = gitq.worktree_add(cfg, "P1", log)
+        assert (again / "pricing" / "code.txt").read_text() == "committed\n"
+        assert (again / "webhooks" / "new.txt").read_text() == "uncommitted\n"
+        assert (again / "notes.txt").read_text() == "umbrella draft\n"
+        assert _out(repos["webhooks"], "show", "swarm/P1:new.txt") == "uncommitted\n"
+    finally:
+        log.close()

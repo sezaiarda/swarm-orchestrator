@@ -50,6 +50,7 @@ Intro prose that is not a row.
 - [ ] `be-W5` · needs:— · **skipped.**
 - [ ] `be-W6` · needs:— · **merged, push owed.** token=ghp_abcdefghijklmnopqrstuvwxyz0123
 - [ ] `be-W7` · needs:`be-W4` · **ready: its dep is ticked, which counts as landed.**
+- [x] `be-W8` · needs:— · **owner-run, and the owner ticked it.**
 """
 
 EXPECTED = {
@@ -57,7 +58,7 @@ EXPECTED = {
     "al-W4": "needs_you", "al-W5": "merging", "al-W6": "merging", "al-W7": "operator",
     "al-W8": "failed", "al-W9": "blocked", "be-W1": "excluded", "be-W2": "blocked",
     "be-W3": "needs_you", "be-W4": "done", "be-W5": "done", "be-W6": "merging",
-    "be-W7": "ready",
+    "be-W7": "ready", "be-W8": "done",
 }
 
 
@@ -72,7 +73,7 @@ def make_run(tmp_path: Path, monkeypatch) -> config_mod.Config:
     (project / "docs").mkdir(parents=True)
     (project / "docs" / "LEDGER.md").write_text(LEDGER, encoding="utf-8")
     (project / ".swarm.toml").write_text(
-        '[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1"]\n', encoding="utf-8")
+        '[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "be-W8"]\n', encoding="utf-8")
     state_dir = tmp_path / "state"
     monkeypatch.setenv("SWARM_STATE_DIR", str(state_dir))
     cfg = config_mod.load(project_dir=str(project))
@@ -157,6 +158,7 @@ def test_cards_say_why_they_sit_where_they_do(feed):
     assert cards["be-W6"]["sub"] == "merged; push owed"
     assert cards["be-W3"]["q"] == "deploy now or tonight?"
     assert cards["be-W4"]["sub"] == "ticked in the ledger"
+    assert cards["be-W8"]["sub"] == "ticked in the ledger"  # owner-run, and done
     assert cards["be-W5"]["sub"] == "skipped"
     assert cards["al-W0"]["sub"] == "built"
     assert cards["al-W2"]["slot"] == 0
@@ -215,7 +217,8 @@ def test_campaign_headers_say_what_it_is_and_how_far(feed):
     assert camps["al"]["about"] == "Alpha exists to put a phase in every column."
     assert (camps["al"]["done"], camps["al"]["total"]) == (1, 10)
     assert camps["be"]["what"] == "beta — owner-run things"
-    assert (camps["be"]["done"], camps["be"]["total"]) == (2, 6)  # be-W1 is excluded
+    # be-W1 is excluded; be-W8 is excluded too, but ticked, so it counts as done.
+    assert (camps["be"]["done"], camps["be"]["total"]) == (3, 7)
     assert camps["al"]["active"] is True
     assert feed.board["campaigns"][0]["name"] == "al"
 
@@ -278,6 +281,19 @@ def test_detail_of_a_building_and_a_waiting_phase(feed):
     assert x["card"]["col"] == "excluded"
 
 
+def test_nothing_waits_behind_a_row_whose_dependents_are_ticked(tmp_path, monkeypatch):
+    cfg = make_run(tmp_path, monkeypatch)
+    path = cfg.project_dir / cfg.ledger
+    # be-W4 is ticked (landed); make it need the skipped be-W5.
+    path.write_text(path.read_text().replace(
+        "`be-W4` · needs:—", "`be-W4` · needs:`be-W5`"))
+    f = Feed(cfg)
+    f.refresh(force=True)
+    d = json.loads(f.detail("be-W5"))
+    assert [x["id"] for x in d["blocks"]] == ["be-W4"]
+    assert d["blocks_total"] == 0
+
+
 def test_detail_of_an_unknown_phase_is_none(feed):
     assert feed.detail("nope-W1") is None
 
@@ -320,3 +336,14 @@ def test_deep_redacts_every_string_in_a_payload():
 def test_the_served_board_is_redacted(feed):
     assert b"ghp_abcdefghijklmnopqrstuvwxyz0123" not in feed.body
     assert b"ghp_abcdefghijklmnopqrstuvwxyz0123" not in (feed.detail("be-W6") or b"")
+
+
+def test_a_cycle_through_a_landed_row_is_not_an_issue(tmp_path, monkeypatch):
+    cfg = make_run(tmp_path, monkeypatch)
+    path = cfg.project_dir / cfg.ledger
+    # al-W0 has landed; an ordering edge added later makes it "need" al-W1.
+    path.write_text(path.read_text().replace(
+        "`al-W0` · dir:`repo1` · needs:—", "`al-W0` · dir:`repo1` · needs:`al-W1`"))
+    f = Feed(cfg)
+    f.refresh(force=True)
+    assert not [i for i in f.board["issues"] if "cycle" in i]

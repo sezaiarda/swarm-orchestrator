@@ -18,7 +18,7 @@ a person would want to be told:
 3. **Merging / held** — in the merge queue, holding it, or pushed-but-owed.
 4. **Operator** — a hand-off job queued or running for it.
 5. **Done** — landed (``ok`` / ``operator`` / ``skip``), or ticked in the
-   ledger; the card says which.
+   ledger (an owner-run row the owner ticked too); the card says which.
 6. **Excluded** — in ``[tasks].exclude`` (owner-run rows), and not done.
 7. **Failed** — recorded ``fail``.
 8. **Blocked** — a dependency has not landed; the card names the root.
@@ -119,8 +119,8 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         card = {"id": pid, "c": campaign_of(pid), "t": row.title if row else ""}
         if row is not None and row.dirs:
             card["r"] = row.dirs
-        col, extra = _place(pid, graph, done, satisfied, excluded, waiting, parked, busy,
-                            queue, snap, owed, jobs, questions, row, roots_of)
+        col, extra = _place(pid, graph, view, satisfied, excluded, waiting, parked, busy,
+                            queue, snap, owed, jobs, questions, roots_of)
         card["col"] = col
         card.update({k: v for k, v in extra.items() if v not in (None, "", [], {})})
         cards[pid] = card
@@ -142,7 +142,8 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         "columns": columns,
         "campaigns": _campaigns(cards, metas),
         "activity": _activity(dash, passes),
-        "issues": list(getattr(snap.progress, "issues", []) or [])[:20],
+        # Landed rows stall nothing, so a cycle through one is history, not an issue.
+        "issues": ledger.validate(graph, satisfied)[:20],
         "cycle": starve.get("cycle", [])[:50],
         "kept": _kept(dash, now),
         "asks": _asks(dash, now),
@@ -189,8 +190,12 @@ def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:
 
 
 def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, snap,
-           owed, jobs, questions, row, roots_of) -> tuple[str, dict]:
-    """``(column, card extras)`` for one ledger phase — the rules in the module doc."""
+           owed, jobs, questions, roots_of) -> tuple[str, dict]:
+    """``(column, card extras)`` for one ledger phase — the rules in the module doc.
+
+    ``done`` is the launcher's view (:func:`ledger.with_ticked`), so a ticked row
+    is Done here exactly when the launcher treats it as landed — excluded or not.
+    """
     status = done.get(pid)
     mine = jobs.get(pid, [])
     ask = next((j for j in mine if j.state == opqueue.WAITING), None)
@@ -232,6 +237,8 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
     if status in statuses.SATISFIES_DEPS:
         if status == statuses.SKIP:
             sub = "skipped"
+        elif status == statuses.LEDGER:
+            sub = "ticked in the ledger"
         elif status == statuses.OPERATOR:
             sub = "built · operator done" if mine and all(
                 j.state == opqueue.DONE for j in mine) else "built · operator"
@@ -239,11 +246,9 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
             sub = "built"
         return DONE, {"sub": sub, "st": status}
     if pid in excluded:
-        return EXCLUDED, {"sub": "ticked" if row is not None and row.checked else "owner-run"}
+        return EXCLUDED, {"sub": "owner-run"}
     if status == statuses.FAIL:
         return FAILED, {"st": status}
-    if row is not None and row.checked:
-        return DONE, {"sub": "ticked in the ledger", "st": "ledger"}
     unmet = sorted(d for d in graph.get(pid, ()) if d not in satisfied)
     if unmet:
         roots = sorted(roots_of.get(pid, []), key=lambda b: -b["blocks"])

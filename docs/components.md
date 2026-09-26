@@ -710,7 +710,7 @@ as a detached process. `swarm down` stops it. `swarm up`, `swarm status` and
 or its LAN addresses when Tailscale is not running.
 
 **Columns:** Needs you, Blocked, Ready, Building, Merging / held, Operator, Done,
-Failed, Excluded. Rows ticked in the ledger count as done.
+Failed, Excluded. Rows ticked in the ledger count as done, owner-run ones included.
 
 **Views:**
 

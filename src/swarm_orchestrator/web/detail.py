@@ -45,7 +45,8 @@ def phase(cfg, dash, board: dict, rows: dict, metas: dict, pid: str,
     camp = campaign_of(pid)
     meta = metas.get(camp)
     snap = dash.snapshot
-    done = dict(snap.done)
+    # The launcher's view: a ticked row has landed, so nothing waits behind it.
+    done = dict(snap.landed)
     deps = sorted(graph.get(pid, ()))
     dependents = sorted(p for p, ds in graph.items() if pid in ds)
     excluded = set(getattr(cfg, "exclude", None) or [])

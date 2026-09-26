@@ -1062,6 +1062,76 @@ def integrate(
     return MERGED
 
 
+#: :func:`commit_to_target` outcomes besides :data:`MERGED`-style pushes.
+COMMITTED = "committed"
+UNCHANGED = "unchanged"
+HELD = "held"
+UNVERSIONED = "unversioned"
+
+
+@dataclass
+class TargetCommit:
+    """What :func:`commit_to_target` did, and the push that followed a commit."""
+
+    status: str  # COMMITTED | UNCHANGED | HELD | UNVERSIONED
+    reason: str = ""
+    push: PushResult | None = None
+
+
+def _existing(repo: Path, paths: list[str]) -> list[str]:
+    """The pathspecs that name something on disk or in the index: git refuses
+    a pathspec that matches nothing, and a history dir may not exist yet."""
+    tracked = _git(repo, "ls-files", "--", *paths, check=False).stdout.split("\n")
+    return [p for p in paths if (repo / p).exists()
+            or any(t == p or t.startswith(p.rstrip("/") + "/") for t in tracked if t)]
+
+
+def commit_to_target(cfg: Config, paths: list[str], write, message: str, log: Log) -> TargetCommit:
+    """Write swarm-authored files on the target branch of the project checkout and commit them.
+
+    ``write()`` edits files under ``cfg.project_dir``, inside ``paths`` only
+    (project-relative files or directories). It runs under the umbrella's repo
+    lock, so it is serialised with integration, on the configured main branch,
+    and only when none of ``paths`` holds anyone else's uncommitted change: the
+    commit takes exactly those paths (``git commit -- <paths>``), so other work
+    in the tree, an in-place worker's included, is never swept in. Anything
+    else is :data:`HELD` with the reason, untouched. A failed write or commit
+    puts ``paths`` back as they were. The commit is pushed like an owed push;
+    a push that fails is the caller's to record (:func:`pushowed.settle`).
+    """
+    repo = cfg.project_dir
+    if not (repo / ".git").exists():
+        write()
+        return TargetCommit(UNVERSIONED)
+    main = cfg.git_main_branch
+    with repo_lock(cfg, repo):
+        if _current_branch(repo) != main:
+            return TargetCommit(HELD, f"the checkout is on {_current_branch(repo)}, not {main}")
+        if _merge_in_progress(repo) or _rebase_in_progress(repo):
+            return TargetCommit(HELD, "a merge or rebase is in progress")
+        if _git(repo, "status", "--porcelain", "--", *paths, check=False).stdout.strip():
+            return TargetCommit(HELD, f"uncommitted changes in {' '.join(paths)}")
+        try:
+            write()
+            names = _existing(repo, paths)
+            if names:
+                _git(repo, "add", "-A", "--", *names)
+            staged = _git(repo, "diff", "--cached", "--quiet", "--", *names, check=False) if names else None
+            if staged is None or staged.returncode == 0:
+                return TargetCommit(UNCHANGED)
+            _git(repo, "commit", "-q", "-m", message, "--", *names)
+        except BaseException:
+            names = _existing(repo, paths)
+            if names:
+                _git(repo, "reset", "-q", "--", *names, check=False)
+                _git(repo, "checkout", "--", *names, check=False)
+                _git(repo, "clean", "-fdq", "--", *names, check=False)
+            raise
+        log.line(f"TARGET-COMMIT {repo.name} {message}")
+        push = _push_owed(repo, main, log) if _has_remote(repo) else None
+        return TargetCommit(COMMITTED, push=push)
+
+
 def blocked_repo(cfg: Config, phase: str) -> Path | None:
     """The repo currently mid-merge / mid-rebase / dirty / off main for
     ``phase``, if any. A :data:`CONFLICT` or :data:`DIRTY` leaves one; a

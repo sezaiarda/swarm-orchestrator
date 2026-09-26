@@ -1963,7 +1963,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("tui", help="the always-on dashboard (window 0)").set_defaults(
         func=lambda cfg, a: cmd_tui(cfg))
 
-    wbp = sub.add_parser("web", help="the read-only Kanban board, served on the LAN")
+    wbp = sub.add_parser("web", help="the read-only Kanban board, reached over Tailscale")
     wbp.add_argument("--host", help="address to bind (default [web] host, 0.0.0.0)")
     wbp.add_argument("--port", type=int, help="port (default [web] port, 8765; 0 = any)")
     wbp.add_argument("--pidfile", help=argparse.SUPPRESS)  # written only when `up` starts it

@@ -1,4 +1,4 @@
-"""``swarm web`` — the read-only Kanban board, served on the LAN.
+"""``swarm web`` — the read-only Kanban board, reached over Tailscale.
 
 Stdlib only (``http.server``, ``json``, threads): the package has no web
 dependency and a board is not a reason to grow one. The endpoints, all GET:
@@ -225,7 +225,7 @@ def serve(cfg, host: str, port: int, pidfile: str | None = None,
     print(f"swarm web: read-only board for {cfg.project_dir.name} (state {cfg.state_dir})")
     for url in shown:
         print(f"  {url}")
-    print("  open on the LAN, no token (by choice); Ctrl-C stops it", flush=True)
+    print("  open to anyone who can reach it, no token (by choice); Ctrl-C stops it", flush=True)
     pid_path = Path(pidfile) if pidfile else None
     if pid_path is not None:
         try:

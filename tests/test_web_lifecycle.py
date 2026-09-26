@@ -100,6 +100,35 @@ def test_lan_ips_are_never_loopback_or_container_bridges():
         assert not ip.startswith("127.") and not ip.startswith("172.17.")
 
 
+def test_the_address_is_the_tailscale_ip_when_tailscale_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_WEB_HOST", "0.0.0.0")
+    monkeypatch.setenv("SWARM_WEB_PORT", "8765")
+    cfg = load(project_dir=str(tmp_path))
+    monkeypatch.setattr(lifecycle, "lan_ips", lambda: ["192.168.1.10"])
+    monkeypatch.setattr(lifecycle.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 0, stdout="100.66.77.71\n", stderr=""))
+    assert lifecycle.urls(cfg) == ["http://100.66.77.71:8765/"]
+
+
+def test_the_address_falls_back_to_the_lan_without_tailscale(tmp_path, monkeypatch):
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_WEB_HOST", "0.0.0.0")
+    monkeypatch.setenv("SWARM_WEB_PORT", "8765")
+    cfg = load(project_dir=str(tmp_path))
+    monkeypatch.setattr(lifecycle, "lan_ips", lambda: ["192.168.1.10"])
+
+    def missing(*a, **k):
+        raise FileNotFoundError("tailscale")
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", missing)
+    assert lifecycle.urls(cfg) == ["http://192.168.1.10:8765/"]
+    # Installed but logged out: `tailscale ip -4` fails, and prints no address.
+    monkeypatch.setattr(lifecycle.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 1, stdout="", stderr="Tailscale is stopped."))
+    assert lifecycle.urls(cfg) == ["http://192.168.1.10:8765/"]
+
+
 def test_the_command_is_this_interpreter_and_this_project(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     cfg = load(project_dir=str(tmp_path))

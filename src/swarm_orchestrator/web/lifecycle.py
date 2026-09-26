@@ -3,8 +3,8 @@
 ``swarm up`` starts the board beside the run and ``swarm down`` stops it; the
 owner then needs one thing from ``swarm status`` / ``doctor``: *the address to
 type into the phone*. So this module owns the command line the board is started
-with, the pid file it leaves, the listening probe, and the machine's LAN
-addresses.
+with, the pid file it leaves, the listening probe, and the address the owner is
+given: the machine's Tailscale IP, or its LAN addresses when Tailscale is absent.
 
 Under the tmux driver the board runs in its own ``web`` window (created by
 :func:`session.setup`), so it dies with the session like every other window.
@@ -17,6 +17,7 @@ writes nothing into it.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -103,10 +104,35 @@ def lan_ips() -> list[str]:
     return sorted(out, key=lambda a: (not a.startswith(("192.168.", "10.", "172.")), a))
 
 
+def tailscale_ip() -> str | None:
+    """This machine's Tailscale IPv4 address, or ``None`` without a running Tailscale.
+
+    The owner reaches the board over Tailscale, never the LAN. ``tailscale ip -4``
+    is the right one under WSL too, where a second ``100.x`` address (the Windows
+    host's, on a mirrored interface) does not reach a server inside WSL.
+    """
+    try:
+        out = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
+                             text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    for word in out.stdout.split():
+        try:
+            return str(ipaddress.IPv4Address(word))
+        except ValueError:
+            continue
+    return None
+
+
 def urls(cfg) -> list[str]:
+    """The board's address for the owner: Tailscale when this machine has it,
+    else the LAN addresses (so a box without Tailscale still says something)."""
     host = cfg.web_host
     if host in ("", "0.0.0.0", "::"):
-        hosts = lan_ips() or ["localhost"]
+        ts = tailscale_ip()
+        hosts = [ts] if ts else (lan_ips() or ["localhost"])
     else:
         hosts = [host]
     return [f"http://{h}:{int(cfg.web_port)}/" for h in hosts]

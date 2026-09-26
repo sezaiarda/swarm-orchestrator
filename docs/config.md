@@ -176,7 +176,7 @@ An ask's outcome (`swarm ask-done`) pings by `[operator].notify`: with the defau
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `enabled` | `true` | `SWARM_WEB` | restart | Start the board in the last tmux window at `swarm up`. Under the `bare` driver it runs as a detached process instead. |
-| `host` | `"0.0.0.0"` | `SWARM_WEB_HOST` | restart | The bind address. The default is every interface, because the LAN is the point. |
+| `host` | `"0.0.0.0"` | `SWARM_WEB_HOST` | restart | The bind address. The default is every interface, so the board answers on the Tailscale IP that `swarm status` prints (or the LAN address when Tailscale is absent). |
 | `port` | `8765` | `SWARM_WEB_PORT` | restart | The TCP port. |
 
 ## Environment-only variables

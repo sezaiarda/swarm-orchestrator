@@ -58,7 +58,7 @@ through it every day.
 - Cap concurrent heavy builds swarm-wide, so parallel workers cannot run the host
   out of memory.
 - Show everything live: a terminal dashboard in window 0, a read-only Kanban board
-  for your phone on the LAN, `swarm status`, `swarm doctor`, `swarm why <phase>`,
+  for your phone over Tailscale, `swarm status`, `swarm doctor`, `swarm why <phase>`,
   and `swarm report`.
 - Measure every run: phases per hour, 5-hour and weekly subscription usage per
   hour, and cost per hour. Past runs are kept in a history.
@@ -88,7 +88,7 @@ flowchart TB
 
   subgraph S["tmux session, one per project"]
     direction LR
-    dash["0 · dash<br/>swarm tui"] ~~~ ovs["1 · overseer<br/>init pass, then<br/>Overseer passes"] ~~~ opw["2 · operator<br/>one job at a time"] ~~~ wk["3+ · workers<br/>one claude per slot"] ~~~ web["last · web<br/>LAN board"]
+    dash["0 · dash<br/>swarm tui"] ~~~ ovs["1 · overseer<br/>init pass, then<br/>Overseer passes"] ~~~ opw["2 · operator<br/>one job at a time"] ~~~ wk["3+ · workers<br/>one claude per slot"] ~~~ web["last · web<br/>web board"]
   end
 
   fifo[["control.fifo"]]
@@ -461,8 +461,9 @@ eleven tabs, switched with `1`–`9`, `0` and `a`, are:
 
 ### Web board (`swarm web`)
 
-- **Is:** a read-only Kanban board for a phone on the LAN, in the last tmux
-  window. `swarm status` prints its address.
+- **Is:** a read-only Kanban board for a phone, in the last tmux window.
+  `swarm status` prints its address: the machine's Tailscale IP (the LAN
+  address only when Tailscale is absent).
 - **Columns:** Needs you, Blocked, Ready, Building, Merging / held, Operator,
   Done, Failed, Excluded.
 - **Waiting on you:** the open asks (rows, what you decide, how to reach the
@@ -471,9 +472,9 @@ eleven tabs, switched with `1`–`9`, `0` and `a`, are:
   finishes, a detail sheet per card (`#phase=<id>`), and live updates over
   Server-Sent Events.
 - **Safety:** GET only, no URL maps to a file, and credential-shaped strings are
-  redacted. It is **open on the LAN with no token**, by design. See
+  redacted. It listens on every interface **with no token**, by design. See
   [docs/components.md](docs/components.md#the-web-board-swarm-web) for the WSL
-  firewall rule.
+  firewall rule a LAN phone needs.
 
 ### Processes and `swarm keep`
 

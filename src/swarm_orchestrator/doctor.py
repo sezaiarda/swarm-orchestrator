@@ -1181,7 +1181,7 @@ def _check_prompts() -> Check:
 
 # -- entry points ---------------------------------------------------------
 def _check_web(cfg: Config, st: State) -> Check:
-    """Is the LAN board answering, and at what address?
+    """Is the web board answering, and at what address?
 
     The address is the point: it is what the owner types into the phone. Only
     a live run that should have a board and does not is worth a warning — a

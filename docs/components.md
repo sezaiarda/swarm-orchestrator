@@ -703,10 +703,11 @@ columns hide as it narrows.
 
 ## The web board (`swarm web`)
 
-A read-only Kanban board for a phone or a browser on the LAN. Under tmux,
+A read-only Kanban board for a phone or a browser. Under tmux,
 `swarm up` starts it in the last window (`web`). Under the `bare` driver, it runs
 as a detached process. `swarm down` stops it. `swarm up`, `swarm status` and
-`swarm doctor` print its LAN address.
+`swarm doctor` print its address: the machine's Tailscale IP (`tailscale ip -4`),
+or its LAN addresses when Tailscale is not running.
 
 **Columns:** Needs you, Blocked, Ready, Building, Merging / held, Operator, Done,
 Failed, Excluded. Rows ticked in the ledger count as done.
@@ -725,13 +726,13 @@ Failed, Excluded. Rows ticked in the ledger count as done.
 Updates arrive live over Server-Sent Events.
 
 It is plain `http.server`, GET and HEAD only, and no URL path ever maps to a file.
-Every payload is scrubbed of credential-shaped strings. It is **open on the LAN
-with no token**, by design (`[web].host = "0.0.0.0"`). `/healthz`
+Every payload is scrubbed of credential-shaped strings. It listens on every
+interface **with no token**, by the owner's choice (`[web].host = "0.0.0.0"`). `/healthz`
 answers `{"app": "swarm-web", "project": …}`, which is how `swarm up` tells its own
 board from another program holding the port.
 
-Under WSL with mirrored networking, a phone reaches the board only once Windows
-lets the port in:
+Tailscale inside WSL needs nothing more. Without it, under WSL with mirrored
+networking, a phone on the LAN reaches the board only once Windows lets the port in:
 
 ```powershell
 New-NetFirewallRule -DisplayName "swarm web" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow

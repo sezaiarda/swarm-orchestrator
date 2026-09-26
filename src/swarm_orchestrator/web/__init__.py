@@ -1,4 +1,4 @@
-"""``swarm web``: the read-only Kanban board, served on the LAN.
+"""``swarm web``: the read-only Kanban board, reached over Tailscale.
 
 One concept per module: :mod:`.rows` reads the ledger's rows and headings,
 :mod:`.campaigns` says what each campaign is, :mod:`.board` places every phase in

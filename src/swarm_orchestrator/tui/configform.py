@@ -475,8 +475,8 @@ FIELDS: tuple[Setting, ...] = (
     Setting("tui_autostart", BOOL, "open this dashboard automatically at `swarm up`"),
     Setting("tui_cmd", STR, "command the dashboard pane is respawned with"),
     # -- [web] ------------------------------------------------------------
-    Setting("web_enabled", BOOL, "start the LAN web board at `swarm up`"),
-    Setting("web_host", STR, "address the web board binds (0.0.0.0 = LAN)"),
+    Setting("web_enabled", BOOL, "start the web board at `swarm up`"),
+    Setting("web_host", STR, "address the web board binds (0.0.0.0 = every interface)"),
     Setting("web_port", INT, "port the web board listens on", minimum=0),
     # -- (cli) ------------------------------------------------------------
     Setting("project_dir", FROZEN, "the project root — --project-dir or the cwd"),

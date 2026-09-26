@@ -78,6 +78,21 @@ class Swarm:
             return []
         return sorted(s["phase"] for s in st["slots"] if s["busy"])
 
+    def claim(self, phase: str) -> None:
+        """Record ``phase`` in a slot, as a live run's state has it, so a
+        ``swarm done`` from its worker is accepted without a supervisor."""
+        code = (
+            "import sys\n"
+            "from swarm_orchestrator import state as s\n"
+            "from swarm_orchestrator.config import load\n"
+            "c = load(project_dir=sys.argv[1])\n"
+            "s.init_state(c)\n"
+            "with s.transaction(c) as st:\n"
+            "    st.claim_slot(sys.argv[2])\n"
+        )
+        subprocess.run([sys.executable, "-c", code, str(self.project), phase],
+                       env=self.env, check=True, capture_output=True)
+
     def busy_count(self) -> int:
         st = self.state()
         return sum(1 for s in st["slots"] if s["busy"]) if st else 0

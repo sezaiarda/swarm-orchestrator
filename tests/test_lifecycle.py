@@ -161,31 +161,13 @@ def test_duplicate_done_is_ignored(swarm):
     assert "already recorded ok" in again.stdout
 
 
-def _seed_in_flight(swarm, phase: str) -> None:
-    """Record ``phase`` in a slot, as a running swarm's state would have it."""
-    import subprocess
-    import sys
-
-    code = (
-        "import sys\n"
-        "from swarm_orchestrator import state as s\n"
-        "from swarm_orchestrator.config import load\n"
-        "c = load(project_dir=sys.argv[1])\n"
-        "s.init_state(c)\n"
-        "with s.transaction(c) as st:\n"
-        "    st.claim_slot(sys.argv[2])\n"
-    )
-    subprocess.run([sys.executable, "-c", code, str(swarm.project), phase],
-                   env=swarm.env, check=True, capture_output=True)
-
-
 def test_done_never_hangs_when_supervisor_down(swarm):
     """Assertion 4: `swarm done` returns immediately with no supervisor."""
     import os
 
     swarm.state_dir.mkdir(parents=True, exist_ok=True)
     os.mkfifo(swarm.state_dir / "control.fifo")  # exists, but no reader (ENXIO)
-    _seed_in_flight(swarm, "P0")  # its worker outlived the supervisor
+    swarm.claim("P0")  # its worker outlived the supervisor
 
     start = time.monotonic()
     proc = swarm.cli("done", "P0", "ok", timeout=5)

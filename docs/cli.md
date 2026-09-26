@@ -12,7 +12,7 @@ exact flags.
 | `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass, the board and the bot's command listener, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
 | `down` | Stop the supervisor, the board and the command listener, end every session process (anything carrying the run's `SWARM_STATE_DIR`, detached ones included; never what `swarm keep` holds), tear the session down, close the run. Only a tmux session this swarm made (or, made before that was recorded, one whose windows its state holds) is torn down, and the recorded supervisor pid is signalled only while it still is this project's supervisor. |
 | `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued or an ask is open, unless `--force`. |
-| `pause` / `resume` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. |
+| `pause` / `resume [--override-cap]` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. A usage cap's hold is not lifted by `resume`, which says what holds and when it lifts; `--override-cap` runs through it until its window resets. |
 | `reset` | Close the open run and start a new one: ETA and usage count from now. Nothing restarts. |
 | `reload [--dry-run]` | Apply a `.swarm.toml` edit to the running swarm. |
 | `layout [name]` | Show or change the worker-pane arrangement, live. |
@@ -53,7 +53,7 @@ exact flags.
 | `resumed <phase> ["answer"]` | The owner answered. Records the answer and cancels the park. |
 | `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |
 | `build <cmd…>` | Run a heavy build through the swarm-wide gate. |
-| `notify "message"` | Message the owner through the swarm's own sender, the only way a session should. From an Overseer pass, the usage block is appended. |
+| `notify "message"` | Message the owner through the swarm's own sender, the only way a session should. |
 | `keep --name N --why "one line" [--cwd DIR] -- <cmd…>` | Leave one process running after your session ends (everything else a session starts is ended with it). Starts it detached without the session's markers, records `<state>/keep/N.json`, prints its pid and log. `--why` is required (≤120 chars); a live name is refused, a dead one replaced. Use it only when something must outlive the session, and name it in your recap. |
 | `keep --list [--json]` / `keep --stop N` | Every kept process, alive or dead, with why, who and age / stop one (SIGTERM, then SIGKILL, to its group) and forget it. |
 

@@ -161,6 +161,34 @@ An ask's outcome (`swarm ask-done`) pings by `[operator].notify`: with the defau
 | `hold_wait_s` | `600` | `SWARM_OVERSEER_HOLD_WAIT` | hot | A merge conflict the resolver is working on triggers a pass only once it has been held this long. A hold with no resolver, or one the resolver gave up on, triggers at once. |
 | `timeout_s` | `2700` | `SWARM_OVERSEER_TIMEOUT` | next | A pass still running after this is killed, and whatever it committed is merged. `overseer-ask` stretches the deadline while you are being asked. |
 
+## `[usage]`
+
+Usage caps: what the swarm does when the 5-hour or weekly limit runs high. They
+act on the swarm only; workers are never told. See
+[components](components.md#usage-caps).
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `enabled` | `true` | `SWARM_USAGE` | hot | `false` turns the caps off and lifts a hold they placed. |
+| `check_s` | `600` | `SWARM_USAGE_CHECK` | hot | How often the supervisor checks usage against the rules. At least 60. |
+| `stale_s` | `1800` | `SWARM_USAGE_STALE` | hot | A reading older than this is not trusted. With nothing fresher, the supervisor asks Claude Code's usage endpoint, at most once every 30 minutes. At least 300. |
+| `rules` | see below | | hot | A list of `{ window = "week" \| "five_hour", at = <percent>, action = "pause" \| "down" }`. A malformed rule fails the load. |
+
+The default rules:
+
+```toml
+[usage]
+rules = [
+  { window = "week",      at = 60, action = "pause" },
+  { window = "week",      at = 70, action = "down"  },
+  { window = "five_hour", at = 90, action = "pause" },
+]
+```
+
+`pause` stops new workers while a fresh reading is at or over `at`; running
+workers carry on. `down` runs `swarm down` once per window; the swarm stays down
+until you run `swarm up`.
+
 ## `[gc]`
 
 | key | default | env | reload | meaning |

@@ -593,21 +593,43 @@ isolation splits the run's averages.
 weekly figures are account-wide, so other Claude sessions on the same account
 during a run count too.
 
-The same numbers, shortened to four lines, reach your phone twice
-(`usage.brief`): at the bottom of the Overseer's summary ping, and as the answer
-to `/usage` (see [Telegram](#telegram-and-asking-the-owner)):
+Usage reaches your phone only when you ask: `/usage` to the bot (see
+[Telegram](#telegram-and-asking-the-owner)) answers with (`usage.brief`):
 
 ```
-usage (as of 14:05, 3 min ago):
-5-hour 23% · resets 16:00
-weekly 41% · resets Wed 11:00
-this run (6.2 h): 5-hour 2.1 %/h · weekly 0.9 %/h · 14 phases · $/h 11.05
+Weekly 41%, resets Wed 11:00.
+5-hour 23%, resets 16:00.
+Read at 14:05, 3 min ago.
+The swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.
 ```
 
-A sample arrives only when some session renders its status line, so the first
-line says how old it is, and `stale` past 30 minutes. With no sample at all the
-first three lines are one line saying so. `swarm usage` prints the same age on its
-`sample` line.
+The last line is the usage caps' state: the hold, when one holds. A sample arrives
+only when some session renders its status line, so the answer says how old it is.
+`swarm usage` prints the same age on its `sample` line.
+
+### Usage caps
+
+`[usage].rules` (`caps.py`) act on the swarm, never inside a session: workers are
+not told. Every `[usage].check_s` (10 minutes) the supervisor reads the tap's
+newest figures. When they are older than `[usage].stale_s` (30 minutes), or a
+window has reset since, it asks Claude Code's own usage endpoint
+(`GET /api/oauth/usage` with the login in `~/.claude/.credentials.json`), at most
+once every 30 minutes, and appends the answer to `limits.jsonl` as a sample with
+`"src": "api"`. The token is used only while unexpired, never refreshed, written
+or logged; a failed call is logged (`USAGE-API`) and the last reading stands.
+
+- **pause:** no new workers while a fresh reading is at or over the limit;
+  running workers finish. The hold is its own record (`usage_hold` in
+  `state.json`), apart from `swarm pause`: lifting it never undoes your pause.
+  It lifts by itself once the window has reset and a fresh reading is under the
+  limit. `swarm resume` leaves it in place and says so;
+  `swarm resume --override-cap` runs through it until the window resets.
+- **down:** runs `swarm down`, once per window. The swarm stays down.
+
+A stale or missing reading never creates a hold and never lifts one. Each
+crossing pings once, and so does a hold lifting. The hold and the reading show on
+the TUI, the web board, `swarm status`, `swarm why` and `swarm doctor`
+(`usage.caps`). Hold, lift and endpoint events are logged as `USAGE-*`.
 
 ## Doctor, why and gc
 
@@ -750,8 +772,7 @@ The swarm has its own sender: `scripts/notify.sh`, with a bot of its own. It rea
 Point `[telegram].notify` at any script that takes the message as `$1`.
 
 Messages are plain text, capped at 3800 characters. A `swarm notify` sent from an
-Overseer pass is its summary: it ends with the usage block, and the summary is cut
-first if the whole would pass the cap. Every send, delivered or not,
+Overseer pass is its summary. Every send, delivered or not,
 is logged to `<state>/notifications.jsonl`, and the dashboard's alerts tab reads
 that log. A message the swarm holds back on purpose is logged there too, with
 `delivered: false` and a `suppressed` reason; the dashboard shows it as `·`, not
@@ -788,14 +809,15 @@ with `--attention`, and a decision with `--ask "<question>"`; either opens an as
 - a supervisor crash or error; a master that would not start, or an Overseer
   pass that would not start or ran past its timeout, on the third in a row (and
   every third after that);
-- the Overseer's summary, with the usage block, on a cadence pass
+- the Overseer's summary on a cadence pass
   (`[overseer].every_finished`) or a pass you asked for (`swarm overseer --now`).
   Any other pass (the clock, starvation, a hold, a doctor FAIL, an owner wait)
   records its summary without sending it, unless it runs
   `swarm notify --attention` because something needs you. The digest tells the
   pass which case it is in;
 - a note from the init pass or a resolver (`swarm notify`);
-- the finish summary, with the usage block;
+- the finish summary;
+- a usage cap pausing or stopping the swarm, and a usage pause lifting;
 - the bot's answers to your `/usage` and `/help`.
 
 **Logged, not sent:** routine operator outcomes (the Overseer's digest lists
@@ -814,7 +836,7 @@ Question pings start with what the wait costs, for example
 
 **Commands (`tgbot.py`).** The bot also listens, so you can ask it:
 
-- `/usage`: the usage block above, read when you ask;
+- `/usage`: both limits and the usage caps' state, read when you ask;
 - `/help` (and `/start`): the list.
 
 The listener long-polls `getUpdates` with the same token and answers through the

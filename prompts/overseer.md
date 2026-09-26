@@ -84,6 +84,7 @@ Go through the digest and ask, in this order:
   `swarm pause` (running workers finish, nothing new starts) and say why in your
   report. Resume with `swarm resume` only a pause an earlier Overseer pass made
   — a pause the owner made is theirs to lift.
+  Never lift a usage-cap hold (`swarm resume --override-cap`); it is the owner's.
 
 Say what you are about to do before each action, in this pane, in one line.
 Prefer the step you can undo.
@@ -144,8 +145,8 @@ it serves, and `swarm keep --stop <name>`.
    owner. No internals they would have to decode. Operator jobs no longer ping
    the owner one by one, so fold the digest's "Operator jobs finished" list into
    one line (e.g. "operator: 9 jobs, all already done; api-F26 roll owed"),
-   naming only what is flagged or still owed. The swarm appends the usage
-   figures (5-hour and weekly limits, this run's pace) itself; leave them out.
+   naming only what is flagged or still owed. Leave usage figures out; the
+   owner asks the bot for them.
 2. **Fill in your pass record** (its path is in your first line): write what you
    saw under `## Saw` (short), what you did under `## Did` (each action and its
    result), and what you left for the owner under `## Left for the owner`

@@ -417,10 +417,15 @@ flowchart TD
 - **`swarm usage`:** each run's hours, phases, average 5-hour and weekly %/h,
   windows spanned, and $/h. The figures are account-wide, so other Claude sessions
   on the same account count too.
-- **On your phone:** the Overseer's Telegram summary (sent on a cadence pass,
-  see [Telegram](#telegram-and-asking-the-owner)) and the finish summary end with a short usage
-  block (5-hour and weekly %, resets, this run's %/h, phases and $/h, and how old
-  the sample is), and sending `/usage` to the swarm bot answers with the same block.
+- **Usage caps (`[usage]`):** at weekly 60% the swarm stops starting workers
+  (running ones finish), at weekly 70% it runs `swarm down`, and at 5-hour 90% it
+  pauses too. A pause lifts by itself after the window resets; `swarm resume
+  --override-cap` runs through it. When the tap's figures are stale, the
+  supervisor asks Claude Code's usage endpoint, at most every 30 minutes. Workers
+  are never told.
+- **On your phone:** usage only when you ask: `/usage` to the swarm bot answers
+  with both limits, how old the reading is, and the caps' state. A cap pausing or
+  stopping the swarm pings once, and so does a pause lifting.
 
 ### Doctor, why, gc
 
@@ -517,7 +522,8 @@ eleven tabs, switched with `1`–`9`, `0` and `a`, are:
   - the Overseer's summary on a cadence pass (`every_finished`) or one you asked
     for, or any summary it flags `--attention`;
   - a note from the init pass or a resolver (`swarm notify`);
-  - the finish summary, with the usage block.
+  - the finish summary;
+  - a usage cap pausing or stopping the swarm, and a usage pause lifting.
 - **Logged, not sent:** routine operator outcomes, parks, a first `fail` (the
   Overseer retries it), a push owed for less than the grace, a conflict a
   resolver is working on, a web board that did not start, a single master or
@@ -526,7 +532,7 @@ eleven tabs, switched with `1`–`9`, `0` and `a`, are:
   dashboard's alerts tab (as `·`), and in the Overseer's digest where it applies.
   `[telegram].pings = "all"` sends every one of them again. `ok` finishes are
   silent either way.
-- **Commands:** the bot also listens. Send it `/usage` for the usage block or
+- **Commands:** the bot also listens. Send it `/usage` for usage and the caps or
   `/help` for the list. `swarm up` starts the listener (`[telegram].commands`, on
   by default), `swarm down` stops it, and `swarm telegram-bot` runs it in the
   foreground. It answers only the chat in `TELEGRAM_CHAT_ID` and ignores everyone
@@ -591,7 +597,9 @@ stateDiagram-v2
   had already run).
 - **Waiting and parked** phases keep the run open until they finish, and so does
   an open ask.
-- **Pause:** `swarm pause` holds new launches while running workers finish.
+- **Pause:** `swarm pause` holds new launches while running workers finish. A
+  usage cap holds them the same way, on its own record (see
+  [Meters, usage and runs](#meters-usage-and-runs)).
 - **Done-ness** comes from the swarm's own records (`state.json`, seeded from
   `done/` sentinels on every `swarm up`), plus the ledger's checkboxes: a row
   ticked `[x]` that the swarm has no record of counts as done. It is neither
@@ -820,7 +828,8 @@ fake scripts need bash (`read -t`).
   `test_overseer_*.py`), and asks (`test_ask.py`);
 - the dashboard, which is booted headless at three terminal sizes (`test_tui_*.py`);
 - the web board (`test_web_*.py`);
-- the usage block and the bot's command listener (`test_tgbot.py`);
+- the bot's `/usage` answer and its command listener (`test_tgbot.py`), and the
+  usage caps (`test_caps.py`);
 - units for every other module.
 
 ## Design principles

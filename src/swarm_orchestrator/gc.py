@@ -1009,7 +1009,19 @@ def apply(plan: GcPlan, log=None) -> GcPlan:
 
     with build_gate(cfg, opts):
         _apply_in_gate(plan, log)
+    _drop_remote_attic(plan, log)
     return plan
+
+
+def _drop_remote_attic(plan: GcPlan, log=None) -> None:
+    """Delete the origin backup of every attic ref the plan dropped. After the
+    build gate is released: each is a network call, and no build should wait on
+    a slow or dead remote."""
+    if not plan.applied:
+        return
+    for target in plan.targets:
+        if target.op == "attic" and not target.error:
+            backup_mod.drop_attic(Path(target.repo or ""), target.extra["ref"], log or _NoLog())
 
 
 def _apply_in_gate(plan: GcPlan, log=None) -> None:
@@ -1073,7 +1085,6 @@ def _execute(cfg: Config, target: Target, log=None, live: set[str] | None = None
         repo = Path(target.repo or "")
         with gitq.repo_lock(cfg, repo):
             gitq._git(repo, "update-ref", "-d", target.extra["ref"])
-        backup_mod.drop_attic(repo, target.extra["ref"], log or _NoLog())
         target.after = 0
     elif target.op == "discard":
         # Worktrees, branches and the mirror dir, the way a failed phase is
@@ -1217,6 +1228,7 @@ def auto(cfg: Config, log=None) -> AutoResult:
             _apply_in_gate(plan, log)
     except GcRefused as exc:
         return AutoResult(AUTO_BUSY, detail=str(exc))
+    _drop_remote_attic(plan, log)
     kinds: dict[str, int] = {}
     for t in plan.targets:
         kinds[t.kind] = kinds.get(t.kind, 0) + (t.reclaimed or 0)

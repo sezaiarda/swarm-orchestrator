@@ -692,7 +692,7 @@ def cmd_gc(cfg: Config, opts: gc_mod.GcOptions, verbose: bool) -> int:
         return 1
     if opts.yes:
         try:
-            plan = gc_mod.apply(plan)
+            plan = gc_mod.apply(plan, Log(cfg.supervisor_log))
         except gc_mod.GcRefused as exc:
             # Re-checked under the build gate at delete time: a build (or a
             # phase) can have started since the plan was made. Nothing was deleted.

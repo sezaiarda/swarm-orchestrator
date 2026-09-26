@@ -612,3 +612,32 @@ def test_swarm_gc_yes_reports_a_refusal_at_delete_time(cfg, monkeypatch, capsys)
     monkeypatch.setattr(gc_mod, "apply", refuse)
     assert cli.cmd_gc(cfg, gc_mod.GcOptions(yes=True), verbose=False) == 1
     assert "swarm gc refused: a build is running" in capsys.readouterr().err
+
+
+def test_remote_attic_deletes_wait_until_the_build_gate_is_released(gitcfg, monkeypatch):
+    """Each is a network call; no build should queue behind a dead remote."""
+    from contextlib import contextmanager
+
+    from swarm_orchestrator import backup
+    from test_worktree import _git, _out
+
+    project = gitcfg.project_dir
+    head = _out(project, "rev-parse", "HEAD").strip()
+    old = time.strftime(gitq.ATTIC_STAMP, time.gmtime(time.time() - 31 * 86400))
+    _git(project, "update-ref", f"refs/swarm-attic/P1/{old}", head)
+    held = {"gate": False}
+    calls = []
+
+    @contextmanager
+    def gate(cfg, opts):
+        held["gate"] = True
+        try:
+            yield
+        finally:
+            held["gate"] = False
+
+    monkeypatch.setattr(gc_mod, "build_gate", gate)
+    monkeypatch.setattr(backup, "drop_attic",
+                        lambda repo, ref, log: calls.append((ref, held["gate"])))
+    gc_mod.apply(gc_mod.plan_gc(gitcfg, gc_mod.GcOptions(yes=True)))
+    assert calls == [(f"refs/swarm-attic/P1/{old}", False)]

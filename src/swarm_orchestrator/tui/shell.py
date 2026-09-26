@@ -70,7 +70,7 @@ class StatusBar(Static):
         # campaigns that ended long ago, so the number could not move.
         cs = camp.summarise(
             getattr(dash, "graph", {}) or {},
-            dict(snap.done),
+            dict(snap.landed),
             {s.phase for s in snap.slots if s.busy and s.phase},
             set(getattr(self.app.cfg, "exclude", []) or []),
         )

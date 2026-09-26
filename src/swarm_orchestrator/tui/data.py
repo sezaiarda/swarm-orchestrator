@@ -292,6 +292,10 @@ class Snapshot:
     reason: str = "no run yet"
     slots: list[SlotView] = field(default_factory=list)
     done: dict[str, str] = field(default_factory=dict)
+    #: ``done`` plus every row the ledger ticks (status ``ledger``) — the
+    #: launcher's view. Campaign counts and the upcoming list read this: on
+    #: ``done`` alone a ticked row looks unbuilt and counts as work left.
+    landed: dict[str, str] = field(default_factory=dict)
     paused: bool = False
     finished: bool = False
     master_alive: bool = False
@@ -312,6 +316,10 @@ class Snapshot:
     # a long time" is the failure this dashboard exists to make visible, and this is
     # the only field that can say it — a live-looking slot grid says nothing.
     last_event_at: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.landed and self.done:
+            object.__setattr__(self, "landed", dict(self.done))  # no ledger read
 
     @property
     def uptime_s(self) -> float | None:
@@ -428,6 +436,8 @@ def build_snapshot(
     parked = list(state.get("parked") or [])
     busy_phases = {s.phase for s in slots if s.busy and s.phase}
     in_flight = busy_phases | set(parked) | {p for p in waiting}
+    # The launcher's done view: a ticked row with no record counts as landed.
+    landed = ledger_mod.with_ticked(done, ticked or set(), in_flight)
 
     blockers: list[Blocker] = []
     for phase, deadline in sorted(waiting.items()):
@@ -505,6 +515,7 @@ def build_snapshot(
         reason="",
         slots=slots,
         done=done,
+        landed=landed,
         paused=bool(state.get("paused")),
         finished=bool(state.get("finished")),
         master_alive=bool(state.get("master_alive")),
@@ -516,10 +527,9 @@ def build_snapshot(
         integ_blocked_repo=_as_str(state.get("integ_blocked_repo")),
         blockers=blockers,
         operator=operator,
-        # The launcher's done view: a ticked row with no record counts as landed.
         progress=phase_progress(
             graph,
-            ledger_mod.with_ticked(done, ticked or set(), in_flight),
+            landed,
             in_flight,
             set(getattr(cfg, "exclude", []) or []),
         ),

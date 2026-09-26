@@ -208,6 +208,18 @@ def test_headline_counts_live_work_not_the_ledger_total():
     assert "1 running" in text and "12 ready" in text
 
 
+def test_headline_skips_a_campaign_the_ledger_already_ticked():
+    # A campaign whose rows were mostly ticked in the ledger, none in the done map,
+    # once headlined as "read 0 / 104" with an ETA timed on all of them.
+    graph = {f"read-W{i}": set() for i in range(1, 6)}
+    graph.update({"teal-W1": set(), "teal-W2": {"teal-W1"}})
+    landed = {f"read-W{i}": "ledger" for i in range(1, 6)}
+    snap = data.Snapshot(ok=True, done={}, landed=landed, slots=[slot(0, "teal-W1")])
+    text = plain(home.headline(FakeDash(snap, graph=graph), 76))
+    assert "teal" in text and "0 / 2 phases" in text
+    assert "read" not in text
+
+
 def test_headline_carries_an_eta():
     graph = {f"dash-W{i}": set() for i in range(1, 9)}
     dash = FakeDash(

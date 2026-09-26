@@ -198,7 +198,7 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     busy = {s.phase for s in snap.slots if s.busy and s.phase}
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     camps = [
-        c for c in summarise(dash.graph or {}, snap.done, busy, excluded)
+        c for c in summarise(dash.graph or {}, snap.landed, busy, excluded)
         if c.live_total or c.built
     ]
     if not camps:
@@ -402,10 +402,10 @@ def next_lines(dash, width: int = 44, limit: int = 6) -> list[str]:
     busy = {s.phase for s in snap.slots if s.busy and s.phase}
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     graph = dash.graph or {}
-    camps = summarise(graph, snap.done, busy, excluded)
+    camps = summarise(graph, snap.landed, busy, excluded)
     cur = active(camps)
     waiting = {b.phase for b in snap.blockers}
-    items = tl.upcoming(graph, snap.done, busy, excluded, waiting,
+    items = tl.upcoming(graph, snap.landed, busy, excluded, waiting,
                         prefer=cur.name if cur else None, limit=limit)
     if not items:
         return [paint("nothing left to run — the ledger is built", OK if graph else MUTED)]

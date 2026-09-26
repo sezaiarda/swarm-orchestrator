@@ -292,6 +292,12 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         if st.paused:
             log.line(f"LAUNCH-DENIED {phase} paused")
             return DENIED
+        if phase in st.integrating():
+            log.line(f"LAUNCH-DENIED {phase} its finished work is waiting to merge")
+            if not quiet:
+                print(f"LAUNCH-DENIED {phase}: its finished work is waiting to merge"
+                      f" (`swarm resolved {phase}` once the hold is cleared)")
+            return DENIED
         slot = st.claim_slot(phase)
         if slot is None:
             log.line(f"LAUNCH-DENIED {phase} no-free-slot")

@@ -510,3 +510,52 @@ def test_branch_exists_is_public(tmp_path, monkeypatch):
     monkeypatch.setattr(gitq, "_branch_exists", lambda r, b: calls.append((r, b)) or True)
     assert gitq.branch_exists(Path("/repo"), "swarm/P0") is True
     assert calls == [(Path("/repo"), "swarm/P0")]
+
+
+# -- a phase whose merge is held is finished work: never relaunched ---------
+def test_a_held_or_queued_phase_is_never_ready_or_claimable(tmp_path, monkeypatch):
+    from swarm_orchestrator import master as master_mod
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.integ_blocked = "P0"
+        st.integ_push("P0", "ok")
+        st.integ_push("R1", "ok")
+    st = state_mod.read(cfg)
+    assert master_mod.build_context(cfg, st)["ready"] == []
+    assert st.claim_slot("P0") is None and st.claim_slot("R1") is None
+
+
+def test_swarm_launch_refuses_a_held_phase(tmp_path, monkeypatch):
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator.logutil import Log
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.integ_blocked = "P0"
+    log = Log(cfg.supervisor_log)
+    try:
+        assert launch_mod.launch_outcome(cfg, "P0", log, quiet=True) == launch_mod.DENIED
+    finally:
+        log.close()
+    assert not state_mod.read(cfg).busy_slots()
+
+
+def test_up_queues_every_held_phase_so_none_is_relaunched(tmp_path, monkeypatch):
+    """Only the first held phase used to be recorded; the rest looked ready, and
+    the launcher built over their finished branches."""
+    from swarm_orchestrator import cli
+    from swarm_orchestrator import master as master_mod
+
+    cfg = _cfg(tmp_path, monkeypatch, isolation="worktree")
+    state_mod.init_state(cfg)
+    monkeypatch.setattr(gitq, "sentinel_done", lambda c: {"P0": "ok", "R1": "needs-owner"})
+    held = [gitq.Held("P0", gitq.DIRTY, None), gitq.Held("R1", gitq.DIRTY, None)]
+    monkeypatch.setattr(gitq, "reconcile", lambda c, d, l, **kw: gitq.ReconcileResult(held=held))
+    cli._reconcile_orphans(cfg)
+    st = state_mod.read(cfg)
+    assert st.integ_blocked == "P0"
+    assert st.integ_queue == ["P0", "R1"] and st.integ_status["R1"] == "needs-owner"
+    assert master_mod.build_context(cfg, st)["ready"] == []

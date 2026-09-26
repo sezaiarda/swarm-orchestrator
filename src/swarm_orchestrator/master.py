@@ -71,8 +71,15 @@ def build_context(cfg: Config, st: State) -> dict:
     graph = ledger_mod.load(ledger_path)
     # A parked or waiting phase is still in flight (its worker owes the owner an
     # answer) but is not in a slot, so exclude it from `ready` too — otherwise the
-    # master would relaunch a phase that is already being built off-grid.
-    busy_phases = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+    # master would relaunch a phase that is already being built off-grid. A phase
+    # queued or held for merging is finished work: relaunching it would build over
+    # the only copy of that work.
+    busy_phases = (
+        {s.phase for s in st.busy_slots() if s.phase}
+        | set(st.parked)
+        | set(st.waiting)
+        | st.integrating()
+    )
     excluded = set(cfg.exclude)
     # A row ticked `[x]` with no record of ours counts as landed (a view only;
     # `done` below stays the swarm's own records).

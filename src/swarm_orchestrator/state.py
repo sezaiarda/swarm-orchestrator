@@ -137,6 +137,12 @@ class State:
         finish until it runs ``swarm done``."""
         return self.any_busy() or bool(self.parked) or bool(self.waiting)
 
+    def integrating(self) -> set[str]:
+        """Phases whose finished work is queued or held for merging. Their
+        branch is the only copy of that work, so they are never launched again."""
+        held = {self.integ_blocked} if self.integ_blocked else set()
+        return set(self.integ_queue) | held
+
     def slot_by_id(self, sid: int) -> Slot | None:
         return next((s for s in self.slots if s.id == sid), None)
 
@@ -153,9 +159,9 @@ class State:
         one holds no slot: its worker is alive off-grid on ``swarm/<phase>``. Only
         consulting ``busy`` let a manual ``swarm launch <phase>`` claim a second
         slot for it and hand ``worktree_add`` a branch it then force-deletes out
-        from under the live worker.
+        from under the live worker. A phase queued or held for merging counts too.
         """
-        if phase in self.parked or phase in self.waiting:
+        if phase in self.parked or phase in self.waiting or phase in self.integrating():
             return None
         if any(s.busy and s.phase == phase for s in self.slots):
             return None

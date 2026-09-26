@@ -156,14 +156,16 @@ def _reconcile_orphans(cfg: Config) -> None:
                 s.integ_blocked_kind = first.kind
                 s.integ_blocked_repo = str(first.repo) if first.repo else None
                 for h in result.held:
-                    # Queued too, so `swarm resolved` re-lands it; a job or a
-                    # pass has no sentinel for the next `swarm up` to find it by.
+                    # Queued, so `swarm resolved` re-lands it and the launcher
+                    # never builds over it (the first is the queue's head).
                     if plan.get(h.phase) == operator_mod.INTEGRATE:
                         s.integ_push(h.phase, operator_mod.INTEG_STATUS)
                     elif h.phase in passes:
                         s.integ_push(h.phase, ovrecord.INTEG_STATUS)
                     elif h.phase in asks:
                         s.integ_push(h.phase, ask_mod.INTEG_STATUS)
+                    else:
+                        s.integ_push(h.phase, seed.get(h.phase, "ok"))
             names = ", ".join(f"{h.phase} ({h.kind})" for h in result.held)
             print(f"integration HELD: {names}", file=sys.stderr)
             print("  these phases are NOT marked done — their branches never merged.")

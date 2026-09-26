@@ -73,7 +73,8 @@ def spawn(cfg: Config, phase: str, repo: Path, log: Log) -> str | None:
     # conflicted tree while the merge queue stayed held -- and a launch script
     # that no-ops on resolve-* windows would leave every merge conflict silently
     # landing on the owner to fix by hand.
-    cmd = cfg.resolver_cmd or f"cd {repo} && exec claude"
+    model = f" --model {cfg.resolver_model}" if cfg.resolver_model else ""
+    cmd = cfg.resolver_cmd or f"cd {repo} && exec claude{model}"
     tmux.respawn_pane(pane, cmd, env=_resolver_env(cfg, phase))
     if not cfg.resolver_cmd:
         _deliver(cfg, pane, phase, repo, log)
@@ -109,6 +110,10 @@ def _deliver(cfg: Config, pane: str, phase: str, repo: Path, log: Log) -> None:
         f"{cfg.git_main_branch}. Work only in {repo}. When done, run "
         f"`swarm resolved {phase}`."
     )
+    checks = cfg.git_auto_resolve_check
+    if checks:
+        named = "; ".join(f"{glob}: `{cmd}`" for glob, cmd in checks.items())
+        line += f" The project's checks for resolved files: {named}."
     if not tmux.send_submit(pane, line):
         log.line(f"RESOLVER-SUBMIT-LOST {phase}")
 

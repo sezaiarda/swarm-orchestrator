@@ -38,6 +38,7 @@ way, which is why `[operator].notify` is "next" too.
 | `driver` | `"tmux"` | `SWARM_DRIVER` | restart | `tmux`, or `bare` (headless subprocesses, no panes; the hermetic tests use it). |
 | `master_cmd` | `""` | `SWARM_MASTER_CMD` | next | Replaces the built-in `claude` command in the overseer window (the init pass, and the Overseer when `[overseer].cmd` is empty). With it set, no prompt is typed in. The tests use it to inject a fake master. |
 | `resolver_cmd` | `""` | `SWARM_RESOLVER_CMD` | next | Replaces `cd <repo> && exec claude` for the merge-conflict resolver. With it set, no prompt is typed in. |
+| `resolver_model` | `"sonnet"` | | next | `--model` for the merge-conflict resolver. `""` inherits the user's setting. Ignored when `resolver_cmd` is set. |
 | `watchdog_s` | `300` | `SWARM_WATCHDOG` | hot | Seconds between the supervisor's liveness sweeps. `0` turns the sweep off and leaves the loop purely event-driven. See the README's watchdog section. |
 
 ## `[worker]`

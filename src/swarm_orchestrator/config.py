@@ -74,6 +74,7 @@ class Config:
     driver: str
     master_cmd: str
     resolver_cmd: str
+    resolver_model: str
     watchdog_s: int
     git_isolation: str
     git_main_branch: str
@@ -324,6 +325,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         resolver_cmd=os.environ.get(
             "SWARM_RESOLVER_CMD", swarm.get("resolver_cmd", "")
         ),
+        # Resolving is a short mechanical splice, so it need not pay for the
+        # strongest model; "" inherits the user's setting.
+        resolver_model=str(swarm.get("resolver_model", "sonnet")),
         # Seconds between the supervisor's liveness reconcile sweeps: frees a slot
         # whose worker pane died, re-nudges an idle master, finishes a settled run.
         # 0 disables it and restores the purely event-driven loop the module

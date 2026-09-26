@@ -12,11 +12,15 @@ Do exactly this, then stop:
    `=======`, `>>>>>>>`) so the result keeps **both sides' intent** — never
    blindly discard either side. For a phase-ledger tick, keep every phase line
    from both sides (both ticks).
-2. `git add` each resolved file. When the tree is clean, `git commit --no-edit`
+2. Verify only what the conflict touched. If your instructions name a check for
+   a file you resolved, run it in the repo and fix the merge until it passes.
+   Build or test only when a conflicted file is code; for docs, ledgers and
+   journals, do not build.
+3. `git add` each resolved file. When the tree is clean, `git commit --no-edit`
    to complete the merge (do not create extra commits).
-3. Run `swarm resolved <phase>` (the exact phase named above). This unblocks the
+4. Run `swarm resolved <phase>` (the exact phase named above). This unblocks the
    merge-queue; the supervisor pushes, prunes the branch(es), and continues.
-4. If you genuinely cannot resolve it correctly, **telegram the owner** with
+5. If you genuinely cannot resolve it correctly, **telegram the owner** with
    `swarm notify "<the specifics>"` (the swarm's own sender, the only way to
    message the owner) and stop — do not run `swarm resolved`. Leave the merge in
    progress for the owner.

@@ -377,9 +377,12 @@ A merge can end four ways:
 | dirty | a canonical repo has uncommitted tracked edits | the queue is held; you commit or stash, then `swarm resolved <phase>` |
 | push failed | merged locally, the push was refused or the remote was unreachable | not a hold: the repo **owes a push** (below) |
 
-The **resolver** is a Claude session (prompt: `prompts/resolver.md`) that:
+The **resolver** is a Claude session (prompt: `prompts/resolver.md`, model
+`[swarm].resolver_model`, Sonnet by default) that:
 
 - resolves every conflict marker so that both sides' intent survives;
+- runs the project's `auto_resolve_check` for a file it resolved, and builds only
+  when a conflicted file is code;
 - commits the merge and runs `swarm resolved <phase>`;
 - if it cannot resolve correctly, tells you and stops, leaving the merge in
   progress;

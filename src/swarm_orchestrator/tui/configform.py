@@ -389,6 +389,7 @@ FIELDS: tuple[Setting, ...] = (
     Setting("master_model", STR, 'model for the master session; "" inherits'),
     Setting("master_cmd", STR, 'command the master pane runs; "" = the built-in'),
     Setting("resolver_cmd", STR, "command that opens a conflict-resolver session"),
+    Setting("resolver_model", STR, 'model for the resolver; "" inherits'),
     Setting("driver", CHOICE, "tmux = real panes; bare = headless test driver",
             choices=("tmux", "bare")),
     Setting("slug", STR, "names this run's state dir — its identity on disk"),

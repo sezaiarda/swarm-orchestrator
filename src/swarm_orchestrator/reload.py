@@ -197,6 +197,8 @@ POLICY: dict[str, Policy] = {
         _p("resolver_cmd", "[swarm]", "resolver_cmd", NEXT, "SWARM_RESOLVER_CMD",
            "read once, when a conflict opens a resolver pane; an already-open"
            " resolver keeps the command it was spawned with"),
+        _p("resolver_model", "[swarm]", "resolver_model", NEXT, None,
+           "baked into the resolver's command line when a conflict opens its pane"),
         _p("command_template", "[worker]", "command_template", NEXT, None,
            "the prime line is typed into a worker's pane once, at launch"),
         _p("command_file", "[worker]", "command_file", NEXT, None,

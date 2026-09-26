@@ -50,6 +50,7 @@ READY = "ready"
 # a dep can also be an already-landed ancestor we do not recurse into).
 _SATISFIED = "satisfied"
 _CYCLE = "cycle"
+_SHOWN = "shown"
 
 
 @dataclass
@@ -248,7 +249,10 @@ def _roots(
     all (a typo'd ``needs:``) has no deps and so surfaces as its own root, which is
     exactly the diagnosis. ``seen`` breaks cycles: a phase already on the stack
     contributes no root, so a fully cyclic subtree returns ``[]`` and the caller
-    reports the cycle instead of a bogus root.
+    reports the cycle instead of a bogus root. ``seen`` is shared across the
+    whole walk, not per path: a phase reached twice (a diamond, or the long
+    ordering-only chains a ledger builds) already gave its roots the first time,
+    and re-walking it per path is exponential in the chain length.
     """
     unmet = _unmet(graph, done, phase)
     if not unmet:
@@ -256,8 +260,9 @@ def _roots(
     out: list[str] = []
     for dep in unmet:
         if dep in seen:
-            continue  # a cycle edge yields no actionable root
-        out.extend(_roots(graph, done, dep, seen | {dep}))
+            continue  # a cycle edge, or already walked: no new root
+        seen.add(dep)
+        out.extend(_roots(graph, done, dep, seen))
     return list(dict.fromkeys(out))
 
 
@@ -268,13 +273,19 @@ def _tree(
     phase: str,
     roots: set[str],
     seen: set[str],
+    expanded: set[str] | None = None,
 ) -> Node:
     """The blocking sub-tree under ``phase``.
 
     Only *unmet* deps are expanded — a landed dep is shown as one satisfied leaf
     rather than dragging its whole history in, so the tree is exactly the set of
-    phases still owed.
+    phases still owed. Each phase is expanded once: a later path to it is one
+    ``shown`` leaf, or a ledger's long shared chains blow the tree up
+    exponentially. ``seen`` stays the path, so a real cycle is still named.
     """
+    if expanded is None:
+        expanded = set()
+    expanded.add(phase)
     exp = _classify(cfg, phase, st, graph)
     # A `done` node's *status* is the whole diagnosis (`fail` vs `ok`), so it goes
     # in the label rather than hiding one level down in the detail text.
@@ -287,8 +298,12 @@ def _tree(
             )
         elif dep in seen:
             node.children.append(Node(dep, _CYCLE, "already above in this tree"))
+        elif dep in expanded:
+            node.children.append(Node(dep, _SHOWN, "expanded elsewhere in this tree"))
         else:
-            node.children.append(_tree(cfg, st, graph, dep, roots, seen | {dep}))
+            node.children.append(
+                _tree(cfg, st, graph, dep, roots, seen | {dep}, expanded)
+            )
     return node
 
 

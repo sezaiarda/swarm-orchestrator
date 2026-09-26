@@ -318,6 +318,27 @@ def test_the_tree_expands_only_what_is_still_owed(tmp_path, monkeypatch):
     assert p0.state == why_mod._SATISFIED and p0.children == []
 
 
+def test_shared_ancestors_are_walked_once_not_per_path(tmp_path, monkeypatch):
+    # 60 rows, each needing both rows of the layer below: 2**30 paths to the
+    # bottom. Walked per path this never returns (memory grows without bound
+    # on chains like this); walked per node it is instant.
+    rows = ["- [ ] `L0a` · needs:—", "- [ ] `L0b` · needs:—"]
+    for i in range(1, 30):
+        for side in "ab":
+            rows.append(f"- [ ] `L{i}{side}` · needs:`L{i-1}a` `L{i-1}b`")
+    cfg = _cfg(tmp_path, monkeypatch, "\n".join(rows) + "\n")
+    _state(cfg)
+
+    exp = why_mod.explain(cfg, "L29a")
+
+    assert exp.roots == ["L0a", "L0b"]
+    below = {f"L{i}{s}" for i in range(29) for s in "ab"}
+    assert why_mod._tree_phases(exp.tree) == below | {"L29a"}
+    # The second path into a phase is one leaf, not another copy of its subtree.
+    l27b = next(n for n in exp.tree.children[1].children if n.phase == "L27b")
+    assert l27b.state == why_mod._SHOWN and l27b.children == []
+
+
 def test_a_done_node_is_labelled_with_its_status(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
     _state(cfg, done={"P0": "fail"})

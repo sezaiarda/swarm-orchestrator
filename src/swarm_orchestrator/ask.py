@@ -369,7 +369,7 @@ def brief_text(cfg: Config, ask: Ask, cwd: Path | None) -> str:
     swarm = swarm_form(cfg)
     where = (
         f"Your cwd {cwd} is your own full-workspace mirror (branch swarm/{mirror_name(ask.name)}):"
-        " edit and commit the ledger there; the swarm merges it when you run ask-done."
+        " commit what you change there; the swarm merges it when you run ask-done."
         if cwd is not None
         else f"Your cwd is the project itself, {cfg.project_dir}: commit there right away."
     )
@@ -379,8 +379,9 @@ def brief_text(cfg: Config, ask: Ask, cwd: Path | None) -> str:
         f" `{ask.name}`, in tmux window {ask.window}, for the project at {cfg.project_dir}."
         f" The owner's answer is wanted on these ledger rows: {rows_text(ask.rows)}"
         f" (the ledger is {cfg.ledger}). Why, in one line: {ask.why}. {where}"
-        f" The project's worker command file, whose rules for ticking a row and any"
-        f" ledger gate you follow: {command_file}. Run swarm commands as `{swarm} <command>`."
+        f" Record each answer with `{swarm} record <row> done|note \"<the answer>\"`;"
+        f" never edit the ledger yourself. The project's worker command file: {command_file}."
+        f" Run swarm commands as `{swarm} <command>`."
         f"\n\nThe brief, in full:\n\n{ask.brief}\n\n"
         f"When every answer is recorded and committed, run"
         f' `{swarm} ask-done {ask.name} "<one-line outcome>"`, adding'

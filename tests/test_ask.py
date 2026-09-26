@@ -582,6 +582,6 @@ def test_the_prompts_tell_sessions_to_open_an_ask():
         flat = " ".join((repo / "prompts" / name).read_text(encoding="utf-8").split())
         assert "swarm ask --name" in flat and "--rows" in flat and "--why" in flat, name
     flat = " ".join((repo / "prompts" / "ask.md").read_text(encoding="utf-8").split())
-    for text in ("AskUserQuestion", "Owner's pick (", "swarm ask-done", "--stop-keep",
-                 "owner-run", "ledger gate"):
+    for text in ("AskUserQuestion", "Owner's pick:", "swarm ask-done", "--stop-keep",
+                 "owner-run", "swarm record"):
         assert text in flat

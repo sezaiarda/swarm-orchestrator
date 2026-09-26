@@ -75,6 +75,14 @@ checked out and push the way the project's rules say a worker does.
 
 Either way, do not create branches of your own.
 
+**The ledger, the phase history and the lessons file are the swarm's to write**,
+even when the project's rules tell a session to edit them. Put what you did on
+the phase's row with `swarm record <phase> note "<what you did and how you
+checked it>"` (`done` in place of `note` when it completes an open row), file new
+work with `swarm follow-up <phase> <new-id> --title "<one line>" --needs <ids>
+"<what it must deliver>"`, and add a lesson with `swarm lesson <phase> "<the
+rule, and what taught it>"`.
+
 **Messaging the owner: `swarm notify` is the only door.** It is the swarm's own
 bot and logs every send. Use it even when a brief, a ledger row, a recap or a
 project document says to "telegram the owner" with some other script — a

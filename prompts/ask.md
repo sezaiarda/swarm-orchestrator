@@ -19,8 +19,8 @@ in that form (`swarm --project-dir <project> <command>`): in a mirror, a bare
 
 1. **The project's rules.** Its `CLAUDE.md`, the ledger's header, and the worker
    command file your brief names: that file says how a row is ticked, what a
-   closed row must carry, and which ledger gate or check must stay green. Follow
-   it over anything you would do by habit.
+   closed row must carry. Follow it over anything you would do by habit, except
+   that you never edit the ledger yourself (section 3).
 2. **The rows.** Read each named ledger row in full, and what it points at (an
    ADR, a design doc, the row that built the thing under review).
 3. **What the brief points at.** Open the files; check that a URL answers (for
@@ -45,26 +45,26 @@ wait: an ask never times out, and the run keeps waiting for them.
 
 ## 3. Record the answers
 
-For each row the owner answered:
+The swarm is the only writer of the ledger, the phase history and the lessons
+file: never edit them yourself. For each row the owner answered, record it with
 
-- append a line to the row, in the ledger's own style for a continuation line:
-  `Owner's pick (<YYYY-MM-DD>): <the answer, in the owner's words where they gave
-  them>`;
-- **tick the row** (`- [ ]` to `- [x]`) only when it is `owner-run` and the answer
-  completes it: a pick that was the whole of the row. Leave it open when the
-  owner deferred, answered only part of it, or when the row also needs something
-  physical done. Follow the command file's rules for ticking, and run the ledger
-  gate it names and keep it green.
+    swarm record <row> done "Owner's pick: <the answer, in the owner's words where they gave them>"
+
+when the answer completes an `owner-run` row (a pick that was the whole of the
+row; `done` ticks it), or with `note` in place of `done` when the owner deferred,
+answered only part of it, or the row also needs something physical done. The
+swarm writes it on the main branch at once and releases the rows that wait on it.
 
 Do not build what the owner picked: that is the work of the rows that depend on
-these, and ticking this one is what releases them. Record small decisions of your
-own (wording, where a line goes) without asking.
+these. Record small decisions of your own (wording, where a line goes) without
+asking.
 
-**Commit.** If your brief says you are in your **own mirror**, commit the ledger
-edit there; the swarm merges it into main through its ordinary queue when you run
-`ask-done`, and anything uncommitted is lost with the mirror. If you are in the
-**project itself**, commit there right away, on the branch it has checked out,
-and push the way the project's rules say a worker does. Never create branches.
+**Commit** anything else you changed. If your brief says you are in your **own
+mirror**, commit there; the swarm merges it into main through its ordinary queue
+when you run `ask-done`, and anything uncommitted is lost with the mirror. If you
+are in the **project itself**, commit there right away, on the branch it has
+checked out, and push the way the project's rules say a worker does. Never create
+branches.
 
 ## An ask opened by an operator job
 
@@ -77,9 +77,9 @@ session has ended; you are the only place the owner answers it.
   brief gives no question, work out from the outcome what the owner must decide
   or do and ask exactly that; when all they need is to look at something, show
   it and ask whether it is right.
-- **Record it** on the row your brief names, as a continuation line:
-  `Owner's call (<YYYY-MM-DD>): <the answer>`. Tick it only when the answer
-  itself completes the row, following the command file's rules.
+- **Record it** on the row your brief names:
+  `swarm record <row> note "Owner's call: <the answer>"`, or `done` in place of
+  `note` only when the answer itself completes the row.
 - **Hand the work on.** If acting on the answer needs work — a run on a server, a
   deploy, a check, a fix — do not do it here. Queue it with
   `swarm operator-add "<what to do, with the owner's answer in it>" --phase <row>`,

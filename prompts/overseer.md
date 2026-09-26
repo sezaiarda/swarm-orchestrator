@@ -62,12 +62,17 @@ Go through the digest and ask, in this order:
   supervisor gave up launching once you have fixed why.
 - **Keep the swarm fed — edit the ledger.** Split a long serial chain so its
   independent parts can run side by side, reorder, loosen a `needs:` that is not
-  real, or file follow-up rows for the risks and decisions the finished phases
-  reported. Write rows exactly the way the ledger header and `CLAUDE.md` say,
-  with `needs:` naming real phase ids. If the project has a ledger gate or check
-  (its `CLAUDE.md` names it), run it and keep it green. **Commit** the edit — in
-  your mirror it only reaches the swarm through the merge when you finish, and
-  anything uncommitted is lost with the mirror.
+  real. Write rows exactly the way the ledger header and `CLAUDE.md` say, with
+  `needs:` naming real phase ids. If the project has a ledger gate or check (its
+  `CLAUDE.md` names it), run it and keep it green. **Commit** the edit — in your
+  mirror it only reaches the swarm through the merge when you finish, and
+  anything uncommitted is lost with the mirror. Reshaping `needs:` is the one
+  ledger edit that is yours: file new rows for the risks and decisions the
+  finished phases reported with `swarm follow-up <phase> <new-id> --title "<one
+  line>" --needs <ids> "<what it must deliver>"`, and put notes on a row with
+  `swarm record <phase> note "<text>"`. Never append notes to a row, never tick
+  one by hand, and never write the phase history or lessons files: the swarm
+  writes those.
 - **Hand work to the operator:** `swarm operator-add "<brief>" [--phase <id>]` for
   deploys, post-deploy checks, provisioning and cross-repo chores. Write the brief
   so a capable colleague can act on it alone: what, where, and how to tell it

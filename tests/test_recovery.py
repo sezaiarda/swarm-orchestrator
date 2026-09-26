@@ -139,18 +139,18 @@ def test_a_handler_exception_does_not_kill_the_loop(tmp_path, monkeypatch):
 
 
 # -- C2: the opt-in liveness watchdog -------------------------------------
-def _pane_probe(dead: set[str]):
-    """Stand-in for `tmux run`: report `#{pane_dead}` for known panes only."""
+class _R:
+    def __init__(self, rc: int, out: str) -> None:
+        self.returncode, self.stdout, self.stderr = rc, out, ""
 
-    class R:
-        def __init__(self, rc: int, out: str) -> None:
-            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+def _pane_probe(dead: set[str], panes=("%42",)):
+    """Stand-in for `tmux run`: the session lists ``panes`` minus the ``dead``."""
 
     def fake(args, check=False):
-        pane = args[args.index("-t") + 1]
-        if pane in dead:
-            return R(1, "")  # tmux: no such pane
-        return R(0, "0\n")
+        if args[0] == "list-panes":
+            return _R(0, "".join(f"{p} 0\n" for p in panes if p not in dead))
+        return _R(0, "")
 
     return fake
 
@@ -165,7 +165,7 @@ def test_watchdog_frees_a_slot_whose_pane_died(tmp_path, monkeypatch):
         st.claim_slot("P0")
         st.slots[0].pane_id = "%42"
     discarded: list[str] = []
-    monkeypatch.setattr(gitq, "discard", lambda c, p, l: discarded.append(p))
+    monkeypatch.setattr(gitq, "set_aside", lambda c, p, l: discarded.append(p))
     monkeypatch.setattr("swarm_orchestrator.tmux.run", _pane_probe({"%42"}))
 
     sup = Supervisor(cfg)
@@ -181,11 +181,11 @@ def test_watchdog_frees_a_slot_whose_pane_died(tmp_path, monkeypatch):
         st = state_mod.read(cfg)
         assert not st.busy_slots()  # slot freed
         assert "P0" not in st.done  # NOT recorded done: still relaunchable
-        assert discarded == ["P0"]  # its branches rolled back
+        assert discarded == ["P0"]  # its work set aside for the next attempt
     finally:
         sup.log.close()
 
-    assert any("died without 'swarm done'" in ln for ln in _tg(tmp_path))
+    assert any("stopped without finishing" in ln for ln in _tg(tmp_path))
     assert "WATCHDOG-REAP P0" in cfg.supervisor_log.read_text(encoding="utf-8")
 
 
@@ -559,3 +559,63 @@ def test_up_queues_every_held_phase_so_none_is_relaunched(tmp_path, monkeypatch)
     assert st.integ_blocked == "P0"
     assert st.integ_queue == ["P0", "R1"] and st.integ_status["R1"] == "needs-owner"
     assert master_mod.build_context(cfg, st)["ready"] == []
+
+
+# -- a tmux that cannot answer is not a dead worker --------------------------
+@pytest.mark.parametrize("rc", [1, 124])
+def test_watchdog_never_reaps_when_tmux_cannot_answer(tmp_path, monkeypatch, rc):
+    cfg = _cfg(tmp_path, monkeypatch, driver="tmux", isolation="worktree", watchdog=1)
+    state_mod.init_state(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("P0")
+        st.slots[0].pane_id = "%42"
+    set_aside: list[str] = []
+    monkeypatch.setattr(gitq, "set_aside", lambda c, p, l: set_aside.append(p))
+    monkeypatch.setattr(gitq, "discard", lambda c, p, l: set_aside.append(p))
+    monkeypatch.setattr("swarm_orchestrator.tmux.run", lambda args, check=False: _R(rc, ""))
+    sup = Supervisor(cfg)
+    try:
+        for _ in range(4):
+            sup._last_sweep = 0.0
+            sup._watchdog_tick()
+    finally:
+        sup.log.close()
+    assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"]
+    assert set_aside == []
+    assert "WATCHDOG-TMUX-UNREACHABLE" in cfg.supervisor_log.read_text(encoding="utf-8")
+
+
+def test_a_worker_that_keeps_dying_is_held_and_the_owner_told(tmp_path, monkeypatch):
+    from swarm_orchestrator import supervisor as sup_mod
+
+    cfg = _cfg(tmp_path, monkeypatch, driver="tmux", isolation="worktree", watchdog=1)
+    state_mod.init_state(cfg)
+    monkeypatch.setattr(gitq, "set_aside", lambda c, p, l: True)
+    monkeypatch.setattr("swarm_orchestrator.tmux.run", _pane_probe({"%42"}))
+    sup = Supervisor(cfg)
+    try:
+        for n in range(sup_mod.CRASH_LIMIT):
+            assert not sup._given_up("P0"), f"held after {n} deaths"
+            sup._reap("P0")
+        assert sup._given_up("P0")
+    finally:
+        sup.log.close()
+    tg = _tg(tmp_path)
+    assert any("stopped unexpectedly 3 times in the last hour" in ln for ln in tg)
+    assert "WATCHDOG-CRASH-HOLD P0" in cfg.supervisor_log.read_text(encoding="utf-8")
+
+
+def test_tmux_calls_time_out_instead_of_hanging(monkeypatch):
+    import subprocess
+
+    from swarm_orchestrator import tmux
+
+    def hang(*a, **kw):
+        assert kw["timeout"] == tmux.TIMEOUT_S
+        raise subprocess.TimeoutExpired(a[0], kw["timeout"])
+
+    monkeypatch.setattr(tmux.subprocess, "run", hang)
+    assert tmux.run(["list-panes"]).returncode == tmux.TIMEOUT_RC
+    assert tmux.pane_states("s") is None
+    with pytest.raises(subprocess.CalledProcessError):
+        tmux.run(["respawn-pane"], check=True)

@@ -83,6 +83,14 @@ def preset_for(count: int, layout: str = AUTO_LAYOUT) -> str | None:
     return layout
 
 
+#: Every tmux command here returns at once; one still running after this is a
+#: hung server, and must not freeze the caller (the supervisor's only loop
+#: thread among them).
+TIMEOUT_S = 15.0
+#: The return code a timed-out call reports (coreutils ``timeout``'s).
+TIMEOUT_RC = 124
+
+
 def run(
     args: Sequence[str], check: bool = False, input_text: str | None = None
 ) -> subprocess.CompletedProcess:
@@ -90,15 +98,38 @@ def run(
 
     ``input_text`` is fed to the command's stdin (``load-buffer -`` is the only
     caller) so that every tmux invocation still goes through this one function
-    and stays stubbable in tests.
+    and stays stubbable in tests. A call that outlives :data:`TIMEOUT_S` fails
+    like any other tmux error, with :data:`TIMEOUT_RC`.
     """
-    return subprocess.run(
-        ["tmux", *args],
-        check=check,
-        capture_output=True,
-        text=True,
-        input=input_text,
-    )
+    try:
+        return subprocess.run(
+            ["tmux", *args],
+            check=check,
+            capture_output=True,
+            text=True,
+            input=input_text,
+            timeout=TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        err = f"tmux {' '.join(args[:1])} timed out after {TIMEOUT_S:.0f}s"
+        if check:
+            raise subprocess.CalledProcessError(TIMEOUT_RC, ["tmux", *args], "", err) from exc
+        return subprocess.CompletedProcess(["tmux", *args], TIMEOUT_RC, "", err)
+
+
+def pane_states(session: str) -> dict[str, bool] | None:
+    """``{pane_id: dead}`` for every pane in ``session``; None when tmux cannot
+    answer (server down, hung, or the session gone). A pane missing from a real
+    answer is gone; None means nothing is known, and nothing may be inferred."""
+    out = run(["list-panes", "-s", "-t", f"={session}", "-F", "#{pane_id} #{pane_dead}"])
+    if out.returncode != 0:
+        return None
+    states: dict[str, bool] = {}
+    for line in out.stdout.splitlines():
+        pane, _, dead = line.partition(" ")
+        if pane:
+            states[pane] = dead.strip() == "1"
+    return states
 
 
 def session_exists(session: str) -> bool:

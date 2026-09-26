@@ -42,7 +42,9 @@ logged to `<state>/logs/supervisor.log`.
 periodic poll. On each sweep it:
 
 - frees a busy slot whose pane is gone, once seen on two sweeps in a row, and
-  rolls back that phase's branch;
+  keeps that phase's work for its next launch, which resumes on the same branch.
+  A tmux that errors, hangs or has lost the session reaps nothing. A worker that
+  dies 3 times within an hour is not restarted again, and you are told;
 - relaunches when the swarm has been idle for a full interval with free slots and
   ready phases;
 - finishes a run that has settled;

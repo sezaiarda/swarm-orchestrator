@@ -82,6 +82,11 @@ LAUNCH_RETRY_S = 60.0
 #: resume`` puts it back. It stops holding the finish open, and the finish
 #: message names it.
 LAUNCH_GIVE_UP = 3
+#: A worker whose pane dies this many times within :data:`CRASH_WINDOW_S` is not
+#: started again automatically: something about the phase kills it, and each
+#: restart costs a session. The owner is told once.
+CRASH_LIMIT = 3
+CRASH_WINDOW_S = 3600.0
 #: The cheap doctor checks behind the Overseer's ``doctor`` trigger are probed at
 #: most this often: they parse the ledger, and a FAIL that matters lasts minutes.
 DOCTOR_PROBE_S = 600.0
@@ -110,6 +115,7 @@ class Supervisor:
         # reaped after two consecutive sightings, so the claim-then-respawn
         # window in `launch` can never be mistaken for a dead worker.
         self._suspect: dict[int, str] = {}
+        self._crashes: dict[str, list[float]] = {}  # phase -> recent reap times
         self._pinged: dict[str, float] = {}  # ping key -> last send (cooldown)
         # The launcher. A launch blocks for up to two READY_TIMEOUTs (worktree
         # build + claude boot + one retry), so each runs on its own thread and
@@ -1035,7 +1041,8 @@ class Supervisor:
         busy and the run hangs silently forever. This sweep is the only poll in the
         supervisor and it only ever asserts what the event path would have done:
 
-        * a busy slot whose pane is gone -> free it, roll back its branches, ping;
+        * a busy slot whose pane is gone -> free it, keep its work for the next
+          attempt, ping (never when tmux itself cannot answer);
         * idle, unpaused, unblocked, with a free slot and ready phases -> run the
           launcher again, past a hung init master and a launch-retry backoff
           (only a phase given up on after :data:`LAUNCH_GIVE_UP` failures stays
@@ -1145,13 +1152,22 @@ class Supervisor:
         ``launch`` claims the slot before it creates the worktree and respawns the
         pane, so a single sighting inside that window would reap a worker that is
         about to start. Bare-driver runs have no panes and are skipped entirely.
+
+        Only a real answer from tmux counts. When tmux errors, hangs or has lost
+        the session, every pane would look gone: nothing is reaped, the sightings
+        start over, and the next sweep asks again.
         """
         if self.cfg.driver != "tmux":
+            return []
+        panes = tmux.pane_states(self.cfg.session)
+        if panes is None:
+            self.log.line("WATCHDOG-TMUX-UNREACHABLE no answer from tmux; nothing reaped")
+            self._suspect = {}
             return []
         suspect: dict[int, str] = {}
         reaped: list[str] = []
         for slot in st.busy_slots():
-            if not slot.pane_id or not slot.phase or self._pane_alive(slot.pane_id):
+            if not slot.pane_id or not slot.phase or panes.get(slot.pane_id) is False:
                 continue
             if self._suspect.get(slot.id) != slot.phase:
                 suspect[slot.id] = slot.phase  # first sighting; confirm next sweep
@@ -1165,32 +1181,46 @@ class Supervisor:
             self._reap(phase)
         return reaped
 
-    def _pane_alive(self, pane_id: str) -> bool:
-        """False when tmux no longer knows ``pane_id``, or the pane's process
-        exited and it is only being held open by ``remain-on-exit``."""
-        out = tmux.run(["display-message", "-p", "-t", pane_id, "#{pane_dead}"])
-        if out.returncode != 0:
-            return False  # no such pane
-        return out.stdout.strip() != "1"
-
     def _reap(self, phase: str) -> None:
-        """Undo a worker that died without reporting: free its slot, roll back its
-        branches, tell the owner. Deliberately NOT recorded in ``done`` — the phase
-        was never attempted to completion, so it stays relaunchable."""
+        """Free the slot of a worker that died without reporting, keep its work
+        for the next attempt (:func:`gitq.set_aside`), tell the owner. Not
+        recorded in ``done``: the phase stays launchable, and its next launch
+        resumes on the same branch. After :data:`CRASH_LIMIT` deaths within
+        :data:`CRASH_WINDOW_S` it is given up on instead, like a phase that
+        keeps failing to launch, until the owner puts it back."""
         self.log.line(f"WATCHDOG-REAP {phase} pane-dead")
+        now = time.time()
+        recent = [t for t in self._crashes.get(phase, []) if now - t < CRASH_WINDOW_S]
+        recent.append(now)
+        self._crashes[phase] = recent
+        crash_looping = len(recent) >= CRASH_LIMIT
+        if crash_looping:
+            with self._launch_lock:
+                self._launch_fails[phase] = (LAUNCH_GIVE_UP, now)
+            self.log.line(f"WATCHDOG-CRASH-HOLD {phase} {len(recent)} deaths in an hour")
         with state_mod.transaction(self.cfg) as st:
             st.free_slot_for(phase)
-            st.last_event_at = time.time()
-        self._ping(
-            f"reap:{phase}",
-            f"swarm: worker {phase} died without 'swarm done' -- slot freed and its"
-            f" work rolled back; `swarm launch {phase}` to retry",
-        )
+            st.last_event_at = now
+        if crash_looping:
+            self._ping(
+                f"crash-hold:{phase}",
+                f"swarm: the worker for {phase} has stopped unexpectedly {len(recent)}"
+                " times in the last hour, so the swarm has stopped restarting it. Its"
+                f" work so far is kept. Once you have looked, `swarm launch {phase}`"
+                " starts it again from there.",
+                cooldown=0.0,
+            )
+        else:
+            self._ping(
+                f"reap:{phase}",
+                f"swarm: the worker for {phase} stopped without finishing. Its work so"
+                " far is kept, and the phase will be started again from there.",
+            )
         if self.cfg.git_isolation == "worktree":
             try:
-                gitq.discard(self.cfg, phase, self.log)
+                gitq.set_aside(self.cfg, phase, self.log)
             except gitq.GitError as exc:
-                self.log.line(f"WATCHDOG-DISCARD-ERROR {phase} {exc}")
+                self.log.line(f"WATCHDOG-SET-ASIDE-ERROR {phase} {exc}")
         launch_mod.drop_session_tmp(self.cfg, phase)  # the pane is dead
         # The pane died, but a `setsid`/`nohup` child it started may not have.
         session_mod.reap_session(self.cfg, "worker", phase, self.log)

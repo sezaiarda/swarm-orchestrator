@@ -146,8 +146,9 @@ part.
 - **Is:** the supervisor's one periodic sweep (`[swarm].watchdog_s`, default 300 s,
   `0` = off).
 - **Decides:**
-  - frees a busy slot whose pane has died, after two sightings, and rolls back
-    that phase's branch;
+  - frees a busy slot whose pane has died, after two sightings, and keeps that
+    phase's work for its next launch (never when tmux itself cannot answer; a
+    worker that dies 3 times in an hour is held and you are told);
   - relaunches after a full idle interval with free slots and ready phases;
   - finishes a settled run;
   - retries owed pushes, at most every 15 minutes.

@@ -65,6 +65,7 @@ def setup(cfg: Config) -> dict[str, str]:
             f"tmux session {cfg.session!r} already exists; run `swarm down` first"
         )
     dash_win = tmux.new_session(cfg.session)
+    tmux.mark_owner(cfg.session, str(cfg.state_dir))
     tmux.harden(cfg.session)
     tmux.rename_window(dash_win, "dash")
     dash_pane = tmux.list_panes(dash_win)[0]
@@ -184,8 +185,25 @@ def add_slot_panes(
     return panes, windows, failed
 
 
+def owns_session(cfg: Config, windows: dict[str, str]) -> bool:
+    """Whether the tmux session named ``cfg.session`` is this run's.
+
+    The name alone proves nothing: by default it is the project directory's
+    name, which the owner may use for a session of their own. A session carries
+    its swarm's state dir (:data:`tmux.OWNER_OPT`); one made before that marker
+    existed is ours when a window or pane this run recorded (``windows``, from
+    state) is in it."""
+    owner = tmux.session_owner(cfg.session)
+    if owner:
+        return owner == str(cfg.state_dir)
+    if owner is None:
+        return False
+    return any(tmux.window_session(w) == cfg.session for w in windows.values())
+
+
 def teardown(cfg: Config) -> None:
-    """Kill the swarm tmux session (idempotent)."""
+    """Kill the swarm tmux session (idempotent). The caller has checked
+    :func:`owns_session`."""
     if tmux.session_exists(cfg.session):
         tmux.kill_session(cfg.session)
 

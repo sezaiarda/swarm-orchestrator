@@ -14,6 +14,9 @@ import time
 from typing import Callable, Sequence
 
 SLOT_OPT = "@swarm_slot"
+#: The session option naming the state dir of the swarm that created the
+#: session, so ``swarm down`` never ends a same-named session it does not own.
+OWNER_OPT = "@swarm_state_dir"
 
 # -- pane arrangements ----------------------------------------------------
 # How a worker window arranges its slot panes. ``auto`` is the historical rule
@@ -134,6 +137,31 @@ def pane_states(session: str) -> dict[str, bool] | None:
 
 def session_exists(session: str) -> bool:
     return run(["has-session", "-t", f"={session}"]).returncode == 0
+
+
+def mark_owner(session: str, owner: str) -> None:
+    """Record ``owner`` on ``session`` (see :data:`OWNER_OPT`). The target is
+    ``=<name>:`` because an option's target is a window, and a bare ``=<name>``
+    does not resolve as one."""
+    run(["set-option", "-t", f"={session}:", OWNER_OPT, owner])
+
+
+def session_owner(session: str) -> str | None:
+    """The owner recorded on ``session``; ``""`` when it carries none (made before
+    the marker existed, or not by a swarm); None when tmux cannot say (no such
+    session, no server)."""
+    out = run(["show-options", "-v", "-t", f"={session}:", OWNER_OPT])
+    if out.returncode == 0:
+        return out.stdout.strip()
+    return "" if "invalid option" in out.stderr else None
+
+
+def window_session(target: str) -> str | None:
+    """The name of the session a window or pane id is in; None if tmux has no such id."""
+    out = run(["display-message", "-p", "-t", target, "#{session_name}"])
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
 
 
 def kill_session(session: str) -> None:

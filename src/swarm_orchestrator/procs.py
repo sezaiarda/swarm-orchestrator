@@ -66,6 +66,22 @@ def environ(pid: int) -> list[bytes]:
         return []
 
 
+def cmdline(pid: int) -> list[str]:
+    """``pid``'s argv (empty if unreadable)."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+
+
+def cwd(pid: int) -> Path | None:
+    try:
+        return Path(f"/proc/{pid}/cwd").resolve(strict=True)
+    except OSError:
+        return None
+
+
 def comm(pid: int) -> str:
     try:
         return Path(f"/proc/{pid}/comm").read_text().strip()

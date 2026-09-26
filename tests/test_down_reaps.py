@@ -136,3 +136,58 @@ def _kill(pids) -> None:
 
 def _pane_pid(pane: str) -> int:
     return int(tmux.run(["display-message", "-p", "-t", pane, "#{pane_pid}"]).stdout.strip())
+
+
+# -- `swarm down` only ends what is this swarm's ------------------------------
+@pytest.fixture
+def tmux_cfg(cfg, monkeypatch):
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux not available")
+    monkeypatch.setenv("SWARM_DRIVER", "tmux")
+    tcfg = load(project_dir=str(cfg.project_dir))
+    yield tcfg
+    if tmux.session_exists(tcfg.session):
+        tmux.kill_session(tcfg.session)
+
+
+def test_down_leaves_a_same_named_session_it_does_not_own(tmux_cfg, capsys):
+    tmux.new_session(tmux_cfg.session)  # the owner's own, by coincidence same name
+    assert cli.cmd_down(tmux_cfg) == 0
+    assert tmux.session_exists(tmux_cfg.session)
+    assert "not this swarm's" in capsys.readouterr().err
+
+
+def test_down_leaves_a_session_another_swarm_marked(tmux_cfg):
+    tmux.new_session(tmux_cfg.session)
+    tmux.mark_owner(tmux_cfg.session, "/some/other/state")
+    cli.cmd_down(tmux_cfg)
+    assert tmux.session_exists(tmux_cfg.session)
+
+
+def test_down_ends_its_own_session_and_a_legacy_one_state_records(tmux_cfg):
+    session_mod.setup(tmux_cfg)
+    assert tmux.session_owner(tmux_cfg.session) == str(tmux_cfg.state_dir)
+    cli.cmd_down(tmux_cfg)
+    assert not tmux.session_exists(tmux_cfg.session)
+
+    # Made before the marker existed: no option, but state holds its windows.
+    win = tmux.new_session(tmux_cfg.session)
+    assert tmux.session_owner(tmux_cfg.session) == ""
+    with state_mod.transaction(tmux_cfg) as st:
+        st.windows = {"dash": win}
+    cli.cmd_down(tmux_cfg)
+    assert not tmux.session_exists(tmux_cfg.session)
+
+
+def test_down_never_signals_a_pid_that_is_no_longer_the_supervisor(cfg, capsys):
+    clean = {k: v for k, v in os.environ.items() if k != "SWARM_STATE_DIR"}
+    stranger = subprocess.Popen(["sleep", "300"], env=clean)
+    try:
+        with state_mod.transaction(cfg) as st:
+            st.supervisor_pid = stranger.pid  # the number, since reused
+        cli.cmd_down(cfg)
+        assert stranger.poll() is None
+        assert "no longer this project's supervisor" in capsys.readouterr().err
+    finally:
+        stranger.kill()
+        stranger.wait(timeout=5)

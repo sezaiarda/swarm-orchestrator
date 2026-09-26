@@ -29,6 +29,7 @@ from . import tui as tui_mod
 from . import doctor as doctor_mod
 from . import gc as gc_mod
 from . import promptlint
+from . import procs
 from . import pushowed
 from . import recap as recap_mod
 from . import reload as reload_mod
@@ -333,10 +334,24 @@ def cmd_supervise(cfg: Config) -> int:
     return 0
 
 
+def _our_supervisor(cfg: Config, pid: int) -> bool:
+    """Whether ``pid`` is this project's supervisor and not a process that has
+    since been given the same number. The pid recorded in state outlives the
+    supervisor, and ``down`` escalates to SIGKILL."""
+    args = procs.cmdline(pid)
+    if "_supervise" not in args or not any("swarm" in a for a in args):
+        return False
+    return procs.cwd(pid) == cfg.project_dir.resolve()
+
+
 def cmd_down(cfg: Config) -> int:
     st = state_mod.read(cfg)
     _poke(cfg, "shutdown")
     pid = st.supervisor_pid
+    if pid and procs.alive(pid) and not _our_supervisor(cfg, pid):
+        print(f"swarm down: pid {pid} is no longer this project's supervisor; not"
+              " signalling it", file=sys.stderr)
+        pid = None
     if pid and not _wait_pid_gone(pid, timeout=30.0):
         # Still alive — likely mid-integration. Escalate before tearing down the
         # session, so we never kill the master/worker/resolver panes out from
@@ -355,9 +370,13 @@ def cmd_down(cfg: Config) -> int:
     # session only hangs up on its panes, and a claude can outlive its SIGHUP:
     # some workers, the Overseer and an operator could keep running after
     # `down` until the owner killed them by hand.
-    roots = tmux.session_pane_pids(cfg.session) if cfg.driver == "tmux" else []
+    owned = cfg.driver == "tmux" and session_mod.owns_session(cfg, st.windows)
+    if cfg.driver == "tmux" and not owned and tmux.session_exists(cfg.session):
+        print(f"swarm down: tmux session {cfg.session!r} is not this swarm's; left"
+              " alone", file=sys.stderr)
+    roots = tmux.session_pane_pids(cfg.session) if owned else []
     sessions = session_mod.session_processes(cfg, roots)
-    if cfg.driver == "tmux":
+    if owned:
         session_mod.teardown(cfg)
     # After the teardown: under tmux the board died with its window, and this
     # only clears the pid file; under the headless driver it is what stops it.

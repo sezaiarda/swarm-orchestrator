@@ -10,7 +10,7 @@ exact flags.
 | command | what it does |
 |---|---|
 | `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass, the board and the bot's command listener, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
-| `down` | Stop the supervisor, the board and the command listener, end every session process (anything carrying the run's `SWARM_STATE_DIR`, detached ones included; never what `swarm keep` holds), tear the session down, close the run. |
+| `down` | Stop the supervisor, the board and the command listener, end every session process (anything carrying the run's `SWARM_STATE_DIR`, detached ones included; never what `swarm keep` holds), tear the session down, close the run. Only a tmux session this swarm made (or, made before that was recorded, one whose windows its state holds) is torn down, and the recorded supervisor pid is signalled only while it still is this project's supervisor. |
 | `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued or an ask is open, unless `--force`. |
 | `pause` / `resume` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. |
 | `reset` | Close the open run and start a new one: ETA and usage count from now. Nothing restarts. |

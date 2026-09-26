@@ -128,6 +128,30 @@ def test_the_digest_lists_what_finished_since_the_last_pass_with_its_notes(cfg):
     assert "P1 [failed] blocks 1: P2" in md
 
 
+def test_the_digest_carries_every_operator_outcome_since_the_last_pass(cfg):
+    """Routine outcomes no longer ping, so the digest is how they reach the owner."""
+    from swarm_orchestrator import opqueue
+
+    now = time.time()
+    for job, outcome, attention, at in (
+        ("read-W97", "already done: image on 2026-01-01.1", False, now - 600),
+        ("api-F26", "NOT rolled; owed: roll api-F18 first", True, now - 300),
+        ("old-job", "done long ago", False, now - 7200),
+    ):
+        opqueue._write(cfg, opqueue.Item(phase=job, state=opqueue.DONE, outcome=outcome,
+                                         attention=attention, done_at=at, queued_at=at))
+    opqueue._write(cfg, opqueue.Item(phase="still-open", note="roll it", queued_at=now))
+
+    data = ovdigest.build(cfg, state_mod.read(cfg), [], since=now - 3600)
+    md = ovdigest.render(data)
+
+    assert [o["job"] for o in data["operator"]["finished"]] == ["api-F26", "read-W97"]
+    assert "## Operator jobs finished since" in md and "(2, 1 flagged)" in md
+    assert "- **[needs the owner]** api-F26: NOT rolled; owed: roll api-F18 first" in md
+    assert "- read-W97: already done: image on 2026-01-01.1" in md
+    assert "old-job" not in md
+
+
 def test_the_digest_writes_a_markdown_and_a_json_twin(cfg):
     data = ovdigest.build(cfg, state_mod.read(cfg), [], since=0.0)
     md = ovdigest.write(cfg, "20260923T100000Z", data)

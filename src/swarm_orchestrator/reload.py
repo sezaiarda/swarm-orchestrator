@@ -224,6 +224,10 @@ POLICY: dict[str, Policy] = {
         _p("operator_triage_model", "[operator]", "triage_model", NEXT, None,
            "triage is spawned by the worker's `swarm done` from its worktree"
            " mirror, so it reads the branched .swarm.toml copy"),
+        _p("operator_notify", "[operator]", "notify", NEXT, "SWARM_OPERATOR_NOTIFY",
+           "read by the session's own `swarm operator-done`, which under worktree"
+           " isolation runs in its mirror and reads the .swarm.toml copy branched"
+           " when the job opened; the next job reads this one"),
         _p("overseer_enabled", "[overseer]", "enabled", HOT, "SWARM_OVERSEER",
            "the supervisor's trigger policy reads it on every wake; a pass"
            " already running is left to finish"),

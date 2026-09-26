@@ -167,6 +167,8 @@ class Ping:
     kind: str
     delivered: bool
     error: str = ""
+    #: Why the swarm chose not to send it; "" = it was sent (or tried).
+    suppressed: str = ""
 
 
 @dataclass
@@ -384,13 +386,16 @@ def _ping_warnings(rep: PhaseReport, ping_ledger: bool) -> list[str]:
     """
     if not ping_ledger or rep.sentinel_status not in ("needs-owner", "fail"):
         return []
+    sent = [p for p in rep.pings if not p.suppressed]
+    if not sent and rep.pings:
+        return []  # held back on purpose by the quiet-pings policy, and logged
     if not rep.pings:
         return [
             f"owner-never-pinged: the sentinel says `{rep.sentinel_status}`, which"
             " owes the owner a telegram, but nothing was ever sent for this phase"
         ]
-    failed = [p for p in rep.pings if not p.delivered]
-    if len(failed) == len(rep.pings):
+    failed = [p for p in sent if not p.delivered]
+    if len(failed) == len(sent):
         detail = failed[-1].error or "no reason recorded"
         return [
             f"ping-undelivered: every owner ping for this phase failed to send"
@@ -622,6 +627,7 @@ def _read_pings(cfg: Config) -> tuple[dict[str, list[Ping]], bool]:
                 kind=str(row.get("kind") or ""),
                 delivered=bool(row.get("delivered")),
                 error=str(row.get("error") or ""),
+                suppressed=str(row.get("suppressed") or ""),
             )
         )
     return out, True

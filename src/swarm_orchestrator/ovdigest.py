@@ -157,7 +157,26 @@ def owner_questions(cfg: Config, st: State, now: float) -> list[dict]:
     return out
 
 
-def operator_summary(cfg: Config, st: State) -> dict:
+#: How many operator outcomes the digest lists in full (flagged ones first).
+MAX_OUTCOMES = 30
+
+
+def operator_outcomes(items: list[opqueue.Item], since: float) -> list[dict]:
+    """Every operator job finished since ``since``: flagged ones first, then newest.
+
+    Routine outcomes no longer ping the owner (``[operator].notify``), so this is
+    how they reach them: the Overseer folds them into its summary.
+    """
+    done = [i for i in items if i.state == opqueue.DONE and i.done_at >= since]
+    done.sort(key=lambda i: (not i.attention, -i.done_at))
+    return [
+        {"job": i.phase, "at": i.done_at, "attention": i.attention,
+         "outcome": i.outcome[:400]}
+        for i in done
+    ]
+
+
+def operator_summary(cfg: Config, st: State, since: float = 0.0) -> dict:
     items = opqueue.load_all(cfg)
     counts = {k: sum(1 for i in items if i.state == k) for k in opqueue.STATES}
     open_items = [
@@ -166,7 +185,8 @@ def operator_summary(cfg: Config, st: State) -> dict:
         if not i.terminal
     ]
     return {"enabled": cfg.operator_enabled, "counts": counts,
-            "current": st.operator_phase, "open": open_items[:15]}
+            "current": st.operator_phase, "open": open_items[:15],
+            "finished": operator_outcomes(items, since)}
 
 
 def in_flight(st: State, launching: set[str] | frozenset[str] = frozenset()) -> dict[str, str]:
@@ -239,7 +259,7 @@ def build(
             {"key": r.key, "text": r.text, "urgent": r.urgent, "at": r.at} for r in reasons
         ],
         "context": context,
-        "operator": operator_summary(cfg, st),
+        "operator": operator_summary(cfg, st, since),
         "finished": finished_since(cfg, st, since),
         "failures": failures(cfg, st),
         "owner": owner_questions(cfg, st, now),
@@ -301,6 +321,16 @@ def render(d: dict) -> str:
         out.append(f"  - {item['job']} [{item['state']}] {item['brief']}")
 
     since = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(d["since"])) if d["since"] else "the start"
+    done = op.get("finished") or []
+    flagged = sum(1 for o in done if o["attention"])
+    out += ["", f"## Operator jobs finished since {since} ({len(done)}, {flagged} flagged)"]
+    for o in done[:MAX_OUTCOMES]:
+        mark = "**[needs the owner]** " if o["attention"] else ""
+        out.append(f"- {mark}{o['job']}: {o['outcome'] or '(no outcome given)'}")
+    if len(done) > MAX_OUTCOMES:
+        out.append(f"- … and {len(done) - MAX_OUTCOMES} more")
+    if not done:
+        out.append("- none")
     out += ["", f"## Finished since {since} ({len(d['finished'])})"]
     for f in d["finished"]:
         out.append(f"- **{f['phase']}** {f['status']}: {f['recap'] or f['note'] or '(no recap)'}")

@@ -113,11 +113,23 @@ Run, as your last action,
 
     swarm operator-done <job> "<one-line outcome>"
 
-The outcome goes to the owner's phone exactly as written, so make it one plain
-line: what you did, what you skipped because it was already done, and anything
-left over. Run it once, when the work is really finished — not to signal that
-you have started. It ends this session, and in a mirror it merges and removes
-your working copy, so everything must be committed first.
+Make the outcome one plain line: what you did, what you skipped because it was
+already done, and anything left over. Run it once, when the work is really
+finished — not to signal that you have started. It ends this session, and in a
+mirror it merges and removes your working copy, so everything must be committed
+first.
+
+**It does not ping the owner.** It stays quiet by default, so routine outcomes do not pile up.
+The outcome is recorded, and the Overseer's next summary
+mentions it. Add `--attention` to ping them, and only when:
+
+- the owner must do something;
+- something the brief asked for is not done, or is still owed;
+- a check came back bad.
+
+    swarm operator-done <job> "<one-line outcome>" --attention
+
+"Already done, nothing to do" and "done and verified" never get `--attention`.
 
 Do not run `swarm done`, `swarm launch` or `swarm finish`: those belong to the
 workers and to the owner.

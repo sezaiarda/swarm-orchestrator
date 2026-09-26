@@ -20,6 +20,7 @@ What is actually load-bearing:
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -470,7 +471,15 @@ def test_operator_resumed_puts_the_session_back_on_an_ordinary_lease(cfg, log):
         notes_mod.OWNER_DECISION, "the staging box (asked: which host)")
 
 
-def test_operator_done_records_the_outcome_and_telegrams_one_line(cfg, log):
+def ledger_rows(cfg) -> list[dict]:
+    path = Path(str(cfg.state_dir)) / "notifications.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def test_a_routine_operator_outcome_is_recorded_but_pings_nobody(cfg, log):
+    """The default is quiet: a stream of routine outcome pings is noise."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
@@ -479,8 +488,76 @@ def test_operator_done_records_the_outcome_and_telegrams_one_line(cfg, log):
     assert result.returncode == 0, result.stderr
     item = opqueue.load(cfg, PHASE)
     assert item.state == opqueue.DONE and item.outcome == "rolled webhooks; healthz green"
+    assert item.attention is False
+    assert tg_lines(cfg) == []
+    # Still in the ledger (the dashboard's alerts), marked held back, not dropped.
+    [row] = ledger_rows(cfg)
+    assert row["kind"] == "operator-done" and "rolled webhooks; healthz green" in row["text"]
+    assert row["delivered"] is False and row["suppressed"] and row["error"] is None
+    assert "not pinged" in result.stdout
+
+
+def test_an_outcome_flagged_for_attention_pings_one_line(cfg, log):
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+
+    result = cli(cfg, "operator-done", PHASE, "api-F26 NOT rolled; roll owed", "--attention")
+
+    assert result.returncode == 0, result.stderr
+    assert opqueue.load(cfg, PHASE).attention is True
     [line] = tg_lines(cfg)
-    assert PHASE in line and "rolled webhooks; healthz green" in line
+    assert PHASE in line and "api-F26 NOT rolled; roll owed" in line
+    [row] = ledger_rows(cfg)
+    assert row["delivered"] is True and "suppressed" not in row
+
+
+def test_notify_all_pings_every_outcome(cfg, log, monkeypatch):
+    monkeypatch.setenv("SWARM_OPERATOR_NOTIFY", "all")
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+
+    assert cli(cfg, "operator-done", PHASE, "already done").returncode == 0
+    [line] = tg_lines(cfg)
+    assert "already done" in line
+
+
+def test_notify_none_silences_even_attention_but_not_questions_or_abandons(
+    cfg, log, monkeypatch
+):
+    monkeypatch.setenv("SWARM_OPERATOR_NOTIFY", "none")
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+    assert cli(cfg, "operator-ask", PHASE, "which", "host?").returncode == 0
+    assert cli(cfg, "operator-resumed", PHASE, "staging").returncode == 0
+    assert cli(cfg, "operator-done", PHASE, "roll owed", "--attention").returncode == 0
+    queue(cfg, OTHER)
+    opqueue.abandon(cfg, OTHER, "three crashes")
+
+    sent = "\n".join(tg_lines(cfg))
+    assert "waiting on you" in sent and "which host?" in sent
+    assert "ABANDONED" in sent and OTHER in sent
+    assert "roll owed" not in sent
+    assert [(r["kind"], r["delivered"]) for r in ledger_rows(cfg)] == [
+        ("operator-ask", True), ("operator-done", False), ("operator-abandoned", True)]
+
+
+def test_an_unknown_flag_never_fails_operator_done(cfg, log):
+    """A newer or older prompt's flag must not lose a finished job."""
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+
+    result = cli(cfg, "operator-done", PHASE, "--quiet", "done and verified", "--level=2")
+
+    assert result.returncode == 0, result.stderr
+    item = opqueue.load(cfg, PHASE)
+    assert item.state == opqueue.DONE and item.outcome == "done and verified"
+    # Every other command still refuses what it does not know.
+    assert cli(cfg, "status", "--bogus").returncode == 2
+
+
+def test_a_bad_notify_value_falls_back_to_the_quiet_default(cfg, monkeypatch):
+    monkeypatch.setenv("SWARM_OPERATOR_NOTIFY", "loud")
+    assert load(project_dir=str(cfg.project_dir)).operator_notify == "attention"
 
 
 def test_the_brief_carries_the_job_its_exits_and_an_earlier_question(cfg):

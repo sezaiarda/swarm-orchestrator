@@ -545,25 +545,28 @@ def notification_key(index: int) -> str:
 
 
 def notification_row(note: Notification, message_w: int = 56) -> tuple[str, ...]:
-    """One Notifications row. A failed delivery is red in three columns."""
-    state = OK if note.delivered else BAD
+    """One Notifications row. A failed delivery is red in three columns; a
+    message the swarm chose not to send is a muted ``·``."""
+    bad = BAD if note.dropped else None
+    glyph = "·" if note.suppressed else ("✓" if note.delivered else "✗")
     return (
-        paint("✓" if note.delivered else "✗", state),
+        paint(glyph, MUTED if note.suppressed else (OK if note.delivered else BAD)),
         cell(fmt_stamp(note.ts), 13, MUTED),
-        cell(note.kind or "—", 14, None if note.delivered else BAD),
+        cell(note.kind or "—", 14, bad),
         cell(note.phase or "—", 16),
         cell(note.source or "unknown", 20, MUTED),
-        cell(note.text or "—", message_w, None if note.delivered else BAD),
+        cell(note.text or "—", message_w, bad),
     )
 
 
 def notification_detail(note: Notification) -> str:
     """One ping in full. A failure leads with the error, not with the message."""
-    head = (
-        paint("✓ delivered", OK)
-        if note.delivered
-        else paint("✗ NOT DELIVERED — this ping never reached you", BAD)
-    )
+    if note.suppressed:
+        head = paint(f"· not sent to your phone — {escape(note.suppressed)}", MUTED)
+    elif note.delivered:
+        head = paint("✓ delivered", OK)
+    else:
+        head = paint("✗ NOT DELIVERED — this ping never reached you", BAD)
     lines = [
         head,
         field("kind", escape(note.kind or "—")),
@@ -1078,7 +1081,7 @@ class Notifications(TableTab):
         everything = list(dash.notifications or [])
         pairs = list(enumerate(everything))
         if self.mode == "failed":
-            pairs = [(i, n) for i, n in pairs if not n.delivered]
+            pairs = [(i, n) for i, n in pairs if n.dropped]
         elif self.mode == "delivered":
             pairs = [(i, n) for i, n in pairs if n.delivered]
         pairs.reverse()  # newest first; the file is append-only
@@ -1090,7 +1093,7 @@ class Notifications(TableTab):
             lambda note: notification_row(note, width),
         )
 
-        dropped = sum(1 for note in everything if not note.delivered)
+        dropped = sum(1 for note in everything if note.dropped)
         head = [f"{len(pairs)} of {len(everything)} ping(s)"]
         head.append(f"showing [{COLOR[ACCENT]}]{self.mode}[/] (F)")
         if dropped:

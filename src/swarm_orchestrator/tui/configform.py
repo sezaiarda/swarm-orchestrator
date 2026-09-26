@@ -59,7 +59,7 @@ from textual.widgets import Button, Input, RadioButton, RadioSet, Select, Static
 from textual import work
 
 from .. import reload as reload_mod
-from ..config import EFFORTS, load as load_config
+from ..config import EFFORTS, OPERATOR_NOTIFY, load as load_config
 from ..reload import HOT, NEXT, POLICY, RESTART
 from ..tmux import LAYOUTS
 from . import probes
@@ -441,6 +441,9 @@ FIELDS: tuple[Setting, ...] = (
     Setting("operator_cmd", STR, 'command an operator session runs; "" = built-in'),
     Setting("operator_model", STR, 'model for an operator session; "" inherits'),
     Setting("operator_triage_model", STR, "model that decides now vs later"),
+    Setting("operator_notify", CHOICE,
+            "which operator outcomes ping you",
+            choices=OPERATOR_NOTIFY),
     # -- [overseer] -------------------------------------------------------
     Setting("overseer_enabled", BOOL, "run periodic Overseer review passes"),
     Setting("overseer_cmd", STR, 'command an Overseer pass runs; "" = built-in'),

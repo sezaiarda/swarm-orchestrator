@@ -617,30 +617,50 @@ def cmd_operator(cfg: Config, phase: str) -> int:
     return 0
 
 
-def cmd_operator_done(cfg: Config, phase: str, outcome: str = "") -> int:
+def _operator_done_hold(mode: str, attention: bool) -> str | None:
+    """Why an ``operator-done`` outcome is not sent to the phone, or ``None``.
+
+    ``[operator].notify``: ``attention`` (the default) sends only an outcome the
+    session flagged, ``all`` sends every one, ``none`` sends none.
+    """
+    if mode == "all" or (mode == "attention" and attention):
+        return None
+    if mode == "none":
+        return "[operator].notify = none"
+    return "routine outcome (no --attention); it goes in the Overseer's summary"
+
+
+def cmd_operator_done(
+    cfg: Config, phase: str, outcome: str = "", attention: bool = False
+) -> int:
     """The session signals its job is finished, with a one-line outcome.
 
-    The outcome is recorded on the item and telegrammed as one short line: the
-    owner delegated the job, so they hear how it ended without opening a pane.
+    The outcome is recorded on the item, in the notification ledger and in the
+    next Overseer digest. It reaches the owner's phone only when it needs them
+    (``--attention``) unless ``[operator].notify`` says otherwise: routine
+    outcomes arrive folded into the Overseer's summary instead.
     """
-    item = opqueue.complete(cfg, phase, outcome)
+    item = opqueue.complete(cfg, phase, outcome, attention)
     if item is None:
         print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
         return 1
     tail = f" — {item.outcome}" if item.outcome else " (no outcome given)"
+    hold = _operator_done_hold(cfg.operator_notify, attention)
     telegram.notify(
         cfg.telegram_notify,
-        f"swarm: operator job {phase} done{tail}",
+        f"swarm: operator job {phase} {'needs you' if attention else 'done'}{tail}",
         kind="operator-done",
         phase=phase,
         source="cli.operator-done",
         state_dir=cfg.state_dir,
+        suppressed=hold,
     )
     # The item is settled whatever happens next; only the session's own lease
     # (and, under worktree isolation, the merge of its mirror) rides on the
     # poke, and a lost one holds the lease until it expires. Say so.
     heard = _poke(cfg, f"operator-done {phase}")
     print(f"operator-done {phase}")
+    print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
     print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
     return 0
 
@@ -1672,8 +1692,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "operator-done", help="report this operator job is finished")
     odp.add_argument("phase", help="the operator job id")
     odp.add_argument("outcome", nargs="*", help="one line: what was done or skipped")
+    odp.add_argument(
+        "--attention", action="store_true",
+        help="ping the owner: they must act, something is still owed, or a check failed")
     odp.set_defaults(
-        func=lambda cfg, a: cmd_operator_done(cfg, a.phase, " ".join(a.outcome)))
+        func=lambda cfg, a: cmd_operator_done(
+            cfg, a.phase, " ".join(a.outcome), a.attention),
+        tolerant=True)
 
     oap = sub.add_parser(
         "operator-ask",
@@ -1753,7 +1778,12 @@ def main(argv: list[str] | None = None) -> int:
     entry plus a matching branch a hundred lines away — a split that silently
     returned 2 whenever the two drifted apart.
     """
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args, extra = parser.parse_known_args(argv)
+    # A tolerant subcommand (`operator-done`) records its job whatever flags an
+    # older or newer prompt passes: an unknown one is ignored, never fatal.
+    if extra and not getattr(args, "tolerant", False):
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     try:
         cfg = load(explicit=args.config, project_dir=args.project_dir)
     except (ValueError, OSError) as exc:

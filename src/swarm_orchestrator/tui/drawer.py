@@ -345,14 +345,15 @@ def notification_rows(dash, width: int = WIDTH - 4) -> list[Row]:
     snap = dash.snapshot
     out: list[Row] = []
     for note in notes:
-        state = OK if note.delivered else BAD
+        state = MUTED if note.suppressed else (OK if note.delivered else BAD)
+        glyph = "·" if note.suppressed else ("✓" if note.delivered else "✗")
         who = note.phase or note.source or note.kind or "—"
         body = escape(clip(f"{who} · {note.text or '—'}", max(12, width - _PING_GUTTER)))
         out.append(
             Row(
-                f"  {paint('✓' if note.delivered else '✗', state)} "
+                f"  {paint(glyph, state)} "
                 f"[{COLOR[MUTED]}]{fmt_clock(note.ts)[:5]}[/] "
-                + (body if note.delivered else paint(body, BAD)),
+                + (paint(body, BAD) if note.dropped else body),
                 note.phase,
                 slot_of(snap, note.phase),
             )
@@ -363,7 +364,7 @@ def notification_rows(dash, width: int = WIDTH - 4) -> list[Row]:
 def pings_head(dash) -> str:
     """``pings`` — red, and counting, the moment one of them never landed."""
     notes = dash.notifications or []
-    dropped = sum(1 for note in notes if not note.delivered)
+    dropped = sum(1 for note in notes if note.dropped)
     if dropped:
         return paint(f"pings · {dropped} NOT DELIVERED", BAD)
     return paint("pings", MUTED)

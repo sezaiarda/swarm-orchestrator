@@ -83,6 +83,7 @@ class Config:
     operator_cmd: str
     operator_model: str
     operator_triage_model: str
+    operator_notify: str
     overseer_enabled: bool
     overseer_cmd: str
     overseer_model: str
@@ -339,6 +340,13 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # the day that snapshot retires every hand-off silently falls to `later`.
         # Spelled out rather than imported from `recap` -- recap imports us.
         operator_triage_model=str(operator.get("triage_model", "haiku")),
+        # Which `operator-done` outcomes reach the owner's phone. Every outcome
+        # is still recorded (job file, ledger, the Overseer's digest); to keep the
+        # phone quiet, by default only the ones
+        # passed `--attention` are sent.
+        operator_notify=_operator_notify(
+            os.environ.get("SWARM_OPERATOR_NOTIFY", operator.get("notify", OPERATOR_NOTIFY_DEFAULT))
+        ),
         # The Overseer: the old master, now a periodic reviewer that acts on what
         # it reads (see overseer.py). On by default -- it is the one part of the
         # swarm that notices a failure, a hold or a starved backlog and does
@@ -390,6 +398,21 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
 
 #: What ``claude --effort`` accepts (CLI 2.1.276). "" means pass nothing.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+#: ``[operator].notify``: ``attention`` pings only an outcome passed
+#: ``--attention``; ``all`` pings every outcome; ``none`` pings no outcome.
+OPERATOR_NOTIFY = ("attention", "all", "none")
+OPERATOR_NOTIFY_DEFAULT = "attention"
+
+
+def _operator_notify(value: object) -> str:
+    """A valid ``[operator].notify``; anything else is the quiet default.
+
+    Deliberately not a load error like :func:`_effort`: ``operator-done`` loads
+    the config, and a typo must never stop a finished job from being recorded.
+    """
+    mode = str(value or "").strip().lower()
+    return mode if mode in OPERATOR_NOTIFY else OPERATOR_NOTIFY_DEFAULT
 
 
 def _effort(value: object) -> str:

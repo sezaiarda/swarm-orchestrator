@@ -124,7 +124,8 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
   queue, a doctor FAIL, starvation, or `swarm overseer --now`.
 - **What it reads:** before each pass the supervisor writes
   `<state>/overseer/digest-<id>.md` (and `.json`). It holds the trigger, the swarm
-  now, every phase finished since the last pass with its recap and notes,
+  now, every phase finished since the last pass with its recap and notes, every
+  operator job finished since then with its outcome (flagged ones first),
   failures, questions waiting on you, a starvation map (which root blockers hold
   how much backlog), and a snapshot of RAM, swap, `/tmp` and disk.
 - **Where it works:** under worktree isolation, in its own mirror `ovs-<id>`,
@@ -193,8 +194,14 @@ worktree isolation, it works in the project itself.
 
 **What it decides:** how to carry out the brief. It first checks whether a later
 phase or you already did the work. It narrates each action and prefers the step
-it can undo. It ends with `swarm operator-done <job> "<outcome>"`, which
-telegrams you the outcome.
+it can undo. It ends with `swarm operator-done <job> "<outcome>"`. That pings you
+only when the session adds `--attention`: you must act, something the brief
+asked for is not done or still owed, or a check came back bad. Every other
+outcome is recorded (on the job, in `notifications.jsonl` marked `suppressed`,
+on the dashboard) and reaches you in the Overseer's next summary, which lists
+every operator job finished since its last pass. `[operator].notify = "all"`
+pings every outcome again; `"none"` pings none. Questions and abandoned jobs
+always ping.
 
 **What it may not do:** it asks you only about money, taste, unrecoverable data
 loss, or contradicting something you decided in writing, through
@@ -517,7 +524,9 @@ Messages are plain text, capped at 3800 characters. A `swarm notify` sent from a
 Overseer pass is its summary: it ends with the usage block, and the summary is cut
 first if the whole would pass the cap. Every send, delivered or not,
 is logged to `<state>/notifications.jsonl`, and the dashboard's alerts tab reads
-that log. `swarm notify "<text>"` is the only way a session should message you.
+that log. A message the swarm holds back on purpose is logged there too, with
+`delivered: false` and a `suppressed` reason; the dashboard shows it as `·`, not
+as a drop, and `swarm doctor` does not count it as one. `swarm notify "<text>"` is the only way a session should message you.
 
 **What pings you:**
 
@@ -526,8 +535,8 @@ that log. `swarm notify "<text>"` is the only way a session should message you.
 - a park;
 - a merge hold;
 - a repo starting or stopping owing a push;
-- an operator job's outcome, a to-do while the operator is off, or an abandoned
-  job;
+- an operator job's outcome flagged `--attention`, a to-do while the operator
+  is off, or an abandoned job (routine outcomes go into the Overseer's summary);
 - a launch given up;
 - a crashed or erroring supervisor;
 - a web board that did not start;

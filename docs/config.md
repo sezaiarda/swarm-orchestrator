@@ -24,7 +24,9 @@ winning after a reload; `swarm reload` reports such fields as shadowed.
 
 A worker's own `swarm done` runs in its mirror under worktree isolation, so it
 reads the `.swarm.toml` copy that was branched when the phase launched. That is
-why `[operator].enabled`, `triage_model` and `done_grace_s` are "next".
+why `[operator].enabled`, `triage_model` and `done_grace_s` are "next". An
+operator session's own `swarm operator-done` reads its mirror's copy the same
+way, which is why `[operator].notify` is "next" too.
 
 ## `[swarm]`
 
@@ -123,6 +125,7 @@ auto_resolve = { "docs/PHASE-LEDGER.md" = "keyed:^- \\[[ x]\\] `([A-Za-z0-9_.-]+
 | `cmd` | `""` | `SWARM_OPERATOR_CMD` | next | Replaces the built-in session command. With it set, no brief is typed in. |
 | `model` | `""` | | next | `--model` for operator sessions. `""` inherits the user's setting. |
 | `triage_model` | `"haiku"` | | next | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
+| `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | next | Which `operator-done` outcomes ping you. `"attention"` pings only an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed). `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions (`operator-ask`) and abandoned jobs always ping. Any other value counts as `"attention"`. |
 
 ## `[overseer]`
 

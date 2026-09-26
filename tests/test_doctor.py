@@ -394,6 +394,14 @@ def test_delivered_sends_are_ok(cfg):
     assert sends.status == OK and "2 send(s) logged, all delivered" in sends.detail
 
 
+def test_a_message_held_back_on_purpose_is_not_a_dropped_send(cfg):
+    telegram.notify(cfg.telegram_notify, "one", state_dir=cfg.state_dir)
+    telegram.notify(cfg.telegram_notify, "two", state_dir=cfg.state_dir, suppressed="routine")
+    sends = doctor._check_telegram(cfg)[1]
+    assert sends.status == OK
+    assert "1 send(s) logged, all delivered" in sends.detail and "+1 held back" in sends.detail
+
+
 def test_one_dropped_send_fails_with_its_error(cfg):
     telegram.notify(cfg.telegram_notify, "one", state_dir=cfg.state_dir)
     with (cfg.state_dir / telegram.LEDGER_NAME).open("a", encoding="utf-8") as fh:

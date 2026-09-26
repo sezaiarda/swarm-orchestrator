@@ -547,6 +547,14 @@ class Notification:
     delivered: bool
     error: str
     raw: dict = field(default_factory=dict)
+    #: Why the swarm deliberately did not send it ("" = it tried to). Such a
+    #: message was never meant to reach the phone, so it is not a drop.
+    suppressed: str = ""
+
+    @property
+    def dropped(self) -> bool:
+        """It was meant to reach the owner and did not."""
+        return not self.delivered and not self.suppressed
 
 
 def parse_notification(line: str) -> Notification | None:
@@ -575,6 +583,7 @@ def parse_notification(line: str) -> Notification | None:
         delivered=bool(obj.get("delivered")),
         error=str(obj.get("error") or ""),
         raw=obj,
+        suppressed=str(obj.get("suppressed") or ""),
     )
 
 

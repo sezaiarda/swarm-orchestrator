@@ -181,7 +181,9 @@ def brief(cfg: Config, item: opqueue.Item, cwd: Path | None = None) -> str:
         f"Read {prompt_file} and follow it exactly. You are operator job {job}:"
         f" {origin}, in the project at {cfg.project_dir}, on the owner's behalf."
         f" {where} The brief, in full: {note}{earlier} When the job is"
-        f' finished run `swarm operator-done {job} "<one-line outcome>"`; if you hit'
+        f' finished run `swarm operator-done {job} "<one-line outcome>"`, adding'
+        f" `--attention` only if the owner must act, something is still owed or a"
+        f" check came back bad (see the prompt); if you hit"
         f' a genuine decision run `swarm operator-ask {job} "<question>"`, ask it'
         f" with AskUserQuestion, then `swarm operator-resumed {job} \"<answer>\"`."
     )

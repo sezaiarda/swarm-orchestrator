@@ -102,7 +102,10 @@ Do not run `swarm done`, `swarm up`, `swarm down` or `swarm finish`.
 1. **Tell the owner**, unless nothing has changed since the last pass and nothing
    needs them: one `swarm notify "<text>"`, plain language, at most six short
    lines — done since the last pass, running now, stuck, and what needs the
-   owner. No internals they would have to decode. The swarm appends the usage
+   owner. No internals they would have to decode. Operator jobs no longer ping
+   the owner one by one, so fold the digest's "Operator jobs finished" list into
+   one line (e.g. "operator: 9 jobs, all already done; api-F26 roll owed"),
+   naming only what is flagged or still owed. The swarm appends the usage
    figures (5-hour and weekly limits, this run's pace) itself; leave them out.
 2. **Fill in your pass record** (its path is in your first line): write what you
    saw under `## Saw` (short), what you did under `## Did` (each action and its

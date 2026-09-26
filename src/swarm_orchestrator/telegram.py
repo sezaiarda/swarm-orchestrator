@@ -62,6 +62,10 @@ class NotifyResult:
     delivered: bool
     text: str  # exactly what was sent (post-truncation)
     error: str | None  # notify.sh's token-redacted API error, or None
+    #: Why it was deliberately NOT sent (a quiet-pings policy), or None. A
+    #: suppressed message is logged like any other, so nothing disappears; it
+    #: just never reaches the phone, and it is not a drop.
+    suppressed: str | None = None
 
 
 def notify(
@@ -72,15 +76,18 @@ def notify(
     phase: str | None = None,
     source: str = "",
     state_dir: str | Path | None = None,
+    suppressed: str | None = None,
 ) -> bool:
     """Send ``message``; return True on success. Never raises.
 
     The bool-returning face of :func:`notify_detail`, kept so existing call sites
     (which only ever branch on success) work unchanged. ``kind``/``phase``/
     ``source`` are ledger metadata only — they never reach the owner's phone.
+    ``suppressed`` (a reason) records the message without sending it.
     """
     return notify_detail(
-        script, message, kind=kind, phase=phase, source=source, state_dir=state_dir
+        script, message, kind=kind, phase=phase, source=source, state_dir=state_dir,
+        suppressed=suppressed,
     ).delivered
 
 
@@ -92,6 +99,7 @@ def notify_detail(
     phase: str | None = None,
     source: str = "",
     state_dir: str | Path | None = None,
+    suppressed: str | None = None,
 ) -> NotifyResult:
     """Send ``message`` and report *why* it failed. Never raises.
 
@@ -99,8 +107,16 @@ def notify_detail(
     captured and discarded, which is how a ``400 can't parse entities`` drop
     looked exactly like a healthy send to every caller. It is now returned to the
     caller *and* recorded in the ledger, whatever the caller does with it.
+
+    With ``suppressed`` set (the reason), nothing is sent: the message goes to
+    the ledger only, ``delivered: false`` with that reason, so the dashboard's
+    alerts still show it and nothing reads it as a drop.
     """
     text = _clamp(message)
+    if suppressed:
+        result = NotifyResult(False, text, None, suppressed)
+        _record(state_dir, kind, phase, source, result)
+        return result
     sink = os.environ.get("SWARM_TG_SINK")
     result = _write_sink(sink, text) if sink else _run_script(script, text)
     _record(state_dir, kind, phase, source, result)
@@ -175,6 +191,8 @@ def _record(
         "delivered": result.delivered,
         "error": result.error,
     }
+    if result.suppressed:
+        row["suppressed"] = result.suppressed
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:

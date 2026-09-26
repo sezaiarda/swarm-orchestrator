@@ -799,7 +799,12 @@ def _check_telegram(cfg: Config) -> list[Check]:
         detail,
         None if ok else "scripts/resolve-chat-id.sh, or fix the .env it names",
     )
-    rows = _notifications(cfg)
+    everything = _notifications(cfg)
+    # A message the swarm chose not to send (`suppressed`) is neither a send nor
+    # a drop: it only ever went to the ledger.
+    rows = [r for r in everything if not r.get("suppressed")]
+    held = len(everything) - len(rows)
+    held_note = f" (+{held} held back, not sent)" if held else ""
     if not rows:
         sends = Check(
             "telegram.sends",
@@ -822,7 +827,9 @@ def _check_telegram(cfg: Config) -> list[Check]:
             )
         else:
             sends = Check(
-                "telegram.sends", OK, f"{len(rows)} send(s) logged, all delivered, last {age} ago"
+                "telegram.sends",
+                OK,
+                f"{len(rows)} send(s) logged, all delivered, last {age} ago{held_note}",
             )
     return [config, sends]
 

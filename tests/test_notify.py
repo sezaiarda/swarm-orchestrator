@@ -94,6 +94,21 @@ def test_sink_send_is_delivered_and_logged(sink, state_dir):
     assert isinstance(row["ts"], float)
 
 
+def test_a_suppressed_message_is_logged_never_sent_and_never_a_drop(sink, state_dir, tmp_path):
+    """Held back on purpose: in the alerts, off the phone, and not read as a failure."""
+    from swarm_orchestrator.tui.data import parse_notification
+
+    ok = telegram.notify("unused", "swarm: job done", kind="operator-done", phase="J",
+                         suppressed="routine outcome")
+    assert ok is False and sent(sink) == []
+    [row] = ledger(state_dir)
+    assert row["delivered"] is False and row["error"] is None
+    assert row["suppressed"] == "routine outcome"
+    note = parse_notification(json.dumps(row))
+    assert note.suppressed == "routine outcome" and note.dropped is False
+    assert parse_notification(json.dumps({**row, "suppressed": None})).dropped is True
+
+
 def test_an_oversized_message_is_clamped_not_rejected(sink, state_dir):
     """Telegram refuses >4096 chars outright; a refused send is a lost one."""
     result = telegram.notify_detail("unused", "x" * 10_000)

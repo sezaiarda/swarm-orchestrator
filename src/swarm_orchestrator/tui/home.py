@@ -647,7 +647,7 @@ def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None)
     if snap.integ_blocked:
         kind = snap.integ_blocked_kind or "conflict"
         parts.append((f"merge queue held: {snap.integ_blocked} {kind}", BAD))
-    dropped = [n for n in (dash.notifications or []) if not n.delivered]
+    dropped = [n for n in (dash.notifications or []) if n.dropped]
     if dropped:
         parts.append((f"{len(dropped)} telegram(s) dropped", BAD))
 

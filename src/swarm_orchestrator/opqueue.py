@@ -171,6 +171,9 @@ class Item:
     answer: str = ""
     #: The session's one-line account of what it did, from ``operator-done``.
     outcome: str = ""
+    #: The session flagged the outcome for the owner (``operator-done --attention``):
+    #: they must act, something the brief asked for is still owed, or a check failed.
+    attention: bool = False
     done_at: float = 0.0
     #: The job's own workspace mirror under worktree isolation ("" = project dir).
     mirror: str = ""
@@ -483,7 +486,9 @@ def release(
     return item
 
 
-def complete(cfg: Config, phase: str, outcome: str = "") -> Item | None:
+def complete(
+    cfg: Config, phase: str, outcome: str = "", attention: bool = False
+) -> Item | None:
     """Mark ``phase``'s hand-off carried out, with the session's own account."""
     item = load(cfg, phase)
     if item is None or item.terminal:
@@ -492,6 +497,7 @@ def complete(cfg: Config, phase: str, outcome: str = "") -> Item | None:
     item.run_id = ""
     item.lease_until = 0.0
     item.outcome = " ".join((outcome or "").split())
+    item.attention = bool(attention)
     item.done_at = time.time()
     _write(cfg, item)
     return item

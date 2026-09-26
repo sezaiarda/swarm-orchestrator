@@ -249,7 +249,9 @@ flowchart TD
   one job runs at a time, under a lease: 1 h, or 7 days while it waits on you. A
   job gets 3 attempts 5 minutes apart. After that it is `abandoned` and you are
   told once. Under worktree isolation it works in its own mirror (`op-<job>`),
-  merged on `operator-done`, which also telegrams you the outcome.
+  merged on `operator-done`. Its outcome pings you only when the session flags it
+  `--attention` (you must act, something is still owed, a check failed); the
+  rest reach you folded into the Overseer's summary (`[operator].notify`).
 - **Decides:** how to do the job. It checks first whether the work is already
   done, narrates each action, and prefers the step it can undo.
 - **May not:**
@@ -266,7 +268,7 @@ stateDiagram-v2
   Queued --> Running: dispatched (lease 1 h, attempt +1)
   Running --> Waiting: operator-ask (owner pinged, lease 7 days)
   Waiting --> Running: operator-resumed
-  Running --> Done: operator-done (outcome pinged)
+  Running --> Done: operator-done (pinged only with --attention)
   Running --> Queued: lease expired or session would not start<br/>(eligible again after 5 min)
   Running --> Queued: swarm up (the old run is gone)
   Waiting --> Queued: swarm up
@@ -443,7 +445,8 @@ nine tabs, switched with `1`–`9`, are:
   - a park;
   - a merge hold;
   - an owed push starting or clearing;
-  - an operator outcome or an abandoned job;
+  - an operator outcome flagged `--attention`, or an abandoned job (routine
+    outcomes go into the Overseer's summary instead);
   - a launch given up;
   - a supervisor error;
   - the finish summary.
@@ -680,7 +683,7 @@ project path, so two projects with the same folder name never share state.
 | `recaps/<phase>.json` | Generated recaps. |
 | `meters/` | Per-phase meters, `limits.jsonl` (5-hour and weekly samples), `sessions.jsonl`. `limits.jsonl` is not rotated: a row is written only when a usage figure moves (a few hundred small rows a day at most), the open run's usage is computed from every sample since its start, and each closed run keeps its own slice in `history/runs/<id>/`. |
 | `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
-| `notifications.jsonl` | Every Telegram send and whether it landed. |
+| `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |

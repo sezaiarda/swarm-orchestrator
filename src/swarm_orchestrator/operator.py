@@ -49,6 +49,7 @@ from . import gitq
 from . import launch as launch_mod
 from . import opqueue
 from . import resolver
+from . import session as session_mod
 from . import state as state_mod
 from . import tmux
 from .config import Config
@@ -82,7 +83,7 @@ def mirror_name(job: str) -> str:
 
 
 def _operator_env(cfg: Config, job: str, mirror: Path | None = None) -> dict[str, str]:
-    env = launch_mod.session_env(cfg, mirror, tmp=mirror_name(job))
+    env = launch_mod.session_env(cfg, mirror, tmp=mirror_name(job), session=f"operator:{job}")
     for key in _FORWARD_ENV:
         val = os.environ.get(key)
         if val is not None:
@@ -344,6 +345,9 @@ def release(cfg: Config, log: Log) -> str | None:
         # Respawn, not kill: the window belongs to `session.setup`, so it goes
         # back to holding `sleep infinity` with its pane id still valid.
         tmux.respawn_pane(pane, "exec sleep infinity")
+    # The job is over (done, lease expired, or the run stopping): so is every
+    # process its session started, a detached one included (`swarm keep` aside).
+    session_mod.reap_session(cfg, "operator", phase, log)
     log.line(f"OPERATOR-RELEASE {phase}")
     return phase
 

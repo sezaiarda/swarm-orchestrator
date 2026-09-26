@@ -220,6 +220,7 @@ def swarm(tmp_path: Path):
         "SWARM_WORKER_CMD",
         "SWARM_READY_MARKER",
         "SWARM_SESSION",
+        "SWARM_SESSION_ID",
         "SWARM_SLUG",
         "SWARM_LAYOUT",
     ):

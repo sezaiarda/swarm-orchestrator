@@ -15,9 +15,11 @@ import os
 from pathlib import Path
 
 from . import launch as launch_mod
+from . import session as session_mod
 from . import tmux
 from .config import Config
 from .logutil import Log
+from .procs import SESSION_ENV
 
 _FORWARD_ENV = (
     "SWARM_STATE_DIR",
@@ -36,7 +38,8 @@ def _resolver_env(cfg: Config, phase: str) -> dict[str, str]:
     """The run's variables plus ``TMPDIR``. The resolver finishes ``phase``'s
     integration, so it shares that phase's temp dir, which goes when the merge
     lands (``gitq._rmtree_mirror``) — no second lifetime to track."""
-    env = {"SWARM_STATE_DIR": str(cfg.state_dir), **launch_mod.tmp_env(cfg, phase)}
+    env = {"SWARM_STATE_DIR": str(cfg.state_dir), SESSION_ENV: f"resolver:{phase}",
+           **launch_mod.tmp_env(cfg, phase)}
     for key in _FORWARD_ENV:
         val = os.environ.get(key)
         if val is not None:
@@ -110,8 +113,11 @@ def _deliver(cfg: Config, pane: str, phase: str, repo: Path, log: Log) -> None:
         log.line(f"RESOLVER-SUBMIT-LOST {phase}")
 
 
-def close(cfg: Config, win: str, log: Log) -> None:
-    """Close a resolver window (idempotent; no-op on the bare driver)."""
+def close(cfg: Config, win: str, log: Log, phase: str | None = None) -> None:
+    """Close a resolver window (idempotent; no-op on the bare driver), and end
+    every process the resolver session for ``phase`` started."""
     if cfg.driver == "tmux":
         tmux.kill_window(win)
+    if phase:
+        session_mod.reap_session(cfg, "resolver", phase, log)
     log.line(f"RESOLVER-CLOSE win={win}")

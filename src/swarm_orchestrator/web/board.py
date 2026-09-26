@@ -37,7 +37,7 @@ from statistics import median
 from .. import ledger, opqueue, statuses
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
-from ..tui.data import five_outlook, forecast, limit_outlook, typical_durations
+from ..tui.data import five_outlook, forecast, kept_rows, limit_outlook, typical_durations
 from .rows import clip
 
 NEEDS_YOU = "needs_you"
@@ -142,7 +142,19 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         "activity": _activity(dash, passes),
         "issues": list(getattr(snap.progress, "issues", []) or [])[:20],
         "cycle": starve.get("cycle", [])[:50],
+        "kept": _kept(dash, now),
     }
+
+
+#: What the board says about a kept process. Not its command line, cwd or log
+#: path: the one line of why is what a phone needs, and the rest stays on the box.
+_KEPT_KEYS = ("name", "why", "alive", "pid", "started_at", "by", "stop", "stale")
+
+
+def _kept(dash, now: float) -> list[dict]:
+    """``swarm keep`` records, read-only — the processes left running on purpose."""
+    return [{k: row[k] for k in _KEPT_KEYS}
+            for row in kept_rows(getattr(dash, "kept", None) or [], now)]
 
 
 def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:

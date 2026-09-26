@@ -1,4 +1,4 @@
-"""The three data tabs: Workers, History and Notifications.
+"""The data tabs: Workers, History, Notifications, Runs and Shells.
 
 The dashboards these replace had a lot of text and no structure: every tab built
 one big string and dropped it into
@@ -1043,6 +1043,111 @@ class Runs(TableTab):
         if summary is None:
             return paint(escape(self.EMPTY_DETAIL), MUTED)
         return run_detail(summary)
+
+
+# -- shells tab ------------------------------------------------------------
+SHELL_COLUMNS: tuple[tuple[str, int], ...] = (
+    ("", 2),
+    ("name", 16),
+    ("what it is for", 44),
+    ("state", 6),
+    ("pid", 8),
+    ("age", 6),
+    ("by", 20),
+    ("stop it with", 30),
+)
+#: The name and its one line are the point; the pid goes first, then who and how.
+SHELL_PRIORITY = (0, 0, 0, 0, 4, 1, 3, 2)
+SHELL_FLEX = 2
+
+
+def shell_row(row: dict, why_w: int = 44) -> tuple[str, ...]:
+    """One kept process. Alive is green; dead, or alive past a week, is amber."""
+    alive, stale = row.get("alive"), row.get("stale")
+    state = WARN if stale or not alive else OK
+    return (
+        paint("●", state),
+        cell(row.get("name"), 16),
+        cell(row.get("why") or "— no why recorded —", why_w, None if row.get("why") else MUTED),
+        cell(row.get("state"), 6, state),
+        cell(row.get("pid") if alive else "—", 8, MUTED),
+        cell(row.get("age"), 6, WARN if stale else None),
+        cell(row.get("by"), 20, MUTED),
+        cell(row.get("stop"), 30, ACCENT),
+    )
+
+
+def shell_detail(row: dict) -> str:
+    """The selected kept process in full: what it runs, where, and where it logs."""
+    alive = row.get("alive")
+    state = f"alive, pid {row.get('pid')}" if alive else "dead — its record is all that is left"
+    lines = [
+        field("name", escape(str(row.get("name")))),
+        field("for", escape(str(row.get("why") or "—"))),
+        field("state", escape(state), state=OK if alive else WARN),
+        field("age", escape(f"{row.get('age')} (since {fmt_stamp(row.get('started_at'))})"),
+              state=WARN if row.get("stale") else None),
+        field("started by", escape(str(row.get("by") or "?"))),
+        field("command", escape(str(row.get("command") or "—"))),
+        field("cwd", escape(str(row.get("cwd") or "—"))),
+        field("log", escape(str(row.get("log") or "—"))),
+        field("stop", paint(escape(str(row.get("stop"))), ACCENT)
+              + paint("   x here (asks first)" if alive else "   x here clears the record", MUTED)),
+    ]
+    if row.get("stale"):
+        lines.append(paint("alive for over a week — still wanted?", WARN))
+    return "\n".join(lines)
+
+
+class StopKept(Message):
+    """``x`` on a shell: stop it — the app hands it to the command centre."""
+
+    def __init__(self, kept: str) -> None:
+        super().__init__()
+        self.kept = kept
+
+
+class Shells(TableTab):
+    """What ``swarm keep`` left running, and the one line saying why.
+
+    Everything else a session starts is reaped when the session ends, so these
+    are the only processes the swarm leaves behind on purpose — and the only ones
+    the owner has to be able to see, understand and stop without hunting through
+    ``ps``. ``x`` runs ``swarm keep --stop`` through the command centre, which
+    confirms first and keeps the output.
+    """
+
+    COLUMNS = SHELL_COLUMNS
+    PRIORITY = SHELL_PRIORITY
+    FLEX = SHELL_FLEX
+    DETAIL_TITLE = "kept process"
+    EMPTY_DETAIL = "nothing kept — `swarm keep --name N --why '...' -- <command>` leaves one running"
+
+    BINDINGS = [Binding("x", "stop_kept", "stop it")]
+
+    def _update(self, dash) -> None:
+        rows = data.kept_rows(getattr(dash, "kept", None) or [])
+        width = self.flex_width
+        self.sync(rows, [r["name"] for r in rows], lambda r: shell_row(r, width))
+        alive = sum(1 for r in rows if r["alive"])
+        stale = sum(1 for r in rows if r["stale"])
+        head = [f"{alive} kept process(es) running"]
+        if len(rows) > alive:
+            head.append(paint(f"{len(rows) - alive} dead record(s)", WARN))
+        if stale:
+            head.append(paint(f"{stale} older than a week", WARN))
+        head.append("x stops the selected")
+        self.set_head("  ·  ".join(head))
+        self.update_detail(dash)
+
+    def detail_text(self, dash) -> str:
+        row = self.selected
+        return paint(escape(self.EMPTY_DETAIL), MUTED) if row is None else shell_detail(row)
+
+    def action_stop_kept(self) -> None:
+        row = self.selected
+        if row is not None:
+            self.post_message(StopKept(row["name"]))
 
 
 # -- notifications tab -----------------------------------------------------

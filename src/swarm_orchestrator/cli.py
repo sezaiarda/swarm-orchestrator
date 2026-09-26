@@ -34,6 +34,7 @@ from . import reload as reload_mod
 from . import report as report_mod
 from . import why as why_mod
 from . import gitq
+from . import keep as keep_mod
 from . import ledger as ledger_mod
 from . import launch as launch_mod
 from . import session as session_mod
@@ -1132,6 +1133,55 @@ def cmd_build(cfg: Config, argv: list[str]) -> int:
     return buildsem.run(cfg, argv)
 
 
+def cmd_keep(cfg: Config, name: str | None, why: str | None, argv: list[str],
+             listing: bool = False, stop: str | None = None, cwd: str | None = None,
+             as_json: bool = False) -> int:
+    """Leave one process running past its session, on the record — or list or stop one.
+
+    Everything a session starts dies with it; this is the exception, for what the
+    owner needs after the session is gone (a page to open). The command runs fully
+    detached with the session's markers stripped, so no reaper — a session's end
+    or ``swarm down`` — matches it.
+    """
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if stop:
+        rec = keep_mod.stop(cfg, stop)
+        if rec is None:
+            print(f"swarm keep: nothing kept as {stop}", file=sys.stderr)
+            return 1
+        if rec.alive:
+            print(f"swarm keep: {stop} (pid {rec.pid}) survived SIGKILL", file=sys.stderr)
+            return 1
+        print(f"stopped {stop} (pid {rec.pid})")
+        return 0
+    if listing or (not name and not argv):
+        recs = keep_mod.load_all(cfg)
+        if as_json:
+            return _dump([r.to_json() for r in recs])
+        print("\n".join(keep_mod.line(r) for r in recs) if recs else "nothing kept")
+        return 0
+    if not name:
+        print("swarm keep: --name is required to start one", file=sys.stderr)
+        return 2
+    try:
+        rec = keep_mod.start(cfg, name, argv, why or "", cwd)
+    except keep_mod.KeepError as exc:
+        print(f"swarm keep: {exc}", file=sys.stderr)
+        return 1
+    print(f"kept {rec.name}: pid {rec.pid}, log {rec.log}")
+    print(f"  why: {rec.why}")
+    print(f"  stop: {rec.stop_cmd}")
+    if Path(rec.cwd).is_relative_to(Path(cfg.wt_dir).resolve()):
+        print(f"  warning: its cwd {rec.cwd} is inside a session mirror, which is removed"
+              " when the session's work merges; `--cwd` a canonical path instead",
+              file=sys.stderr)
+    if not rec.alive:
+        print(f"swarm keep: {rec.name} exited at once — read {rec.log}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_context(cfg: Config) -> int:
     st = state_mod.read(cfg)
     print(json.dumps(build_context(cfg, st)))
@@ -1481,6 +1531,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["operator_jobs"] = [i.to_dict() for i in opqueue.load_all(cfg)]
         data["web"] = web_lifecycle.status_line(cfg)
         data["telegram_bot"] = tgbot.status_line(cfg)
+        data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
@@ -1505,6 +1556,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
     lines.append(web_lifecycle.status_line(cfg))
     lines.append(tgbot.status_line(cfg))
+    # What `swarm keep` left running on purpose: nothing else outlives its session.
+    lines.extend(f"kept: {keep_mod.line(r)}" for r in keep_mod.load_all(cfg))
     print("\n".join(lines))
     return 0
 
@@ -1588,6 +1641,25 @@ def _build_parser() -> argparse.ArgumentParser:
     bp = sub.add_parser("build", help="run a build command through the concurrency gate")
     bp.add_argument("argv", nargs=argparse.REMAINDER, help="the build command, e.g. cargo nextest run")
     bp.set_defaults(func=lambda cfg, a: cmd_build(cfg, a.argv))
+
+    kpp = sub.add_parser(
+        "keep", help="leave one process running after your session ends (list / stop them)",
+        description=(
+            "Everything a session starts is ended when the session ends. `swarm keep` is "
+            "the one exception: `swarm keep --name N --why \"<one plain line>\" -- <command...>` "
+            "starts the command detached, records it, and lists it everywhere until "
+            "`swarm keep --stop N`. Use it only when something must outlive your session."
+        ),
+    )
+    kpp.add_argument("--name", help="a unique name (letters, digits, . _ -)")
+    kpp.add_argument("--why", help=f"one plain line (≤{keep_mod.WHY_MAX} chars) saying what it is for")
+    kpp.add_argument("--cwd", help="where to run it (default: here)")
+    kpp.add_argument("--list", dest="listing", action="store_true", help="every kept process, alive or dead")
+    kpp.add_argument("--json", action="store_true", help="with --list: JSON")
+    kpp.add_argument("--stop", metavar="NAME", help="stop a kept process and forget it")
+    kpp.add_argument("argv", nargs=argparse.REMAINDER, help="-- the command to keep running")
+    kpp.set_defaults(func=lambda cfg, a: cmd_keep(
+        cfg, a.name, a.why, a.argv, a.listing, a.stop, a.cwd, a.json))
 
     lp = sub.add_parser("launch", help="claim a slot and start a worker")
     lp.add_argument("phase")

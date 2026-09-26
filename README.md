@@ -434,12 +434,30 @@ nine tabs, switched with `1`–`9`, are:
   [docs/components.md](docs/components.md#the-web-board-swarm-web) for the WSL
   firewall rule.
 
+### Processes and `swarm keep`
+
+- **Everything dies with its session.** Every session carries
+  `SWARM_SESSION_ID=<kind>:<id>` and hands it to all it starts. When a worker's
+  `swarm done` lands (or the watchdog finds it dead), an operator job ends, an
+  Overseer pass ends or a resolver is closed, the supervisor ends every process
+  still carrying it, detached ones (`setsid`, `nohup`) included: HUP, TERM, then
+  KILL, like `swarm down`.
+- **`swarm keep` is the exception**, for something the owner needs after the
+  session is gone, and only then:
+  `swarm keep --name N --why "<one plain line>" -- <command…>`. It runs detached
+  with the session's markers stripped, so it outlives its session and
+  `swarm down`, and is listed by `swarm keep --list`, `swarm status`,
+  `swarm doctor` (a warning past 7 days) and the dashboard until
+  `swarm keep --stop N`. The session names it in its recap or outcome.
+  Details: [components.md](docs/components.md#processes-everything-dies-with-its-session-swarm-keep-is-the-exception).
+
 ### Telegram, and asking the owner
 
 - **The sender:** the swarm has its own bot, `scripts/notify.sh`. It reads
   `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's gitignored `.env`.
   Every send is logged to `<state>/notifications.jsonl`. `swarm notify` is the
-  only way a session should message you.
+  only way a session should message you, even when a brief or a ledger row
+  names another script (a `notify.sh`, say); the prompts say so.
 - **What pings you** (`[telegram].pings = "necessary"`, the default): only what
   needs you.
   - a question from a worker, the operator or the Overseer;
@@ -657,6 +675,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 | apply a config edit | `swarm reload` |
 | see what was done and what it cost | `swarm report`, `swarm usage` |
 | free disk | `swarm gc`, then `swarm gc --yes` |
+| leave something running past its session, see it, stop it | `swarm keep --name N --why "…" -- <cmd>`, `swarm keep --list`, `swarm keep --stop N` |
 
 ## Configuration
 
@@ -703,6 +722,7 @@ project path, so two projects with the same folder name never share state.
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
+| `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
 | `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |
 | `telegram-bot.pid`, `.offset.json`, `.status.json` | The command listener's pid, the next Telegram update id it will ask for, and what it is doing (polling, backing off a 409, …). |

@@ -375,7 +375,17 @@ ${camp.what ? `<p class="what">${esc(camp.what)}</p>` : ""}${camp.about ? `<p cl
 }
 function activityView(b) {
   const a = b.activity || {passes: [], finished: []};
-  let out = '<div class="feed"><h2 class="sec">Overseer passes</h2>';
+  let out = '<div class="feed">';
+  const kept = b.kept || [];
+  if (kept.length) {
+    out += '<h2 class="sec">Kept running</h2>';
+    for (const k of kept) {
+      const tone = !k.alive || k.stale ? "warn" : "ok";
+      out += `<article class="item"><h3><span class="${tone}">● ${k.alive ? "alive" : "dead"}</span><span class="mono">${esc(k.name)}</span><span class="mu">${k.alive ? "pid " + esc(k.pid) + " · " : ""}<span data-since="${+k.started_at}">${dur(now() - k.started_at)}</span> · by ${esc(k.by)}</span></h3>
+<p>${esc(k.why)}</p><p class="mu">stop: <code>${esc(k.stop)}</code></p></article>`;
+    }
+  }
+  out += '<h2 class="sec">Overseer passes</h2>';
   if (!a.passes.length) out += '<p class="empty">no Overseer pass recorded yet</p>';
   for (const p of a.passes) {
     const tone = p.status === "done" ? "ok" : p.status === "running" ? "info" : "warn";

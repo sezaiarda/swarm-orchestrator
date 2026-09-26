@@ -10,7 +10,7 @@ exact flags.
 | command | what it does |
 |---|---|
 | `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass, the board and the bot's command listener, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
-| `down` | Stop the supervisor, the board and the command listener, end every session process, tear the session down, close the run. |
+| `down` | Stop the supervisor, the board and the command listener, end every session process (anything carrying the run's `SWARM_STATE_DIR`, detached ones included; never what `swarm keep` holds), tear the session down, close the run. |
 | `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued, unless `--force`. |
 | `pause` / `resume` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. |
 | `reset` | Close the open run and start a new one: ETA and usage count from now. Nothing restarts. |
@@ -21,7 +21,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `status [--all] [--json]` | Slots, merge queue, waiting and parked phases, operator queue, owed pushes, the done map as counts per status (naming failures), board address. `--all` prints the whole done map; `--json` prints the state as JSON. |
+| `status [--all] [--json]` | Slots, merge queue, waiting and parked phases, operator queue, owed pushes, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
 | `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`. |
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |
@@ -53,7 +53,9 @@ exact flags.
 | `resumed <phase> ["answer"]` | The owner answered. Records the answer and cancels the park. |
 | `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |
 | `build <cmd…>` | Run a heavy build through the swarm-wide gate. |
-| `notify "message"` | Message the owner through the swarm's own sender. From an Overseer pass, the usage block is appended. |
+| `notify "message"` | Message the owner through the swarm's own sender, the only way a session should. From an Overseer pass, the usage block is appended. |
+| `keep --name N --why "one line" [--cwd DIR] -- <cmd…>` | Leave one process running after your session ends (everything else a session starts is ended with it). Starts it detached without the session's markers, records `<state>/keep/N.json`, prints its pid and log. `--why` is required (≤120 chars); a live name is refused, a dead one replaced. Use it only when something must outlive the session, and name it in your recap. |
+| `keep --list [--json]` / `keep --stop N` | Every kept process, alive or dead, with why, who and age / stop one (SIGTERM, then SIGKILL, to its group) and forget it. |
 
 ## Operator
 

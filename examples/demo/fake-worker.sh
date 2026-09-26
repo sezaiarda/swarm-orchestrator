@@ -12,6 +12,9 @@
 #   FAKE_WORKER_SLEEP   seconds of "work"               (default 2)
 #   FAKE_WORKER_STATUS  ok|fail passed to `swarm done`  (default ok)
 #   FAKE_WORKER_PARK    1 => park (no done, hold slot)  (default 0)
+#   FAKE_WORKER_DETACH  path prefix => start a setsid'd `sleep` and write its
+#                       pid to <prefix>.<phase> (a child that left the tree)
+#   FAKE_WORKER_KEEP    1 => `swarm keep` a `sleep` as keep-<phase>
 #   SWARM_BIN           how to invoke the CLI           (default swarm)
 #   SWARM_PHASE         phase id (set by the launcher)
 set -u
@@ -43,6 +46,15 @@ if [ "${FAKE_WORKER_PARK:-0}" = "1" ]; then
     # failure. We exit fast without `done`; the slot stays busy in state (the
     # claim lives in state.json, not in this process), so finish cannot fire.
     exit 0
+fi
+
+if [ -n "${FAKE_WORKER_DETACH:-}" ]; then
+    setsid sleep 300 </dev/null >/dev/null 2>&1 &
+    echo $! > "${FAKE_WORKER_DETACH}.${SWARM_PHASE}"
+fi
+if [ "${FAKE_WORKER_KEEP:-0}" = "1" ]; then
+    # shellcheck disable=SC2086
+    ${SWARM_BIN:-swarm} keep --name "keep-$SWARM_PHASE" --why "a test stand-in" -- sleep 300
 fi
 
 sleep "${FAKE_WORKER_SLEEP:-2}"

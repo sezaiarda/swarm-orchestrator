@@ -42,6 +42,7 @@ import json
 import os
 import select
 import signal
+import subprocess
 import threading
 import time
 from dataclasses import asdict
@@ -264,6 +265,9 @@ class Supervisor:
             # owner's full authority on the host, so leaving one typing into a
             # window nothing owns is worse than leaving a master.
             operator_mod.release(self.cfg, self.log)
+            # A finished session's processes are ended off the loop thread; the
+            # run's last `done` is often what finished it, so let those land.
+            session_mod.join_reaps()
             if self._fifo_fd >= 0:
                 os.close(self._fifo_fd)
             self.log.line("SUPERVISOR-STOP")
@@ -574,7 +578,11 @@ class Supervisor:
         UNLESS the phase is already integrating (blocked or queued after having
         reported success): a late, contradictory ``fail`` must not yank a branch
         out from under a live merge or free a parked slot, so it is ignored.
+
+        Whatever the status, the worker's session is over: :meth:`_end_worker`
+        ends it and everything it started, before the slot can be refilled.
         """
+        self._end_worker(phase)
         if self.cfg.git_isolation != "worktree":
             self._advance_done(phase, status)
             return
@@ -593,6 +601,29 @@ class Supervisor:
             if not (already and not has_slot):
                 st.integ_push(phase, status)
         self._pump_integrations()
+
+    def _end_worker(self, phase: str) -> None:
+        """End a finished worker's session and every process it started.
+
+        A finished worker leaves no shells lying around: when the worker is done, all of its
+        shells end too. The slot's pane goes back to
+        ``sleep`` now — before :meth:`_advance_done` can launch the next phase into
+        it, and so the watchdog never mistakes a slot still merging for a dead
+        worker — and :func:`session.reap_session` then ends whatever still carries
+        the phase's markers, a ``setsid``/``nohup`` child that left the pane
+        included. It waits :data:`session.REAP_GRACE_S` first, so the worker's own
+        ``swarm done`` can print its result. ``swarm keep`` is the exception.
+        """
+        if self.cfg.driver == "tmux":
+            st = state_mod.read(self.cfg)
+            pane = next((s.pane_id for s in st.slots
+                         if s.busy and s.phase == phase and s.pane_id), None)
+            if pane is not None:
+                try:
+                    tmux.respawn_pane(pane, "exec sleep infinity")
+                except (subprocess.CalledProcessError, OSError) as exc:
+                    self.log.line(f"END-WORKER-RESPAWN-FAIL {phase} {exc}")
+        session_mod.reap_session(self.cfg, "worker", phase, self.log)
 
     def _pump_integrations(self) -> None:
         """Drain ``integ_queue`` head-first while nothing is blocked.
@@ -746,7 +777,7 @@ class Supervisor:
             st.integ_blocked_kind = None
             win = st.windows.pop(f"resolve:{phase}", None)
         if win:
-            resolver_mod.close(self.cfg, win, self.log)
+            resolver_mod.close(self.cfg, win, self.log, phase)
         self.log.line(f"RESOLVED {phase}")
         self._pump_integrations()  # re-integrate (resumes; may re-block downstream)
 
@@ -1066,6 +1097,8 @@ class Supervisor:
             except gitq.GitError as exc:
                 self.log.line(f"WATCHDOG-DISCARD-ERROR {phase} {exc}")
         launch_mod.drop_session_tmp(self.cfg, phase)  # the pane is dead
+        # The pane died, but a `setsid`/`nohup` child it started may not have.
+        session_mod.reap_session(self.cfg, "worker", phase, self.log)
 
     def _check_park_deadlines(self) -> None:
         """Park every waiting phase whose deadline has fired. Runs on every wake;
@@ -1503,7 +1536,8 @@ class Supervisor:
                 launch_mod.pretrust_dir(cwd, self.log)
             record = ovrecord.md_path(cfg, pid)
             env = {
-                **launch_mod.session_env(cfg, cwd, tmp=ovrecord.mirror_name(pid)),
+                **launch_mod.session_env(cfg, cwd, tmp=ovrecord.mirror_name(pid),
+                                         session=f"overseer:{pid}"),
                 "SWARM_MASTER_KIND": master_mod.OVERSEER,
                 "SWARM_OVERSEER_PASS": pid,
                 "SWARM_OVERSEER_DIGEST": str(digest),
@@ -1582,6 +1616,7 @@ class Supervisor:
         now = time.time()
         self._overseer_live = None
         self.master.kill()
+        session_mod.reap_session(self.cfg, "overseer", pid, self.log)  # and what it started
         launch_mod.drop_session_tmp(self.cfg, ovrecord.mirror_name(pid))  # session gone
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False

@@ -30,6 +30,7 @@ from . import statuses
 from . import telegram, tmux
 from .config import Config, ready_needle
 from .logutil import Log
+from .procs import SESSION_ENV
 
 # 30 s was measured too tight once launches stopped queueing behind an LLM
 # master: several sessions now boot at the same moment on a loaded box, and a
@@ -138,7 +139,8 @@ def _worker_env(
 ) -> dict[str, str]:
     """Env vars a worker (and its ``swarm done``) need to find this run: the
     phase marker plus everything :func:`session_env` gives any session."""
-    return {cfg.env_marker: phase, **session_env(cfg, worktree, tmp=phase)}
+    return {cfg.env_marker: phase,
+            **session_env(cfg, worktree, tmp=phase, session=f"worker:{phase}")}
 
 
 def tmp_env(cfg: Config, name: str) -> dict[str, str]:
@@ -172,7 +174,8 @@ def drop_session_tmp(cfg: Config, name: str) -> None:
 
 
 def session_env(
-    cfg: Config, worktree: Path | None = None, tmp: str | None = None
+    cfg: Config, worktree: Path | None = None, tmp: str | None = None,
+    session: str | None = None,
 ) -> dict[str, str]:
     """Env vars any swarm session needs so ``swarm`` inside it finds this run.
 
@@ -195,8 +198,14 @@ def session_env(
 
     ``tmp`` names the session's own ``TMPDIR`` (:func:`tmp_env`): the phase for a
     worker, the mirror name for the operator and the Overseer.
+
+    ``session`` is the session's own marker (``SWARM_SESSION_ID``, e.g.
+    ``worker:<phase>``): everything the session starts inherits it, and when the
+    session ends whatever still carries it is ended (:func:`session.reap_session`).
     """
     env = {"SWARM_STATE_DIR": str(cfg.state_dir)}
+    if session:
+        env[SESSION_ENV] = session
     if tmp:
         env.update(tmp_env(cfg, tmp))
     env.setdefault("CARGO_INCREMENTAL", os.environ.get("CARGO_INCREMENTAL") or "0")
@@ -826,6 +835,7 @@ def _detach_recap(cfg: Config, phase: str) -> bool:
         subprocess.Popen(
             ["/bin/sh", "-c", f"exec {bin_} recap {shlex.quote(phase)} --completion"],
             cwd=str(cfg.project_dir),
+            env=detached_env(cfg),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -850,6 +860,7 @@ def _detach_triage(cfg: Config, phase: str) -> bool:
         subprocess.Popen(
             ["/bin/sh", "-c", f"exec {bin_} operator-triage {shlex.quote(phase)}"],
             cwd=str(cfg.project_dir),
+            env=detached_env(cfg),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -886,6 +897,16 @@ def _queue_operator(
     return True
 
 
+def detached_env(cfg: Config) -> dict[str, str]:
+    """This environment without the session's own markers, for the swarm's own
+    detached helpers (the grace poke, the recap, the triage) that ``swarm done``
+    starts from inside a worker: the worker's end reaps whatever carries its
+    markers, and these must outlive it. ``SWARM_STATE_DIR`` stays, so they still
+    find the run, and ``swarm down`` still ends them."""
+    drop = {SESSION_ENV, cfg.env_marker}
+    return {k: v for k, v in os.environ.items() if k not in drop}
+
+
 def _detach_poke(cfg: Config, phase: str, status: str) -> bool:
     """Deliver the delayed ``done`` poke from a detached survivor process.
 
@@ -903,6 +924,7 @@ def _detach_poke(cfg: Config, phase: str, status: str) -> bool:
         subprocess.Popen(
             ["/bin/sh", "-c", script],
             cwd=str(cfg.project_dir),
+            env=detached_env(cfg),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

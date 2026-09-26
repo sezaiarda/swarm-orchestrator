@@ -95,6 +95,7 @@ DESTRUCTIVE: dict[str, tuple[str | None, str]] = {
     "integrate": (None, "merges swarm/<phase> into main"),
     "operator-done": (None, "settles the job and ends its operator session"),
     "gc": ("--yes", "deletes files from disk"),
+    "keep": ("--stop", "stops a process a session kept running for the owner, and forgets it"),
     "reset": (None, "closes the open run and starts a fresh one — ETA and usage count from "
                     "now; the closed run keeps its summary under `swarm usage`"),
 }
@@ -658,20 +659,32 @@ class Commands(Vertical):
             self._say("nothing has run yet")
             return
         last = max(self._cmd_history, key=lambda r: r.started_at)
-        spec = self._cmd_by_name.get(last.name)
+        self.run_command(last.name, list(last.args))
+
+    def run_command(self, name: str, args: list[str], reason: str | None = None) -> bool:
+        """Put ``swarm <name> <args>`` on the argument line and request it.
+
+        How another tab runs a command (the shells tab's ``x``): through here it
+        gets the same confirm, output log and history as one typed by hand.
+        ``reason`` asks for a confirm :data:`DESTRUCTIVE` would not.
+        Returns False when this CLI has no such command.
+        """
+        spec = self._cmd_by_name.get(name)
         if spec is None:
-            return
+            self._say(f"this swarm has no `{name}` command", BAD)
+            return False
         self._cmd_picked = spec
         self.query_one("#cmd-prompt", Label).update(f"$ swarm {escape(spec.name)}")
-        self.query_one("#cmd-args", Input).value = shlex.join(last.args)
-        self.request(spec, list(last.args))
+        self.query_one("#cmd-args", Input).value = shlex.join(args)
+        self.request(spec, list(args), reason)
+        return True
 
-    def request(self, spec: CommandSpec, args: list[str]) -> None:
-        """Run ``spec`` with ``args`` — after a confirm, if it is destructive."""
+    def request(self, spec: CommandSpec, args: list[str], reason: str | None = None) -> None:
+        """Run ``spec`` with ``args`` — after a confirm, if it is destructive (or ``reason``)."""
         if self._cmd_run is not None and self._cmd_run.ended_at is None:
             self._say(f"{self._cmd_run.line} is still running — ctrl+x stops it", WARN)
             return
-        reason = destructive_reason(spec.name, args)
+        reason = reason or destructive_reason(spec.name, args)
         if reason is None:
             self._start(spec, args)
             return

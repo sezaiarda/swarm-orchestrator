@@ -27,12 +27,14 @@ from __future__ import annotations
 import json
 import math
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from statistics import median
 
+from .. import keep as keep_mod
 from .. import ledger as ledger_mod
 from .. import opqueue
 from .. import statuses
@@ -1520,3 +1522,46 @@ def fmt_ago(ts: float | None, now: float | None = None) -> str:
     if ts is None:
         return "—"
     return f"{fmt_duration((now if now is not None else time.time()) - ts)} ago"
+
+
+# -- kept processes: what `swarm keep` left running --------------------------
+def load_kept(cfg) -> list:
+    """Every ``swarm keep`` record, alive or dead, by name; empty on any failure."""
+    try:
+        return keep_mod.load_all(cfg)
+    except Exception:  # noqa: BLE001 - a bad record must not cost the cockpit
+        return []
+
+
+def kept_rows(records, now: float | None = None) -> list[dict]:
+    """One plain dict per kept process: what the shells tab and the board show.
+
+    Everything a session starts is reaped when it ends; a kept process is the one
+    exception, so it is the one process the owner has to be able to find, read
+    ("what is this for?" is the ``why`` its session had to write) and stop. The
+    stop command is offered for a dead record too: it is also how the record goes.
+    """
+    now = time.time() if now is None else now
+    out: list[dict] = []
+    for rec in records or []:
+        try:
+            age = rec.age_s(now)
+            out.append({
+                "name": rec.name,
+                "why": rec.why,
+                "alive": bool(rec.alive),
+                "state": "alive" if rec.alive else "dead",
+                "pid": rec.pid,
+                "started_at": rec.started_at,
+                "age_s": age,
+                "age": keep_mod.age_text(age),
+                "stale": bool(rec.alive) and age >= keep_mod.STALE_S,
+                "by": rec.by,
+                "stop": rec.stop_cmd,
+                "command": shlex.join(str(a) for a in rec.argv or []),
+                "cwd": rec.cwd,
+                "log": rec.log,
+            })
+        except Exception:  # noqa: BLE001 - a malformed record costs its own row
+            continue
+    return out

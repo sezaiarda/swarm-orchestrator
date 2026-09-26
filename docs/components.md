@@ -59,7 +59,8 @@ as `cd <cwd> && exec <worker_cmd> --settings <worker_settings> --effort <effort>
 Their teammates run in-process (`teammateMode`), so they never open extra panes.
 Each worker's environment carries:
 
-- `SWARM_PHASE` and `SWARM_STATE_DIR`;
+- `SWARM_PHASE`, `SWARM_SESSION_ID=worker:<phase>` and `SWARM_STATE_DIR`
+  (everything it starts dies with it: see [Processes](#processes-everything-dies-with-its-session-swarm-keep-is-the-exception));
 - a private `TMPDIR` on disk under `<state>/tmp/<phase>`;
 - `CARGO_INCREMENTAL=0`;
 - under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN`, `SWARM_PROJECT`
@@ -273,6 +274,63 @@ as origin has local main, whoever pushed it. `swarm status` and `swarm doctor`
 show the standing debt.
 
 `swarm integrate <phase>` runs the same integration by hand, outside the queue.
+
+## Processes: everything dies with its session; `swarm keep` is the exception
+
+Every shell a session starts is cleaned up with it.
+So a session's end ends every process it started.
+
+**The marker.** Every session is spawned with `SWARM_STATE_DIR` and its own
+`SWARM_SESSION_ID=<kind>:<id>`: `worker:<phase>` (a worker also carries
+`SWARM_PHASE`), `operator:<job>`, `overseer:<pass>`, `resolver:<phase>`. Everything
+the session starts inherits them, so a child that detached itself (`setsid`,
+`nohup`, `&`, reparented to init) is still found by its environment.
+
+**When a session ends:**
+
+| session | ends at | what the supervisor does |
+|---|---|---|
+| worker | `swarm done` (any status), or the watchdog finding its pane dead | returns the slot's pane to `sleep` before the slot can be refilled, then reaps `worker:<phase>` |
+| operator | `operator-done`, a lease that expired, the run stopping | respawns the operator pane to idle, then reaps `operator:<job>` |
+| Overseer | `overseer-done`, or its timeout | clears the master pane, then reaps `overseer:<pass>` |
+| resolver | `swarm resolved` closing its window | kills the window, then reaps `resolver:<phase>` |
+
+Reaping is `swarm down`'s code narrowed to the session's markers within this run:
+SIGHUP, then SIGTERM, then SIGKILL to what outlived each, process groups
+included. It runs off the supervisor's loop, 2 s after the session's end (so its
+own `swarm done` can print), and the supervisor waits for pending reaps before it
+exits. It never signals itself, its ancestors or a tmux server. Each reap is
+logged as `REAP <kind>:<id> ended=N`.
+The swarm's own helpers that `swarm done` starts detached (the grace poke, the
+recap, the operator triage) are spawned without the session's markers, so they
+finish their job after the worker is gone.
+
+**`swarm down`** still ends everything carrying the run's `SWARM_STATE_DIR`,
+orphaned sessions and whatever detached from them included.
+
+**`swarm keep`** is the one sanctioned way to leave something running, and
+sessions are told to use it only when something must outlive them, such as a page
+the owner needs to open:
+
+    swarm keep --name look-mockups --why "serves the look mockups for the owner's layout picks" \
+        --cwd "$SWARM_PROJECT" -- python3 -m http.server 8790 --bind 0.0.0.0 --directory tasks/mockups/look
+
+- It starts the command fully detached (its own session), with `SWARM_STATE_DIR`,
+  `SWARM_SESSION_ID`, `SWARM_SESSION`, `SWARM_PHASE` and a session `TMPDIR`
+  removed from its environment, so no reaper matches it. The kept pid and its
+  start time are also excluded from every sweep, as a belt.
+- `--why` is required: one plain line (at most 120 characters) a non-developer
+  can read. A name is unique: a live one is refused, a dead one replaced.
+- It records `<state>/keep/<name>.json` (pid, start time, argv, cwd, who started
+  it, why, log) and logs output to `<state>/keep/<name>.log`. It warns when its
+  cwd is inside a mirror, which goes when the session's work merges.
+- `swarm keep --list [--json]` lists every kept process, alive or dead;
+  `swarm keep --stop <name>` sends its group SIGTERM, then SIGKILL, and forgets it.
+- `swarm status`, `swarm doctor` (`keep`, a WARN for one alive past 7 days, never
+  a FAIL) and the dashboard list them, with their why and how to stop them.
+- A session that keeps something says so in its recap or outcome: the name, what
+  it serves and `swarm keep --stop <name>`. For the operator that outcome needs
+  the owner, so it gets `--attention`.
 
 ## Worktree isolation and mirrors
 
@@ -529,6 +587,13 @@ is logged to `<state>/notifications.jsonl`, and the dashboard's alerts tab reads
 that log. A message the swarm holds back on purpose is logged there too, with
 `delivered: false` and a `suppressed` reason; the dashboard shows it as `·`, not
 as a drop, and `swarm doctor` does not count it as one. `swarm notify "<text>"` is the only way a session should message you.
+Every shipped prompt, and the init pass's patch to the worker command, says so
+in so many words: use `swarm notify` even when a brief, a ledger row, a recap or
+a project document names another script (a `notify.sh`, say). A message
+sent that way would not come from the swarm's own bot and would not be logged.
+An operator's result that needs you
+(a URL to open, something only you can do) goes in its `operator-done` outcome
+with `--attention`.
 
 **What pings you.** Only necessary messages ring, so by default
 (`[telegram].pings = "necessary"`) the phone rings only for these:

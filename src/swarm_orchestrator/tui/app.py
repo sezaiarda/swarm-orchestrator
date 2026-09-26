@@ -74,12 +74,13 @@ try:
 except Exception as exc:  # noqa: BLE001
     Home = _missing("home", exc)
 try:
-    from .tables import History, Notifications, Runs, Workers
+    from .tables import History, Notifications, Runs, Shells, Workers
 except Exception as exc:  # noqa: BLE001
     Workers = _missing("workers", exc)
     History = _missing("history", exc)
     Notifications = _missing("notifications", exc)
     Runs = _missing("runs", exc)
+    Shells = _missing("shells", exc)
 try:
     from .disk import Disk
 except Exception as exc:  # noqa: BLE001
@@ -125,7 +126,7 @@ class HelpScreen(ModalScreen[None]):
     HELP = f"""[b]tabs[/b]
   [{COLOR[OK]}]1[/] home      [{COLOR[OK]}]2[/] workers   [{COLOR[OK]}]3[/] history   [{COLOR[OK]}]4[/] alerts
   [{COLOR[OK]}]5[/] disk      [{COLOR[OK]}]6[/] settings  [{COLOR[OK]}]7[/] commands  [{COLOR[OK]}]8[/] doctor
-  [{COLOR[OK]}]9[/] runs
+  [{COLOR[OK]}]9[/] runs      [{COLOR[OK]}]0[/] shells
   [{COLOR[MUTED]}]tab / shift+tab cycle[/]
 
 [b]anywhere[/b]
@@ -137,6 +138,7 @@ class HelpScreen(ModalScreen[None]):
   [{COLOR[OK]}]/[/] commands: filter   [{COLOR[OK]}]esc[/] clear it
   [{COLOR[OK]}]F[/] alerts: all / failed / delivered
   [{COLOR[OK]}]r[/] disk: rescan   [{COLOR[MUTED]}](it never scans on a timer)[/]
+  [{COLOR[OK]}]x[/] shells: stop the selected kept process (asks first)
 
 [b]settings[/b]
   [{COLOR[OK]}]enter[/] or [{COLOR[OK]}]e[/] edit   [{COLOR[OK]}]ctrl+s[/] apply   [{COLOR[OK]}]r[/] revert   [{COLOR[OK]}]d[/] dry-run
@@ -209,6 +211,7 @@ class SwarmApp(App):
         Binding("7", "tab('commands')", "commands"),
         Binding("8", "tab('doctor')", "doctor"),
         Binding("9", "tab('runs')", "runs"),
+        Binding("0", "tab('shells')", "shells"),
         Binding("R", "reset_run", "reset run", show=False),
         Binding("c", "tab('commands')", "commands", show=False),
         Binding("d", "doctor", "doctor", show=False),
@@ -248,6 +251,8 @@ class SwarmApp(App):
                     yield Doctor(id="tab-doctor")
                 with TabPane("9 runs", id="runs"):
                     yield Runs(id="tab-runs")
+                with TabPane("0 shells", id="shells"):
+                    yield Shells(id="tab-shells")
             if Drawer is not None:
                 yield Drawer(id="drawer")
         yield Footer()
@@ -404,6 +409,21 @@ class SwarmApp(App):
         """``enter`` on a table row: the tab's detail, full height, readable."""
         event.stop()
         self.push_screen(DetailScreen(event.title, event.body))
+
+    def on_stop_kept(self, event) -> None:
+        """``x`` on the shells tab: ``swarm keep --stop`` via the command centre.
+
+        There rather than in-process so it confirms, streams its output and is
+        kept in the recent list like any command typed by hand.
+        """
+        event.stop()
+        self.action_tab("commands")
+        run = getattr(self.query_one("#tab-commands"), "run_command", None)
+        if run is None:
+            self.notify("the command centre is unavailable", severity="error")
+            return
+        run("keep", ["--stop", event.kept],
+            "ends the kept process and everything in its process group, and drops its record")
 
     def action_doctor(self) -> None:
         """Run the health checks and show them, from whichever tab you were on."""

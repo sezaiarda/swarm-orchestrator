@@ -48,6 +48,7 @@ from .data import (
     question_index,
     read_state,
     load_graph,
+    load_kept,
     load_ticked,
     run_started_at,
     spark,
@@ -63,6 +64,10 @@ REPO_PROBE_S = 30.0
 #: The run's usage summary is re-derived at least this often (its $/h moves with
 #: every render of every worker), and at once when a limit sample or the run moves.
 USAGE_EVERY_S = 60.0
+
+#: A kept process can die without touching its record, so the records are
+#: re-read this often even when ``<state>/keep/`` has not moved.
+KEEP_RECHECK_S = 10.0
 
 #: Overseer pass records kept for the home feed and the needs-you strip (the web
 #: board shows the same dozen).
@@ -109,6 +114,9 @@ class Dash:
         self.passes: list = []
         #: Campaign name -> its one-line "what it is", from the ledger headings.
         self.campaign_what: dict[str, str] = {}
+        #: ``swarm keep`` records, alive or dead, by name — the shells tab.
+        self.kept: list = []
+        self._kept_at = 0.0
         self._live_pass: str | None = None
         self._passes_live: object = ()
         self._samples = usage_mod.SampleTail(cfg.state_dir / METERS_DIR / LIMITS_LOG)
@@ -208,13 +216,28 @@ class Dash:
             self.passes = ovrecord.load_passes(self.cfg, limit=PASSES, live=self._live_pass)
             self._passes_live = self._live_pass
             changed.add("overseer")
-        grew = self._samples.poll()
         now = time.time()
+        if self._poll_kept(now):
+            changed.add("keep")
+        grew = self._samples.poll()
         if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
             self._usage_at = now
             self.usage = self._run_usage(now)
             changed.add("usage")
         return changed
+
+    def _poll_kept(self, now: float) -> bool:
+        """Re-read the kept records when their dir moved, or a death may have gone unseen.
+
+        Returns whether the set of names or any of their liveness changed.
+        """
+        moved = self._changed("keep", self.cfg.state_dir / "keep")
+        if not moved and now - self._kept_at < KEEP_RECHECK_S:
+            return False
+        self._kept_at = now
+        before = [(r.name, r.alive) for r in self.kept]
+        self.kept = load_kept(self.cfg)
+        return moved or before != [(r.name, r.alive) for r in self.kept]
 
     @property
     def epoch(self) -> float | None:

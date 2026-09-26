@@ -93,7 +93,7 @@ def test_the_destructive_set_names_only_real_commands():
 def test_the_destructive_set_is_exactly_the_commands_that_lose_work():
     assert set(cm.DESTRUCTIVE) == {
         "down", "finish", "free", "skip", "done", "retry", "integrate",
-        "operator-done", "gc", "reset",
+        "operator-done", "gc", "reset", "keep",
     }
     for harmless in ("status", "why", "report", "doctor", "pause", "resume",
                      "layout", "reload", "launch", "check", "context", "note"):

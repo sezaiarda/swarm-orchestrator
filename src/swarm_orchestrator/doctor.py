@@ -44,6 +44,7 @@ from pathlib import Path
 
 from . import gc as gc_mod
 from . import gitq
+from . import keep as keep_mod
 from . import ledger as ledger_mod
 from . import opqueue
 from . import pushowed
@@ -1263,7 +1264,29 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_prompts())
     checks.append(_check_web(cfg, st))
     checks.append(_check_tgbot(cfg, st))
+    checks.append(_check_kept(cfg))
     return checks
+
+
+def _check_kept(cfg: Config, now: float | None = None) -> Check:
+    """What ``swarm keep`` left running: listed, and a WARN once one is old.
+
+    Never a FAIL — keeping it was a decision — but nothing may linger forever
+    unnoticed: past :data:`keep.STALE_S` the owner is asked to look."""
+    recs = keep_mod.load_all(cfg)
+    if not recs:
+        return Check("keep", OK, "nothing kept running")
+    now = time.time() if now is None else now
+    alive = [r for r in recs if r.alive]
+    stale = [r for r in alive if r.age_s(now) >= keep_mod.STALE_S]
+    detail = "; ".join(keep_mod.line(r, now) for r in recs)
+    if stale:
+        return Check(
+            "keep", WARN,
+            f"{len(stale)} kept process(es) older than {keep_mod.STALE_S // 86400} days: {detail}",
+            "; ".join(r.stop_cmd for r in stale) + "  # if no longer needed",
+        )
+    return Check("keep", OK, f"{len(alive)} alive, {len(recs) - len(alive)} dead: {detail}")
 
 
 def worst(checks: list[Check]) -> str:

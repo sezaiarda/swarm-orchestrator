@@ -198,9 +198,16 @@ worktree isolation, it works in the project itself.
 
 **What it decides:** how to carry out the brief. It first checks whether a later
 phase or you already did the work. It narrates each action and prefers the step
-it can undo. It ends with `swarm operator-done <job> "<outcome>"`. That pings you
-only when the session adds `--attention`: you must act, something the brief
-asked for is not done or still owed, or a check came back bad. Every other
+it can undo. It ends with `swarm operator-done <job> "<outcome>"`. When the
+session adds `--attention` (you must act, something the brief asked for is not
+done or still owed, or a check came back bad) or `--ask "<question>"` (a decision
+only you can make), it opens an ask: a window of its own, opened once the job's
+work has landed, that shows you the outcome and asks; its one ping carries the
+question and where to answer. Your answer is recorded as your decision on the
+job's phase, and follow-up work is queued with `swarm operator-add`. On
+earlier versions `--attention` was only a "needs you" ping, sent as the session ended;
+you had to look in the operator pane for the next job, and there was no
+question anywhere. Every other
 outcome is recorded (on the job, in `notifications.jsonl` marked `suppressed`,
 on the dashboard) and reaches you in the Overseer's next summary, which lists
 every operator job finished since its last pass. `[operator].notify = "all"`
@@ -721,7 +728,7 @@ a project document names another script (a `notify.sh`, say). A message
 sent that way would not come from the swarm's own bot and would not be logged.
 An operator's result that needs you
 (a URL to open, something only you can do) goes in its `operator-done` outcome
-with `--attention`.
+with `--attention`, and a decision with `--ask "<question>"`; either opens an ask.
 
 **What pings you.** Only necessary messages ring, so by default
 (`[telegram].pings = "necessary"`) the phone rings only for these:

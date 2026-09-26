@@ -41,10 +41,12 @@ every other claim uses and therefore correct across processes.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import time
 from pathlib import Path
 
+from . import ask as ask_mod
 from . import gitq
 from . import launch as launch_mod
 from . import opqueue
@@ -186,7 +188,9 @@ def brief(cfg: Config, item: opqueue.Item, cwd: Path | None = None) -> str:
         f" `--attention` only if the owner must act, something is still owed or a"
         f" check came back bad (see the prompt); if you hit"
         f' a genuine decision run `swarm operator-ask {job} "<question>"`, ask it'
-        f" with AskUserQuestion, then `swarm operator-resumed {job} \"<answer>\"`."
+        f" with AskUserQuestion, then `swarm operator-resumed {job} \"<answer>\"`;"
+        " a decision about what happens after the job ends goes in"
+        ' `--ask "<question>"` on operator-done, never inside the outcome line.'
     )
 
 
@@ -296,11 +300,85 @@ def integration_for(cfg: Config, job: str) -> str | None:
     """
     if cfg.git_isolation != "worktree":
         return None
-    item = opqueue.load(cfg, job)
-    name = item.mirror if item is not None and item.mirror else mirror_name(job)
+    name = job_mirror(cfg, job)
     if not gitq.branch_exists(cfg.project_dir, f"swarm/{name}"):
         return None
     return name
+
+
+def job_mirror(cfg: Config, job: str) -> str:
+    """The mirror name ``job`` works (or worked) in: its record's, else the default."""
+    item = opqueue.load(cfg, job)
+    return item.mirror if item is not None and item.mirror else mirror_name(job)
+
+
+def landing(cfg: Config, st: state_mod.State, job: str) -> bool:
+    """Is ``job``'s session still live, or its mirror still on its way to main?
+
+    An ask the job opened waits for this to clear, as a worker's waits for its
+    phase to land: the ask's mirror branches from main, and what the owner is
+    shown (and the rows the ask edits) must already be there.
+    """
+    return st.operator_phase == job or _in_flight(st, job_mirror(cfg, job))
+
+
+# -- a job that ends needing the owner ------------------------------------
+def ask_name(job: str) -> str:
+    """The ask a finished job opens for the owner: ``op-<job>``, ask-safe."""
+    return re.sub(r"[^A-Za-z0-9_-]", "-", mirror_name(job))[:48]
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _ask_brief(item: opqueue.Item, question: str) -> str:
+    row = opqueue.owning_phase(item.phase)
+    put = question or (
+        "the operator did not phrase one. Read its outcome below, work out what the"
+        " owner has to decide or do, and ask exactly that."
+    )
+    return (
+        f"Operator job {item.phase} has finished, and its outcome needs the owner. Its"
+        " session has ended and the operator window has moved on to other jobs, so this"
+        " window is the only place the owner answers it.\n\n"
+        f"The question: {put}\n\n"
+        f"The operator's outcome, in full: {item.outcome or '(none given)'}\n\n"
+        f"The job it was doing: {item.note or '(no brief)'}\n\n"
+        f"Once the owner has answered, record the answer on row {row} (see the ask"
+        " prompt's section on asks opened by an operator job). If acting on the answer"
+        " needs work (a run, a deploy, a check, a fix), do not do it here: queue it with"
+        f' `swarm operator-add "<what to do, with the owner\'s answer in it>" --phase {row}`'
+        " and name that job in your ask-done outcome. The ask-done outcome is recorded as"
+        " the owner's decision, so lead it with their answer."
+    )
+
+
+def ask_owner(cfg: Config, item: opqueue.Item, question: str = "") -> ask_mod.Ask:
+    """Open an ask for a finished job whose outcome needs the owner.
+
+    ``operator-done --attention`` alone would be a Telegram line and nothing else:
+    "operator job api-W5 needs you", sent as its session ended. The operator
+    pane is reused for the next job, so the owner, going there to
+    answer, would meet a worker that rightly knew of nothing to ask; ``swarm ask
+    --list`` would say "no asks". An outcome that needs the owner therefore ends in
+    an ask: a window of its own that waits for them, shows them the outcome and
+    asks the question, whose one ping says what is asked and where to answer.
+    With no question put (``--attention`` alone) the ask session works it out
+    from the outcome. Raises :class:`ask.AskError` (an open ask of that name
+    whose window is alive).
+    """
+    question = " ".join((question or "").split())
+    head = question or (
+        f"Operator job {item.phase} left this for you: {item.outcome or '(no outcome given)'}"
+    )
+    ask, _ = ask_mod.create(
+        cfg, ask_name(item.phase), [opqueue.owning_phase(item.phase)],
+        _clip(head, ask_mod.WHY_MAX), _ask_brief(item, question),
+        by=f"operator:{item.phase}", question=head,
+    )
+    return ask
 
 
 #: What :func:`mirror_plan` asks ``swarm up``'s reconcile to do with a mirror.

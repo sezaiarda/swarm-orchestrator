@@ -76,7 +76,7 @@ Where the owner answers review questions: a session in its own tmux window,
 | `operator <phase>` | Open an operator session for a phase's hand-off now (or the moment the phase merges, if it has not yet), overriding a `later` triage. Builds the job from its sentinel if needed. |
 | `operator-add "brief" [--phase P]` | Queue an ad-hoc job. |
 | `operator-triage <job>` | Decide `now` or `later` for a queued job. `swarm done` spawns it. |
-| `operator-done <job> ["outcome"]` | The session is finished. Records and telegrams the outcome, merges its mirror. |
+| `operator-done <job> ["outcome"] [--attention] [--ask "question"]` | The session is finished. Records the outcome, merges its mirror. `--attention` or `--ask` opens an ask window where the owner answers (its ping carries the question). |
 | `operator-ask <job> "question"` | Ping the owner and keep the session alive while it asks. |
 | `operator-resumed <job> ["answer"]` | The owner answered. Records the answer, back to a normal lease. |
 

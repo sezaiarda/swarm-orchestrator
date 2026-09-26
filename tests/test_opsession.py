@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from swarm_orchestrator import ask as ask_mod
 from swarm_orchestrator import notes as notes_mod
 from swarm_orchestrator import operator as operator_mod
 from swarm_orchestrator import opqueue, promptlint
@@ -497,7 +498,10 @@ def test_a_routine_operator_outcome_is_recorded_but_pings_nobody(cfg, log):
     assert "not pinged" in result.stdout
 
 
-def test_an_outcome_flagged_for_attention_pings_one_line(cfg, log):
+def test_an_outcome_flagged_for_attention_becomes_an_ask(cfg, log):
+    """Its one ping is the ask's, when the window opens (tests/test_operator_owner_ask.py):
+    a "needs you" line sent as the session ended pointed at a pane already
+    running the next job."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
@@ -505,10 +509,11 @@ def test_an_outcome_flagged_for_attention_pings_one_line(cfg, log):
 
     assert result.returncode == 0, result.stderr
     assert opqueue.load(cfg, PHASE).attention is True
-    [line] = tg_lines(cfg)
-    assert PHASE in line and "api-F26 NOT rolled; roll owed" in line
+    assert ask_mod.load(cfg, operator_mod.ask_name(PHASE)).is_open
+    assert tg_lines(cfg) == []
     [row] = ledger_rows(cfg)
-    assert row["delivered"] is True and "suppressed" not in row
+    assert row["delivered"] is False and "window ask:" in row["suppressed"]
+    assert "api-F26 NOT rolled; roll owed" in row["text"]
 
 
 def test_notify_all_pings_every_outcome(cfg, log, monkeypatch):

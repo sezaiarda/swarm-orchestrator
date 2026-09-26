@@ -42,6 +42,9 @@ Go through the digest and ask, in this order:
   that is a review or pick the owner makes at a keyboard (choose a layout, pick
   between options), open an ask (below). Leave the physical ones — something to
   try by hand, something on a real device — and name them in your summary.
+- **Did an answer go unacted on?** The digest lists the asks the owner answered
+  since the last pass. Where an answer needs work nobody has queued (no follow-up
+  operator job, the row not recorded), queue it with `swarm operator-add`.
 - **What did the finished phases leave behind?** A risk a worker noted, a
   decision that needs a follow-up row, a verification nobody scheduled, a
   deploy that still has to happen.

@@ -639,39 +639,75 @@ def _operator_done_hold(mode: str, attention: bool) -> str | None:
 
 
 def cmd_operator_done(
-    cfg: Config, phase: str, outcome: str = "", attention: bool = False
+    cfg: Config, phase: str, outcome: str = "", attention: bool = False,
+    question: str = "",
 ) -> int:
     """The session signals its job is finished, with a one-line outcome.
 
     The outcome is recorded on the item, in the notification ledger and in the
-    next Overseer digest. It reaches the owner's phone only when it needs them
-    (``--attention``) unless ``[operator].notify`` says otherwise: routine
-    outcomes arrive folded into the Overseer's summary instead.
+    next Overseer digest. Routine outcomes arrive folded into the Overseer's
+    summary, unless ``[operator].notify`` says otherwise.
+
+    One that needs the owner (``--attention``, or ``--ask "<question>"``, which
+    implies it) opens an ask (:func:`operator.ask_owner`): the owner answers in
+    that window, and its one ping carries the question and where to answer it.
+    The outcome's own "needs you" line used to be the whole of it, sent as the
+    session ended, so an owner could go to answer one phase in an
+    operator pane already running a different phase and found no question anywhere.
     """
+    question = " ".join((question or "").split())
+    attention = attention or bool(question)
     item = opqueue.complete(cfg, phase, outcome, attention)
     if item is None:
         print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
         return 1
     tail = f" — {item.outcome}" if item.outcome else " (no outcome given)"
+    asked, failed = None, ""
+    if attention:
+        try:
+            asked = operator_mod.ask_owner(cfg, item, question)
+        except ask_mod.AskError as exc:
+            failed = str(exc)
     mode = cfg.operator_notify
     if mode == "attention" and telegram.sends_all(cfg):
         mode = "all"  # `[telegram].pings = "all"` restores every ping, this one too
-    hold = _operator_done_hold(mode, attention)
+    if asked is not None:
+        # One ping, not two: the ask's, sent when its window opens, which says
+        # what is asked and where. This line saying "needs you" beside it would
+        # point at a session that has already ended.
+        hold = f"its question goes out when window {asked.window} opens"
+        head = f"swarm: operator job {phase} done, question opened in {asked.window}"
+    elif attention:
+        hold = _operator_done_hold(mode, attention)
+        head = (f"swarm: operator job {phase} needs you, but no question window could"
+                f" open ({failed}); its session has ended")
+    else:
+        hold = _operator_done_hold(mode, attention)
+        head = f"swarm: operator job {phase} done"
     telegram.notify(
         cfg.telegram_notify,
-        f"swarm: operator job {phase} {'needs you' if attention else 'done'}{tail}",
+        f"{head}{tail}",
         kind="operator-done",
         phase=phase,
         source="cli.operator-done",
         state_dir=cfg.state_dir,
         suppressed=hold,
     )
+    # The ask is poked before the job's end: the end respawns this very pane,
+    # and a poke that never leaves would leave the question unopened until the
+    # next `swarm up`. The supervisor holds it until the job's work has landed.
+    ask_heard = _poke(cfg, f"ask-open {asked.name}") if asked is not None else False
     # The item is settled whatever happens next; only the session's own lease
     # (and, under worktree isolation, the merge of its mirror) rides on the
     # poke, and a lost one holds the lease until it expires. Say so.
     heard = _poke(cfg, f"operator-done {phase}")
     print(f"operator-done {phase}")
-    print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
+    if asked is not None:
+        print(f"  owner: asked in window {asked.window} (`swarm ask --list`):"
+              f" {asked.question}")
+        print(f"  question: {'opens once this job has landed, then pings the owner once' if ask_heard else 'opens at the next swarm up'}")
+    else:
+        print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
     print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
     return 0
 
@@ -1246,6 +1282,12 @@ def cmd_ask_done(cfg: Config, name: str, outcome: str = "", stop_keeps: list[str
     if ask is None:
         print(f"swarm ask-done: no open ask {name}", file=sys.stderr)
         return 1
+    job = ask_mod.opened_by_operator(ask)
+    # An operator job's question: the answer is the owner's decision on the
+    # job's phase, in the run's history beside what the job itself reported.
+    if job and notes_mod.owner_answer(cfg, opqueue.owning_phase(job), ask.outcome,
+                                      ask.question or ask.why):
+        print("  recorded as an owner decision (`swarm report --decisions`)")
     for keep in stop_keeps:
         rec = keep_mod.stop(cfg, keep)
         if rec is None:
@@ -1946,10 +1988,14 @@ def _build_parser() -> argparse.ArgumentParser:
     odp.add_argument("outcome", nargs="*", help="one line: what was done or skipped")
     odp.add_argument(
         "--attention", action="store_true",
-        help="ping the owner: they must act, something is still owed, or a check failed")
+        help="the owner must act, something is still owed, or a check failed:"
+             " opens an ask window for them")
+    odp.add_argument(
+        "--ask", dest="question", default="", metavar="QUESTION",
+        help="a decision only the owner can make: opens an ask window that puts it to them")
     odp.set_defaults(
         func=lambda cfg, a: cmd_operator_done(
-            cfg, a.phase, " ".join(a.outcome), a.attention),
+            cfg, a.phase, " ".join(a.outcome), a.attention, a.question),
         tolerant=True)
 
     oap = sub.add_parser(

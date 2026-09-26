@@ -66,6 +66,27 @@ edit there; the swarm merges it into main through its ordinary queue when you ru
 **project itself**, commit there right away, on the branch it has checked out,
 and push the way the project's rules say a worker does. Never create branches.
 
+## An ask opened by an operator job
+
+If your brief says an operator job opened this ask, the question is not a pick
+between mockups but a decision the job's outcome left for the owner. The job's
+session has ended; you are the only place the owner answers it.
+
+- **Ask it.** Show the owner, in plain words, what the job found (its outcome is
+  in your brief), then put the question with AskUserQuestion as above. If the
+  brief gives no question, work out from the outcome what the owner must decide
+  or do and ask exactly that; when all they need is to look at something, show
+  it and ask whether it is right.
+- **Record it** on the row your brief names, as a continuation line:
+  `Owner's call (<YYYY-MM-DD>): <the answer>`. Tick it only when the answer
+  itself completes the row, following the command file's rules.
+- **Hand the work on.** If acting on the answer needs work — a run on a server, a
+  deploy, a check, a fix — do not do it here. Queue it with
+  `swarm operator-add "<what to do, with the owner's answer in it>" --phase <row>`,
+  written so a colleague can act on it alone, and name that job in your outcome.
+- Lead your `ask-done` outcome with the owner's answer: it is recorded as their
+  decision on the row.
+
 ## 4. Finish
 
 Run, as your last action:

@@ -106,9 +106,17 @@ outcome. Ask the owner only when the choice is genuinely theirs:
 - it spends money;
 - it is a matter of taste or product direction;
 - it destroys data that cannot be recovered;
-- it contradicts something the owner has decided in writing.
+- it contradicts something the owner has decided in writing;
+- it settles what counts as done — a target, a threshold, whether a result
+  passes — that the brief and the project's documents leave open.
 
-To ask, run
+**A decision always goes to the owner as a question, never inside an outcome
+line.** The owner answers only through a question window; a call written into
+your outcome ("closing the row needs a call on X") reaches them as a ping with
+nowhere to answer, because by then your session has ended and the operator
+window is running another job.
+
+If you need the answer to finish this job, ask it now, while you are here. Run
 
     swarm operator-ask <job> "<question>"
 
@@ -124,6 +132,21 @@ and carry on. Always pass the answer: it is recorded in the run's history as the
 owner's decision, next to the job — without it the history says you asked and
 never what they said. Nobody else will answer: questions go to the owner, not to
 the swarm.
+
+If the job is otherwise finished and the decision is about what happens next
+(it can wait for the owner without holding this session and the operator window
+for hours), finish with the question instead:
+
+    swarm operator-done <job> "<one-line outcome>" --ask "<the question>"
+
+That opens an ask: a window of its own that waits for the owner once your work
+has landed, shows them your outcome, puts the question with AskUserQuestion and
+records the answer; its one ping carries your question and where to answer it.
+Write the question the way you would ask it here: plain product terms, one
+screen, the decision first, then the options with what each one means, the one
+you recommend first, for example "row X passed 9 of 10 checks and the last one
+needs a nightly run. Count it as passed (the row closes), or wait for the next
+nightly run (the row stays open a day)?".
 
 ## When the owner must review something
 
@@ -156,7 +179,7 @@ first.
 
 **It does not ping the owner.** It stays quiet by default, so routine outcomes do not pile up.
 The outcome is recorded, and the Overseer's next summary
-mentions it. Add `--attention` to ping them, and only when:
+mentions it. Add `--attention` only when:
 
 - the owner must do something, or look at something — a URL, a page, anything
   you started for them with `swarm keep`;
@@ -164,6 +187,12 @@ mentions it. Add `--attention` to ping them, and only when:
 - a check came back bad.
 
     swarm operator-done <job> "<one-line outcome>" --attention
+
+`--attention` opens an ask window too, because the owner answers only there;
+with no question given, that session works out from your outcome what to put to
+them. So when there is a decision in it, name it yourself with
+`--ask "<the question>"` (see *Asking the owner*) — never leave it inside the
+outcome line for someone to find.
 
 "Already done, nothing to do" and "done and verified" never get `--attention`.
 

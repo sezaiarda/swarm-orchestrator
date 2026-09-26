@@ -22,6 +22,16 @@ Its one Telegram ping goes out when its window opens. While one is open the run
 does not finish: it waits on the owner, the way a parked phase does. ``swarm
 down`` ends the session like every other; ``swarm up`` opens every ask that was
 open and not done again, with the same brief, from its record.
+
+An operator job whose outcome needs the owner opens one too, from
+``swarm operator-done --ask/--attention`` (:func:`operator.ask_owner`). On
+completion, an outcome can embed a call only the owner can make; the
+Telegram said "operator job needs you", but the operator pane could be reused
+for another phase, and asking there would find nothing pending:
+no question existed anywhere. Such an ask is ``by="operator:<job>"``,
+opens once the job's work has landed, carries the full question in
+:attr:`Ask.question` for its ping, and its answer is recorded as the owner's
+decision on the job's phase when it is done.
 """
 
 from __future__ import annotations
@@ -93,6 +103,9 @@ class Ask:
     attention: bool = False
     done_at: float = 0.0
     stop_keeps: list[str] = field(default_factory=list)
+    #: The full question, when one was put (an operator job's): the ping carries
+    #: it rather than the one-line ``why`` it is cut to.
+    question: str = ""
 
     @property
     def window(self) -> str:
@@ -232,7 +245,8 @@ def check(name: str, rows: list[str], why: str, brief: str) -> tuple[str, str]:
 
 
 def create(cfg: Config, name: str, rows: list[str], why: str, brief: str,
-           by: str | None = None, now: float | None = None) -> tuple[Ask, bool]:
+           by: str | None = None, now: float | None = None,
+           question: str = "") -> tuple[Ask, bool]:
     """Record an ask, ``(ask, reopened)``. Raises :class:`AskError`.
 
     A name that is open with its window alive is refused. One that is open with
@@ -255,7 +269,8 @@ def create(cfg: Config, name: str, rows: list[str], why: str, brief: str,
                   by=by or who(), opened_at=old.opened_at if reopened else now,
                   session=(old.session if reopened else "") or cfg.session,
                   mirror=old.mirror if reopened else "",
-                  pinged=old.pinged if reopened else False)
+                  pinged=old.pinged if reopened else False,
+                  question=" ".join((question or "").split()))
         _write(cfg, ask)
     return ask, reopened
 
@@ -287,6 +302,12 @@ def opened_by_phase(ask: Ask) -> str | None:
     """The phase whose worker opened ``ask``, or ``None`` (anyone else)."""
     kind, _, ident = (ask.by or "").partition(":")
     return ident if kind == "worker" and ident else None
+
+
+def opened_by_operator(ask: Ask) -> str | None:
+    """The operator job that opened ``ask``, or ``None`` (anyone else)."""
+    kind, _, ident = (ask.by or "").partition(":")
+    return ident if kind == "operator" and ident else None
 
 
 def rows_text(rows: list[str]) -> str:
@@ -488,7 +509,8 @@ def ping_once(cfg: Config, name: str, failure: str = "") -> bool:
     else:
         head = (f"swarm: {rows_text(ask.rows)} {verb} on you: answer in tmux window"
                 f" {ask.window} (`tmux attach -t {session}`)")
-    telegram.notify(cfg.telegram_notify, f"{head}\n{ask.why}", kind="ask", phase=name,
+    what = launch_mod.ping_question(ask.question) if ask.question else ask.why
+    telegram.notify(cfg.telegram_notify, f"{head}\n{what}", kind="ask", phase=name,
                     source="ask.open_session", state_dir=cfg.state_dir)
     return True
 

@@ -180,6 +180,24 @@ def operator_outcomes(items: list[opqueue.Item], since: float) -> list[dict]:
     ]
 
 
+def answered_asks(cfg: Config, since: float) -> list[dict]:
+    """Every ask answered since ``since``, newest first.
+
+    What the operator said has to reach something that acts on it. An ask session
+    queues the follow-up work itself (``swarm operator-add``), but an answer
+    that session left unacted on would otherwise be read by nobody: the Overseer
+    sees each one here and picks up what is still owed.
+    """
+    done = [a for a in ask_mod.load_all(cfg) if not a.is_open and a.done_at >= since]
+    done.sort(key=lambda a: -a.done_at)
+    return [
+        {"name": a.name, "rows": list(a.rows), "by": a.by, "at": a.done_at,
+         "attention": a.attention, "question": (a.question or a.why)[:300],
+         "outcome": a.outcome[:400]}
+        for a in done[:MAX_OUTCOMES]
+    ]
+
+
 def operator_summary(cfg: Config, st: State, since: float = 0.0) -> dict:
     items = opqueue.load_all(cfg)
     counts = {k: sum(1 for i in items if i.state == k) for k in opqueue.STATES}
@@ -273,6 +291,7 @@ def build(
         "finished": finished_since(cfg, st, since),
         "failures": failures(cfg, st),
         "owner": owner_questions(cfg, st, now),
+        "answered": answered_asks(cfg, since),
         # Owner-run rows whose dependencies have landed and that no open ask
         # names: open an ask for the ones the owner answers at a keyboard.
         "owner_run_unasked": unasked,
@@ -369,6 +388,18 @@ def render(d: dict) -> str:
         f"- {q['who']} ({q['state']}, {_age(q['age_s'])}): {q['question'] or '(question not recorded)'}"
         for q in d["owner"]
     ] or ["- nobody"]
+
+    answered = d.get("answered") or []
+    out += ["", f"## Asks the owner answered since {since} ({len(answered)})"]
+    if answered:
+        out.append("Check each answer was acted on (a row recorded, a follow-up job"
+                   " queued); queue what is still owed with `swarm operator-add`.")
+    for a in answered:
+        mark = "**[needs the owner]** " if a["attention"] else ""
+        out.append(f"- {mark}{a['name']} ({', '.join(a['rows'])}, by {a['by']}):"
+                   f" asked {a['question']} — answered: {a['outcome'] or '(no outcome given)'}")
+    if not answered:
+        out.append("- none")
 
     unasked = d.get("owner_run_unasked") or []
     out += ["", f"## Owner-run rows ready, no ask open ({len(unasked)})"]

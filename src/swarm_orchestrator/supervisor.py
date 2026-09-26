@@ -682,6 +682,7 @@ class Supervisor:
                     # An operator job's mirror, not a ledger phase: its work is
                     # landed, and there is nothing to record done or free.
                     self.log.line(f"OPERATOR-INTEGRATED {phase}")
+                    self._open_operator_asks(mirror=phase)
                 elif status == ask_mod.INTEG_STATUS:
                     # An ask's mirror: the owner's picks and ticks are on main
                     # now, and a ticked owner-run row can release its dependents.
@@ -827,9 +828,22 @@ class Supervisor:
         if mirror is not None:
             with state_mod.transaction(self.cfg) as st:
                 st.integ_push(mirror, operator_mod.INTEG_STATUS)
-            self._pump_integrations()
+            self._pump_integrations()  # its merge opens the job's asks
+        else:
+            self._open_operator_asks(job=phase)  # nothing to land: open them now
         self._check_operator_queue()  # next hand-off, if one is due
         self._finish_if_settled(state_mod.read(self.cfg))
+
+    def _open_operator_asks(self, *, job: str | None = None, mirror: str | None = None) -> None:
+        """Open the asks an operator job left for the owner, now its work has
+        landed: by the job, or by the mirror that just merged. Each was held by
+        :meth:`_on_ask_open` while the job ran and its mirror merged."""
+        for ask in ask_mod.open_asks(self.cfg):
+            owner = ask_mod.opened_by_operator(ask)
+            if not owner or ask.window_at:
+                continue
+            if owner == job or (mirror and operator_mod.job_mirror(self.cfg, owner) == mirror):
+                self._on_ask_open(ask.name, f"operator job {owner} landed")
 
     def _check_operator_queue(self) -> None:
         """Drain the operator queue. Runs on every wake, like the park deadlines.
@@ -875,11 +889,19 @@ class Supervisor:
         An ask a worker opened before its own ``swarm done`` waits for that
         phase to land, as an operator hand-off does: its mirror branches from
         main, and what the owner reviews (and the rows it edits) must be there.
-        :meth:`_advance_done` opens it then."""
+        :meth:`_advance_done` opens it then. An operator job's ask waits the same
+        way for the job's own end and merge (:meth:`_open_operator_asks`)."""
         ask = ask_mod.load(self.cfg, name)
         phase = ask_mod.opened_by_phase(ask) if ask is not None else None
         if phase and operator_mod._in_flight(state_mod.read(self.cfg), phase):
             self.log.line(f"ASK-HELD {name} until {phase} lands")
+            return
+        # The same for an operator job's ask (`operator-done --ask/--attention`):
+        # it waits for the job to end and its mirror to merge, then
+        # :meth:`_open_operator_asks` opens it.
+        job = ask_mod.opened_by_operator(ask) if ask is not None else None
+        if job and operator_mod.landing(self.cfg, state_mod.read(self.cfg), job):
+            self.log.line(f"ASK-HELD {name} until operator job {job} lands")
             return
         with self._ask_lock:
             if name in self._asks_opening:

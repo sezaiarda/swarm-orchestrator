@@ -252,9 +252,10 @@ flowchart TD
   one job runs at a time, under a lease: 1 h, or 7 days while it waits on you. A
   job gets 3 attempts 5 minutes apart. After that it is `abandoned` and you are
   told once. Under worktree isolation it works in its own mirror (`op-<job>`),
-  merged on `operator-done`. Its outcome pings you only when the session flags it
-  `--attention` (you must act, something is still owed, a check failed); the
-  rest reach you folded into the Overseer's summary (`[operator].notify`).
+  merged on `operator-done`. An outcome that needs you (`--attention`, or
+  `--ask "<question>"` for a decision) opens an ask window where you answer, once
+  the job has landed, and its one ping says what is asked and where; the rest
+  reach you folded into the Overseer's summary (`[operator].notify`).
 - **Decides:** how to do the job. It checks first whether the work is already
   done, narrates each action, and prefers the step it can undo.
 - **May not:**
@@ -271,7 +272,7 @@ stateDiagram-v2
   Queued --> Running: dispatched (lease 1 h, attempt +1)
   Running --> Waiting: operator-ask (owner pinged, lease 7 days)
   Waiting --> Running: operator-resumed
-  Running --> Done: operator-done (pinged only with --attention)
+  Running --> Done: operator-done (--attention/--ask opens an ask)
   Running --> Queued: lease expired or session would not start<br/>(eligible again after 5 min)
   Running --> Queued: swarm up (the old run is gone)
   Waiting --> Queued: swarm up

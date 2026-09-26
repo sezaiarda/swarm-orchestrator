@@ -82,6 +82,7 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 |---|---|---|---|---|
 | `session` | the project folder name, slugified | `SWARM_SESSION` | restart | The tmux session name. |
 | `layout` | `"auto"` | `SWARM_LAYOUT` | hot | How worker windows arrange their panes. `auto` gives one pane the full window, puts two side by side, and tiles three or four. The others are `even-horizontal` (aliases `side-by-side`, `left-right`, `columns`), `even-vertical` (aliases `top-bottom`, `stacked`, `rows`), `tiled` (alias `grid`), `main-horizontal` and `main-vertical`. An unknown name fails the load. `swarm layout <name>` changes it live, and a layout set that way wins over a reload until the next `swarm up`. |
+| `panes_per_window` | `4` | `SWARM_PANES_PER_WINDOW` | restart | Worker panes per tmux window. More slots page into further windows: `workers`, `workers-2`, …. At 2, five workers are 2, 2 and 1; three are 2 and 1. At least 1 (a lower value counts as 1). Restart, because the windows are paged at `swarm up`. |
 
 ## `[tui]`
 

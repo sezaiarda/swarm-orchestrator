@@ -482,7 +482,9 @@ nine tabs, switched with `1`–`9`, are:
   (applied now), *next* (reaches the next session launched) or *restart*
   (refused). A file that does not parse changes nothing.
 - **`swarm layout <name>`:** re-arranges the worker panes live (`auto`,
-  `side-by-side`, `top-bottom`, `tiled`, …).
+  `side-by-side`, `top-bottom`, `tiled`, …). Each worker window holds at most
+  `[tmux].panes_per_window` panes (4 by default); more slots page into
+  `workers-2`, `workers-3`, …, so 5 workers at 2 per window are 2, 2 and 1.
 - **`swarm check`:** a preflight covering the Telegram sender, the ledger, and
   **promptlint**. Promptlint flags sentences in your worker command or the
   shipped prompts that the code has made false (for example a subcommand that
@@ -664,7 +666,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 - `[worker]`: the worker command, settings, effort, parking;
 - `[tasks]`: the ledger, exclusions;
 - `[telegram]`;
-- `[tmux]`: the session name, the layout;
+- `[tmux]`: the session name, the layout, worker panes per window;
 - `[tui]`;
 - `[git]`: isolation, main branch, repos, `auto_resolve`;
 - `[build]`: the gate, the jobs cap, the target cache;

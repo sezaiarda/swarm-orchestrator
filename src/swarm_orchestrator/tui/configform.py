@@ -421,6 +421,8 @@ FIELDS: tuple[Setting, ...] = (
     Setting("tmux_layout", CHOICE,
             "pane arrangement (auto = 1 full/2 cols/3+ tiled)",
             choices=tuple(LAYOUTS)),
+    Setting("tmux_panes_per_window", INT, "worker panes per window before workers-2",
+            minimum=1),
     # -- [build] ----------------------------------------------------------
     Setting("build_max_concurrent", INT,
             "concurrent heavy `swarm build` runs; rest queue", minimum=0),

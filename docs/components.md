@@ -611,8 +611,9 @@ none is ever answered twice.
 Every key is classed as *hot* (applied now), *next* (reaches the next session
 launched) or *restart* (refused and held). A key that a `SWARM_*` variable
 shadows is reported as such. A file that does not parse changes nothing. Growing
-`max_workers` adds panes. Shrinking it retires the surplus slots once they are
-free.
+`max_workers` adds panes, filling the last worker window up to
+`[tmux].panes_per_window` before opening the next `workers-N`. Shrinking it
+retires the surplus slots once they are free.
 
 **`swarm layout [name]`** re-arranges the worker panes live. The choices are
 `auto`, `side-by-side`, `top-bottom`, `tiled`, `main-vertical` and the rest. With

@@ -70,6 +70,7 @@ class Config:
     tui_cmd: str
     session: str
     tmux_layout: str
+    tmux_panes_per_window: int
     driver: str
     master_cmd: str
     resolver_cmd: str
@@ -308,6 +309,10 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # it live for the running session; this is the boot default.
         tmux_layout=normalize_layout(
             str(os.environ.get("SWARM_LAYOUT", tmux.get("layout", AUTO_LAYOUT)))
+        ),
+        # Worker panes per tmux window before the grid pages to `workers-2`, ….
+        tmux_panes_per_window=_int_env(
+            "SWARM_PANES_PER_WINDOW", tmux.get("panes_per_window"), 4, minimum=1
         ),
         driver=driver,
         master_cmd=os.environ.get("SWARM_MASTER_CMD", swarm.get("master_cmd", "")),

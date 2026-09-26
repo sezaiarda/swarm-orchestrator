@@ -114,6 +114,11 @@ POLICY: dict[str, Policy] = {
         _p("session", "[tmux]", "session", RESTART, "SWARM_SESSION",
            "every pane and window id recorded in state.json belongs to the old"
            " tmux session"),
+        _p("tmux_panes_per_window", "[tmux]", "panes_per_window", RESTART,
+           "SWARM_PANES_PER_WINDOW",
+           "the worker windows were paged at `swarm up`; a slot added later"
+           " would follow a different page size than the panes already there",
+           numeric=True),
         _p("git_isolation", "[git]", "isolation", RESTART, "SWARM_GIT_ISOLATION",
            "live worktrees and a populated merge queue only make sense under the"
            " isolation mode that created them"),

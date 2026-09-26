@@ -9,6 +9,8 @@ tmux server.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +45,108 @@ def test_plan_worker_windows_sums_to_total():
 
 def test_plan_worker_windows_zero():
     assert plan_worker_windows(0) == []
+
+
+@pytest.mark.parametrize(
+    "total, per_window, expected",
+    [
+        (5, 2, [("workers", 2), ("workers-2", 2), ("workers-3", 1)]),
+        (3, 2, [("workers", 2), ("workers-2", 1)]),
+        (2, 2, [("workers", 2)]),
+        (3, 1, [("workers", 1), ("workers-2", 1), ("workers-3", 1)]),
+        (5, 4, [("workers", 4), ("workers-2", 1)]),
+        (2, 0, [("workers", 1), ("workers-2", 1)]),  # never below one per window
+    ],
+)
+def test_plan_worker_windows_per_window(total, per_window, expected):
+    assert plan_worker_windows(total, per_window) == expected
+
+
+def test_config_panes_per_window_default_file_env_and_floor(tmp_path, monkeypatch):
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("SWARM_PANES_PER_WINDOW", raising=False)
+    assert config_mod.load(project_dir=str(tmp_path)).tmux_panes_per_window == PANES_PER_WINDOW
+    (tmp_path / ".swarm.toml").write_text("[tmux]\npanes_per_window = 2\n", encoding="utf-8")
+    assert config_mod.load(project_dir=str(tmp_path)).tmux_panes_per_window == 2
+    monkeypatch.setenv("SWARM_PANES_PER_WINDOW", "3")
+    assert config_mod.load(project_dir=str(tmp_path)).tmux_panes_per_window == 3
+    monkeypatch.setenv("SWARM_PANES_PER_WINDOW", "0")
+    assert config_mod.load(project_dir=str(tmp_path)).tmux_panes_per_window == 1
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not available")
+def test_three_workers_at_two_per_window_live_tmux(tmp_path, monkeypatch):
+    """The multi-repo setting, on a real but fully isolated tmux server (own
+    TMUX_TMPDIR): 3 workers at 2 per window is `workers` (slots 0, 1) and
+    `workers-2` (slot 2); parking slot 2's worker keeps `workers-2` at one pane
+    with a replacement tagged 2; growing to 5 fills `workers-2` then opens
+    `workers-3`. The default server, and any live swarm on it, is never touched."""
+    from swarm_orchestrator import session as session_mod
+    from swarm_orchestrator import state as state_mod
+    from swarm_orchestrator.supervisor import Supervisor
+
+    sockdir = tempfile.mkdtemp(prefix="ppwprobe-")
+    monkeypatch.setenv("TMUX_TMPDIR", sockdir)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    for leak in ("SWARM_DRIVER", "SWARM_PANES_PER_WINDOW", "SWARM_SESSION", "SWARM_LAYOUT",
+                 "SWARM_GIT_ISOLATION", "SWARM_MASTER_CMD"):
+        monkeypatch.delenv(leak, raising=False)
+    monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".swarm.toml").write_text(
+        '[swarm]\nmax_workers = 3\ndriver = "tmux"\n'
+        '[tmux]\nsession = "ppwprobe"\npanes_per_window = 2\n'
+        "[web]\nenabled = false\n[tui]\nautostart = false\n",
+        encoding="utf-8",
+    )
+    cfg = config_mod.load(project_dir=str(project))
+    cfg.ensure_dirs()
+    state_mod.init_state(cfg)
+
+    def slots(win: str) -> list[str]:
+        return [s for _, s in tmux.list_panes_with_slot(win)]
+
+    try:
+        windows = session_mod.setup(cfg)
+        workers = [n for n in windows if n.startswith("workers")]
+        assert workers == ["workers", "workers-2"]
+        assert slots(windows["workers"]) == ["0", "1"]
+        assert slots(windows["workers-2"]) == ["2"]
+        st = state_mod.read(cfg)
+        assert [tmux.window_of(s.pane_id) for s in st.slots] == [
+            windows["workers"], windows["workers"], windows["workers-2"]]
+
+        # Park the worker in slot 2: its window keeps one pane, the replacement.
+        with state_mod.transaction(cfg) as s:
+            s.claim_slot("P2")  # slots 0 and 1 first
+            s.claim_slot("P3")
+            s.claim_slot("P4")
+            s.waiting["P4"] = 0.0
+            s.paused = True  # the park must not go on to launch anything
+        old = state_mod.read(cfg).slots[2].pane_id
+        sup = Supervisor(cfg)
+        try:
+            sup._park("P4")
+        finally:
+            sup.log.close()
+        st = state_mod.read(cfg)
+        assert "P4" in st.parked
+        assert st.slots[2].pane_id != old
+        assert tmux.list_panes(windows["workers-2"]) == [st.slots[2].pane_id]
+        assert slots(windows["workers-2"]) == ["2"]
+        assert slots(windows["workers"]) == ["0", "1"]
+        assert tmux.list_panes(st.windows["wait:P4"]) == [old]
+
+        # A live grow to five follows the same page size.
+        panes, grown, failed = session_mod.add_slot_panes(cfg, st.windows, [3, 4], cfg.tmux_layout)
+        assert failed == []
+        assert slots(grown["workers-2"]) == ["2", "3"]
+        assert slots(grown["workers-3"]) == ["4"]
+    finally:
+        tmux.run(["kill-server"])
+        shutil.rmtree(sockdir, ignore_errors=True)
 
 
 class _FakeTmux:

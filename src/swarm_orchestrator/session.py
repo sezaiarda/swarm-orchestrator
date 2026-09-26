@@ -5,7 +5,8 @@ Layout: window 0 ``dash`` (the always-on TUI dashboard), window 1 ``overseer``
 itself is detached and has no tty), window 2 ``operator`` (idle until a hand-off opens a session in it), then
 one or more worker windows tagged
 ``@swarm_slot 0..N-1`` across a GLOBAL slot index. Slots paginate into windows of
-at most :data:`PANES_PER_WINDOW` (``workers``, ``workers-2``, …), each laid out by
+at most ``[tmux].panes_per_window`` (default :data:`PANES_PER_WINDOW`; ``workers``,
+``workers-2``, …), each laid out by
 :func:`swarm_orchestrator.tmux.split_layout` per ``[tmux].layout`` (``auto`` = 1
 full pane / 2 LEFT|RIGHT / 3-4 tiled; or a pinned preset such as
 ``even-vertical`` for a TOP/BOTTOM stack). Windows are referenced by captured id everywhere downstream; slot pane ids
@@ -28,21 +29,26 @@ from . import tmux
 from .config import Config
 from .web import lifecycle as web_lifecycle
 
+#: The default of ``[tmux].panes_per_window``.
 PANES_PER_WINDOW = 4
 
 
-def plan_worker_windows(total: int) -> list[tuple[str, int]]:
-    """Split ``total`` worker slots into windows of at most ``PANES_PER_WINDOW``.
+def plan_worker_windows(
+    total: int, per_window: int = PANES_PER_WINDOW
+) -> list[tuple[str, int]]:
+    """Split ``total`` worker slots into windows of at most ``per_window`` panes.
 
     Returns ``[(window_name, pane_count), …]``: the first window is ``workers`` and
-    the rest ``workers-2``, ``workers-3``, … each holding ``min(4, remaining)``
-    panes. ``total <= 0`` yields no windows. Pure — no tmux side effects.
+    the rest ``workers-2``, ``workers-3``, … each holding
+    ``min(per_window, remaining)`` panes (5 at 2 per window: 2, 2, 1). ``total <= 0``
+    yields no windows. Pure — no tmux side effects.
     """
+    per_window = max(1, per_window)
     plan: list[tuple[str, int]] = []
     remaining = total
     k = 0
     while remaining > 0:
-        size = min(PANES_PER_WINDOW, remaining)
+        size = min(per_window, remaining)
         name = "workers" if k == 0 else f"workers-{k + 1}"
         plan.append((name, size))
         remaining -= size
@@ -78,7 +84,7 @@ def setup(cfg: Config) -> dict[str, str]:
     windows = {"dash": dash_win, "master": master_win, "operator": operator_win}
     slot_panes: dict[int, str] = {}
     base = 0
-    for name, size in plan_worker_windows(cfg.max_workers):
+    for name, size in plan_worker_windows(cfg.max_workers, cfg.tmux_panes_per_window):
         win = tmux.new_window(cfg.session, name)
         for offset, pane in enumerate(tmux.split_layout(win, size, cfg.tmux_layout)):
             gidx = base + offset
@@ -139,7 +145,7 @@ def add_slot_panes(
     grow used to add the slot record only, so its ``pane_id`` stayed ``None`` and
     every launch that picked it failed ``no-pane``. New panes follow the same
     pagination ``setup`` uses: fill the first ``workers*`` window holding fewer
-    than :data:`PANES_PER_WINDOW` panes (re-tidied to ``layout``), else open the
+    than ``[tmux].panes_per_window`` panes (re-tidied to ``layout``), else open the
     next ``workers-N`` window. ``windows`` is returned updated with any window
     opened here; ``failed`` lists slots tmux would not give a pane (the caller
     must keep anything from launching into them).
@@ -149,12 +155,13 @@ def add_slot_panes(
         ((n, w) for n, w in windows.items() if n == "workers" or n.startswith("workers-")),
         key=lambda nw: _worker_window_index(nw[0]),
     )
+    per_window = max(1, cfg.tmux_panes_per_window)
     panes: dict[int, str] = {}
     failed: list[int] = []
     for sid in slot_ids:
         try:
             target = next(
-                (w for _, w in worker_wins if 0 < len(tmux.list_panes(w)) < PANES_PER_WINDOW),
+                (w for _, w in worker_wins if 0 < len(tmux.list_panes(w)) < per_window),
                 None,
             )
             if target is None:

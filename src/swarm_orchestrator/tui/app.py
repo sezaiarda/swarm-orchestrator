@@ -134,6 +134,7 @@ class HelpScreen(ModalScreen[None]):
   [{COLOR[OK]}]n[/] needs-you drawer   [{COLOR[OK]}]c[/] command centre   [{COLOR[OK]}]d[/] run the doctor
   [{COLOR[OK]}]j k[/] / arrows move    [{COLOR[OK]}]enter[/] or click opens what is selected
   [{COLOR[OK]}]R[/] reset the run: ETA and usage count from now (asks first)
+  [{COLOR[OK]}]D[/] drain: stop once the running work is done, then maybe run a command
 
 [b]on their own tab[/b]
   [{COLOR[OK]}]/[/] commands: filter   [{COLOR[OK]}]esc[/] clear it
@@ -215,6 +216,7 @@ class SwarmApp(App):
         Binding("0", "tab('shells')", "shells"),
         Binding("a", "tab('asks')", "asks"),
         Binding("R", "reset_run", "reset run", show=False),
+        Binding("D", "drain", "drain, then stop", show=False),
         Binding("c", "tab('commands')", "commands", show=False),
         Binding("d", "doctor", "doctor", show=False),
         Binding("n", "toggle_drawer", "needs you"),
@@ -439,6 +441,24 @@ class SwarmApp(App):
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
+
+    def action_drain(self) -> None:
+        """``D``: ``swarm down --drain [--then CMD]`` through the command centre,
+        so it gets the usual confirm, output log and history."""
+        from .commands import DrainAsk
+
+        def answered(then: str | None) -> None:
+            if then is None:
+                self.notify("no drain")
+                return
+            self.action_tab("commands")
+            run = getattr(self.query_one("#tab-commands"), "run_command", None)
+            if run is None:
+                self.notify("the command centre is unavailable", severity="error")
+                return
+            run("down", ["--drain", *(["--then", then] if then else [])])
+
+        self.push_screen(DrainAsk(), answered)
 
     def action_reset_run(self) -> None:
         """``R``: close the open run and start a fresh one, after the usual confirm."""

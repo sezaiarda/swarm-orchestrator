@@ -54,6 +54,7 @@ KINDS = (
     "spawn-fail",  # launch: the worker process/pane would not start
     "web-board",  # cli.cmd_up: the LAN board's window/process did not come up
     "usage-cap",  # supervisor: a usage cap paused or stopped the swarm, or a pause lifted
+    "drain",  # supervisor: `swarm down --drain` finished waiting and is stopping the swarm
     "other",  # unclassified (the default)
 )
 

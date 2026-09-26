@@ -35,6 +35,7 @@ import time
 from statistics import median
 
 from .. import ledger, opqueue, statuses
+from ..drain import line as drain_line
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
 from ..tui.data import (
@@ -417,6 +418,7 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         "slots": {"busy": sum(1 for s in snap.slots if s.busy), "total": workers},
         "paused": bool(snap.paused),
         "usage_hold": snap.usage_hold,
+        "drain": drain_line(snap.drain),
         "finished": bool(snap.finished),
         "running": bool(snap.ok and snap.supervisor_alive),
         "state": snap.reason if not snap.ok else "",

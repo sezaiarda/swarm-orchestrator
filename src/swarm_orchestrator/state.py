@@ -130,6 +130,13 @@ class State:
     usage_fired: dict[str, float] = field(default_factory=dict)
     usage_override: dict[str, float] = field(default_factory=dict)
     usage_api_at: float = 0.0
+    # ``swarm down --drain``: ``{since, then, waiting, stopping_at}`` while the
+    # run is winding down to a stop, empty otherwise. A hold of its own, apart
+    # from ``paused``, so ending one never lifts the other. ``waiting`` is the
+    # supervisor's latest word on what the stop still waits for, kept here so the
+    # dashboard, the board and ``swarm status`` can say it without asking it.
+    # Dropped by ``init_state``: a drain ends with the run it was stopping.
+    drain: dict = field(default_factory=dict)
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -140,8 +147,9 @@ class State:
 
     @property
     def on_hold(self) -> bool:
-        """Nothing new may launch: paused by a person, or held by a usage cap."""
-        return self.paused or bool(self.usage_hold)
+        """Nothing new may launch: paused by a person, held by a usage cap, or
+        draining to a stop."""
+        return self.paused or bool(self.usage_hold) or bool(self.drain)
 
     def any_busy(self) -> bool:
         return any(s.busy for s in self.slots)
@@ -375,6 +383,7 @@ class State:
             usage_fired=dict(data.get("usage_fired") or {}),
             usage_override=dict(data.get("usage_override") or {}),
             usage_api_at=float(data.get("usage_api_at") or 0.0),
+            drain=dict(data.get("drain") or {}),
         )
 
     @classmethod

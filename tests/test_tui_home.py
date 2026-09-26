@@ -516,6 +516,13 @@ def test_footer_flags_a_dead_supervisor():
     assert "supervisor down" in plain(home.footer_line(FakeDash(snap), 76, now=NOW))
 
 
+def test_footer_says_what_a_drain_waits_for():
+    snap = healthy(paused=True, drain={"waiting": ["1 worker"], "then": "sudo shutdown now"})
+    text = plain(home.footer_line(FakeDash(snap), 120, now=NOW))
+    assert "Draining: waiting for 1 worker, then stop, then: sudo shutdown now" in text
+    assert "paused" not in text
+
+
 def test_footer_paused_reads_as_paused_not_dead():
     snap = healthy(paused=True)
     text = plain(home.footer_line(FakeDash(snap), 76, now=NOW))

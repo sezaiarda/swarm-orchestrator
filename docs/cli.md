@@ -10,7 +10,9 @@ exact flags.
 | command | what it does |
 |---|---|
 | `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass, the board and the bot's command listener, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
-| `down` | Stop the supervisor, the board and the command listener, end every session process (anything carrying the run's `SWARM_STATE_DIR`, detached ones included; never what `swarm keep` holds), tear the session down, close the run. Only a tmux session this swarm made (or, made before that was recorded, one whose windows its state holds) is torn down, and the recorded supervisor pid is signalled only while it still is this project's supervisor. |
+| `down [--then CMD]` | Stop the supervisor, the board and the command listener, end every session process (anything carrying the run's `SWARM_STATE_DIR`, detached ones included; never what `swarm keep` holds), push unmerged work to origin (`[backup].on_down`), tear the session down, close the run. Only a tmux session this swarm made (or, made before that was recorded, one whose windows its state holds) is torn down, and the recorded supervisor pid is signalled only while it still is this project's supervisor. `--then` runs `CMD` afterwards, detached from the swarm, with its output in `<state>/logs/after-down.log`. |
+| `down --drain [--then CMD]` | Launch nothing new and stop once the running work is finished: busy workers (through their done grace), launches, the moving merge queue, a merge-conflict resolver, a running operator job, the init pass or an Overseer pass. Whatever waits on you (a waiting or parked worker, an operator job that asked, a queue held on a dirty tree) does not hold it; the down keeps its work. Then `down`, then `CMD` (e.g. `'sleep 120; sudo shutdown now'`), with one telegram when it starts stopping. Warns if `CMD` uses `sudo` and sudo would ask for a password. With no supervisor running it stops at once. `D` in the dashboard does the same. |
+| `down --cancel` | Cancel a pending drain. `resume` cancels one too. Refused once the stop has begun. |
 | `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued or an ask is open, unless `--force`. |
 | `pause` / `resume [--override-cap]` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. A usage cap's hold is not lifted by `resume`, which says what holds and when it lifts; `--override-cap` runs through it until its window resets. |
 | `reset` | Close the open run and start a new one: ETA and usage count from now. Nothing restarts. |
@@ -21,7 +23,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `status [--all] [--json]` | Slots, merge queue, waiting and parked phases, operator queue, open asks, owed pushes, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
+| `status [--all] [--json]` | A drain and what it still waits for, slots, merge queue, waiting and parked phases, operator queue, open asks, owed pushes, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
 | `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`. |
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |

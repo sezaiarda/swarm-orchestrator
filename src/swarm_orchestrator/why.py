@@ -217,6 +217,11 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
     if st.usage_hold:
         held = " ".join(caps.describe_hold(st.usage_hold, time.time()))
         return Explanation(phase, READY, f"ready — but {held[0].lower()}{held[1:]}")
+    if st.drain:
+        return Explanation(
+            phase, READY,
+            "ready — but the swarm is draining to a stop (`swarm down --cancel`)",
+        )
     if not st.free_slots():
         return Explanation(
             phase,

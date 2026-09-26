@@ -193,8 +193,30 @@ def matches(spec: CommandSpec, needle: str) -> bool:
     return all(word in hay for word in (needle or "").lower().split())
 
 
+#: ``down --drain`` ends the run too, only later: the confirm says when.
+DRAIN_REASON = ("launches nothing new, waits for the running workers to finish, then stops"
+                " the supervisor and tears down the tmux session")
+
+
+def _then_of(args) -> str:
+    """The ``--then`` command on a ``down`` line, or ""."""
+    args = list(args)
+    for i, arg in enumerate(args):
+        if arg == "--then" and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--then="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
 def destructive_reason(name: str, args) -> str | None:
     """Why ``swarm <name> <args>`` needs a confirm, or None when it does not."""
+    if name == "down":
+        if "--cancel" in args:
+            return None  # it only lifts a drain
+        then = _then_of(args)
+        why = DRAIN_REASON if "--drain" in args else DESTRUCTIVE["down"][1]
+        return why + (f"; then runs, detached: {then}" if then else "")
     entry = DESTRUCTIVE.get(name)
     if entry is None:
         return None
@@ -372,6 +394,37 @@ class ConfirmRun(ModalScreen[bool]):
 
     def action_answer(self, go: bool) -> None:
         self.dismiss(go)
+
+
+class DrainAsk(ModalScreen[str | None]):
+    """``D``: what to run once a drain has stopped the swarm, if anything.
+
+    Answers the command line (``""`` for none); ``esc`` answers None and nothing
+    runs. The confirm that follows is the usual one, with the command in it."""
+
+    BINDINGS = [Binding("escape", "cancel", "stop")]
+    DEFAULT_CSS = f"""
+    DrainAsk {{ align: center middle; }}
+    DrainAsk > Vertical {{
+        width: 72; height: auto;
+        border: thick {COLOR[WARN]}; padding: 1 2; background: #0d1117;
+    }}
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(paint("[b]drain, then stop[/b]", WARN))
+            yield Static(f"\n{escape(DRAIN_REASON)}.\n\nAfterwards, run (optional, e.g."
+                         " sleep 120; sudo shutdown now):")
+            yield Input(placeholder="nothing — just stop", id="drain-then")
+            yield Static(f"[{COLOR[OK]}]enter[/] next    [{COLOR[BAD]}]esc[/] don't")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 # -- the tab ---------------------------------------------------------------

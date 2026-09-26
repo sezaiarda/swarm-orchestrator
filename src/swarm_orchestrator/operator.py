@@ -246,6 +246,10 @@ def dispatch(cfg: Config, phase: str, log: Log, *, reason: str = "") -> bool:
     if not cfg.operator_enabled:
         log.line(f"OPERATOR-SKIP {phase} disabled")
         return False
+    if state_mod.read(cfg).drain:
+        # Winding down to a stop: the job stays queued for the next `swarm up`.
+        log.line(f"OPERATOR-HELD {phase} draining")
+        return False
     now = time.time()
     with state_mod.transaction(cfg) as st:
         took = st.claim_operator(phase, now + opqueue.LEASE_S, now)

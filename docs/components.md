@@ -30,7 +30,15 @@ drives the merge queue.
   in a row the phase is given up, and you are told once. `swarm launch <phase>` or
   `swarm resume` hands it back.
 - **Scheduling.** It decides when to park a waiting worker, when an Overseer pass
-  is due, and when to run gc.
+  is due, when to run gc, and when to push a backup of unmerged work
+  (`[backup]`).
+- **Draining.** While `swarm down --drain` holds, nothing launches and no
+  operator job or Overseer pass opens. On every event it records what the stop
+  still waits for (`State.drain`, shown by `status`, the dashboard and the
+  board). When that is nothing it telegrams once and starts `swarm _drain-down`
+  in a session of its own, which runs `swarm down` and then the after-command
+  (in a `systemd-run --user --scope` where it can, so neither the tmux teardown
+  nor a logout takes it).
 
 **What it may not do:** it never builds, never retries a phase that finished
 `fail`, and never restarts a worker. An exception in one event handler is logged,
@@ -513,6 +521,9 @@ time, one nesting level at a time. `[git].repos` globs pick the component repos
 Operator jobs (`op-<job>`), Overseer passes (`ovs-<id>`) and asks (`ask-<name>`)
 get mirrors the same way.
 
+Unmerged mirrors are pushed to origin as backups (`[backup]`): the branch, a
+snapshot of uncommitted edits, and kept attic refs.
+
 On `swarm up`, leftover `swarm/*` branches are reconciled from the durable
 sentinels, never from branch shape:
 
@@ -688,7 +699,7 @@ and exits 1 if any check FAILs. It checks:
 A Textual app in window 0 (`dash`), started by `swarm up` under tmux. It re-reads
 the state every 2 s, and probes panes and git every 10 s. The status bar shows:
 
-- live, paused, finished, or supervisor down;
+- live, paused, draining (and what for), finished, or supervisor down;
 - busy slots;
 - campaign progress;
 - the time since the last event, which turns amber after 30 minutes and red after
@@ -719,7 +730,8 @@ Two more sit beside them:
 - `a` **asks:** open asks (and the last answered ones) with their rows, what you
   decide, their age, and the `tmux select-window` that reaches each window.
 
-`R` resets the run (after a confirmation), `?` opens help, and `q` quits the
+`R` resets the run (after a confirmation), `D` drains then stops (it asks for an
+optional after-command, then confirms), `?` opens help, and `q` quits the
 dashboard only. It fits an 80×24 terminal: panels stack, the chart drops out and
 columns hide as it narrows.
 

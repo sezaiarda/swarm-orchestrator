@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import ask as ask_mod
 from . import caps
+from . import backup as backup_mod
 from . import buildsem
 from . import notes as notes_mod
 from . import operator as operator_mod
@@ -28,6 +29,7 @@ from . import overseer as overseer_mod
 from . import ovrecord
 from . import tui as tui_mod
 from . import doctor as doctor_mod
+from . import drain as drain_mod
 from . import gc as gc_mod
 from . import promptlint
 from . import procs
@@ -385,8 +387,14 @@ def cmd_down(cfg: Config) -> int:
     web_lifecycle.stop(cfg)
     tgbot.stop(cfg)
     ended, left = session_mod.end_processes(cfg, sessions)
+    # After the sessions end, so their work is final. Printed only once the run
+    # is closed: a dashboard that ran this is gone by now, and a write to its
+    # dead pipe must not cut the down short.
+    backup = _backup_on_down(cfg) if cfg.backup_on_down else []
     closed = usage_mod.close_run(cfg, "down")
     print("swarm down" + (f" — {_run_line(closed)}" if closed else ""))
+    for text, to_err in backup:
+        print(text, file=sys.stderr if to_err else sys.stdout)
     if ended:
         print(f"  ended {ended} session process(es)")
     if left:
@@ -394,6 +402,96 @@ def cmd_down(cfg: Config) -> int:
               f"{' '.join(map(str, left))}", file=sys.stderr)
         return 1
     return 0
+
+
+def _backup_on_down(cfg: Config) -> list[tuple[str, bool]]:
+    """Push every unmerged phase's work to origin; the lines to print, and
+    whether each goes to stderr."""
+    log = Log(cfg.supervisor_log)
+    try:
+        res = backup_mod.run(cfg, log, budget_s=backup_mod.DOWN_BUDGET_S)
+    finally:
+        log.close()
+    lines = [(f"  backup to origin: {res.line()}", False)] if (
+        res.pushed or res.deleted or res.failed) else []
+    return lines + [(f"  backup failed: {what}", True) for what in res.failed[:5]]
+
+
+def _down_then(cfg: Config, then: str) -> int:
+    """``swarm down``, then the owner's after-command, detached, whatever down said."""
+    try:
+        rc = cmd_down(cfg)
+    except BrokenPipeError:
+        # Run from the dashboard, whose pipe died with the session: the down
+        # itself had finished, and the after-command must still run.
+        rc = 0
+    if then:
+        log = drain_mod.run_after(cfg, then)
+        try:
+            if log is None:
+                print(f"could not start the after-command: {then}", file=sys.stderr)
+                return 1
+            print(f"after-command started, detached: {then}  (output: {log})")
+        except BrokenPipeError:
+            pass
+    return rc
+
+
+def cmd_drain(cfg: Config, then: str) -> int:
+    """Launch nothing new, and stop once the running work is finished.
+
+    The supervisor does the waiting: only it knows what is mid-launch, and it
+    sees every event that could be the last one. With no supervisor there is
+    nothing left to wait for, so this is an ordinary down."""
+    warning = drain_mod.sudo_warning(then)
+    if warning:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    if not _supervisor_running(cfg):
+        print("no supervisor is running, so there is nothing to wait for: stopping now")
+        return _down_then(cfg, then)
+    with state_mod.transaction(cfg) as st:
+        if st.drain.get("stopping_at"):
+            print("the drain already finished and the swarm is stopping", file=sys.stderr)
+            return 1
+        st.drain = {"since": st.drain.get("since") or time.time(), "then": then,
+                    "waiting": list(st.drain.get("waiting") or [])}
+    _poke(cfg, "drain")
+    tail = f", then run: {then}" if then else ""
+    print(f"swarm draining — nothing new launches; it stops once the running work is finished{tail}")
+    print("  `swarm status` says what it waits for; `swarm down --cancel` or `swarm resume` cancels")
+    return 0
+
+
+def cmd_drain_cancel(cfg: Config) -> int:
+    with state_mod.transaction(cfg) as st:
+        had = dict(st.drain)
+        if had and not had.get("stopping_at"):
+            st.drain = {}
+        paused = st.paused
+    if not had:
+        print("no drain to cancel")
+        return 0
+    if had.get("stopping_at"):
+        print("too late: the drain finished and the swarm is already stopping", file=sys.stderr)
+        return 1
+    _poke(cfg, "drain")
+    print("drain cancelled — " + ("the swarm is still paused" if paused else "launching resumes"))
+    return 0
+
+
+def cmd_drain_down(cfg: Config) -> int:
+    """The drain's last step, started detached by the supervisor: down, then the after-command."""
+    then = state_mod.read(cfg).drain.get("then") or ""
+    print(f"== {time.strftime('%Y-%m-%d %H:%M:%S')} drain finished: stopping the swarm")
+    return _down_then(cfg, then)
+
+
+def cmd_down_verb(cfg: Config, drain: bool, then: str, cancel: bool) -> int:
+    if cancel:
+        return cmd_drain_cancel(cfg)
+    if drain:
+        return cmd_drain(cfg, then)
+    return _down_then(cfg, then)
 
 
 def _run_line(rec: dict) -> str:
@@ -1627,12 +1725,18 @@ def cmd_resume(cfg: Config, override_cap: bool = False) -> int:
     now = time.time()
     with state_mod.transaction(cfg) as st:
         st.paused = False
+        # A resume is "go on": it cancels a drain too, unless the stop has begun.
+        drained = bool(st.drain) and not st.drain.get("stopping_at")
+        if drained:
+            st.drain = {}
         hold = dict(st.usage_hold)
         if override_cap:
             for window, h in hold.items():
                 st.usage_override[window] = h.get("resets_at") or now
             st.usage_hold = {}
     _poke(cfg, "resume")
+    if drained:
+        print("drain cancelled")
     if hold and not override_cap:
         for line in caps.describe_hold(hold, now):
             print(line)
@@ -1757,6 +1861,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["telegram_bot"] = tgbot.status_line(cfg)
         data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
         data["asks"] = [a.to_dict() for a in ask_mod.open_asks(cfg)]
+        data["drain_line"] = drain_mod.line(st.drain)
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
@@ -1766,6 +1871,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         f"isolation={cfg.git_isolation} main={cfg.git_main_branch}"
         f" integ_blocked={st.integ_blocked} integ_queue={st.integ_queue}",
     ]
+    if st.drain:
+        lines.insert(1, drain_mod.line(st.drain))
     for s in st.slots:
         mark = f"BUSY {s.phase}" if s.busy else "free"
         wt = f" branch={s.branch}" if s.branch else ""
@@ -1804,8 +1911,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="don't attach the terminal to the swarm tmux session after bringing it up",
     )
     up.set_defaults(func=lambda cfg, a: cmd_up(cfg, attach=not a.no_attach))
-    sub.add_parser("down", help="stop the supervisor + tear down").set_defaults(
-        func=lambda cfg, a: cmd_down(cfg))
+    dnp = sub.add_parser(
+        "down", help="stop the supervisor + tear down; --drain waits for running work first")
+    dnp.add_argument("--drain", action="store_true",
+                     help="launch nothing new; stop once the running work is finished")
+    dnp.add_argument("--then", metavar="CMD", default="",
+                     help="a shell command to run after the stop, detached from the swarm"
+                          " (e.g. 'sleep 120; sudo shutdown now')")
+    dnp.add_argument("--cancel", action="store_true", help="cancel a pending --drain")
+    dnp.set_defaults(func=lambda cfg, a: cmd_down_verb(cfg, a.drain, a.then, a.cancel))
+    sub.add_parser("_drain-down").set_defaults(func=lambda cfg, a: cmd_drain_down(cfg))
     sub.add_parser(
         "reset", help="start a fresh run: ETA and usage count from now (nothing restarts)"
     ).set_defaults(func=lambda cfg, a: cmd_reset(cfg))

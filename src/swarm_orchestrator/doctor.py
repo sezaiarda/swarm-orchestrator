@@ -670,6 +670,7 @@ def _check_nudge(st: State, ready: list[str], free: list[int]) -> Check:
             "finished" if st.finished
             else "paused" if st.paused
             else "held by a usage cap" if st.usage_hold
+            else "draining to a stop" if st.drain
             else "integration held" if st.integ_blocked
             # `swarm up` holds the first launch until the init pass is over.
             else "starting: the first launch waits for the init pass"

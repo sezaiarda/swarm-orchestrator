@@ -300,6 +300,8 @@ class Snapshot:
     paused: bool = False
     #: Why a usage cap holds new workers, in plain English; "" when none does.
     usage_hold: str = ""
+    #: ``State.drain``: the run is winding down to a stop (see :mod:`drain`).
+    drain: dict = field(default_factory=dict)
     finished: bool = False
     master_alive: bool = False
     supervisor_pid: int | None = None
@@ -521,6 +523,7 @@ def build_snapshot(
         landed=landed,
         paused=bool(state.get("paused")),
         usage_hold=" ".join(caps.describe_hold(state.get("usage_hold") or {}, time.time())),
+        drain=dict(state.get("drain") or {}) if isinstance(state.get("drain"), dict) else {},
         finished=bool(state.get("finished")),
         master_alive=bool(state.get("master_alive")),
         supervisor_pid=pid if isinstance(pid, int) else None,

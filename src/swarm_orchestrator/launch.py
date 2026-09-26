@@ -339,6 +339,9 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         if st.usage_hold:
             log.line(f"LAUNCH-DENIED {phase} usage-cap")
             return DENIED
+        if st.drain:
+            log.line(f"LAUNCH-DENIED {phase} draining")
+            return DENIED
         if phase in st.integrating():
             log.line(f"LAUNCH-DENIED {phase} its finished work is waiting to merge")
             if not quiet:

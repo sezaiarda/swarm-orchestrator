@@ -51,7 +51,9 @@ from pathlib import Path
 
 from . import ask as ask_mod
 from . import caps
+from . import backup as backup_mod
 from . import doctor as doctor_mod
+from . import drain as drain_mod
 from . import gc as gc_mod
 from . import gitq
 from . import launch as launch_mod
@@ -172,6 +174,10 @@ class Supervisor:
         self._usage_last = 0.0
         self._usage_tail = usage_mod.SampleTail(
             cfg.state_dir / usage_mod.METERS_DIR / usage_mod.LIMITS_LOG)
+        # Periodic backup pushes (see `_backup_tick`), first one a full interval
+        # after start-up: `swarm down` pushes too, so nothing waits on this one.
+        self._backup_thread: threading.Thread | None = None
+        self._backup_last = time.time()
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -243,6 +249,8 @@ class Supervisor:
                 self._dispatch("overseer", self._overseer_tick)
                 self._dispatch("gc", self._gc_tick)
                 self._dispatch("usage", self._usage_tick)
+                self._dispatch("backup", self._backup_tick)
+                self._dispatch("drain", self._drain_tick)
                 if self._fifo_fd not in ready:
                     continue
                 try:
@@ -260,6 +268,7 @@ class Supervisor:
                     # `fail`, a hold), and waiting for the next wake to notice
                     # it could be waiting for nothing.
                     self._dispatch("overseer", self._overseer_tick)
+                    self._dispatch("drain", self._drain_tick)
         except Exception as exc:  # noqa: BLE001 - announce, then re-raise
             self.log.line(f"SUPERVISOR-CRASH {exc!r}")
             self._ping(
@@ -379,6 +388,8 @@ class Supervisor:
             self._on_bootstrap()
         elif verb == "resume":
             self._on_resume()
+        elif verb == "drain":
+            self._on_drain()
         elif verb == "reload":
             self._on_reload()
         elif verb == "operator":
@@ -600,6 +611,57 @@ class Supervisor:
             self._retried.clear()
         self._fill_slots("resumed")
         self._finish_if_settled()
+
+    # -- drain: stop once the running work is finished ---------------------
+    def _on_drain(self) -> None:
+        """``swarm down --drain`` set or updated the drain, or ``--cancel`` /
+        ``swarm resume`` dropped it: look now, and refill slots if it is gone."""
+        st = state_mod.read(self.cfg)
+        self.log.line(f"EVENT drain {'on' if st.drain else 'off'}")
+        if st.drain:
+            self._drain_tick()
+            return
+        self._fill_slots("drain cancelled")
+        self._finish_if_settled()
+
+    def _drain_tick(self) -> None:
+        """Record what a drain still waits for; once nothing, stop the swarm.
+
+        Runs on every wake and after every event, the same moments anything it
+        waits for can end. The stop itself is ``swarm _drain-down``, started
+        detached: ``swarm down`` stops this process, so it cannot run in it."""
+        st = state_mod.read(self.cfg)
+        if not st.drain or st.drain.get("stopping_at"):
+            return
+        busy = {s.phase for s in st.busy_slots()}
+        with self._launch_lock:
+            launching = len(self._launching - busy)
+        waits = drain_mod.waiting_for(
+            self.cfg, st, launching=launching,
+            overseer=self._overseer_live is not None,
+            init_pass=self._bootstrapping and self.master.is_alive(),
+        )
+        if waits == st.drain.get("waiting") and waits:
+            return
+        with state_mod.transaction(self.cfg) as s2:
+            if not s2.drain or s2.drain.get("stopping_at"):
+                return  # cancelled, or already stopping, since the read above
+            s2.drain["waiting"] = waits
+            if not waits:
+                s2.drain["stopping_at"] = time.time()
+            then = s2.drain.get("then") or ""
+        if waits:
+            self.log.line(f"DRAIN-WAITING {', '.join(waits)}")
+            return
+        started = drain_mod.spawn_down(self.cfg)
+        self.log.line(f"DRAIN-COMPLETE stopping={started} then={then!r}")
+        if started:
+            msg = f"swarm: {self.cfg.slug} finished its running work and is stopping now"
+            msg += f", then running: {then}" if then else ""
+        else:
+            msg = (f"swarm: {self.cfg.slug} finished its running work but could not start"
+                   " the stop; run `swarm down` yourself")
+        self._ping("drain", msg, cooldown=0.0, kind="drain", source="supervisor._drain_tick")
 
     # -- rule 1: done -----------------------------------------------------
     def _on_done(self, phase: str, status: str) -> None:
@@ -1042,6 +1104,8 @@ class Supervisor:
         stamps.extend(t for t in self._gc_deadlines() if t > now)
         if self.cfg.usage_enabled and self._usage_last + self.cfg.usage_check_s > now:
             stamps.append(self._usage_last + self.cfg.usage_check_s)
+        if self.cfg.backup_every_s and not self._backup_running():
+            stamps.append(max(now, self._backup_last + self.cfg.backup_every_s))
         if not stamps:
             return None
         return max(0.0, min(stamps) - time.time())
@@ -1153,7 +1217,7 @@ class Supervisor:
         not hold it; the finish message names it instead)."""
         if st is None:
             st = state_mod.read(self.cfg)
-        if st.finished or st.paused or st.pending():
+        if st.finished or st.on_hold or st.pending():
             return
         if st.integ_queue or st.integ_blocked is not None or self.master.is_alive():
             return
@@ -1313,7 +1377,7 @@ class Supervisor:
                 if s is not None:
                     s.pane_id = replacement
             st.park(phase)
-            paused = st.paused
+            paused = st.on_hold
         self.log.line(f"PARK {phase} slot={sid}")
         telegram.notify(
             self.cfg.telegram_notify,
@@ -1348,7 +1412,7 @@ class Supervisor:
             st.clear_pending(phase)
             wait_win = st.windows.pop(f"wait:{phase}", None) if was_parked else None
             freed_id = freed.id if freed else None
-            paused = st.paused
+            paused = st.on_hold
         if wait_win and self.cfg.driver == "tmux":
             tmux.kill_window(wait_win)  # close the parked worker's own window
         # The session's TMPDIR ends with its phase. Under worktree isolation the
@@ -1507,7 +1571,7 @@ class Supervisor:
         self._end_bootstrap()
         with state_mod.transaction(self.cfg) as st:
             st.master_alive = False
-            paused = st.paused
+            paused = st.on_hold
             pending = st.pending()
             integrating = bool(st.integ_queue) or st.integ_blocked is not None
         self.log.line(
@@ -1605,7 +1669,7 @@ class Supervisor:
         The supervisor's own verdict, because only it knows what is mid-launch,
         backing off or given up. A phase given up after failed launches is
         backlog nothing will start — starvation, not progress."""
-        if st.paused or not st.free_slots() or not self._bootstrapped or self.master.is_alive():
+        if st.on_hold or not st.free_slots() or not self._bootstrapped or self.master.is_alive():
             return False
         launching, given_up, backing = self._launch_view()
         if launching:
@@ -1643,7 +1707,7 @@ class Supervisor:
         return {c.name: c.detail for c in checks if c.status == doctor_mod.FAIL}
 
     def _maybe_start_overseer(self, st: state_mod.State, now: float) -> None:
-        if not self._bootstrapped or self._overseer_live is not None:
+        if not self._bootstrapped or self._overseer_live is not None or st.drain:
             return
         if self.master.is_alive():
             return  # the init pass has the pane; the pending pass waits for it
@@ -2006,6 +2070,29 @@ class Supervisor:
                 cwd=str(cfg.project_dir), stdin=subprocess.DEVNULL, stdout=out,
                 stderr=subprocess.STDOUT, start_new_session=True,
             )
+
+    # -- backup pushes --------------------------------------------------------
+    def _backup_running(self) -> bool:
+        return self._backup_thread is not None and self._backup_thread.is_alive()
+
+    def _backup_tick(self) -> None:
+        """Start a backup pass every ``[backup].every_s``, on a thread: it is
+        network-bound and must never hold up the loop."""
+        every = self.cfg.backup_every_s
+        now = time.time()
+        if not every or self._backup_running() or now - self._backup_last < every:
+            return
+        self._backup_last = now
+        self._backup_thread = threading.Thread(
+            target=self._backup_run, name="backup", daemon=True
+        )
+        self._backup_thread.start()
+
+    def _backup_run(self) -> None:
+        try:
+            backup_mod.run(self.cfg, self.log)
+        except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
+            self.log.line(f"BACKUP-ERROR {exc!r}")
 
     # -- finish -----------------------------------------------------------
     def _finish(

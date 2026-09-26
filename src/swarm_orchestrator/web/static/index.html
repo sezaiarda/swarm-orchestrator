@@ -264,6 +264,7 @@ function header(b) {
   let tone = "ok", txt = "running";
   if (!h.running) { tone = "mu"; txt = h.state || "stopped"; }
   else if (h.finished) { tone = "ok"; txt = "finished"; }
+  else if (h.drain) { tone = "warn"; txt = h.drain; }
   else if (h.paused) { tone = "warn"; txt = "paused"; }
   else if (h.usage_hold) { tone = "warn"; txt = "paused by usage cap"; }
   rs.innerHTML = `<span class="dot" style="background:var(--${tone === "mu" ? "mu" : tone})"></span><span>${esc(txt)}</span>`;

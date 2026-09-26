@@ -48,6 +48,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
+from ..drain import line as drain_line
 from . import probes
 from . import timeline as tl
 from .campaign import active, summarise
@@ -640,6 +641,8 @@ def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None)
 
     if not snap.ok:
         parts.append(("no run yet", MUTED))
+    elif snap.drain and snap.supervisor_alive:
+        parts.append((escape(drain_line(snap.drain)), WARN))
     elif snap.paused:
         parts.append(("paused — `swarm resume`", WARN))
     elif snap.usage_hold:

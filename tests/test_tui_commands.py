@@ -416,3 +416,41 @@ def test_the_real_app_mounts_the_tab_instead_of_the_fallback(cfg, capfd, monkeyp
 
     with capfd.disabled():
         asyncio.run(asyncio.wait_for(run(), timeout=30))
+
+
+def test_down_confirms_with_what_it_will_do_and_cancel_does_not_ask():
+    assert "every live worker dies" in cm.destructive_reason("down", [])
+    drain = cm.destructive_reason("down", ["--drain", "--then", "sleep 120; sudo shutdown now"])
+    assert drain.startswith("launches nothing new, waits for the running workers")
+    assert drain.endswith("then runs, detached: sleep 120; sudo shutdown now")
+    assert cm.destructive_reason("down", ["--cancel"]) is None
+
+
+def test_D_asks_for_the_after_command_then_confirms_the_drain(cfg, capfd, monkeypatch):
+    from swarm_orchestrator.tui.app import SwarmApp
+    from swarm_orchestrator.tui.dash import Dash
+
+    monkeypatch.setattr(Dash, "probe", lambda self: None)
+    app = SwarmApp(cfg)
+
+    async def run() -> None:
+        async with app.run_test(size=(140, 48)) as pilot:
+            await pilot.press("D")
+            await pilot.pause()
+            assert isinstance(app.screen, cm.DrainAsk)
+            await pilot.press(*"sleep 1", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, cm.ConfirmRun)
+            assert app.screen.line == "swarm down --drain --then 'sleep 1'"
+            assert "then runs, detached: sleep 1" in app.screen.reason
+            await pilot.press("n")
+            await pilot.pause()
+            tab = app.query_one("#tab-commands")
+            assert tab._cmd_history == []
+            assert "not run: swarm down --drain" in output(tab)
+            await pilot.press("D", "escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, (cm.DrainAsk, cm.ConfirmRun))
+
+    with capfd.disabled():
+        asyncio.run(asyncio.wait_for(run(), timeout=30))

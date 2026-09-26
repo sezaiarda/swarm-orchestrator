@@ -203,6 +203,14 @@ def test_a_state_change_bumps_the_version(feed):
     assert feed.version == v + 1 and feed.board["header"]["paused"] is True
 
 
+def test_the_header_says_a_drain_in_words(feed):
+    st = json.loads(feed.cfg.state_path.read_text())
+    st["drain"] = {"since": 1.0, "then": "", "waiting": ["2 workers"]}
+    feed.cfg.state_path.write_text(json.dumps(st))
+    feed.refresh()
+    assert feed.board["header"]["drain"] == "Draining: waiting for 2 workers, then stop"
+
+
 def test_an_edited_exclude_list_moves_the_card(feed):
     toml = feed.cfg.project_dir / ".swarm.toml"
     toml.write_text('[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "al-W1"]\n')

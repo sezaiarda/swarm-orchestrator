@@ -410,6 +410,11 @@ FIELDS: tuple[Setting, ...] = (
     # -- [tasks] ----------------------------------------------------------
     Setting("ledger", STR, "phase ledger the master reads (project-relative)"),
     Setting("exclude", LIST, "phases the swarm must never launch (comma-sep)"),
+    Setting("history_dir", STR, "where each phase family's history is filed"),
+    Setting("history_split_kb", INT, "a family file past this splits per phase (KB)",
+            minimum=0),
+    Setting("lessons", STR, "file `swarm lesson` appends to (project-relative)"),
+    Setting("ledger_gate", STR, 'command that checks the ledger; "" = none'),
     # -- [telegram] -------------------------------------------------------
     Setting("telegram_notify", STR, "script that sends the swarm's own Telegram pings"),
     Setting("telegram_commands", BOOL, "answer /usage and /help sent to the swarm bot"),

@@ -67,6 +67,7 @@ from . import ovrecord
 from . import pushowed
 from . import resolver as resolver_mod
 from . import ledger as ledger_mod
+from . import ledgerw
 from . import state as state_mod
 from . import reload as reload_mod
 from . import runs as runs_mod
@@ -418,6 +419,10 @@ class Supervisor:
             self._on_ask_open(parts[1] if len(parts) > 1 else "?", "asked")
         elif verb == "ask-done":
             self._on_ask_done(parts[1] if len(parts) > 1 else "?")
+        elif verb == "ledger":
+            # `swarm record` / a follow-up or lesson filed outside its phase.
+            if self._flush_ledger({}):
+                self._fill_slots("ledger updated")
         elif verb == "overseer-now":
             self.overseer.request(
                 overseer_mod.MANUAL, "requested by `swarm overseer --now`", urgent=True
@@ -439,6 +444,8 @@ class Supervisor:
         if no master could be started, happens now. A master that hangs cannot
         hold launching for longer than one watchdog interval."""
         self._bootstrapped = True
+        # Reports queued before the last stop: their phases may have landed.
+        self._flush_ledger(dict(state_mod.read(self.cfg).done))
         # Asks that were open when the last run stopped: the owner cannot answer
         # a dead window, so each opens again with the brief its record holds.
         for name in ask_mod.open_names(self.cfg):
@@ -742,6 +749,20 @@ class Supervisor:
                 except (subprocess.CalledProcessError, OSError) as exc:
                     self.log.line(f"END-WORKER-RESPAWN-FAIL {phase} {exc}")
         session_mod.reap_session(self.cfg, "worker", phase, self.log)
+
+    def _flush_ledger(self, finished: dict[str, str]) -> bool:
+        """Apply the sessions' queued ledger reports on the target branch.
+
+        ``finished`` is ``{phase: status}`` for the phases whose reports are
+        due (see :func:`ledgerw.flush`). True when a row was ticked or added,
+        which can make new work ready. Never raises: a report that cannot be
+        written stays queued and the watchdog tries it again.
+        """
+        try:
+            return ledgerw.flush(self.cfg, self.log, finished).released
+        except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
+            self.log.line(f"LEDGER-ERROR {exc!r}")
+            return False
 
     def _pump_integrations(self) -> None:
         """Drain ``integ_queue`` head-first while nothing is blocked.
@@ -1190,6 +1211,13 @@ class Supervisor:
             st = state_mod.read(self.cfg)  # slots changed under us
         if st.push_owed:
             pushowed.retry(self.cfg, self.log, min_gap=pushowed.TICK_RETRY_S)
+        # Reports the checkout could not take earlier, and `later` rows whose
+        # date has come.
+        self._flush_ledger(dict(st.done))
+        if ledgerw.release_due(self.cfg, self.log):
+            st = state_mod.read(self.cfg)
+            self._touch()
+            self._fill_slots("a `later` phase's date has come")
         if idle < self.watchdog_s:
             return  # something moved recently -- leave a live swarm alone
         ready = [
@@ -1434,6 +1462,9 @@ class Supervisor:
         self.log.line(
             f"EVENT done {phase} {status} freed_slot={freed_id} parked={was_parked}"
         )
+        # The phase has landed (or been rolled back): its ledger tick, status and
+        # history entry go on the target branch now, and only now.
+        self._flush_ledger({phase: status})
         # After `mark_done`, never from `launch.done`: `swarm done` has to return
         # to its worker immediately, and under worktree isolation this point is
         # the first at which the work the session is briefed about is actually in

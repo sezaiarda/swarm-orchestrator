@@ -182,6 +182,35 @@ def load_ticked(path: Path) -> set[str]:
     return ticked(path.read_text(encoding="utf-8"))
 
 
+_AFTER_RE = re.compile(r"(?:^|\s)after:`(\d{4}-\d{2}-\d{2})`")
+
+
+def deferred(text: str, today: str) -> dict[str, str]:
+    """Open checklist rows whose ``after:`YYYY-MM-DD``` date is still ahead.
+
+    A phase that finished ``later`` waits for its date in the ledger itself, so
+    a new run, a ``swarm retry`` or the Overseer cannot start it early.
+    """
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        m = _CHECKBOX_RE.match(raw)
+        if not m or _TICKED_RE.match(raw):
+            continue
+        ids = _BACKTICK_RE.findall(m.group(1))
+        for part in m.group(1).split(_FIELD_SEP):
+            d = _AFTER_RE.match(" " + part.strip())
+            if d and ids and d.group(1) > today:
+                out.setdefault(ids[0], d.group(1))
+    return out
+
+
+def load_deferred(path: Path, today: str) -> dict[str, str]:
+    """:func:`deferred` over a ledger file; empty when it is missing."""
+    if not path.is_file():
+        return {}
+    return deferred(path.read_text(encoding="utf-8"), today)
+
+
 def with_ticked(
     done: dict[str, str],
     ticked_ids: set[str] | frozenset[str],

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import gitq
 from . import ledger as ledger_mod
+from . import ledgerw
 from . import meters, opqueue
 from . import state as state_mod
 from . import statuses
@@ -858,14 +859,17 @@ class DoneResult:
             ),
         }[self.poke]
         lines = [
-            f"done {self.phase} {self.status} [{self.verdict}]",
+            f"done {self.phase} {self.status} [{self.verdict}]"
+            + (f" (as `{self.spelling}`)" if self.spelling in statuses.ALIASES else ""),
             f"  {sentinel}",
             f"  {ping}",
             f"  {route}",
             f"  {poke}",
             f"  history: {self.history}",
+            "  ledger: the swarm ticks or updates your row and files this note in the"
+            " phase history when the phase lands; do not edit the ledger yourself",
         ]
-        if self.spelling != self.status:
+        if self.spelling in statuses.RETIRED:
             lines.append(
                 f"  NOTE: `{self.spelling}` is retired and was recorded as"
                 f" `{self.status}` — say `{self.status}` next time"
@@ -993,7 +997,8 @@ def _detach_poke(cfg: Config, phase: str, status: str) -> bool:
 
 
 def done(
-    cfg: Config, phase: str, status: str, note: str = "", force: bool = False
+    cfg: Config, phase: str, status: str, note: str = "", force: bool = False,
+    after: str = "",
 ) -> DoneResult:
     """Signal phase completion; report what happened (see :class:`DoneResult`).
 
@@ -1026,10 +1031,17 @@ def done(
     episode = _fail_episode(cfg, phase, fresh) if status == statuses.FAIL else 0
     verdict = _write_sentinel(cfg, phase, status, note, force=force)
     _append_history(cfg, phase, status, note, verdict, fresh)
+    if verdict != "refused":
+        # The ledger tick, status and history entry: applied by the supervisor
+        # when the phase lands (or is rolled back), never by the worker.
+        ledgerw.queue(cfg, phase, {"kind": "outcome", "outcome": spelling,
+                                   "note": note, "after": after})
 
     plan = _outcome_plan(
         phase, status, note, recorded, verdict, force, cfg.operator_enabled
     )
+    if spelling == statuses.LATER:
+        plan.ping, plan.ping_detail = "skipped", "`later` waits for its date; nobody is paged"
     ping, detail = plan.ping, plan.ping_detail
     if ping == "send":
         # The Overseer retries a failed phase once, so a first failure is its to

@@ -62,6 +62,10 @@ class Config:
     park_after: int
     ledger: str
     exclude: list[str]
+    history_dir: str
+    history_split_kb: int
+    lessons: str
+    ledger_gate: str
     telegram_notify: str
     telegram_commands: bool
     telegram_pings: str
@@ -294,6 +298,15 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         ),
         ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
         exclude=list(tasks.get("exclude", DEFAULT_EXCLUDE)),
+        # Where the swarm files what was written about each phase: one file per
+        # phase family (`read-W12` -> `read.md`), a directory of one file per
+        # phase once the family file passes `history_split_kb`.
+        history_dir=str(tasks.get("history", "docs/phases")),
+        history_split_kb=max(0, int(tasks.get("history_split_kb", 256))),
+        lessons=str(tasks.get("lessons", "tasks/lessons.md")),
+        # A command that checks the ledger (run in the project checkout, with
+        # SWARM_LEDGER naming the file); a follow-up row it rejects is refused.
+        ledger_gate=str(tasks.get("ledger_gate", "")),
         tui_autostart=_bool_env("SWARM_TUI_AUTOSTART", tui.get("autostart", True)),
         tui_cmd=os.environ.get("SWARM_TUI_CMD", str(tui.get("cmd", "swarm tui"))),
         telegram_notify=str(

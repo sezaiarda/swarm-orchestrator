@@ -38,10 +38,19 @@ NEEDS_OWNER = "needs-owner"
 #: shows it; a real record, a ``fail`` included, always wins over it.
 LEDGER = "ledger"
 
+#: Two more ways to say "nothing lands", told apart only in the ledger and the
+#: phase history: ``blocked`` (something outside the phase is missing) and
+#: ``later`` (it cannot be done before a date; ``--after`` gives the date, and
+#: the row waits for it). The swarm records and handles both as ``fail``.
+BLOCKED = "blocked"
+LATER = "later"
+
 #: The statuses ``swarm done`` advertises as an argument.
-WRITABLE = (OK, OPERATOR, FAIL)
+WRITABLE = (OK, OPERATOR, FAIL, BLOCKED, LATER)
 #: Deprecated input spelling -> the canonical one it means.
 RETIRED = {NEEDS_OWNER: OPERATOR}
+#: Outcome words the swarm handles as another status.
+ALIASES = {BLOCKED: FAIL, LATER: FAIL}
 #: What argparse accepts: what we advertise, plus what we still honour quietly.
 ACCEPTED = WRITABLE + tuple(RETIRED)
 #: Every status that can exist on disk, including the retired spelling and
@@ -81,4 +90,4 @@ ROUTES = frozenset({OPERATOR})
 
 def canonical(status: str) -> str:
     """The current spelling of *status*; a retired one maps forward, else itself."""
-    return RETIRED.get(status, status)
+    return RETIRED.get(status, ALIASES.get(status, status))

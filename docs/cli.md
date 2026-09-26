@@ -51,7 +51,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `done <phase> [ok\|operator\|fail] ["recap"] [--force]` | Signal completion. Writes the sentinel, then pings, routes and pokes as the status says. Refused, before anything is written, for a malformed phase id, a phase no worker is running, or (inside a worker) a phase other than the worker's own. A repeat for a phase already recorded is a no-op. |
+| `done <phase> [ok\|operator\|fail\|blocked\|later] ["recap"] [--after YYYY-MM-DD] [--force]` | Signal completion. Writes the sentinel, then pings, routes and pokes as the status says. `blocked` and `later` are handled as `fail`; `later` pings nobody and, with `--after`, keeps the row from running before that date. The recap is also queued for the ledger (below). Refused, before anything is written, for a malformed phase id, a phase no worker is running, or (inside a worker) a phase other than the worker's own. A repeat for a phase already recorded is a no-op. |
 | `waiting <phase> ["question"]` | Tell the owner you are blocked on them. Arms the park timer. |
 | `resumed <phase> ["answer"]` | The owner answered. Records the answer and cancels the park. |
 | `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |
@@ -59,6 +59,27 @@ exact flags.
 | `notify "message"` | Message the owner through the swarm's own sender, the only way a session should. |
 | `keep --name N --why "one line" [--cwd DIR] -- <cmd…>` | Leave one process running after your session ends (everything else a session starts is ended with it). Starts it detached without the session's markers, records `<state>/keep/N.json`, prints its pid and log. `--why` is required (≤120 chars); a live name is refused, a dead one replaced. Use it only when something must outlive the session, and name it in your recap. |
 | `keep --list [--json]` / `keep --stop N` | Every kept process, alive or dead, with why, who and age / stop one (SIGTERM, then SIGKILL, to its group) and forget it. |
+
+## Reporting: the ledger and the history
+
+The swarm is the only writer of the ledger, the phase history (`[tasks].history`)
+and the lessons file. Sessions report; the supervisor applies each report on the
+target branch in the project checkout, under the umbrella's merge lock, and
+commits and pushes it itself. A worker's reports land with its phase: after the
+merge for an outcome that integrates, at once for one that does not. Everything
+else lands at once. See [components.md](components.md#the-ledger-writer).
+
+| command | what it does |
+|---|---|
+| `done <phase> <outcome> ["recap"]` | (worker) Ticks the row when the phase lands (`ok`, `operator`), sets its short status (`done (date)`, `failed (date)`, `blocked (date)`, `later, after <date>`), and files the recap and the phase's `swarm note` decisions in its history. |
+| `record <phase> done\|failed\|blocked\|later\|note ["text"] [--after YYYY-MM-DD]` | (ask, operator, Overseer) The same for a row with no worker of its own: `done` ticks it, `note` only files the text. Refused for an id with no row. |
+| `follow-up <phase> <new-id> --title "one line" [--needs a,b] [--dir d] [--tag t] ["what it must deliver"]` | File a new open row after `<phase>`'s section, with the text in the new phase's history. Refused at once for a taken id, a need with no row, or a new dependency cycle; `[tasks].ledger_gate` is run when it is applied, and a rejected row goes into `<phase>`'s history instead. |
+| `lesson <phase> "text" [--title T]` | Append `## (date, `phase`) title` and the text to `[tasks].lessons`. |
+
+`python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--gate CMD] [--write]`
+moves a ledger's accumulated notes into the history once (and the dated entries
+of `docs/STATUS.md` into `<history>/STATUS-archive.md`), proving the ledger reads
+the same before and after. Run it with the swarm stopped.
 
 ## Asks
 

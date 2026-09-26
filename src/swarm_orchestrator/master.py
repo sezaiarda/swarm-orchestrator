@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 from . import launch as launch_mod
@@ -80,7 +81,9 @@ def build_context(cfg: Config, st: State) -> dict:
         | set(st.waiting)
         | st.integrating()
     )
-    excluded = set(cfg.exclude)
+    # A row that finished `later` waits in the ledger for its `after:` date.
+    deferred = ledger_mod.load_deferred(ledger_path, time.strftime("%Y-%m-%d", time.gmtime()))
+    excluded = set(cfg.exclude) | set(deferred)
     # A row ticked `[x]` with no record of ours counts as landed (a view only;
     # `done` below stays the swarm's own records).
     done = ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(ledger_path), busy_phases)
@@ -104,6 +107,8 @@ def build_context(cfg: Config, st: State) -> dict:
         # keep the run `pending` until the worker is answered and runs `swarm done`.
         "waiting": sorted(st.waiting),
         "parked": list(st.parked),
+        # Rows waiting for a date (`after:`), which `ready` leaves out until then.
+        "deferred": deferred,
         # Repos merged locally but not yet on origin. Informational: nothing a
         # worker builds waits on origin, so these never gate `ready`.
         "push_owed": {k: v.get("phase") for k, v in st.push_owed.items()},
@@ -159,7 +164,7 @@ def overseer_brief(
     prompt_file = resolver.prompt_path(_PROMPTS[OVERSEER])
     where = (
         f"Your cwd {cwd} is your own full-workspace mirror (branch swarm/{cwd.name}):"
-        " edit and commit the ledger there; the swarm merges it when you finish."
+        " commit your ledger edits there; the swarm merges them when you finish."
         if cwd is not None
         else f"Your cwd is the project itself, {cfg.project_dir}; commit there."
     )

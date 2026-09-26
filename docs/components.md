@@ -384,6 +384,35 @@ was last refreshed. `<state>/bigpic/state.json` holds the counter, the last
 pass and any draft waiting to land, so a restart loses none of them; a pass
 running when the supervisor stops is ended with it.
 
+## The ledger writer
+
+Sessions never edit the ledger, the phase history or the lessons file
+(`ledgerw.py`). They used to: every worker ticked its own row and appended its
+notes to it, and operator, ask and Overseer sessions did the same, each on its
+own branch. Rows grew large and the merge queue kept meeting the same row edited twice
+(a common source of conflicts).
+
+Now a session reports (`swarm done`, `record`, `follow-up`, `lesson`) and the
+report waits in `<state>/ledger/<key>.json`. The supervisor applies it with
+`gitq.commit_to_target`: on the main branch of the project checkout, under the
+umbrella's repo lock (so it is serialised with integration), committing only the
+ledger, the history directory and the lessons file, then pushing. A worker's
+report is applied in `_advance_done`, which runs after the merge succeeds, so a
+row is ticked only once its work is on main; a `fail` never ticks. When the
+checkout cannot take it (off main, mid-merge, someone's edit in those files) the
+report is held and the watchdog retries it; nothing is lost across a restart.
+
+- **The ledger keeps state:** box, id, dir, needs, a short bold title, tags, an
+  `after:` date and `status:`. A ticked row's open needs are carried to its open
+  dependents, so ticking never lets two rows its chain ordered run together.
+- **The history** is `<history>/<family>.md` (the id up to its first `-`), one
+  `## ` section per phase with dated `### ` entries. Past `history_split_kb` it
+  becomes `<history>/<family>/<id>.md`. The web board's detail sheet shows it
+  under the row.
+- **`later`** finishes like `fail` but writes `after:` on the row; the launcher
+  leaves the row alone until that date, and the watchdog then clears the failure
+  so the next free slot takes it.
+
 ## Integrator and merge-conflict resolver
 
 Under `isolation = "worktree"` a finished phase joins the **merge queue**

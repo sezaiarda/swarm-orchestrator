@@ -42,6 +42,7 @@ from . import why as why_mod
 from . import gitq
 from . import keep as keep_mod
 from . import ledger as ledger_mod
+from . import ledgerw
 from . import launch as launch_mod
 from . import session as session_mod
 from . import state as state_mod
@@ -580,7 +581,8 @@ def cmd_launch(cfg: Config, phase: str) -> int:
     return 1
 
 
-def cmd_done(cfg: Config, phase: str, status: str, note: str, force: bool = False) -> int:
+def cmd_done(cfg: Config, phase: str, status: str, note: str, force: bool = False,
+             after: str = "") -> int:
     """Signal phase completion — and say, in full, what that did.
 
     This used to be two lines that printed nothing and returned 0 unconditionally,
@@ -605,7 +607,17 @@ def cmd_done(cfg: Config, phase: str, status: str, note: str, force: bool = Fals
     if refusal is not None:
         print(f"swarm done refused: {refusal}", file=sys.stderr)
         return 2
-    result = launch_mod.done(cfg, phase, status, note, force=force)
+    if after:
+        try:
+            ledgerw.check_date(after)
+        except ledgerw.ReportError as exc:
+            # Past the point of no return: record the finish, just without a date.
+            print(f"swarm done: {exc}; recorded without --after", file=sys.stderr)
+            after = ""
+    if status == statuses.LATER and not after:
+        print("swarm done: `later` without --after YYYY-MM-DD waits for nobody;"
+              " it is recorded like `blocked`", file=sys.stderr)
+    result = launch_mod.done(cfg, phase, status, note, force=force, after=after)
     print(result.render())
     # Exit non-zero only when a ping the owner was owed did not go out. A missing
     # supervisor is NOT a failure: the sentinel is durable and `swarm up`
@@ -1361,6 +1373,62 @@ def cmd_note(cfg: Config, phase: str, text: str, kind: str) -> int:
     return 0
 
 
+def _report_queued(cfg: Config, key: str, what: str) -> int:
+    if key == ledgerw.NOW:
+        poked = _poke(cfg, "ledger")
+        print(f"{what}: queued; the swarm writes it on the target branch"
+              + (" now" if poked else " when it next runs (no supervisor is reading)"))
+    else:
+        print(f"{what}: queued with {key}; the swarm writes it when {key} lands")
+    print("  (the swarm is the ledger's only writer: do not edit the ledger,"
+          " the phase history or the lessons file yourself)")
+    return 0
+
+
+def cmd_record(cfg: Config, phase: str, outcome: str, note: str, after: str) -> int:
+    """Record an outcome on a row that has no worker of its own to report it.
+
+    For the sessions that are not a phase's worker: an ask records the owner's
+    pick on an owner-run row, an operator what it did for a phase, the Overseer
+    a finding. A worker reports its own phase with ``swarm done``.
+    """
+    try:
+        if outcome == "later":
+            ledgerw.check_date(after)
+        if phase not in ledger_mod.load(cfg.project_dir / cfg.ledger) and outcome != "note":
+            raise ledgerw.ReportError(f"no ledger row {phase}")
+    except ledgerw.ReportError as exc:
+        print(f"swarm record: {exc}", file=sys.stderr)
+        return 2
+    by = os.environ.get("SWARM_SESSION_ID", "") or "owner"
+    ledgerw.queue(cfg, ledgerw.NOW, {"kind": "record", "phase": phase, "outcome": outcome,
+                                     "note": note, "after": after, "by": by})
+    return _report_queued(cfg, ledgerw.NOW, f"{phase} {outcome}")
+
+
+def cmd_follow_up(cfg: Config, by: str, phase: str, title: str, needs: str, dirs: str,
+                  tags: str, scope: str) -> int:
+    """File a new ledger row for work found while building ``by``."""
+    split = lambda v: [t for t in (v or "").replace(",", " ").split() if t]  # noqa: E731
+    try:
+        key = ledgerw.file_follow_up(cfg, by, phase, title, split(needs), split(dirs),
+                                     split(tags), scope)
+    except ledgerw.ReportError as exc:
+        print(f"swarm follow-up: {exc}", file=sys.stderr)
+        return 2
+    return _report_queued(cfg, key, f"follow-up {phase}")
+
+
+def cmd_lesson(cfg: Config, phase: str, text: str, title: str) -> int:
+    """Append a lesson to the project's lessons file, through the swarm."""
+    if not text.strip():
+        print("swarm lesson: empty lesson", file=sys.stderr)
+        return 2
+    key = ledgerw.key_for(phase)
+    ledgerw.queue(cfg, key, {"kind": "lesson", "phase": phase, "text": text, "title": title})
+    return _report_queued(cfg, key, "lesson")
+
+
 def cmd_build(cfg: Config, argv: list[str]) -> int:
     """Run a heavy build command through the swarm-wide concurrency gate.
 
@@ -2097,13 +2165,43 @@ def _build_parser() -> argparse.ArgumentParser:
         # *after* its point of no return, so rejecting the retired spelling would
         # cost it the sentinel, the history row and the poke over a word.
         "status", nargs="?", default="ok",
-        choices=list(statuses.ACCEPTED), metavar="{ok,operator,fail}",
+        choices=list(statuses.ACCEPTED), metavar="{ok,operator,fail,blocked,later}",
     )
     dp.add_argument("note", nargs="*", default=[])
     dp.add_argument("--force", action="store_true",
                     help="replace an existing recap / re-send its ping")
+    dp.add_argument("--after", default="", metavar="YYYY-MM-DD",
+                    help="with `later`: the date before which the phase must not run")
     dp.set_defaults(func=lambda cfg, a: cmd_done(
-        cfg, a.phase, a.status, " ".join(a.note), force=a.force))
+        cfg, a.phase, a.status, " ".join(a.note), force=a.force, after=a.after))
+
+    rcd = sub.add_parser(
+        "record", help="(ask/operator/Overseer) record an outcome on a ledger row")
+    rcd.add_argument("phase")
+    rcd.add_argument("outcome", choices=list(ledgerw.RECORD_OUTCOMES))
+    rcd.add_argument("note", nargs="*", default=[])
+    rcd.add_argument("--after", default="", metavar="YYYY-MM-DD",
+                     help="with `later`: the date before which the phase must not run")
+    rcd.set_defaults(func=lambda cfg, a: cmd_record(
+        cfg, a.phase, a.outcome, " ".join(a.note), a.after))
+
+    fup = sub.add_parser("follow-up", help="file a new ledger row for work you found")
+    fup.add_argument("phase", help="the phase you are building (the row it is filed from)")
+    fup.add_argument("id", help="the new row's id, unique in the ledger")
+    fup.add_argument("scope", nargs="*", default=[],
+                     help="what the new phase must deliver; goes to its history")
+    fup.add_argument("--title", required=True, help="one line: what the row is")
+    fup.add_argument("--needs", default="", help="ids it waits on (comma-separated)")
+    fup.add_argument("--dir", default="", help="repo dir(s) it works in (comma-separated)")
+    fup.add_argument("--tag", default="", help="owner tag(s) it stops at (comma-separated)")
+    fup.set_defaults(func=lambda cfg, a: cmd_follow_up(
+        cfg, a.phase, a.id, a.title, a.needs, a.dir, a.tag, " ".join(a.scope)))
+
+    lsp = sub.add_parser("lesson", help="add a lesson to the project's lessons file")
+    lsp.add_argument("phase")
+    lsp.add_argument("text", nargs="+", help="the rule, and what taught it")
+    lsp.add_argument("--title", default="", help="its heading (default: its first sentence)")
+    lsp.set_defaults(func=lambda cfg, a: cmd_lesson(cfg, a.phase, " ".join(a.text), a.title))
 
     fp = sub.add_parser("free", help="manually free a slot (by id or phase)")
     fp.add_argument("target")

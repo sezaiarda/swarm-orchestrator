@@ -67,6 +67,10 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 |---|---|---|---|---|
 | `ledger` | `"docs/PHASE-LEDGER.md"` | | hot | The phase ledger, relative to the project root. The launcher parses it on every decision. |
 | `exclude` | `[]` | | hot | Phase ids never to launch, for example rows blocked outside the swarm. `swarm why` quotes the comment next to an entry. |
+| `history` | `"docs/phases"` | | hot | Where the swarm files what was written about each phase: `<history>/<family>.md`, where the family is the id up to its first `-` (`docs-W12` goes to `docs.md`). Sessions never edit it; see [cli.md](cli.md#reporting-the-ledger-and-the-history). |
+| `history_split_kb` | `256` | | hot | A family file that grows past this many KB becomes a directory with one file per phase (`<history>/docs/docs-W12.md`). `0` never splits. |
+| `lessons` | `"tasks/lessons.md"` | | hot | The file `swarm lesson` appends to. |
+| `ledger_gate` | `""` | | hot | A command that checks the ledger, run in the project checkout with `SWARM_LEDGER` set to the ledger's path each time the swarm adds a follow-up row. If it exits non-zero the row is not added and the refusal goes into the filing phase's history. |
 
 ## `[telegram]`
 

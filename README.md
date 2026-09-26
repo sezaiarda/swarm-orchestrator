@@ -221,7 +221,7 @@ by the supervisor.
 
 ```mermaid
 flowchart TD
-  ev1["a phase fails · the merge queue is held<br/>a push becomes owed · a cheap doctor check FAILs"] --> pend
+  ev1["a phase fails · a merge hold no resolver is clearing<br/>a push becomes owed · a cheap doctor check FAILs"] --> pend
   ev2["a phase waits on the owner past owner_wait_s<br/>free slots, nothing launchable, past starve_s"] --> pend
   ct["every every_finished phases · every every_s seconds"] --> pend
   mn["swarm overseer --now"] --> pend

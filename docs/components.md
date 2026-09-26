@@ -126,6 +126,10 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
   pending list (see [the diagram](../README.md#init-pass-and-overseer)). Only one
   pass runs at a time. Passes are `min_gap_s` apart, unless a reason is urgent: a held merge
   queue, a doctor FAIL, starvation, or `swarm overseer --now`.
+- **Merge holds:** a conflict the resolver is working on is left to it. The hold
+  triggers a pass only when no resolver opened, the resolver gave up (it messaged
+  you, or ran `swarm resolved` on an unfinished merge), or the hold is older than
+  `hold_wait_s`. The trigger is checked again just before a pass starts.
 - **What it reads:** before each pass the supervisor writes
   `<state>/overseer/digest-<id>.md` (and `.json`). It holds the trigger, the swarm
   now, every phase finished since the last pass with its recap and notes, every

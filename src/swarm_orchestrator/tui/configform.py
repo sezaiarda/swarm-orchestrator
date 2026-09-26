@@ -468,6 +468,8 @@ FIELDS: tuple[Setting, ...] = (
     Setting("overseer_owner_wait_s", INT, "owner-wait age that triggers a pass (s)",
             minimum=0),
     Setting("overseer_starve_s", INT, "idle-slot starvation before a pass (s)", minimum=0),
+    Setting("overseer_hold_wait_s", INT, "merge hold a resolver has before a pass (s)",
+            minimum=0),
     Setting("overseer_timeout_s", INT, "seconds before a hung pass is killed", minimum=1),
     # -- [tui] ------------------------------------------------------------
     Setting("tui_autostart", BOOL, "open this dashboard automatically at `swarm up`"),

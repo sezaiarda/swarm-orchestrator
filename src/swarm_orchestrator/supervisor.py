@@ -355,6 +355,8 @@ class Supervisor:
             self._on_master_idle()
         elif verb == "resolved":
             self._on_resolved(parts[1] if len(parts) > 1 else "?")
+        elif verb == "resolver-escalated":
+            self._on_resolver_escalated(parts[1] if len(parts) > 1 else "?")
         elif verb == "waiting":
             self._on_waiting(parts[1] if len(parts) > 1 else "?")
         elif verb == "resumed":
@@ -800,6 +802,7 @@ class Supervisor:
         if repo is not None and not gitq.resolve_ready(self.cfg, repo):
             # Resolver / owner signalled early (still mid-merge or dirty): stay blocked.
             self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked")
+            self.overseer.resolver_escalated(phase)
             telegram.notify(
                 self.cfg.telegram_notify,
                 f"swarm: {phase} not finished yet ({repo.name} still has an unfinished"
@@ -818,6 +821,15 @@ class Supervisor:
             resolver_mod.close(self.cfg, win, self.log, phase)
         self.log.line(f"RESOLVED {phase}")
         self._pump_integrations()  # re-integrate (resumes; may re-block downstream)
+
+    def _on_resolver_escalated(self, phase: str) -> None:
+        """The resolver messaged the owner instead of finishing: the hold is no
+        longer being handled, so the Overseer may look at it now."""
+        with state_mod.transaction(self.cfg) as st:
+            blocked = st.integ_blocked
+        self.log.line(f"RESOLVER-ESCALATED {phase}")
+        if blocked == phase:
+            self.overseer.resolver_escalated(phase)
 
     # -- the operator session: dispatch, and the signal it is over -------
     def _on_operator(self, phase: str) -> None:
@@ -1623,6 +1635,10 @@ class Supervisor:
         # and with a pass in the pane `_fill_slots` would read that pass as the
         # init master and hold every launch. Settle it the way `_fill_slots` does.
         self._end_bootstrap()
+        if not self.overseer.due(now):
+            return
+        # A hold reason may have waited while the resolver cleared it.
+        self.overseer.recheck(state_mod.read(self.cfg), now)
         if not self.overseer.due(now):
             return
         self._start_overseer_pass(now)

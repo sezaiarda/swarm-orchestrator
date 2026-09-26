@@ -46,6 +46,7 @@ def test_defaults_match_the_plan(cfg):
     assert cfg.overseer_enabled is True
     assert (cfg.overseer_min_gap_s, cfg.overseer_every_finished, cfg.overseer_every_s) == (600, 3, 10800)
     assert (cfg.overseer_owner_wait_s, cfg.overseer_starve_s, cfg.overseer_timeout_s) == (3600, 600, 2700)
+    assert cfg.overseer_hold_wait_s == 600
 
 
 def test_the_first_look_baselines_history_instead_of_reporting_it(cfg):
@@ -131,6 +132,70 @@ def test_a_hold_fires_once_per_hold_and_again_after_it_clears(cfg):
     assert pol.pending == []
     pol.observe(_st(), T0 + 3)
     pol.observe(held, T0 + 4)
+    assert _keys(pol) == ["hold:P2"]
+
+
+def _resolving(phase="P2", **kw) -> State:
+    return _st(integ_blocked=phase, integ_blocked_kind="conflict",
+               windows={f"resolve:{phase}": "@7"}, **kw)
+
+
+def test_a_hold_the_resolver_is_on_waits_for_hold_wait_s(cfg):
+    assert cfg.overseer_hold_wait_s == 600
+    pol = ov.Policy(cfg)
+    pol.observe(_resolving(), T0)
+    assert pol.pending == []
+    assert pol.next_deadline(T0) == T0 + 600  # the supervisor wakes for it
+    pol.observe(_resolving(), T0 + 599)
+    assert pol.pending == []
+    pol.observe(_resolving(), T0 + 600)
+    assert _keys(pol) == ["hold:P2"] and pol.pending[0].urgent
+    assert "not cleared it in 10m" in pol.pending[0].text
+
+
+def test_a_hold_the_resolver_cleared_never_triggers(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_resolving(), T0)
+    pol.observe(_st(), T0 + 40)
+    pol.observe(_st(), T0 + 4000)
+    assert pol.pending == []
+
+
+def test_a_resolver_that_gives_up_triggers_at_once(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_resolving(), T0)
+    pol.resolver_escalated("P2")
+    pol.observe(_resolving(), T0 + 30)
+    assert _keys(pol) == ["hold:P2"]
+    assert "could not fix it" in pol.pending[0].text
+
+
+def test_the_escalation_belongs_to_one_hold(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_resolving(), T0)
+    pol.resolver_escalated("P2")
+    pol.observe(_resolving(), T0 + 1)
+    pol.begin(T0 + 2)
+    pol.observe(_st(), T0 + 3)
+    pol.observe(_resolving(), T0 + 4)  # a new hold on the same phase
+    assert pol.pending == []
+
+
+def test_a_pending_hold_reason_is_dropped_once_the_hold_clears(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_st(integ_blocked="P2", integ_blocked_kind="dirty"), T0)
+    pol.request("fail:X", "x", now=T0)
+    assert _keys(pol) == ["hold:P2", "fail:X"]
+    assert pol.recheck(_st(), T0 + 5) == ["hold:P2"]
+    assert _keys(pol) == ["fail:X"]
+    assert pol.recheck(_st(), T0 + 6) == []
+
+
+def test_recheck_keeps_a_hold_reason_that_still_applies(cfg):
+    pol = ov.Policy(cfg)
+    held = _st(integ_blocked="P2", integ_blocked_kind="dirty")
+    pol.observe(held, T0)
+    assert pol.recheck(held, T0 + 5) == []
     assert _keys(pol) == ["hold:P2"]
 
 

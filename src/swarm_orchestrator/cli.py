@@ -49,6 +49,7 @@ from .web import lifecycle as web_lifecycle
 from .config import Config, load
 from . import logutil
 from .logutil import Log
+from .procs import SESSION_ENV
 from . import master as master_mod
 from .master import build_context
 
@@ -1549,6 +1550,10 @@ def cmd_notify(cfg: Config, message: str, attention: bool = False) -> int:
         held = _summary_hold(cfg, attention)
         if not held:
             message = telegram.with_footer(message, usage_mod.brief_for(cfg))
+    session = os.environ.get(SESSION_ENV, "")
+    if session.startswith("resolver:"):
+        # A resolver only messages the owner when it gives up on the conflict.
+        _poke(cfg, f"resolver-escalated {session.split(':', 1)[1]}")
     ok = telegram.notify(
         cfg.telegram_notify,
         message,

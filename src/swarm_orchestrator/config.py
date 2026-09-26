@@ -99,6 +99,7 @@ class Config:
     overseer_every_s: int
     overseer_owner_wait_s: int
     overseer_starve_s: int
+    overseer_hold_wait_s: int
     overseer_timeout_s: int
     gc_auto: bool
     gc_every_s: int
@@ -408,6 +409,10 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         ),
         overseer_starve_s=_int_env(
             "SWARM_OVERSEER_STARVE", overseer.get("starve_s"), 600, minimum=0
+        ),
+        # A merge hold the resolver has not cleared in this long gets a pass.
+        overseer_hold_wait_s=_int_env(
+            "SWARM_OVERSEER_HOLD_WAIT", overseer.get("hold_wait_s"), 600, minimum=0
         ),
         # A hung pass must never hold the pane (or the finish) forever: past this
         # the session is killed, logged and its committed work landed.

@@ -158,6 +158,7 @@ An ask's outcome (`swarm ask-done`) pings by `[operator].notify`: with the defau
 | `every_s` | `10800` | `SWARM_OVERSEER_EVERY` | hot | Run a pass at least this often. `0` turns this off. |
 | `owner_wait_s` | `3600` | `SWARM_OVERSEER_OWNER_WAIT` | hot | A phase waiting on you this long triggers a pass, once per phase. |
 | `starve_s` | `600` | `SWARM_OVERSEER_STARVE` | hot | Free slots, nothing launchable and backlog still open for this long triggers a pass, once per episode. |
+| `hold_wait_s` | `600` | `SWARM_OVERSEER_HOLD_WAIT` | hot | A merge conflict the resolver is working on triggers a pass only once it has been held this long. A hold with no resolver, or one the resolver gave up on, triggers at once. |
 | `timeout_s` | `2700` | `SWARM_OVERSEER_TIMEOUT` | next | A pass still running after this is killed, and whatever it committed is merged. `overseer-ask` stretches the deadline while you are being asked. |
 
 ## `[gc]`

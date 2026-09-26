@@ -382,3 +382,21 @@ def test_the_finish_ping_is_filed_as_finish(swarm):
     assert len(finish) == 1, rows
     assert finish[0]["delivered"] is True
     assert finish[0]["kind"] == "finish"
+
+
+def test_a_resolver_messaging_the_owner_tells_the_supervisor_it_gave_up(
+    sink: Path, tmp_path: Path, monkeypatch
+):
+    from swarm_orchestrator import cli
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = load(project_dir=str(project))
+    poked: list[str] = []
+    monkeypatch.setattr(launch, "_poke_fifo", lambda cfg, line: poked.append(line) or True)
+    monkeypatch.setenv("SWARM_SESSION_ID", "resolver:P1")
+    assert cli.cmd_notify(cfg, "cannot merge the ledger rows of P1") == 0
+    assert poked == ["resolver-escalated P1\n"]
+    monkeypatch.setenv("SWARM_SESSION_ID", "overseer:x")
+    cli.cmd_notify(cfg, "hello")
+    assert poked == ["resolver-escalated P1\n"]

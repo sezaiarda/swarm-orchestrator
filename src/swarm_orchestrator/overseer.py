@@ -14,12 +14,21 @@ sees on every wake (:meth:`Policy.observe`) and asks whether a pass is due
 
 Triggers
 --------
-*Events* — a phase finishing ``fail``; an integration hold; a newly owed push; a
+*Events* — a phase finishing ``fail``; an integration hold no resolver is handling
+(below); a newly owed push; a
 cheap doctor check turning FAIL; a phase waiting or parked on the owner for longer
 than ``[overseer] owner_wait_s`` (once per phase); starvation — free slots and
 nothing launchable while non-excluded backlog remains, sustained for
 ``[overseer] starve_s`` (once per episode). *Counters* — every
 ``[overseer] every_finished`` phases finished, and every ``[overseer] every_s``.
+
+A merge conflict opens a resolver session, which almost always clears the hold
+within a minute; a pass that looks meanwhile finds nothing to do. So a hold
+triggers only once the resolver is out of the picture: none was opened (a dirty
+tree, a spawn that failed), it gave up (messaged the owner, or said ``resolved``
+on an unfinished merge), or the hold has outlived ``[overseer] hold_wait_s``.
+The condition is checked again just before a pass starts, and a hold reason
+that no longer applies is dropped.
 
 Coalescing
 ----------
@@ -110,6 +119,11 @@ class Memory:
     #: baselines instead of firing.
     seen_done: dict[str, str] | None = None
     seen_hold: str = ""
+    #: When the current hold was first seen, whether it has triggered a pass,
+    #: and the phase whose resolver gave up on it.
+    hold_since: float = 0.0
+    hold_fired: bool = False
+    hold_escalated: str = ""
     seen_push: list[str] = field(default_factory=list)
     owner_since: dict[str, float] = field(default_factory=dict)
     owner_fired: list[str] = field(default_factory=list)
@@ -265,17 +279,65 @@ class Policy:
 
     def _observe_hold(self, st, now: float) -> list[str]:
         key = f"{st.integ_blocked}:{st.integ_blocked_kind}" if st.integ_blocked else ""
-        if key == self.mem.seen_hold:
+        if key != self.mem.seen_hold:
+            self.mem.seen_hold = key
+            self.mem.hold_since = now if key else 0.0
+            self.mem.hold_fired = False
+            self.mem.hold_escalated = ""
+        elif key and not self.mem.hold_since:
+            self.mem.hold_since = now  # a memory written before the clock existed
+        why = self._hold_trigger(st, now)
+        if not key or self.mem.hold_fired or not why:
             return []
-        self.mem.seen_hold = key
-        if not key:
-            return []
+        self.mem.hold_fired = True
         return self._want(
             f"{HOLD}:{st.integ_blocked}",
-            f"integration held on {st.integ_blocked} ({st.integ_blocked_kind}) — the merge queue is frozen",
+            f"integration held on {st.integ_blocked} ({st.integ_blocked_kind}), {why}"
+            " — the merge queue is frozen",
             True,
             now,
         )
+
+    def _hold_trigger(self, st, now: float) -> str:
+        """Why the current hold needs a pass, or ``""`` while a resolver is on it."""
+        phase = st.integ_blocked
+        if not phase:
+            return ""
+        if f"resolve:{phase}" not in st.windows:
+            return "no resolver is on it"
+        if self.mem.hold_escalated == phase:
+            return "the resolver could not fix it"
+        age = now - (self.mem.hold_since or now)
+        if age >= self.cfg.overseer_hold_wait_s:
+            return f"the resolver has not cleared it in {_age(age)}"
+        return ""
+
+    def resolver_escalated(self, phase: str) -> None:
+        """The resolver on ``phase``'s hold gave up; the next look triggers."""
+        if self.mem.hold_escalated != phase:
+            self.mem.hold_escalated = phase
+            self.save()
+
+    def recheck(self, st, now: float | None = None) -> list[str]:
+        """Drop every pending hold reason whose trigger no longer holds; return
+        their keys. A reason can wait behind a running pass or the gap, and the
+        resolver may clear the hold meanwhile — a pass started for it would only
+        find the queue already moving."""
+        now = time.time() if now is None else now
+        live = f"{HOLD}:{st.integ_blocked}" if self._hold_trigger(st, now) else ""
+        dropped = [
+            d.get("key", "") for d in self.mem.pending
+            if str(d.get("key", "")).startswith(f"{HOLD}:") and d.get("key") != live
+        ]
+        if not dropped:
+            return []
+        self.mem.pending = [d for d in self.mem.pending if d.get("key") not in dropped]
+        if f"{HOLD}:{st.integ_blocked}" in dropped:
+            self.mem.hold_fired = False  # still held: let it trigger again if it must
+        self.save()
+        if self.log is not None:
+            self.log.line(f"OVERSEER-TRIGGER-DROPPED {','.join(dropped)} — no longer applies")
+        return dropped
 
     def _observe_push(self, owed: dict[str, dict], now: float) -> list[str]:
         new = sorted(set(owed) - set(self.mem.seen_push))
@@ -382,6 +444,8 @@ class Policy:
         for phase, since in self.mem.owner_since.items():
             if phase not in self.mem.owner_fired:
                 stamps.append(since + self.cfg.overseer_owner_wait_s)
+        if self.mem.seen_hold and not self.mem.hold_fired and self.mem.hold_since:
+            stamps.append(self.mem.hold_since + self.cfg.overseer_hold_wait_s)
         future = [s for s in stamps if s > now]
         return min(future) if future else None
 

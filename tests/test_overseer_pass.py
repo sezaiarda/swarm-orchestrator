@@ -243,8 +243,16 @@ def test_the_pane_gets_one_short_line_and_the_brief_goes_to_a_file(sup, cfg):
     assert [r.id for r in ovrecord.load_passes(cfg)] == [pid]  # a .md is never a record
 
 
+def _held(cfg, phase: str, kind: str = "dirty", resolver: bool = False) -> None:
+    with state_mod.transaction(cfg) as st:
+        st.integ_blocked, st.integ_blocked_kind = phase, kind
+        if resolver:
+            st.windows[f"resolve:{phase}"] = "@7"
+
+
 def test_no_second_pass_while_one_runs_and_the_pending_one_runs_after(sup, cfg):
     pid = _start(sup)
+    _held(cfg, "P1")
     sup.overseer.request("hold:P1", "held", urgent=True)
     sup._overseer_tick()
     assert sup._overseer_live == pid and len(sup.spawned) == 1
@@ -320,6 +328,7 @@ def test_asking_the_owner_stretches_the_deadline_and_answering_resets_it(sup, cf
 
 
 def test_a_pass_that_will_not_start_gives_its_reasons_back(sup, cfg, tmp_path):
+    _held(cfg, "P1")
     sup.overseer.request("hold:P1", "held", urgent=True)
     sup._overseer_tick()
     pid = sup._overseer_live
@@ -329,6 +338,24 @@ def test_a_pass_that_will_not_start_gives_its_reasons_back(sup, cfg, tmp_path):
     assert [(r.key, r.urgent) for r in sup.overseer.pending] == [("hold:P1", False)]
     assert "would not start" not in _tg(tmp_path)  # its reasons wait for the next one
     assert any("would not start" in r["text"] for r in _ledger(cfg))
+
+
+def test_a_conflict_the_resolver_is_on_gets_a_pass_only_once_it_gives_up(sup, cfg):
+    _held(cfg, "P1", "conflict", resolver=True)
+    sup._overseer_tick()
+    assert sup._overseer_live is None
+    sup._handle("resolver-escalated P1")
+    sup._overseer_tick()
+    rec = ovrecord.load_json(cfg, sup._overseer_live)
+    assert [r["key"] for r in rec.reasons] == ["hold:P1"]
+    assert "RESOLVER-ESCALATED P1" in cfg.supervisor_log.read_text()
+
+
+def test_a_hold_reason_whose_hold_cleared_starts_no_pass(sup, cfg):
+    sup.overseer.request("hold:P1", "held", urgent=True)  # queued; then the resolver finished
+    sup._overseer_tick()
+    assert sup._overseer_live is None and sup.overseer.pending == []
+    assert "OVERSEER-TRIGGER-DROPPED hold:P1" in cfg.supervisor_log.read_text()
 
 
 def test_a_live_or_owed_pass_holds_the_finish(sup, cfg):

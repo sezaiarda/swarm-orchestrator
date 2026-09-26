@@ -212,15 +212,44 @@ def test_pretrust_dir_tolerates_missing_or_bad_config(tmp_path, monkeypatch):
         assert json.loads(missing.read_text())["projects"][str(wt.resolve())][
             "hasTrustDialogAccepted"
         ] is True
-        bad = tmp_path / "bad.json"  # malformed -> replaced, never raises
-        bad.write_text("{ not json")
-        monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(bad))
-        launch_mod.pretrust_dir(wt, log)
-        assert json.loads(bad.read_text())["projects"][str(wt.resolve())][
-            "hasTrustDialogAccepted"
-        ] is True
+        # Unreadable -> NEVER written back: it is the owner's login and settings,
+        # and a torn read of a file claude is rewriting looks exactly like this.
+        monkeypatch.setattr(launch_mod, "PRETRUST_RETRY_S", 0.0)
+        for text in ("{ not json", "[1, 2]", '{"projects": [], "oauthAccount": {"a": 1}}'):
+            bad = tmp_path / "bad.json"
+            bad.write_text(text)
+            monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(bad))
+            launch_mod.pretrust_dir(wt, log)  # never raises
+            assert bad.read_text() == text
     finally:
         log.close()
+    assert "PRETRUST-SKIPPED" in (tmp_path / "l.log").read_text()
+
+
+def test_pretrust_dir_recovers_from_a_torn_read(tmp_path, monkeypatch):
+    import json
+
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator.logutil import Log
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    conf = tmp_path / "claude.json"
+    conf.write_text(json.dumps({"oauthAccount": {"emailAddress": "x"}, "projects": {}}))
+    monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(conf))
+    monkeypatch.setattr(launch_mod, "PRETRUST_RETRY_S", 0.0)
+    real = launch_mod._read_claude_config
+    torn = [None]  # the first read is torn, the next is whole
+    monkeypatch.setattr(launch_mod, "_read_claude_config",
+                        lambda p: torn.pop() if torn else real(p))
+    log = Log(tmp_path / "l.log")
+    try:
+        launch_mod.pretrust_dir(wt, log)
+    finally:
+        log.close()
+    data = json.loads(conf.read_text())
+    assert data["oauthAccount"] == {"emailAddress": "x"}
+    assert data["projects"][str(wt.resolve())]["hasTrustDialogAccepted"] is True
 
 
 # -- flock check-and-set under real concurrency ---------------------------
@@ -259,6 +288,7 @@ def test_done_writes_sentinel_and_fifo_line(swarm):
     os.mkfifo(fifo)
     # Hold the FIFO open O_RDWR (as the supervisor does) so the poke lands.
     fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+    swarm.claim("P1")
     try:
         swarm.cli("done", "P1", "ok", "some note", timeout=10)
         # sentinel written atomically

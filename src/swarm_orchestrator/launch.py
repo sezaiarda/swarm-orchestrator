@@ -75,6 +75,39 @@ def _claude_config_path() -> Path:
     return Path(override).expanduser() if override else Path.home() / ".claude.json"
 
 
+#: How often :func:`pretrust_dir` re-reads a ``~/.claude.json`` it could not
+#: parse, or that changed under it, before it gives up; and the pause between.
+PRETRUST_TRIES = 5
+PRETRUST_RETRY_S = 0.2
+
+
+def _read_claude_config(cfg_path: Path) -> tuple[dict, tuple[int, int] | None] | None:
+    """``(data, (mtime_ns, size))``, ``({}, None)`` for a file that does not
+    exist, or None when it cannot be read or is not a JSON object with a
+    ``projects`` object (a torn read while claude rewrites it looks like that)."""
+    try:
+        before = cfg_path.stat()
+    except FileNotFoundError:
+        return {}, None
+    except OSError:
+        return None
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("projects", {}), dict):
+        return None
+    return data, (before.st_mtime_ns, before.st_size)
+
+
+def _stamp(cfg_path: Path) -> tuple[int, int] | None:
+    try:
+        st = cfg_path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
 def pretrust_dir(path: Path, log: Log) -> None:
     """Mark ``path`` trusted in claude's config so no folder-trust dialog appears.
 
@@ -82,35 +115,46 @@ def pretrust_dir(path: Path, log: Log) -> None:
     seen, which would otherwise pop the "Do you trust the files in this folder?"
     dialog for *every* phase. We pre-seed
     ``projects[<path>].hasTrustDialogAccepted = true`` before the pane starts.
-    Best-effort and additive (never drops other projects), written atomically so a
-    concurrent claude write can't see a half file. A no-op if already trusted.
+    Additive (never drops other projects), written atomically so a concurrent
+    claude write can't see a half file. A no-op if already trusted.
+
+    The file is shared with every live claude session and holds the owner's
+    login and settings, so it is only ever written back from a clean read: one
+    that cannot be parsed, or that changed between the read and the write, is
+    read again a few times and otherwise left alone (the dialog then appears,
+    which is harmless).
     """
     cfg_path = _claude_config_path()
     key = str(path.resolve())
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
-        if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError):
-        data = {}
-    projects = data.setdefault("projects", {})
-    if not isinstance(projects, dict):
-        projects, data["projects"] = {}, {}
-    entry = projects.setdefault(key, {})
-    if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
-        return  # already trusted -> don't rewrite (avoids racing a live claude)
-    if not isinstance(entry, dict):
-        entry = projects[key] = {}
-    entry["hasTrustDialogAccepted"] = True
-    entry.setdefault("hasCompletedProjectOnboarding", True)
-    tmp = cfg_path.with_name(cfg_path.name + ".swarm-tmp")
-    try:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, cfg_path)
+    for attempt in range(PRETRUST_TRIES):
+        if attempt:
+            time.sleep(PRETRUST_RETRY_S)
+        got = _read_claude_config(cfg_path)
+        if got is None:
+            continue
+        data, stamp = got
+        projects = data.setdefault("projects", {})
+        entry = projects.get(key)
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True:
+            return  # already trusted -> don't rewrite (avoids racing a live claude)
+        if not isinstance(entry, dict):
+            entry = projects[key] = {}
+        entry["hasTrustDialogAccepted"] = True
+        entry.setdefault("hasCompletedProjectOnboarding", True)
+        tmp = cfg_path.with_name(cfg_path.name + ".swarm-tmp")
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            if _stamp(cfg_path) != stamp:
+                tmp.unlink(missing_ok=True)
+                continue  # claude wrote it meanwhile; start over from its version
+            os.replace(tmp, cfg_path)
+        except OSError as exc:
+            log.line(f"PRETRUST-FAIL {key} {exc}")
+            return
         log.line(f"PRETRUST {key}")
-    except OSError as exc:
-        log.line(f"PRETRUST-FAIL {key} {exc}")
+        return
+    log.line(f"PRETRUST-SKIPPED {key} {cfg_path} unreadable or changing; left untouched")
 
 
 def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None) -> str:

@@ -130,6 +130,19 @@ auto_resolve = { "docs/PHASE-LEDGER.md" = "keyed:^- \\[[ x]\\] `([A-Za-z0-9_.-]+
 | `triage_model` | `"haiku"` | | next | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
 | `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | next | Which `operator-done` outcomes ping you. `"attention"` pings only an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed). `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions (`operator-ask`) and abandoned jobs always ping. Any other value counts as `"attention"`. |
 
+## `[ask]`
+
+An ask session (`swarm ask`): the window where the owner answers review
+questions. See [components.md](components.md#asks-where-the-owner-answers-review-questions).
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `model` | `""` | `SWARM_ASK_MODEL` | next | `--model` for ask sessions. `""` means `[swarm].master_model` (and, when that is empty too, the user's setting). |
+| `cmd` | `""` | `SWARM_ASK_CMD` | next | Replaces the built-in session command (run as `cd <cwd> && <cmd>`). With it set, no brief is typed in. The tests use it to stand in for `claude`. |
+
+An ask's outcome (`swarm ask-done`) pings by `[operator].notify`: with the default
+`"attention"`, only an outcome passed `--attention`.
+
 ## `[overseer]`
 
 | key | default | env | reload | meaning |

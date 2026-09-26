@@ -23,7 +23,8 @@ drives the merge queue.
   board; a recorded `fail` still wins over a tick.
 - **Merging and finishing.** It merges finished phases through the queue, and it
   finishes the run once nothing is busy, waiting, parked, launching, queued, held,
-  owed as a push, or owed as an operator hand-off, and no Overseer pass is due.
+  owed as a push, owed as an operator hand-off or waiting on you in an ask, and
+  no Overseer pass is due.
 - **Failed launches.** A launch that fails (the worktree, the pane, or the boot,
   which is retried once) waits 60 s before it is tried again. After three failures
   in a row the phase is given up, and you are told once. `swarm launch <phase>` or
@@ -110,7 +111,7 @@ only by the supervisor.
   `swarm notify`;
 - patches `[worker].command_file` for swarm mode (skip the phase picker, the
   self-classified `swarm done`, `swarm build`, `swarm note` / `waiting` /
-  `resumed`, the cost rules) and commits it, so every mirror inherits the patch;
+  `resumed`, `swarm ask` for an owner review, the cost rules) and commits it, so every mirror inherits the patch;
 - runs `swarm master-idle`.
 
 It never asks you anything. If it cannot start, or dies without idling, launching
@@ -127,8 +128,9 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
   `<state>/overseer/digest-<id>.md` (and `.json`). It holds the trigger, the swarm
   now, every phase finished since the last pass with its recap and notes, every
   operator job finished since then with its outcome (flagged ones first),
-  failures, questions waiting on you, a starvation map (which root blockers hold
-  how much backlog), and a snapshot of RAM, swap, `/tmp` and disk.
+  failures, questions and asks waiting on you, the `owner-run` rows whose
+  dependencies have landed with no ask open, a starvation map (which root
+  blockers hold how much backlog), and a snapshot of RAM, swap, `/tmp` and disk.
 - **Where it works:** under worktree isolation, in its own mirror `ovs-<id>`,
   which merges through the ordinary queue when the pass ends.
 - **What it decides, on its own:**
@@ -138,6 +140,7 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
   - edit the ledger so free slots have work (split serial chains, file follow-up
     rows from workers' risks and decisions);
   - queue operator jobs;
+  - open an ask for an `owner-run` row that waits on a review or a pick;
   - run `swarm gc`;
   - `swarm pause` when the box is in danger;
   - send you a digest of six lines at most.
@@ -209,6 +212,117 @@ loss, or contradicting something you decided in writing, through
 `swarm operator-ask`. It never answers a worker's question. It never runs
 `done`, `launch` or `finish`, and never creates branches of its own. `swarm finish`
 refuses to stop the run while jobs are queued, unless you pass `--force`.
+
+## Asks: where the owner answers review questions
+
+**Why it exists.** A phase can build several design mockups and then need the owner to choose
+between them. Such decisions lived in separate ledger rows
+marked `owner-run` (`coral-W1`…`W3`: "the owner picks the layout", …),
+which the swarm never launches, and the owner got a Telegram about the mockups
+with nowhere to answer. So the swarm opens a waiting window in tmux: a small
+session in its own window that waits for the owner, like a parked
+worker, and the owner answers there.
+
+**What it is.** An **ask session**: a Claude session in its own tmux window,
+`ask:<name>`, in the swarm's session (prompt: `prompts/ask.md`, plus the brief).
+It reads the named ledger rows and whatever the brief points at (URLs, files, a
+kept server), shows you what to look at, and asks with AskUserQuestion in plain
+product words. You answer only through that tool. It then records each answer in
+its row, as a line `Owner's pick (<date>): …`, and ticks an `owner-run` row the
+answer completes, following the project's worker command file
+(`[worker].command_file`) for how a row is ticked and which ledger gate must stay
+green. It ends with `swarm ask-done <name> "<one-line outcome>"`.
+
+**Who opens one:**
+
+- a **worker** whose phase produces something for you to review, when `owner-run`
+  rows depend on it: it runs `swarm ask …` before its own `swarm done`, and never
+  waits for the answer itself. The window opens once that phase has landed, as an
+  operator hand-off does (`ASK-HELD` in the log until then), so what you review and
+  the rows the ask edits are on main. If the worker started a server for the
+  review, it keeps it with `swarm keep --why …` and names that keep in the brief.
+  The init pass adds this to the worker command;
+- the **operator** or the **Overseer**, the same way. The Overseer's digest lists
+  the `owner-run` rows (`[tasks].exclude`) whose dependencies have landed and that
+  no open ask names; it opens an ask for the ones you answer at a keyboard and
+  names the physical ones ("something to try by hand") in its summary;
+- **you**, by hand.
+
+The supervisor never opens one by itself for every unblocked `owner-run` row:
+many are physical tasks, and only the session that knows the context can write
+the brief.
+
+```
+swarm ask --name <name> --rows <row>[,<row>…] --why "<one line>" "<brief>"
+```
+
+- `--why` is one plain line (at most 120 characters): what you decide. The brief
+  says what to look at and where.
+- `swarm ask` writes `<state>/ask/<name>.json` first, then pokes the supervisor,
+  which opens the window on a thread (building a mirror and booting `claude` take
+  tens of seconds its loop must not spend). With no supervisor running, the ask
+  is recorded and opens at the next `swarm up`.
+- A name whose window is alive is refused. A name that is open with no live
+  window (it would not open, or the window was closed) takes the new brief and
+  opens again; `swarm ask --reopen <name>` does the same with the brief it has. A
+  finished name starts a fresh ask.
+
+**What it holds, and what it does not.** An ask takes **no worker slot**, never
+times out, and several can be open at once. It has no lease, no retry and no
+timer: its record is its whole state.
+
+- **One ping**, when its window opens (a necessary one, since it waits on you):
+  `swarm: coral-W1, coral-W2 wait on you: answer in tmux window ask:coral (tmux
+  attach -t <session>)`, then the `--why`. It is never sent twice for one ask,
+  however often its window opens again. If the window will not open, that one
+  ping says so and names `swarm ask --reopen <name>`.
+- **The finish waits for it**, the way it waits for a parked phase: the run does
+  not finish while an ask is open (`FINISH-HELD asks=[…]` in the log), and
+  `swarm finish` refuses without `--force`.
+- **Where it works.** Under worktree isolation, in its own mirror `ask-<name>`
+  (branch `swarm/ask-<name>`), which merges through the ordinary queue on
+  `ask-done`, like an operator job's; once it lands the launcher looks again, since
+  a ticked `owner-run` row releases its dependents. Without isolation it works in
+  the project and commits right away.
+- **Its environment** is a session's: `SWARM_SESSION_ID=ask:<name>`,
+  `SWARM_ASK=<name>`, `SWARM_STATE_DIR`, `SWARM_PROJECT`, and a `TMPDIR` under
+  `<state>/tmp/ask-<name>`. The model is `[ask].model`, or `[swarm].master_model`
+  when that is empty.
+
+**`ask-done`.** `swarm ask-done <name> "<outcome>" [--stop-keep <keep>]…
+[--attention]` records the outcome on the ask, durably, before anything else. It
+then stops each kept process named with `--stop-keep` (the server that existed
+only for this review), and pokes the supervisor. The supervisor closes the
+`ask:<name>` window, reaps everything carrying `ask:<name>` (the existing
+`reap_session`), and, under worktree isolation, lands the mirror. The outcome
+follows the operator's quiet policy (`[operator].notify`): it pings only with
+`--attention`, when you still have something to do, and otherwise reaches you in
+the Overseer's summary.
+
+**Recovery.** `swarm down` ends ask sessions like every other session: you cannot
+answer a dead window. `swarm up` keeps an open ask's mirror, lands a finished
+one's that never merged, and opens every ask that was open and not done again,
+with the same brief, from its record.
+
+**Where you see them:** `swarm ask --list` (open ones, then the last ten
+answered: name, rows, why, age, and how to reach the window), `swarm status`,
+`swarm doctor` (`owner.asks`, a WARN like `owner.blocking`, never a FAIL; it
+flags an ask whose window is gone), the dashboard's asks tab (`a`), the web
+board's read-only "Waiting on you" list, and the Overseer's digest. To answer:
+`tmux attach -t <session>`, then `tmux select-window -t <session>:ask:<name>`.
+
+```mermaid
+stateDiagram-v2
+  direction TB
+  [*] --> Recorded: swarm ask (worker, operator, Overseer or owner)<br/>writes ask/NAME.json
+  Recorded --> Waiting: supervisor opens window ask:NAME<br/>(mirror ask-NAME under worktree isolation)<br/>owner pinged once
+  Recorded --> Recorded: no supervisor: opens at the next swarm up
+  Waiting --> Waiting: owner answers with AskUserQuestion,<br/>picks recorded in the rows, committed
+  Waiting --> Closed: swarm down (the record stays open)
+  Closed --> Waiting: swarm up or swarm ask --reopen<br/>(same brief, no second ping)
+  Waiting --> Done: swarm ask-done NAME "outcome"<br/>(--stop-keep, --attention)
+  Done --> [*]: window closed, session reaped,<br/>mirror merged through the queue
+```
 
 ## Integrator and merge-conflict resolver
 
@@ -282,7 +396,8 @@ So a session's end ends every process it started.
 
 **The marker.** Every session is spawned with `SWARM_STATE_DIR` and its own
 `SWARM_SESSION_ID=<kind>:<id>`: `worker:<phase>` (a worker also carries
-`SWARM_PHASE`), `operator:<job>`, `overseer:<pass>`, `resolver:<phase>`. Everything
+`SWARM_PHASE`), `operator:<job>`, `overseer:<pass>`, `resolver:<phase>`,
+`ask:<name>`. Everything
 the session starts inherits them, so a child that detached itself (`setsid`,
 `nohup`, `&`, reparented to init) is still found by its environment.
 
@@ -294,6 +409,7 @@ the session starts inherits them, so a child that detached itself (`setsid`,
 | operator | `operator-done`, a lease that expired, the run stopping | respawns the operator pane to idle, then reaps `operator:<job>` |
 | Overseer | `overseer-done`, or its timeout | clears the master pane, then reaps `overseer:<pass>` |
 | resolver | `swarm resolved` closing its window | kills the window, then reaps `resolver:<phase>` |
+| ask | `swarm ask-done`, or `swarm down` | kills the `ask:<name>` window, then reaps `ask:<name>` |
 
 Reaping is `swarm down`'s code narrowed to the session's markers within this run:
 SIGHUP, then SIGTERM, then SIGKILL to what outlived each, process groups
@@ -355,8 +471,8 @@ time, one nesting level at a time. `[git].repos` globs pick the component repos
   per-repo cache, so only changed crates recompile. This happens only where the
   repo gitignores `target`.
 
-Operator jobs (`op-<job>`) and Overseer passes (`ovs-<id>`) get mirrors the same
-way.
+Operator jobs (`op-<job>`), Overseer passes (`ovs-<id>`) and asks (`ask-<name>`)
+get mirrors the same way.
 
 On `swarm up`, leftover `swarm/*` branches are reconciled from the durable
 sentinels, never from branch shape:
@@ -464,7 +580,8 @@ and exits 1 if any check FAILs. It checks:
 - **run:** watchdog, finished with ready work, free slots beside ready phases,
   no event for 90 minutes;
 - **integration:** hold age, owed pushes;
-- **owner:** questions waiting on you;
+- **owner:** questions waiting on you, and open asks (`owner.asks`, a WARN,
+  never a FAIL);
 - **ledger:** cycles and unknown dependencies;
 - **telegram:** config valid, and whether sends were ever made or dropped;
 - **disk:** state-dir size and growth, incremental caches, a full `/tmp`;
@@ -513,7 +630,7 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
   2 hours while a slot is busy;
 - how many phases wait on you.
 
-`n` opens the **needs-you** drawer. `1`–`9` switch between the tabs:
+`n` opens the **needs-you** drawer. `1`–`9`, `0` and `a` switch between the tabs:
 
 1. **home:** campaign headline, ETA, usage outlook, needs you, working now, a
    chart of phases done, and a feed of finishes, decisions, answers, operator
@@ -530,6 +647,12 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
    `operator-done`, `gc --yes`, `reset`) ask for confirmation.
 8. **doctor:** runs `swarm doctor` on demand.
 9. **runs:** past runs with their per-hour figures.
+
+Two more sit beside them:
+
+- `0` **shells:** what `swarm keep` left running, with why; `x` stops one.
+- `a` **asks:** open asks (and the last answered ones) with their rows, what you
+  decide, their age, and the `tmux select-window` that reaches each window.
 
 `R` resets the run (after a confirmation), `?` opens help, and `q` quits the
 dashboard only. It fits an 80×24 terminal: panels stack, the chart drops out and
@@ -549,7 +672,9 @@ Failed, Excluded. Rows ticked in the ledger count as done.
 
 - **Campaigns:** swimlanes by phase-id prefix, each described from a ledger
   heading or the ADR most of its rows cite.
-- **Activity:** recent Overseer passes and finishes.
+- **Activity:** "Waiting on you" (open asks: rows, what you decide, how to reach
+  the window; never the brief), what `swarm keep` left running, recent Overseer
+  passes and finishes.
 - **Card sheet:** the ledger row, recap, notes, dependencies, operator jobs and
   attempts. Deep links use `#phase=<id>`.
 - **Header:** usage meters, ETA, and the last Overseer pass.
@@ -599,6 +724,7 @@ with `--attention`.
 (`[telegram].pings = "necessary"`) the phone rings only for these:
 
 - a worker, the operator or the Overseer asking you something;
+- an ask whose window opened (once per ask: rows wait on you, and where to answer);
 - a merge hold you must clear: a dirty tree, or a conflict no resolver could
   start. A conflict a resolver is working on is not sent; if the resolver cannot
   fix it, it messages you itself (`swarm notify`);
@@ -631,9 +757,9 @@ with `--attention`.
 **Logged, not sent:** routine operator outcomes (the Overseer's digest lists
 them), parks (you were asked when the phase started waiting), a first `fail`, a
 push owed for less than the grace (and its clearing), a conflict a resolver is
-working on, a web board that did not start (`swarm up` prints it), a single
-master or Overseer failure, a repeat failed start, and the summary of any other
-Overseer pass. Each goes to `notifications.jsonl` with `delivered: false` and a
+working on, an ask's outcome without `--attention`, a web board that did not
+start (`swarm up` prints it), a single master or Overseer failure, a repeat
+failed start, and the summary of any other Overseer pass. Each goes to `notifications.jsonl` with `delivered: false` and a
 `suppressed` reason, shows on the dashboard's alerts tab as `·`, and is not
 counted as a drop. `[telegram].pings = "all"` sends all of them again, as before.
 `ok` finishes are silent either way.

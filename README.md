@@ -49,6 +49,9 @@ through it every day.
   building something else.
 - Hand leftover work (deploys, post-deploy checks, cross-repo chores) to an
   **operator** session that carries it out on your behalf.
+- Give review questions a place to be answered: an **ask** opens a small session
+  in its own tmux window that shows you what to look at, asks you there, and
+  records your picks in the ledger rows that wait on them.
 - Review the whole run every so often with an **Overseer** session. It retries
   failures, clears stuck state, reshapes the ledger when slots starve, and sends
   you a short digest.
@@ -129,7 +132,7 @@ part.
   - when to park a waiting worker;
   - when an Overseer pass or gc is due;
   - when the run is finished (nothing busy, waiting, parked, launching, queued,
-    held or owed).
+    held or owed, and no ask open).
 
   A launch that fails waits 60 s before the next try. After three failures in a
   row the phase is given up and you are told once.
@@ -278,6 +281,30 @@ stateDiagram-v2
   Abandoned --> [*]
 ```
 
+### Asks
+
+- **Is:** a Claude session in its own tmux window, `ask:<name>`, where you answer
+  review questions (`prompts/ask.md`). It reads the named ledger rows and what the
+  brief points at, shows you what to look at, asks with AskUserQuestion, writes
+  `Owner's pick (<date>): …` into each row, ticks an `owner-run` row the answer
+  completes (by the worker command file's rules and ledger gate), and ends with
+  `swarm ask-done <name> "<outcome>"`.
+- **Opened by:** `swarm ask --name <name> --rows <row>[,<row>…] --why "<one line>"
+  "<brief>"`, run by a worker whose phase built something for you to review
+  (before its own `swarm done`), by the operator or the Overseer (which notices
+  `owner-run` rows that became ready with no ask open), or by you. The supervisor
+  never opens one on its own: many `owner-run` rows are physical tasks.
+- **Holds:** no worker slot, no timer. Several can be open at once. One ping when
+  its window opens. The run does not finish while one is open, as with a parked
+  phase.
+- **Ends:** `ask-done` closes the window, ends everything the session started,
+  stops the kept processes named with `--stop-keep`, and, under worktree
+  isolation, merges its mirror `ask-<name>` through the queue. Its outcome pings
+  you only with `--attention`. `swarm down` ends an ask's session; `swarm up`
+  opens it again with the same brief.
+- **May not:** answer for you, build what you picked, or run `done`, `launch` or
+  `finish`.
+
 ### Integrator and merge-conflict resolver
 
 - **Is:** under `isolation = "worktree"`, the supervisor's merge queue. It lands one
@@ -389,7 +416,7 @@ flowchart TD
 ### Doctor, why, gc
 
 - **`swarm doctor`:** about 25 read-only checks covering the supervisor, slots,
-  the run, integration, questions waiting on you, the ledger, Telegram, disk,
+  the run, integration, questions and asks waiting on you, the ledger, Telegram, disk,
   records, the operator, prompts, the web board and the bot's command listener.
   Exit 1 on any FAIL.
 - **`swarm why <phase>`:** the one reason a phase is not running, walking unmet
@@ -406,7 +433,7 @@ flowchart TD
 
 A Textual app in window 0. It has a status bar (live, paused or down; slots;
 campaign progress; time since the last event) and a needs-you drawer (`n`). Its
-nine tabs, switched with `1`–`9`, are:
+eleven tabs, switched with `1`–`9`, `0` and `a`, are:
 
 - **home:** ETA, usage outlook, working now, and a feed;
 - **workers**;
@@ -416,7 +443,9 @@ nine tabs, switched with `1`–`9`, are:
 - **settings:** edits `.swarm.toml` and runs `swarm reload`;
 - **commands:** every subcommand, with a confirmation for the destructive ones;
 - **doctor**;
-- **runs**.
+- **runs**;
+- **shells** (`0`): what `swarm keep` left running, and why;
+- **asks** (`a`): what waits on you in an ask window, and how to get there.
 
 `R` resets the run and `q` quits the dashboard only. It fits an 80×24 terminal.
 
@@ -426,6 +455,8 @@ nine tabs, switched with `1`–`9`, are:
   window. `swarm status` prints its address.
 - **Columns:** Needs you, Blocked, Ready, Building, Merging / held, Operator,
   Done, Failed, Excluded.
+- **Waiting on you:** the open asks (rows, what you decide, how to reach the
+  window), read-only, at the top of the activity view.
 - **Views:** campaign swimlanes, an activity view of Overseer passes and
   finishes, a detail sheet per card (`#phase=<id>`), and live updates over
   Server-Sent Events.
@@ -461,6 +492,7 @@ nine tabs, switched with `1`–`9`, are:
 - **What pings you** (`[telegram].pings = "necessary"`, the default): only what
   needs you.
   - a question from a worker, the operator or the Overseer;
+  - an ask whose window opened (once per ask);
   - a merge hold you must clear: a dirty tree, or a conflict no resolver could
     start (a resolver that cannot fix one messages you itself);
   - an operator outcome flagged `--attention`, an abandoned job, or a to-do
@@ -546,7 +578,8 @@ stateDiagram-v2
   work was rolled back, so nothing may build on top of it, and it stays out of
   `ready` until `swarm retry` clears it (`--cascade` also resets dependents that
   had already run).
-- **Waiting and parked** phases keep the run open until they finish.
+- **Waiting and parked** phases keep the run open until they finish, and so does
+  an open ask.
 - **Pause:** `swarm pause` holds new launches while running workers finish.
 - **Done-ness** comes from the swarm's own records (`state.json`, seeded from
   `done/` sentinels on every `swarm up`), plus the ledger's checkboxes: a row
@@ -624,7 +657,8 @@ git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
 
 **Moving around:** `Ctrl-b 0` is the dashboard, `1` the overseer window, `2` the
 operator, `3` the first workers window (`4`, … page through the rest), and the
-last window is the web board. `Ctrl-b d` detaches while the supervisor keeps
+last window is the web board; an ask's window, `ask:<name>`, opens after it.
+`Ctrl-b d` detaches while the supervisor keeps
 running. Inside tmux already, `swarm up` switches your client instead of
 attaching; `swarm up --no-attach` is for scripts.
 
@@ -660,6 +694,28 @@ The operator (`operator-ask` / `operator-resumed`) and the Overseer
 lease or timeout to 7 days, so a question left overnight does not kill them. The
 init pass never asks.
 
+**Review questions have their own window.** When a phase builds something for you
+to look at (mockups, a page) and your decision lives in `owner-run` rows that no
+worker builds, the worker does not wait for you: it opens an **ask** and finishes.
+You get one ping:
+
+```
+swarm: coral-W1, coral-W2 wait on you: answer in tmux window ask:coral (`tmux attach -t myproject`)
+the owner picks the Settings and Home layouts
+```
+
+1. `tmux attach -t <session>`, then `tmux select-window -t <session>:ask:<name>`
+   (or `Ctrl-b w` and pick `ask:<name>`).
+2. The session there tells you what to look at and asks you with AskUserQuestion.
+   Answer there; take as long as you like, it never times out.
+3. It writes your picks into the rows, ticks the ones your answer completes, and
+   closes its window with `swarm ask-done`. The rows' dependents can then start.
+
+`swarm ask --list`, `swarm status`, `swarm doctor`, the dashboard's asks tab (`a`)
+and the web board's "Waiting on you" list all show what waits on you. You can open
+one yourself with `swarm ask`, and `swarm ask --reopen <name>` brings back a window
+that was closed.
+
 ## Command reference
 
 The full list, one line per subcommand and grouped by purpose, is in
@@ -676,6 +732,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 | see what was done and what it cost | `swarm report`, `swarm usage` |
 | free disk | `swarm gc`, then `swarm gc --yes` |
 | leave something running past its session, see it, stop it | `swarm keep --name N --why "…" -- <cmd>`, `swarm keep --list`, `swarm keep --stop N` |
+| ask the owner to review something, see what waits on them | `swarm ask --name N --rows R --why "…" "<brief>"`, `swarm ask --list` |
 
 ## Configuration
 
@@ -690,6 +747,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 - `[git]`: isolation, main branch, repos, `auto_resolve`;
 - `[build]`: the gate, the jobs cap, the target cache;
 - `[operator]`;
+- `[ask]`: the model of an ask session;
 - `[overseer]`: triggers, timeout;
 - `[gc]`;
 - `[web]`.
@@ -719,9 +777,10 @@ project path, so two projects with the same folder name never share state.
 | `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
-| `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
+| `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`, `ask-<name>`). |
 | `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
+| `ask/<name>.json`, `ask/<name>.brief.md` | Each ask: its rows, why, brief, who opened it, whether it is open or done (and its outcome), whether its one ping went. `swarm up` opens every open one again from here. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
 | `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |
@@ -733,7 +792,7 @@ project path, so two projects with the same folder name never share state.
 uv run pytest
 ```
 
-About 1,900 tests, hermetic and LLM-free. They run a real supervisor against fake
+About 2,000 tests, hermetic and LLM-free. They run a real supervisor against fake
 master and worker shell scripts (`examples/demo/`), in throwaway git repos,
 throwaway tmux sessions and temp state dirs, with no `claude` and every model
 call replaced by an environment seam. Everything is torn down in `finally`. The
@@ -747,7 +806,7 @@ fake scripts need bash (`read -t`).
 - git (`test_worktree.py`, `test_multirepo.py`, `test_automerge.py`,
   `test_push_owed.py`);
 - operator and Overseer (`test_opqueue.py`, `test_opsession.py`,
-  `test_overseer_*.py`);
+  `test_overseer_*.py`), and asks (`test_ask.py`);
 - the dashboard, which is booted headless at three terminal sizes (`test_tui_*.py`);
 - the web board (`test_web_*.py`);
 - the usage block and the bot's command listener (`test_tgbot.py`);

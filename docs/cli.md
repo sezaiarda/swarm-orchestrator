@@ -11,7 +11,7 @@ exact flags.
 |---|---|
 | `up [--no-attach]` | Reconcile leftovers, build the tmux session, start the supervisor, the init pass, the board and the bot's command listener, then attach. Refused, before anything is touched, while a supervisor or the tmux session is already up. |
 | `down` | Stop the supervisor, the board and the command listener, end every session process (anything carrying the run's `SWARM_STATE_DIR`, detached ones included; never what `swarm keep` holds), tear the session down, close the run. |
-| `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued, unless `--force`. |
+| `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued or an ask is open, unless `--force`. |
 | `pause` / `resume` | Hold new launches (running workers finish) / fill free slots again, and hand given-up phases back. |
 | `reset` | Close the open run and start a new one: ETA and usage count from now. Nothing restarts. |
 | `reload [--dry-run]` | Apply a `.swarm.toml` edit to the running swarm. |
@@ -21,7 +21,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `status [--all] [--json]` | Slots, merge queue, waiting and parked phases, operator queue, owed pushes, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
+| `status [--all] [--json]` | Slots, merge queue, waiting and parked phases, operator queue, open asks, owed pushes, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
 | `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`. |
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |
@@ -56,6 +56,18 @@ exact flags.
 | `notify "message"` | Message the owner through the swarm's own sender, the only way a session should. From an Overseer pass, the usage block is appended. |
 | `keep --name N --why "one line" [--cwd DIR] -- <cmd…>` | Leave one process running after your session ends (everything else a session starts is ended with it). Starts it detached without the session's markers, records `<state>/keep/N.json`, prints its pid and log. `--why` is required (≤120 chars); a live name is refused, a dead one replaced. Use it only when something must outlive the session, and name it in your recap. |
 | `keep --list [--json]` / `keep --stop N` | Every kept process, alive or dead, with why, who and age / stop one (SIGTERM, then SIGKILL, to its group) and forget it. |
+
+## Asks
+
+Where the owner answers review questions: a session in its own tmux window,
+`ask:<name>`. See [components.md](components.md#asks-where-the-owner-answers-review-questions).
+
+| command | what it does |
+|---|---|
+| `ask --name N --rows R1[,R2…] --why "one line" "brief"` | Record an ask (`<state>/ask/N.json`) and poke the supervisor to open window `ask:N`: a session that shows the owner what the brief points at, asks with AskUserQuestion and records the picks in the rows. Takes no worker slot and never times out; the owner is pinged once when the window opens. `--why` is required (≤120 chars). A name whose window is alive is refused; an open one whose window is gone takes the new brief and opens again. With no supervisor running it opens at the next `swarm up`. |
+| `ask --list [--json]` | Open asks, then the last ten answered: name, rows, why, age, and the `tmux select-window` that reaches each window. |
+| `ask --reopen N` | Open an open ask's window again, with the brief it has (no second ping). |
+| `ask-done N ["outcome"] [--stop-keep K]… [--attention]` | (ask session) The owner's answers are recorded. Records the outcome, stops each kept process named with `--stop-keep`, then the supervisor closes the window, ends everything the session started and, under worktree isolation, merges its mirror `ask-N`. Pings the owner only with `--attention` (`[operator].notify` applies). |
 
 ## Operator
 

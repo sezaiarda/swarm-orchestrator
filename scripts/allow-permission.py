@@ -8,6 +8,9 @@ pane, so the box stalls the phase until the owner happens to look.
 A ``PreToolUse`` "allow" does not clear these checks; only a
 ``PermissionRequest`` answer does. Verified live on CLI 2.1.283.
 
+Questions to the owner (``AskUserQuestion``, ``ExitPlanMode``) are left alone:
+the hook prints nothing for them, so they wait for a real answer.
+
 Each approval is appended to ``<SWARM_STATE_DIR>/permissions.jsonl`` so what
 was waved through can be read afterwards. Logging never blocks the answer.
 """
@@ -18,9 +21,20 @@ import time
 
 ALLOW = {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
                                 "decision": {"behavior": "allow"}}}
+# Tools whose "permission" box IS a question to the owner. The hook must never
+# answer those: it would otherwise fire on every AskUserQuestion. On
+# CLI 2.1.283 the box still waited for the owner, but a Yes to a question is
+# wrong by definition, so the hook stays silent and the normal flow runs.
+OWNER_QUESTIONS = {"AskUserQuestion", "ExitPlanMode"}
 
 try:
     event = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    event = {}
+if event.get("tool_name") in OWNER_QUESTIONS:
+    sys.exit(0)
+
+try:
     state = os.environ.get("SWARM_STATE_DIR")
     if state:
         row = {"ts": time.time(), "phase": os.environ.get("SWARM_PHASE"),

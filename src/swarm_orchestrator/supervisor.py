@@ -52,6 +52,7 @@ from pathlib import Path
 from . import ask as ask_mod
 from . import caps
 from . import backup as backup_mod
+from . import bigpic as bigpic_mod
 from . import doctor as doctor_mod
 from . import drain as drain_mod
 from . import gc as gc_mod
@@ -143,6 +144,8 @@ class Supervisor:
         self._bootstrapped = False
         self._bootstrap_recorded_over = False  # see `_end_bootstrap`
         self.overseer = overseer_mod.Policy(cfg, self.log)
+        # The periodic big-picture pass: its own window, trigger and landing.
+        self.bigpic = bigpic_mod.Runner(cfg, self.log)
         # The live pass id, from the moment it is reserved (its spawn runs on a
         # thread) until it ends. Guards "one pass at a time" and holds the finish.
         self._overseer_live: str | None = None
@@ -226,6 +229,7 @@ class Supervisor:
         # "before" to diff against once the file on disk has been edited.
         self._write_config_snapshot()
         ovrecord.mark_stale(self.cfg)  # no pass survives a restart
+        self.bigpic.recover()
         self.log.line(
             f"SUPERVISOR-START pid={os.getpid()} driver={self.cfg.driver}"
             f" watchdog_s={self.watchdog_s:g}"
@@ -247,6 +251,7 @@ class Supervisor:
                 self._dispatch("watchdog", self._watchdog_tick)
                 self._dispatch("launch-retry", self._retry_backed_off)
                 self._dispatch("overseer", self._overseer_tick)
+                self._dispatch("big-picture", self.bigpic.tick)
                 self._dispatch("gc", self._gc_tick)
                 self._dispatch("usage", self._usage_tick)
                 self._dispatch("backup", self._backup_tick)
@@ -294,6 +299,7 @@ class Supervisor:
             # owner's full authority on the host, so leaving one typing into a
             # window nothing owns is worse than leaving a master.
             operator_mod.release(self.cfg, self.log)
+            self.bigpic.shutdown()
             # A finished session's processes are ended off the loop thread; the
             # run's last `done` is often what finished it, so let those land.
             session_mod.join_reaps()
@@ -416,6 +422,8 @@ class Supervisor:
             self.overseer.request(
                 overseer_mod.MANUAL, "requested by `swarm overseer --now`", urgent=True
             )
+        elif verb.startswith("big-picture-"):
+            self.bigpic.handle(verb, parts[1:])
         elif verb == "shutdown":
             self._stop = True
         else:
@@ -513,6 +521,7 @@ class Supervisor:
         self.cfg = applied
         self.master.cfg = applied
         self.overseer.cfg = applied
+        self.bigpic.cfg = applied
         # watchdog_s is cached on the instance (read per select, not per event),
         # so swapping self.cfg alone would leave the old sweep interval running.
         self.watchdog_s = max(0.0, float(getattr(applied, "watchdog_s", 300) or 0))
@@ -1106,6 +1115,9 @@ class Supervisor:
             stamps.append(self._usage_last + self.cfg.usage_check_s)
         if self.cfg.backup_every_s and not self._backup_running():
             stamps.append(max(now, self._backup_last + self.cfg.backup_every_s))
+        bp = self.bigpic.next_deadline(now)
+        if bp is not None:
+            stamps.append(bp)
         if not stamps:
             return None
         return max(0.0, min(stamps) - time.time())

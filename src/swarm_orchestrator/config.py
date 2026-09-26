@@ -101,6 +101,11 @@ class Config:
     overseer_starve_s: int
     overseer_hold_wait_s: int
     overseer_timeout_s: int
+    big_picture_every: int
+    big_picture_max_age_h: int
+    big_picture_doc: str
+    big_picture_model: str
+    big_picture_cmd: str
     gc_auto: bool
     gc_every_s: int
     gc_idle_s: int
@@ -231,6 +236,7 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     operator = data.get("operator", {})
     overseer = data.get("overseer", {})
     ask = data.get("ask", {})
+    big_picture = data.get("big_picture", {})
     gc = data.get("gc", {})
     backup = data.get("backup", {})
     web = data.get("web", {})
@@ -427,6 +433,20 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         overseer_timeout_s=_int_env(
             "SWARM_OVERSEER_TIMEOUT", overseer.get("timeout_s"), 2700, minimum=1
         ),
+        # The big-picture pass (see bigpic.py): a session that rewrites one
+        # project doc every `every` integrated phases, so a worker reads where the
+        # project stands instead of surveying it. 0 = no counter; `max_age_h`
+        # refreshes a doc that old once anything has landed since (0 = never).
+        big_picture_every=_int_env(
+            "SWARM_BIG_PICTURE_EVERY", big_picture.get("every"), 10, minimum=0
+        ),
+        big_picture_max_age_h=_int_env(
+            "SWARM_BIG_PICTURE_MAX_AGE_H", big_picture.get("max_age_h"), 0, minimum=0
+        ),
+        big_picture_doc=str(big_picture.get("doc", "docs/BIG-PICTURE.md")),
+        big_picture_model=str(big_picture.get("model", "opus")),
+        # Replaces the built-in session (the tests' seam, as `[ask].cmd` is the ask's).
+        big_picture_cmd=os.environ.get("SWARM_BIG_PICTURE_CMD", str(big_picture.get("cmd", ""))),
         # Automatic `swarm gc` from the supervisor: nothing else ever prunes the
         # build caches, which can grow very large. It runs at most
         # once per `every_s` and once per idle episode longer than `idle_s`, only

@@ -296,6 +296,10 @@ def _live_names(cfg: Config, st: State) -> set[str]:
         pass
     if st.overseer_pass:
         names.add(ovrecord.mirror_name(st.overseer_pass))
+    from . import bigpic  # not at the top: bigpic -> ovdigest -> doctor -> gc
+
+    if bigpic.load(cfg).live:
+        names.add(bigpic.WINDOW)  # the big-picture session's TMPDIR
     try:
         names |= set(ask_mod.mirror_plan(cfg))  # an open ask's mirror and TMPDIR
         names |= {ask_mod.mirror_name(n) for n in ask_mod.open_names(cfg)}

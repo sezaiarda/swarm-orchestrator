@@ -169,6 +169,16 @@ def _overseer_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _big_picture_off(monkeypatch):
+    """The big-picture pass is on by default in a real project; in the suite it is
+    off, for the Overseer's reason: a pass is a real ``claude`` session unless
+    ``SWARM_BIG_PICTURE_CMD`` names a fake. ``tests/test_bigpic.py`` turns it on."""
+    monkeypatch.setenv("SWARM_BIG_PICTURE_EVERY", "0")
+    monkeypatch.delenv("SWARM_BIG_PICTURE_MAX_AGE_H", raising=False)
+    monkeypatch.delenv("SWARM_BIG_PICTURE_CMD", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _gc_auto_off(monkeypatch):
     """Automatic gc is on by default in a real project; in the suite it is off,
     so no supervisor under test starts a gc thread walking /proc and the temp

@@ -21,6 +21,7 @@ from pathlib import Path
 from . import ask as ask_mod
 from . import caps
 from . import backup as backup_mod
+from . import bigpic as bigpic_mod
 from . import buildsem
 from . import notes as notes_mod
 from . import operator as operator_mod
@@ -988,6 +989,53 @@ def cmd_overseer(cfg: Config, now: bool, as_json: bool, limit: int) -> int:
     return 0
 
 
+def cmd_big_picture(cfg: Config, now: bool, as_json: bool) -> int:
+    """Where the big-picture doc stands, or (``--now``) ask for a pass straight away."""
+    if now:
+        heard = _poke(cfg, "big-picture-now")
+        print("big-picture pass requested")
+        print(f"  supervisor: {'poked — it starts unless one is running' if heard else 'NOT RUNNING'}")
+        return 0 if heard else 1
+    mem = bigpic_mod.load(cfg)
+    if as_json:
+        return _dump({"enabled": bigpic_mod.enabled(cfg), "doc": cfg.big_picture_doc,
+                      "every": cfg.big_picture_every, "max_age_h": cfg.big_picture_max_age_h,
+                      **asdict(mem)})
+    print(bigpic_mod.status_text(cfg, mem))
+    print(f"  doc: {cfg.big_picture_doc}"
+          + (f" (last commit {mem.last_commit})" if mem.last_commit else ""))
+    if mem.last_summary:
+        print(f"  last pass said: {mem.last_summary}")
+    return 0
+
+
+def cmd_big_picture_done(cfg: Config, summary: str) -> int:
+    """The big-picture session signals its draft is written. Refused while the
+    draft is missing or over the cap, so the session can still fix it."""
+    pid = os.environ.get(bigpic_mod.PASS_ENV) or bigpic_mod.load(cfg).live
+    if not pid:
+        print("swarm big-picture-done: no big-picture pass is running", file=sys.stderr)
+        return 1
+    draft = bigpic_mod.draft_path(cfg, pid)
+    try:
+        text = draft.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    bad = bigpic_mod.check_draft(text)
+    if bad == bigpic_mod.NO_DRAFT:
+        print(f"swarm big-picture-done: write the draft to {draft} first", file=sys.stderr)
+        return 1
+    if bad == bigpic_mod.TOO_BIG:
+        print(f"swarm big-picture-done: the draft is {len(text.encode('utf-8'))} bytes;"
+              f" cut it to {bigpic_mod.MAX_BYTES} or less, then run this again", file=sys.stderr)
+        return 1
+    summary = " ".join(summary.split())[: bigpic_mod.SUMMARY_MAX]
+    heard = _poke(cfg, f"big-picture-done {pid} {summary}".rstrip())
+    print(f"big-picture-done {pid}")
+    print(f"  supervisor: {'poked — it lands the doc' if heard else 'not running'}")
+    return 0 if heard else 1
+
+
 def cmd_overseer_done(cfg: Config, summary: str) -> int:
     """The Overseer signals its pass is over, with a one-line summary.
 
@@ -1127,7 +1175,8 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
     shipped = Path(__file__).resolve().parent / "prompts"
     if not shipped.is_dir():
         shipped = Path(__file__).resolve().parent.parent.parent / "prompts"
-    for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md"):
+    for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md", "ask.md",
+                 "big_picture.md"):
         q = shipped / name
         if q.is_file():
             out.append((f"prompts/{name}", q))
@@ -1862,6 +1911,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
         data["asks"] = [a.to_dict() for a in ask_mod.open_asks(cfg)]
         data["drain_line"] = drain_mod.line(st.drain)
+        data["big_picture"] = bigpic_mod.status_text(cfg, bigpic_mod.load(cfg))
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
@@ -1891,6 +1941,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
     lines.append(web_lifecycle.status_line(cfg))
     lines.append(tgbot.status_line(cfg))
+    lines.append(bigpic_mod.status_text(cfg, bigpic_mod.load(cfg)))
     # What `swarm keep` left running on purpose: nothing else outlives its session.
     lines.extend(f"kept: {keep_mod.line(r)}" for r in keep_mod.load_all(cfg))
     print("\n".join(lines))
@@ -2228,6 +2279,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "overseer-resumed", help="(Overseer) the owner answered; back to the normal timeout")
     ovr.add_argument("answer", nargs="*")
     ovr.set_defaults(func=lambda cfg, a: cmd_overseer_resumed(cfg, " ".join(a.answer)))
+
+    bpp = sub.add_parser("big-picture", help="the big-picture doc's last refresh; --now asks for one")
+    bpp.add_argument("--now", action="store_true", help="request a pass straight away")
+    bpp.add_argument("--json", action="store_true")
+    bpp.set_defaults(func=lambda cfg, a: cmd_big_picture(cfg, a.now, a.json))
+
+    bpd = sub.add_parser(
+        "big-picture-done", help="(big-picture session) the draft is written; land it")
+    bpd.add_argument("summary", nargs="*", help="what changed in the doc, in one line")
+    bpd.set_defaults(func=lambda cfg, a: cmd_big_picture_done(cfg, " ".join(a.summary)),
+                     tolerant=True)
 
     ckp = sub.add_parser("check", help="preflight config, ledger, telegram, prompts")
     ckp.add_argument("--strict", action="store_true", help="warnings are fatal")

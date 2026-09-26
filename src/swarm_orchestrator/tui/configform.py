@@ -341,7 +341,7 @@ FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scal
 
 # The order the tables are drawn in — the order the file itself uses.
 SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "backup", "git",
-                 "operator", "ask", "overseer", "usage", "tui", "web", "(cli)")
+                 "operator", "ask", "overseer", "usage", "big_picture", "tui", "web", "(cli)")
 
 
 @dataclass(frozen=True)
@@ -481,6 +481,14 @@ FIELDS: tuple[Setting, ...] = (
     Setting("usage_stale_s", INT, "a reading older than this is not trusted (s)",
             minimum=300),
     Setting("usage_rules", FROZEN, "window, percent and action of each cap"),
+    # -- [big_picture] ----------------------------------------------------
+    Setting("big_picture_every", INT, "refresh every N integrated phases; 0 = off",
+            minimum=0),
+    Setting("big_picture_max_age_h", INT, "refresh a doc this many hours old; 0 = off",
+            minimum=0),
+    Setting("big_picture_doc", STR, "the doc's path inside the project"),
+    Setting("big_picture_model", STR, 'model for a big-picture pass; "" inherits'),
+    Setting("big_picture_cmd", STR, 'command a big-picture pass runs; "" = built-in'),
     # -- [tui] ------------------------------------------------------------
     Setting("tui_autostart", BOOL, "open this dashboard automatically at `swarm up`"),
     Setting("tui_cmd", STR, "command the dashboard pane is respawned with"),

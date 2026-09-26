@@ -31,6 +31,10 @@ _SPLIT = re.compile(r"^([A-Za-z][A-Za-z0-9_.]*?)-(?:[A-Z]+\d|\d)")
 
 SATISFIED = statuses.SATISFIES_DEPS
 BUILT = statuses.INTEGRATES
+# Rows done before this swarm touched them: a `skip`, or a row the ledger already
+# ticks. Both are history, not work left. Counting ticked rows as ready made
+# `read` read "0 / N" with nearly all of them built, and timed the ETA on all N.
+HISTORY = frozenset({statuses.SKIP, statuses.LEDGER})
 
 
 def campaign_of(phase: str) -> str:
@@ -110,7 +114,7 @@ def summarise(
             b["excluded"] += 1
         elif status in BUILT:
             b["built"] += 1
-        elif status == "skip":
+        elif status in HISTORY:
             b["skipped"] += 1
         elif status == "fail":
             b["failed"] += 1

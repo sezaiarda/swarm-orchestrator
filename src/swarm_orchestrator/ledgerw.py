@@ -623,6 +623,8 @@ def apply(cfg: Config, root: Path, key: str, data: dict, status: str | None,
         if status is not None and status not in statuses.INTEGRATES and word in _TICKS:
             word = "failed"
         after = out.get("after", "") if word == "later" else ""
+        if word == "later" and not _DATE.match(after):
+            word = "blocked"  # a `later` with no date waits for nobody
         if key in ledger_mod.parse(text):
             state(key, word, after)
         body = out.get("note", "")

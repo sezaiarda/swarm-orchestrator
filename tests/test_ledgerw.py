@@ -177,6 +177,18 @@ def test_a_failed_phase_is_not_ticked_even_if_it_says_ok(tmp_path, monkeypatch):
         log.close()
 
 
+def test_a_later_with_no_date_is_recorded_as_blocked(tmp_path, monkeypatch):
+    cfg, project, _origin = _project(tmp_path, monkeypatch)
+    log = Log(cfg.supervisor_log)
+    try:
+        ledgerw.queue(cfg, "a-W2", {"kind": "outcome", "outcome": "later", "note": "", "after": ""})
+        ledgerw.flush(cfg, log, {"a-W2": "fail"})
+        text = (project / "docs" / "PHASE-LEDGER.md").read_text()
+        assert "status: blocked (" in text and "after:" not in text
+    finally:
+        log.close()
+
+
 def test_a_checkout_that_cannot_take_it_holds_the_report(tmp_path, monkeypatch):
     cfg, project, _origin = _project(tmp_path, monkeypatch)
     log = Log(cfg.supervisor_log)
@@ -281,3 +293,27 @@ def test_a_later_phase_waits_for_its_date_then_comes_back(tmp_path, monkeypatch)
         assert "a-W2" in master_mod.build_context(cfg, state_mod.read(cfg))["ready"]
     finally:
         log.close()
+
+
+def test_swarm_done_queues_the_outcome_and_later_pages_nobody(tmp_path, monkeypatch):
+    from swarm_orchestrator import launch as launch_mod
+
+    cfg, _project_dir, _origin = _project(tmp_path, monkeypatch)
+    res = launch_mod.done(cfg, "a-W3", "later", "needs a week of data", after="2999-01-01")
+    assert res.status == "fail" and res.ping == "skipped"
+    assert "(as `later`)" in res.render() and "do not edit the ledger" in res.render()
+    queued = ledgerw.pending(cfg)["a-W3"]["outcome"]
+    assert queued["outcome"] == "later" and queued["after"] == "2999-01-01"
+    assert not (tmp_path / "tg.log").exists() or "a-W3" not in (tmp_path / "tg.log").read_text()
+
+
+def test_the_web_detail_sheet_shows_the_history_under_the_row(tmp_path):
+    from types import SimpleNamespace
+
+    from swarm_orchestrator.web import detail
+
+    ledgerw.append_history(tmp_path, "h", 0, "a-W1", ledgerw.entry("d · done", "what it did"))
+    cfg = SimpleNamespace(project_dir=tmp_path, history_dir="h")
+    text = detail._with_history(cfg, "a-W1", "- [x] `a-W1` · **t**")
+    assert text.startswith("- [x] `a-W1`") and "what it did" in text
+    assert detail._with_history(cfg, "zz-W1", "row") == "row"

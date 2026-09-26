@@ -76,10 +76,12 @@ else lands at once. See [components.md](components.md#the-ledger-writer).
 | `follow-up <phase> <new-id> --title "one line" [--needs a,b] [--dir d] [--tag t] ["what it must deliver"]` | File a new open row after `<phase>`'s section, with the text in the new phase's history. Refused at once for a taken id, a need with no row, or a new dependency cycle; `[tasks].ledger_gate` is run when it is applied, and a rejected row goes into `<phase>`'s history instead. |
 | `lesson <phase> "text" [--title T]` | Append `## (date, `phase`) title` and the text to `[tasks].lessons`. |
 
-`python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--gate CMD] [--write]`
+`python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--gate CMD] [--components] [--write]`
 moves a ledger's accumulated notes into the history once (and the dated entries
 of `docs/STATUS.md` into `<history>/STATUS-archive.md`), proving the ledger reads
-the same before and after. Run it with the swarm stopped.
+the same before and after. `--components` does the same to each component repo's
+`docs/STATUS.md`, into that repo's own archive; `--repos DIR…` does only those
+repos. Run it with the swarm stopped.
 
 ## Asks
 

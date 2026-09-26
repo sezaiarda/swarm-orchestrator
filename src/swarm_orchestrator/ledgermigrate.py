@@ -8,14 +8,17 @@ tags) and files the row as it stood, verbatim, in its family's history
 (:mod:`ledgerw`). A row that is already short is left alone, so a second run
 changes nothing.
 
-It also moves the dated journal out of the status page: every entry above the
-page's first ``##`` section, and a ``## Session log`` section, go verbatim to
+It also moves the dated journal out of the status page: everything above the
+page's first ``##`` section and every dated section ("State — <date>",
+"Previous state", "Session log", …) go verbatim to
 ``<history>/STATUS-archive.md``; the page keeps its title, its standing
-sections, and a short note saying where things are now.
+sections, and a short note saying where things are now. ``--components`` does
+the same for each component repo's ``docs/STATUS.md``, into that repo's own
+``<history>/STATUS-archive.md``.
 
-Run it with the swarm stopped, then commit the result::
+Run it with the swarm stopped, then commit the result in each repo::
 
-    python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--write]
+    python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--components] [--write]
 
 Without ``--write`` it only reports. Either way it proves the ledger still reads
 the same: the same phases in the same order, the same boxes, needs, dirs, tags
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections import Counter
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -84,11 +88,39 @@ def slim_ledger(text: str) -> Plan:
     return plan
 
 
-def split_status(text: str, history: str) -> tuple[str, str] | None:
+#: A status-page section that is a dated journal entry rather than standing
+#: state: "State — <date>", "Previous state", "Prior state", "Earlier", "Session
+#: log", "Last updated", or any heading carrying a date.
+_JOURNAL = re.compile(
+    r"^##\s+\**\s*(state|previous|previously|prior|earlier|session log|last updated)\b"
+    r"|^##\s.*\b20\d\d-\d\d-\d\d\b", re.I)
+
+
+def umbrella_note(ledger: str, history: str) -> list[str]:
+    return [
+        WHERE + f" The ledger (`{ledger}`) is the state of every phase.",
+        f"What was written about a phase is in `{history}/<family>.md` (the id up to its first `-`).",
+        f"The dated session entries that used to fill this page are in `{history}/{ARCHIVE}`.",
+        "Sessions do not add entries here, to the ledger or to the history; they report through the swarm.",
+    ]
+
+
+def component_note(history: str) -> list[str]:
+    return [
+        WHERE + " This page keeps this repo's standing state only. Phase state is the umbrella's",
+        "ledger, and what each phase did is in the umbrella's phase history. The dated entries",
+        f"that used to fill this page are in `{history}/{ARCHIVE}`. Sessions do not add entries",
+        "here; they report through the swarm.",
+    ]
+
+
+def split_status(text: str, note: list[str]) -> tuple[str, str] | None:
     """``(page, archive)`` for a status page with a dated journal, else None.
 
     The journal is everything between the title's first paragraph and the first
-    ``##`` section, plus a ``## Session log`` section.
+    ``##`` section, plus every section :data:`_JOURNAL` recognises; the archive
+    keeps them verbatim, in page order. The page keeps its title paragraph,
+    ``note``, and its standing sections.
     """
     lines = text.split("\n")
     first = next((i for i, ln in enumerate(lines) if ln.startswith("## ")), len(lines))
@@ -98,10 +130,14 @@ def split_status(text: str, history: str) -> tuple[str, str] | None:
     j = top + 1
     while j < first and not lines[j].strip():
         j += 1
-    while j < first and lines[j].strip():
-        j += 1
+    if j < first and lines[j].startswith(WHERE):
+        j = top + 1  # no title paragraph of its own: ours comes first
+    else:
+        while j < first and lines[j].strip():
+            j += 1
     preamble, journal = lines[:j], lines[j:first]
-    if journal and journal[0].strip() == "" and len(journal) > 1 and journal[1].startswith(WHERE):
+    k = next((i for i, ln in enumerate(journal) if ln.strip()), None)
+    if k is not None and journal[k].startswith(WHERE):
         journal = []  # already migrated: that paragraph is ours
     sections: list[list[str]] = []
     for ln in lines[first:]:
@@ -109,23 +145,45 @@ def split_status(text: str, history: str) -> tuple[str, str] | None:
             sections.append([ln])
         elif sections:
             sections[-1].append(ln)
-    keep = [s for s in sections if s[0].strip().lower() != "## session log"]
-    logs = [s for s in sections if s[0].strip().lower() == "## session log"]
+    keep = [s for s in sections if not _JOURNAL.match(s[0])]
+    logs = [s for s in sections if _JOURNAL.match(s[0])]
     if not any(ln.strip() for ln in journal) and not logs:
         return None
-    note = [
-        "",
-        WHERE + " The ledger (`docs/PHASE-LEDGER.md`) is the state of every phase.",
-        f"What was written about a phase is in `{history}/<family>.md` (the id up to its first `-`).",
-        f"The dated session entries that used to open this page are in `{history}/{ARCHIVE}`.",
-        "Sessions do not edit the ledger or the history; they report through the swarm.",
-        "",
-    ]
-    page = preamble + note + [ln for s in keep for ln in s]
+    page = preamble + [""] + note + [""] + [ln for s in keep for ln in s]
     archive = ["# STATUS archive", "",
-               "The dated entries of `docs/STATUS.md`, newest first, as they stood when they moved here.",
+               "The dated entries of `docs/STATUS.md`, as they stood when they moved here.",
                ""] + journal + [ln for s in logs for ln in s]
     return "\n".join(page).rstrip("\n") + "\n", "\n".join(archive).rstrip("\n") + "\n"
+
+
+def move_status(root: Path, status: str, history: str, note: list[str], write: bool) -> str:
+    """Move one repo's status journal into ``<history>/STATUS-archive.md``; its report line."""
+    path = root / status
+    if not path.is_file():
+        return f"{root.name}: no {status}"
+    before = path.stat().st_size
+    text = path.read_text(encoding="utf-8")
+    split = split_status(text, note)
+    if split is None:
+        return f"{root.name}: {status} {before:,} bytes, unchanged"
+    lost = Counter(ln for ln in text.split("\n") if ln.strip())
+    lost.subtract(ln for part in split for ln in part.split("\n") if ln.strip())
+    if any(n > 0 for n in lost.values()):
+        return f"{root.name}: FAILED, the split would drop lines of {status}"
+    if write:
+        path.write_text(split[0], encoding="utf-8")
+        (root / history).mkdir(parents=True, exist_ok=True)
+        arch = root / history / ARCHIVE
+        prior = arch.read_text(encoding="utf-8") if arch.is_file() else ""
+        arch.write_text(split[1] + ("\n" + prior if prior else ""), encoding="utf-8")
+    return (f"{root.name}: {status} {before:,} -> {len(split[0].encode()):,} bytes"
+            f" (archive {len(split[1].encode()):,})")
+
+
+def component_repos(root: Path) -> list[Path]:
+    """The independent git repos directly under ``root`` that keep a status page."""
+    return sorted(p for p in root.iterdir()
+                  if p.is_dir() and (p / ".git").exists() and (p / "docs" / "STATUS.md").is_file())
 
 
 # -- equivalence -----------------------------------------------------------
@@ -190,7 +248,7 @@ def migrate(root: Path, ledger: str, history: str, split_kb: int, status: str | 
     status_path = root / status if status else None
     split = None
     if status_path is not None and status_path.is_file():
-        split = split_status(status_path.read_text(encoding="utf-8"), history)
+        split = split_status(status_path.read_text(encoding="utf-8"), umbrella_note(ledger, history))
     gate_before = run_gate(gate, root) if gate else ""
 
     size = lambda p: p.stat().st_size if p.is_file() else 0  # noqa: E731
@@ -242,11 +300,21 @@ def main(argv: list[str] | None = None) -> int:
                     help='the status page to move the journal out of ("" = none)')
     ap.add_argument("--gate", default="",
                     help="a command checking the ledger, run before and after to compare")
+    ap.add_argument("--components", action="store_true",
+                    help="also move the journal out of each component repo's docs/STATUS.md")
+    ap.add_argument("--repos", nargs="+", default=[], metavar="DIR",
+                    help="only these component repos' status pages (the umbrella is left alone)")
     ap.add_argument("--write", action="store_true", help="write the result (default: report only)")
     a = ap.parse_args(argv)
     cfg = load(project_dir=a.project_dir)
-    report = migrate(cfg.project_dir, cfg.ledger, cfg.history_dir, cfg.history_split_kb,
-                     a.status or None, a.write, ledgerw.today(), a.gate)
+    report: list[str] = []
+    if not a.repos:
+        report = migrate(cfg.project_dir, cfg.ledger, cfg.history_dir, cfg.history_split_kb,
+                         a.status or None, a.write, ledgerw.today(), a.gate)
+    repos = [Path(r).resolve() for r in a.repos] or (
+        component_repos(cfg.project_dir) if a.components else [])
+    note = component_note(cfg.history_dir)
+    report += [move_status(r, "docs/STATUS.md", cfg.history_dir, note, a.write) for r in repos]
     print("\n".join(report))
     return 1 if any(ln.startswith("equivalence: FAILED") for ln in report) else 0
 

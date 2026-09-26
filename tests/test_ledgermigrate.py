@@ -40,3 +40,51 @@ def test_migration_slims_rows_and_proves_the_ledger_reads_the_same(tmp_path):
     again = ledgermigrate.migrate(tmp_path, "docs/L.md", "h", 256, "docs/S.md", True, "2026-09-28")
     assert again[0].endswith("0 of 2 rows slimmed") and "unchanged" in again[1]
     assert (tmp_path / "docs" / "L.md").read_text() == slim
+
+
+COMPONENT = """# repo — STATUS
+
+> Living status doc.
+
+**Last updated:** 2026-09-07 (a top journal paragraph)
+
+## State — 2026-09-27: `x-W2`, the newest
+
+new entry
+
+## Next action
+
+do the thing
+
+## Previous state: **older** (0.2.0)
+
+older entry
+
+## Gates (Phase 1 — all green, 2026-07-05)
+
+gate list
+
+## Decision log
+
+- ADR-1
+"""
+
+
+def test_a_component_status_keeps_its_standing_sections_and_archives_the_journal(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "docs" / "STATUS.md").write_text(COMPONENT)
+    note = ledgermigrate.component_note("docs/phases")
+    line = ledgermigrate.move_status(repo, "docs/STATUS.md", "docs/phases", note, True)
+    assert "->" in line and "FAILED" not in line
+    page = (repo / "docs" / "STATUS.md").read_text()
+    assert page.startswith("# repo — STATUS\n\n> Living status doc.\n\n**Where things are now.**")
+    assert "## Next action" in page and "## Decision log" in page
+    for gone in ("Last updated", "newest", "older entry", "gate list"):
+        assert gone not in page
+    arch = (repo / "docs" / "phases" / "STATUS-archive.md").read_text()
+    assert arch.index("Last updated") < arch.index("newest") < arch.index("older entry") < arch.index("gate list")
+    assert ledgermigrate.component_repos(tmp_path) == [repo]
+    again = ledgermigrate.move_status(repo, "docs/STATUS.md", "docs/phases", note, True)
+    assert again.endswith("unchanged") and (repo / "docs" / "STATUS.md").read_text() == page

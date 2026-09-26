@@ -29,12 +29,11 @@ from .. import statuses
 # rather than being forced into a bucket it does not belong to.
 _SPLIT = re.compile(r"^([A-Za-z][A-Za-z0-9_.]*?)-(?:[A-Z]+\d|\d)")
 
+# Done is everything done, whoever did it: built by this run, ticked in the
+# ledger or skipped. The web board counts the same way, so both say `billing 16/18`.
+# Counting ticked rows as ready would make a campaign read "0 / 104" with 102 of them
+# built, and would time the ETA on all 104.
 SATISFIED = statuses.SATISFIES_DEPS
-BUILT = statuses.INTEGRATES
-# Rows done before this swarm touched them: a `skip`, or a row the ledger already
-# ticks. Both are history, not work left. Counting ticked rows as ready made
-# `read` read "0 / N" with nearly all of them built, and timed the ETA on all N.
-HISTORY = frozenset({statuses.SKIP, statuses.LEDGER})
 
 
 def campaign_of(phase: str) -> str:
@@ -49,8 +48,8 @@ class Campaign:
 
     name: str
     total: int = 0
-    built: int = 0        # ok / needs-owner -- real work that landed
-    skipped: int = 0      # seeded history, never run by this swarm
+    built: int = 0        # done: built, ticked in the ledger, or skipped
+    skipped: int = 0      # of those, `skip` rows: seeded, never built by anyone
     failed: int = 0
     running: list[str] = field(default_factory=list)
     ready: list[str] = field(default_factory=list)
@@ -64,13 +63,13 @@ class Campaign:
 
     @property
     def live_total(self) -> int:
-        """Phases this campaign can actually move — history excluded.
+        """This campaign's phases, less the owner-run rows it never schedules.
 
         This is the denominator the owner means by "how far along are we". A
         campaign of 23 waves with 118 unrelated skips elsewhere is 6/23, never
         6/161.
         """
-        return max(0, self.total - self.skipped - self.excluded)
+        return max(0, self.total - self.excluded)
 
     @property
     def pct(self) -> float:
@@ -110,12 +109,11 @@ def summarise(
         status = done.get(phase)
         if phase in busy:
             b["running"].append(phase)
+        elif status in SATISFIED:
+            b["built"] += 1  # a finished owner-run row too, as on the web board
+            b["skipped"] += status == statuses.SKIP
         elif phase in excluded:
             b["excluded"] += 1
-        elif status in BUILT:
-            b["built"] += 1
-        elif status in HISTORY:
-            b["skipped"] += 1
         elif status == "fail":
             b["failed"] += 1
         elif deps <= satisfied:
@@ -137,7 +135,8 @@ def summarise(
         )
         for name, b in buckets.items()
     ]
-    out.sort(key=lambda c: (not c.active, -c.live_total, c.name))
+    # A finished campaign is never the headline while one with work left idles.
+    out.sort(key=lambda c: (not c.active, c.complete, -c.live_total, c.name))
     return out
 
 

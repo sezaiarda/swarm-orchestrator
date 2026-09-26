@@ -741,7 +741,8 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
 
 - live, paused, draining (and what for), finished, or supervisor down;
 - busy slots;
-- campaign progress;
+- campaign progress: everything done (built, ticked in the ledger or skipped) over
+  everything the campaign schedules, the same count as the web board;
 - the time since the last event, which turns amber after 30 minutes and red after
   2 hours while a slot is busy;
 - how many phases wait on you.

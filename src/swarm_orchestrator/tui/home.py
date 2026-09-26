@@ -200,7 +200,7 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     camps = [
         c for c in summarise(dash.graph or {}, snap.landed, busy, excluded)
-        if c.live_total or c.built
+        if c.live_total > c.skipped  # a campaign of nothing but skips is noise
     ]
     if not camps:
         return PAD + paint("no phases scheduled — check the ledger", MUTED)

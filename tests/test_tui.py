@@ -948,3 +948,10 @@ def test_app_boots_against_a_populated_state_dir(cfg, capfd, monkeypatch):
         encoding="utf-8",
     )
     _boot(cfg, ["2", "j", "3", "slash", "escape", "4", "F", "5", "G", "1"], capfd, monkeypatch)
+
+
+def test_phase_progress_counts_a_ticked_owner_run_row_once():
+    """Done and excluded at once: subtracting both counts shrank ``blocked``."""
+    graph = {"G1": set(), "P1": {"G1"}, "P2": {"X"}, "X": set()}
+    progress = data.phase_progress(graph, {"G1": "ledger", "P1": "ok"}, set(), {"G1", "X"})
+    assert (progress.done, progress.excluded, progress.ready, progress.blocked) == (2, 1, 0, 1)

@@ -370,25 +370,29 @@ def phase_progress(
 
     ``blocked`` is the residual — phases that are neither finished, in flight,
     excluded, nor launchable — which is exactly the set an owner glancing at the
-    bar wants to see shrink. ``ready``/``next_up`` reuse
+    bar wants to see shrink. The buckets are sets, not subtracted counts: an
+    owner-run row the ledger ticks is both excluded and done, and counting it
+    twice shrank ``blocked``. ``ready``/``next_up`` reuse
     :func:`swarm_orchestrator.ledger.ready` so the dashboard can never disagree
     with what the master will actually launch.
     """
-    total = len(graph)
-    ready = ledger_mod.ready(graph, done, busy_phases, excluded) if graph else []
-    running = len([p for p in busy_phases if p in graph]) if graph else len(busy_phases)
-    failed = sum(1 for status in done.values() if status == "fail")
-    excluded_n = len([p for p in excluded if p in graph])
-    done_n = len([p for p in done if p in graph]) if graph else len(done)
-    blocked = max(0, total - done_n - running - len(ready) - excluded_n)
+    if not graph:
+        return Progress(done=len(done), running=len(busy_phases))
+    ready = ledger_mod.ready(graph, done, busy_phases, excluded)
+    running = {p for p in busy_phases if p in graph}
+    done_set = {p for p in graph if p in done}
+    failed = {p for p in done_set if done[p] == statuses.FAIL}
+    # A finished row is done even when it is owner-run, as on the web board.
+    excluded_set = {p for p in excluded if p in graph} - done_set - running
+    blocked = set(graph) - done_set - running - set(ready) - excluded_set
     return Progress(
-        total=total,
-        done=done_n,
-        failed=failed,
-        running=running,
+        total=len(graph),
+        done=len(done_set),
+        failed=len(failed),
+        running=len(running),
         ready=len(ready),
-        blocked=blocked,
-        excluded=excluded_n,
+        blocked=len(blocked),
+        excluded=len(excluded_set),
         next_up=ready[:6],
         issues=ledger_mod.validate(graph) if graph else [],
     )

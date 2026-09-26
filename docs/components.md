@@ -372,11 +372,11 @@ cap) gives its counted phases back and the next one waits 15 minutes.
 **How the doc lands.** The session changes nothing in the project: it works in a
 scratch directory, writes its draft to `<state>/bigpic/<id>.md` and ends with
 `swarm big-picture-done`. The supervisor then closes the window and commits the
-draft to the target branch itself, under the umbrella's integration lock,
-committing only the doc's path. A project that is mid-merge, on another branch,
-or holding uncommitted edits to the doc is waited out, never overwritten; no new
-pass starts while a draft waits. The commit goes out with the next integration's
-push. The swarm never hands the doc to a worker: every mirror branched after it
+draft to the target branch itself, the way it commits every file it writes
+there: under the umbrella's integration lock, committing only the doc's path,
+then pushing, with a failed push owed like a merge's. A project that is
+mid-merge, on another branch, or holding uncommitted edits to the doc is waited
+out, never overwritten; no new pass starts while a draft waits. The swarm never hands the doc to a worker: every mirror branched after it
 lands has it, and the worker's command file tells it the doc exists.
 
 `swarm status`, the dashboard headline and the web board's header show when it

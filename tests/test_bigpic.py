@@ -56,8 +56,12 @@ def cfg(monkeypatch, tmp_path):
     return c
 
 
+def _log(cfg) -> Log:
+    return Log(cfg.state_dir / "logs" / "supervisor.log")
+
+
 def _runner(cfg) -> bigpic.Runner:
-    return bigpic.Runner(cfg, Log(cfg.state_dir / "logs" / "supervisor.log"))
+    return bigpic.Runner(cfg, _log(cfg))
 
 
 def _integrate(cfg, *phases, status="ok"):
@@ -124,29 +128,29 @@ def test_land_commits_only_the_doc_and_is_idempotent(cfg):
     repo = cfg.project_dir
     (repo / "other.txt").write_text("staged by someone else\n")
     _git(repo, "add", "other.txt")
-    outcome, sha = bigpic.land(cfg, DRAFT, "big picture: refresh")
+    outcome, sha = bigpic.land(cfg, DRAFT, "big picture: refresh", _log(cfg))
     assert outcome == bigpic.LANDED and sha == _git(repo, "rev-parse", "--short", "HEAD")
     assert _git(repo, "show", "--name-only", "--format=", "HEAD") == "docs/BIG-PICTURE.md"
     assert "other.txt" in _git(repo, "diff", "--cached", "--name-only")
-    assert bigpic.land(cfg, DRAFT, "again") == (bigpic.UNCHANGED, "")
+    assert bigpic.land(cfg, DRAFT, "again", _log(cfg)) == (bigpic.UNCHANGED, "")
 
 
 def test_land_waits_for_a_tree_that_is_not_ready(cfg):
     repo = cfg.project_dir
-    bigpic.land(cfg, DRAFT, "first")
+    bigpic.land(cfg, DRAFT, "first", _log(cfg))
     (repo / "docs" / "BIG-PICTURE.md").write_text("the owner's own edit\n")
-    outcome, why = bigpic.land(cfg, DRAFT + "more\n", "second")
-    assert outcome == bigpic.WAITING and "uncommitted edits" in why
+    outcome, why = bigpic.land(cfg, DRAFT + "more\n", "second", _log(cfg))
+    assert outcome == bigpic.WAITING and "uncommitted changes" in why
     assert (repo / "docs" / "BIG-PICTURE.md").read_text() == "the owner's own edit\n"
     _git(repo, "checkout", "-q", "--", "docs/BIG-PICTURE.md")
     _git(repo, "checkout", "-q", "-b", "elsewhere")
-    outcome, why = bigpic.land(cfg, DRAFT + "more\n", "second")
+    outcome, why = bigpic.land(cfg, DRAFT + "more\n", "second", _log(cfg))
     assert outcome == bigpic.WAITING and "elsewhere" in why
 
 
 def test_a_doc_path_outside_the_project_never_lands(cfg):
     cfg.big_picture_doc = "../escape.md"
-    assert bigpic.land(cfg, DRAFT, "x")[0] == bigpic.WAITING
+    assert bigpic.land(cfg, DRAFT, "x", _log(cfg))[0] == bigpic.WAITING
     assert not (cfg.project_dir.parent / "escape.md").exists()
 
 
@@ -323,3 +327,13 @@ def test_gc_leaves_a_live_pass_tmpdir_alone(cfg):
     bigpic.save(cfg, bigpic.Memory())
     labels = [t.label for t in gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True)).targets]
     assert f"tmp/{bigpic.WINDOW}" in labels
+
+
+def test_a_landed_doc_is_pushed_like_every_swarm_written_file(cfg, tmp_path):
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True)
+    _git(cfg.project_dir, "remote", "add", "origin", str(origin))
+    _git(cfg.project_dir, "push", "-q", "-u", "origin", "master")
+    outcome, sha = bigpic.land(cfg, DRAFT, "big picture: refresh", _log(cfg))
+    assert outcome == bigpic.LANDED
+    assert _git(origin, "rev-parse", "--short", "master") == sha

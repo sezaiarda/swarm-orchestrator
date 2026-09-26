@@ -40,6 +40,7 @@ from pathlib import Path
 from . import gitq
 from . import launch as launch_mod
 from . import ovdigest
+from . import pushowed
 from . import resolver
 from . import session as session_mod
 from . import state as state_mod
@@ -217,36 +218,34 @@ def check_draft(text: str) -> str | None:
     return None
 
 
-def land(cfg: Config, text: str, message: str) -> tuple[str, str]:
+def land(cfg: Config, text: str, message: str, log: Log) -> tuple[str, str]:
     """Commit ``text`` as the doc on the umbrella's target branch.
 
     Returns ``(outcome, detail)``: :data:`LANDED` with the commit, :data:`UNCHANGED`,
-    or :data:`WAITING` with why the tree is not ready. Under the umbrella's
-    integration lock, so it never interleaves with a merge; only the doc's path is
-    committed, whatever else is staged. The commit is left for the next
-    integration to push, as any local commit on main is.
+    or :data:`WAITING` with why the tree is not ready. Committed and pushed the
+    way every swarm-authored file is (:func:`gitq.commit_to_target`): only the
+    doc's path, never while a merge is under way, and a failed push is owed.
     """
     repo = cfg.project_dir
     rel = cfg.big_picture_doc
     target = (repo / rel).resolve()
     if not target.is_relative_to(repo.resolve()) or target == repo.resolve():
         return WAITING, f"[big_picture].doc {rel!r} is not a file inside the project"
-    main = cfg.git_main_branch
-    with gitq.repo_lock(cfg, repo):
-        branch = gitq._current_branch(repo)
-        if branch != main:
-            return WAITING, f"the project has {branch or 'no branch'} checked out, not {main}"
-        if gitq._merge_in_progress(repo) or gitq._rebase_in_progress(repo):
-            return WAITING, "a merge is in progress in the project"
-        if gitq._git(repo, "status", "--porcelain", "--", rel, check=False).stdout.strip():
-            return WAITING, f"{rel} has uncommitted edits in the project"
+
+    def write() -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
-        gitq._git(repo, "add", "--", rel)
-        if gitq._git(repo, "diff", "--cached", "--quiet", "--", rel, check=False).returncode == 0:
-            return UNCHANGED, ""
-        gitq._git(repo, "commit", "-q", "-m", message, "--", rel)
-        return LANDED, gitq._git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
+
+    result = gitq.commit_to_target(cfg, [rel], write, message, log)
+    if result.status == gitq.HELD:
+        return WAITING, result.reason
+    if result.status == gitq.UNCHANGED:
+        return UNCHANGED, ""
+    if result.push is not None:
+        pushowed.settle(cfg, "big picture", {repo: result.push}, log)
+    if result.status == gitq.UNVERSIONED:
+        return LANDED, ""
+    return LANDED, gitq._git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
 
 
 def _head(cfg: Config) -> str:
@@ -584,7 +583,7 @@ class Runner:
         if self.mem.last_summary:
             message += f" — {self.mem.last_summary}"
         try:
-            outcome, detail = land(self.cfg, text, message)
+            outcome, detail = land(self.cfg, text, message, self.log)
         except (gitq.GitError, OSError) as exc:
             outcome, detail = WAITING, str(exc)
         if outcome == WAITING:

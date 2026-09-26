@@ -47,11 +47,14 @@ because the queue directory is read-only.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 
 from . import recap as recap_mod
@@ -252,6 +255,32 @@ def begin_run(cfg: Config) -> str:
 
 
 # -- persistence ----------------------------------------------------------
+@contextmanager
+def _locked(cfg: Config):
+    """One writer at a time across processes: the supervisor's lease, release and
+    reclaim, and a session's ``operator-done`` / ``waiting`` / ``resumed``.
+
+    Every change is a read-modify-write of one file, and two of them crossing
+    lose one: a reclaim that read a job before its ``operator-done`` landed wrote
+    it back ``queued``, and the finished job ran again. Not re-entrant, so no
+    locked function calls another. A queue dir that cannot be locked (read-only)
+    is written unlocked rather than not at all: nothing here raises into a caller.
+    """
+    try:
+        folder = queue_dir(cfg)
+        folder.mkdir(parents=True, exist_ok=True)
+        fh = open(folder / ".lock", "a")
+    except (OSError, TypeError):
+        yield
+        return
+    with fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def _write_text(path: Path, text: str) -> bool:
     """tmp + ``os.replace``. Never raises; a lost write is not a failed phase."""
     try:
@@ -410,12 +439,39 @@ def owning_phase(job: str) -> str:
     return m.group(1) if m and not job.startswith(ADHOC_PREFIX) else job
 
 
-def add_adhoc(cfg: Config, brief: str, phase: str | None = None) -> Item | None:
+_UNITS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_not_before(text: str, now: float | None = None) -> float:
+    """``--not-before``: ``90m`` / ``6h`` / ``3d`` from now, or a local
+    ``YYYY-MM-DD[ HH:MM]`` (a bare date means its first minute).
+
+    Raises ``ValueError`` on anything else: a gate that silently read as "now"
+    is the loop it exists to stop.
+    """
+    raw = (text or "").strip().lstrip("+")
+    now = time.time() if now is None else now
+    if raw and raw[-1].lower() in _UNITS:
+        try:
+            return now + float(raw[:-1]) * _UNITS[raw[-1].lower()]
+        except ValueError:
+            pass
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).timestamp()
+        except ValueError:
+            continue
+    raise ValueError(f"cannot read {text!r} as a time: use 6h, 3d, 2026-09-30 or '2026-09-30 08:00'")
+
+
+def add_adhoc(cfg: Config, brief: str, phase: str | None = None,
+              not_before: float = 0.0) -> Item | None:
     """Queue a job nobody's ``swarm done`` left: ``swarm operator-add``.
 
     The same queue, lease and sweep as a phase's hand-off — it is only the way in
-    that differs. ``None`` when the operator is off, the brief is empty or the id
-    is not a safe name.
+    that differs. ``not_before`` (epoch) holds it until then: work that depends on
+    a date must not open early only to find its precondition unmet. ``None`` when
+    the operator is off, the brief is empty or the id is not a safe name.
     """
     note = " ".join((brief or "").split())
     if not cfg.operator_enabled or not note:
@@ -432,6 +488,7 @@ def add_adhoc(cfg: Config, brief: str, phase: str | None = None) -> Item | None:
             note=note,
             queued_at=now,
             source=ADDED,
+            run_after=max(0.0, not_before),
         )
         if _create(cfg, item):
             return item
@@ -447,18 +504,24 @@ def lease(cfg: Config, phase: str, now: float | None = None) -> Item | None:
     stop. Returns ``None`` when there is nothing leasable — including when the cap
     has just abandoned it.
     """
-    item = load(cfg, phase)
     now = time.time() if now is None else now
-    if item is None or not item.ready(now):
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or not item.ready(now):
+            return None
+        if item.attempts >= MAX_ATTEMPTS:
+            _abandon(cfg, item, "attempt cap reached before this attempt started")
+            gave_up = item
+        else:
+            gave_up = None
+            item.attempts += 1
+            item.state = RUNNING
+            item.run_id = run_id(cfg)
+            item.lease_until = now + LEASE_S
+            _write(cfg, item)
+    if gave_up is not None:
+        _tell_abandoned(cfg, gave_up)
         return None
-    if item.attempts >= MAX_ATTEMPTS:
-        _abandon(cfg, item, "attempt cap reached before this attempt started")
-        return None
-    item.attempts += 1
-    item.state = RUNNING
-    item.run_id = run_id(cfg)
-    item.lease_until = now + LEASE_S
-    _write(cfg, item)
     return item
 
 
@@ -471,18 +534,21 @@ def release(
     moment the queue gives up rather than whenever some later lease happens to
     notice.
     """
-    item = load(cfg, phase)
-    if item is None or item.terminal:
-        return None
     now = time.time() if now is None else now
-    item.last_error = " ".join((error or "").split())
-    if item.attempts >= MAX_ATTEMPTS:
-        return _abandon(cfg, item, item.last_error or "attempt cap reached")
-    item.state = QUEUED
-    item.run_id = ""
-    item.lease_until = 0.0
-    item.run_after = now + RETRY_BACKOFF_S
-    _write(cfg, item)
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.terminal:
+            return None
+        item.last_error = " ".join((error or "").split())
+        if item.attempts < MAX_ATTEMPTS:
+            item.state = QUEUED
+            item.run_id = ""
+            item.lease_until = 0.0
+            item.run_after = now + RETRY_BACKOFF_S
+            _write(cfg, item)
+            return item
+        _abandon(cfg, item, item.last_error or "attempt cap reached")
+    _tell_abandoned(cfg, item)
     return item
 
 
@@ -490,25 +556,53 @@ def complete(
     cfg: Config, phase: str, outcome: str = "", attention: bool = False
 ) -> Item | None:
     """Mark ``phase``'s hand-off carried out, with the session's own account."""
-    item = load(cfg, phase)
-    if item is None or item.terminal:
-        return None
-    item.state = DONE
-    item.run_id = ""
-    item.lease_until = 0.0
-    item.outcome = " ".join((outcome or "").split())
-    item.attention = bool(attention)
-    item.done_at = time.time()
-    _write(cfg, item)
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.terminal:
+            return None
+        item.state = DONE
+        item.run_id = ""
+        item.lease_until = 0.0
+        item.outcome = " ".join((outcome or "").split())
+        item.attention = bool(attention)
+        item.done_at = time.time()
+        _write(cfg, item)
+    return item
+
+
+def later(cfg: Config, phase: str, not_before: float, outcome: str = "") -> Item | None:
+    """Not yet: put a leased job back in the queue until ``not_before``.
+
+    For a job whose precondition is a date or a state that has not arrived (a
+    rollback kit kept until the 30th, a read that needs tomorrow's data). It
+    used to end asking the owner, who had already set the date, and the job was
+    queued again with no gate and ran at once, to the same no-op. The attempt it
+    just used is given back: waiting for a date is not a failure, so it must
+    never walk the job to the abandon cap.
+    """
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.state not in LEASED:
+            return None
+        item.state = QUEUED
+        item.run_id = ""
+        item.lease_until = 0.0
+        item.run_after = not_before
+        item.attempts = max(0, item.attempts - 1)
+        item.last_error = " ".join((outcome or "").split())
+        _write(cfg, item)
     return item
 
 
 def abandon(cfg: Config, phase: str, reason: str = "") -> Item | None:
     """Give up on ``phase``'s hand-off and tell the owner."""
-    item = load(cfg, phase)
-    if item is None or item.terminal:
-        return None
-    return _abandon(cfg, item, reason)
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.terminal:
+            return None
+        _abandon(cfg, item, reason)
+    _tell_abandoned(cfg, item)
+    return item
 
 
 def wait_on_owner(
@@ -526,57 +620,72 @@ def wait_on_owner(
     :data:`WAIT_LEASE_S` so neither the sweep nor a restart-free night reclaims
     it while the owner sleeps.
     """
-    item = load(cfg, phase)
-    if item is None or item.state not in LEASED:
-        return None, False
     now = time.time() if now is None else now
     text = " ".join((question or "").split())
-    fresh = not (item.state == WAITING and item.question == text)
-    item.state = WAITING
-    item.question = text
-    if fresh:
-        item.asked_at = now
-    item.lease_until = now + WAIT_LEASE_S
-    _write(cfg, item)
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.state not in LEASED:
+            return None, False
+        fresh = not (item.state == WAITING and item.question == text)
+        item.state = WAITING
+        item.question = text
+        if fresh:
+            item.asked_at = now
+        item.lease_until = now + WAIT_LEASE_S
+        _write(cfg, item)
     return item, fresh
 
 
 def resume(
-    cfg: Config, phase: str, answer: str = "", now: float | None = None
+    cfg: Config, phase: str, answer: str = "", now: float | None = None,
+    lease_s: float = LEASE_S,
 ) -> Item | None:
-    """The owner answered: the session carries on under an ordinary lease."""
-    item = load(cfg, phase)
-    if item is None or item.state != WAITING:
-        return None
+    """The owner answered: the session carries on under an ordinary lease.
+
+    ``lease_s`` is longer for a parked job: it runs on in its own window,
+    outside the operator window's lease, and only its end releases it.
+    """
     now = time.time() if now is None else now
-    item.state = RUNNING
-    item.answer = " ".join((answer or "").split())
-    item.lease_until = now + LEASE_S
-    _write(cfg, item)
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.state != WAITING:
+            return None
+        item.state = RUNNING
+        item.answer = " ".join((answer or "").split())
+        item.lease_until = now + lease_s
+        _write(cfg, item)
     return item
 
 
 def set_mirror(cfg: Config, phase: str, mirror: str) -> Item | None:
     """Record the workspace mirror a job's session runs in."""
-    item = load(cfg, phase)
-    if item is None:
-        return None
-    item.mirror = mirror
-    _write(cfg, item)
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None:
+            return None
+        item.mirror = mirror
+        _write(cfg, item)
     return item
 
 
 def _abandon(cfg: Config, item: Item, reason: str) -> Item:
-    """The terminal transition, and the one telegram that goes with it.
-
-    Fired on the transition only, so the owner hears about a given hand-off
-    exactly once however many times something asks the queue to give up on it.
-    """
+    """The terminal transition. The caller holds the lock and sends
+    :func:`_tell_abandoned` once it has let go of it."""
     item.state = ABANDONED
     item.run_id = ""
     item.lease_until = 0.0
     item.last_error = " ".join((reason or "").split())
     _write(cfg, item)
+    return item
+
+
+def _tell_abandoned(cfg: Config, item: Item) -> None:
+    """The one telegram that goes with an abandon.
+
+    Sent on the transition only, so the owner hears about a given hand-off
+    exactly once however many times something asks the queue to give up on it,
+    and outside the lock, so a slow send never holds up the queue.
+    """
     tail = f" — {item.note}" if item.note else ""
     telegram.notify(
         cfg.telegram_notify,
@@ -587,24 +696,24 @@ def _abandon(cfg: Config, item: Item, reason: str) -> Item:
         source="opqueue.abandon",
         state_dir=cfg.state_dir,
     )
-    return item
 
 
 def set_triage(
     cfg: Config, phase: str, *, when: str, why: str, group: str, source: str
 ) -> Item | None:
     """Record a triage decision on an existing item."""
-    item = load(cfg, phase)
-    if item is None:
-        return None
-    item.triage = {
-        "when": when,
-        "why": " ".join((why or "").split()),
-        "group": group,
-        "at": time.time(),
-        "source": source,
-    }
-    _write(cfg, item)
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None:
+            return None
+        item.triage = {
+            "when": when,
+            "why": " ".join((why or "").split()),
+            "group": group,
+            "at": time.time(),
+            "source": source,
+        }
+        _write(cfg, item)
     return item
 
 
@@ -628,6 +737,14 @@ def reconcile(cfg: Config, log=None) -> list[str]:
         return []
     current = begin_run(cfg)
     changed: list[str] = []
+    with _locked(cfg):
+        _reconcile(cfg, current, changed)
+    if log is not None and changed:
+        log.line(f"OPQUEUE-RECONCILE {' '.join(changed)}")
+    return changed
+
+
+def _reconcile(cfg: Config, current: str, changed: list[str]) -> None:
     for item in load_all(cfg):
         # A waiting session died with the run too: its question is kept on the
         # item and handed to the next session, which re-asks it if it still
@@ -649,9 +766,6 @@ def reconcile(cfg: Config, log=None) -> list[str]:
         )
         if _create(cfg, item):
             changed.append(f"rebuilt {phase}")
-    if log is not None and changed:
-        log.line(f"OPQUEUE-RECONCILE {' '.join(changed)}")
-    return changed
 
 
 def _orphan_sentinels(cfg: Config) -> list[str]:

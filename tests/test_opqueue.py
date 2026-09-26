@@ -19,6 +19,8 @@ Three properties decide whether this feature helps or hurts:
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -512,3 +514,59 @@ def test_an_ad_hoc_job_is_refused_when_off_empty_or_unsafe(cfg, off):
     assert opqueue.add_adhoc(cfg, "   ") is None
     assert opqueue.add_adhoc(cfg, "a real brief here", phase="../evil") is None
     assert opqueue.add_adhoc(cfg, "a real brief here", phase="a b") is None
+
+
+# -- the queue's files are changed under a lock -----------------------------
+def test_a_finish_never_crosses_a_reclaim(cfg, monkeypatch):
+    """A reclaim that read a running job before its operator-done landed wrote it
+    back queued, and the finished job ran again. Under the lock the finish waits."""
+    opqueue.add(cfg, "P1", status="operator", note="roll it")
+    assert opqueue.lease(cfg, "P1") is not None
+    inside, go = threading.Event(), threading.Event()
+    real_load = opqueue.load
+
+    def slow_load(c, phase):
+        item = real_load(c, phase)
+        if threading.current_thread().name == "reclaim":
+            inside.set()
+            go.wait(5)
+        return item
+
+    monkeypatch.setattr(opqueue, "load", slow_load)
+    reclaim = threading.Thread(target=opqueue.release, args=(cfg, "P1", "lease ran out"),
+                               name="reclaim")
+    reclaim.start()
+    assert inside.wait(5)
+    finish = threading.Thread(target=opqueue.complete, args=(cfg, "P1", "done"))
+    finish.start()
+    time.sleep(0.2)
+    assert finish.is_alive()  # waiting for the lock, not writing over the reclaim
+    go.set()
+    reclaim.join(5)
+    finish.join(5)
+    assert real_load(cfg, "P1").state == opqueue.DONE
+
+
+# -- not before -------------------------------------------------------------
+@pytest.mark.parametrize("text,delta", [("90m", 5400), ("6h", 21600), ("+3d", 259200)])
+def test_not_before_reads_relative_times(text, delta):
+    assert opqueue.parse_not_before(text, now=1000.0) == 1000.0 + delta
+
+
+def test_not_before_reads_a_local_date_and_refuses_nonsense():
+    from datetime import datetime
+    assert opqueue.parse_not_before("2026-09-30") == datetime(2026, 9, 30).timestamp()
+    assert opqueue.parse_not_before("2026-09-30 08:00") == datetime(2026, 9, 30, 8).timestamp()
+    with pytest.raises(ValueError):
+        opqueue.parse_not_before("after the weekend")
+
+
+def test_later_puts_a_leased_job_back_until_then_without_spending_an_attempt(cfg):
+    opqueue.add(cfg, "P1", status="operator", note="delete the rollback kit")
+    assert opqueue.lease(cfg, "P1").attempts == 1
+
+    item = opqueue.later(cfg, "P1", 5000.0, "kept until the 30th")
+
+    assert (item.state, item.run_after, item.attempts) == (opqueue.QUEUED, 5000.0, 0)
+    assert item.last_error == "kept until the 30th"
+    assert opqueue.later(cfg, "P1", 6000.0) is None  # not leased any more

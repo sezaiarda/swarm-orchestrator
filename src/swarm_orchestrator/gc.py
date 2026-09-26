@@ -78,6 +78,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import ask as ask_mod
+from . import backup as backup_mod
 from . import gitq
 from . import ledger as ledger_mod
 from . import operator as operator_mod
@@ -1072,6 +1073,7 @@ def _execute(cfg: Config, target: Target, log=None, live: set[str] | None = None
         repo = Path(target.repo or "")
         with gitq.repo_lock(cfg, repo):
             gitq._git(repo, "update-ref", "-d", target.extra["ref"])
+        backup_mod.drop_attic(repo, target.extra["ref"], log or _NoLog())
         target.after = 0
     elif target.op == "discard":
         # Worktrees, branches and the mirror dir, the way a failed phase is

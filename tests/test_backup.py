@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -236,3 +237,24 @@ def test_the_supervisor_runs_a_pass_on_its_own_clock(env, monkeypatch):
     sup._backup_last = 0.0
     sup._backup_tick()
     assert len(ran) == 1 and sup._next_timeout() is None
+
+
+def test_gc_pruning_an_attic_ref_deletes_its_remote_backup(env):
+    """A pass only deletes what reached main; set-aside work mostly never does."""
+    from swarm_orchestrator import gc as gc_mod
+
+    cfg, log, tmp = env
+    comp = cfg.project_dir / "comp"
+    head = _git(comp, "rev-parse", "HEAD")
+    old = time.strftime(gitq.ATTIC_STAMP, time.gmtime(time.time() - 31 * 86400))
+    new = time.strftime(gitq.ATTIC_STAMP, time.gmtime(time.time() - 29 * 86400))
+    never = time.strftime(gitq.ATTIC_STAMP, time.gmtime(time.time() - 32 * 86400))
+    _git(comp, "update-ref", f"refs/swarm-attic/P1/{old}", head)
+    _git(comp, "update-ref", f"refs/swarm-attic/P1/{new}", head)
+    backup.run(cfg, log)
+    _git(comp, "update-ref", f"refs/swarm-attic/P2/{never}", head)  # never backed up
+    gc_mod.apply(gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True)), log)
+    assert list(_remote(tmp / "comp.git")) == [f"swarm-attic/P1-{new}"]
+    text = cfg.supervisor_log.read_text()
+    assert f"BACKUP-ATTIC-DELETED comp:swarm-attic/P1-{old}" in text
+    assert "FAILED" not in text

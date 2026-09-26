@@ -561,7 +561,8 @@ Operator jobs (`op-<job>`), Overseer passes (`ovs-<id>`) and asks (`ask-<name>`)
 get mirrors the same way.
 
 Unmerged mirrors are pushed to origin as backups (`[backup]`): the branch, a
-snapshot of uncommitted edits, and kept attic refs.
+snapshot of uncommitted edits, and kept attic refs. gc deletes an attic backup
+when it drops the local ref.
 
 On `swarm up`, leftover `swarm/*` branches are reconciled from the durable
 sentinels, never from branch shape:

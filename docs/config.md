@@ -211,7 +211,7 @@ read where the project stands instead of surveying it. See
 | `every_s` | `900` | `SWARM_GC_EVERY` | hot | At most this often (a busy build slot defers it a few minutes). `0` leaves only the idle trigger. |
 | `idle_s` | `1800` | `SWARM_GC_IDLE` | hot | Also once per idle stretch (no busy slot) of this length. `0` turns this off. |
 | `keep_days` | `3` | `SWARM_GC_KEEP_DAYS` | hot | Build output used within this many days survives `cargo sweep`. |
-| `attic_days` | `30` | `SWARM_GC_ATTIC_DAYS` | hot | Work the swarm set aside instead of deleting (a discarded phase's commits, under `refs/swarm-attic/<phase>/<utc-stamp>`) is kept this many days before gc drops the ref. |
+| `attic_days` | `30` | `SWARM_GC_ATTIC_DAYS` | hot | Work the swarm set aside instead of deleting (a discarded phase's commits, under `refs/swarm-attic/<phase>/<utc-stamp>`) is kept this many days before gc drops the ref, and its backup branch on origin with it. |
 
 ## `[backup]`
 
@@ -221,7 +221,8 @@ holds commits main lacks, its uncommitted edits as a snapshot commit
 `swarm-wip/<phase>` (built in a throwaway index; the worker's files and index are
 untouched), and each kept `refs/swarm-attic/<phase>/<stamp>` as the branch
 `swarm-attic/<phase>-<stamp>`. Pushes use `--force-with-lease` and skip pre-push
-hooks. A backup whose work has reached main is deleted on the next pass. A
+hooks. A backup whose work has reached main is deleted on the next pass, and an
+attic backup when gc drops its local ref (`[gc].attic_days`). A
 failure is logged (`BACKUP` in `supervisor.log`) and never holds anything up.
 
 | key | default | env | reload | meaning |

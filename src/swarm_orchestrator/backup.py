@@ -13,7 +13,8 @@ under names the swarm owns:
 
 Everything is pushed with ``--force-with-lease`` against what ``ls-remote`` just
 reported, and ``--no-verify``: a repo's pre-push checks judge work bound for main,
-and a backup is not that. A remote backup whose work is now on main is deleted.
+and a backup is not that. A remote backup whose work is now on main is deleted,
+and an attic backup goes when gc prunes its local ref (:func:`drop_attic`).
 A failure is logged and reported, never raised: a backup must not block anything.
 """
 
@@ -155,6 +156,28 @@ def _attic_branch(ref: str) -> str:
     rest = ref[len(ATTIC_REFS):]
     head, _, stamp = rest.rpartition("/")
     return ATTIC_BRANCH + (f"{head}-{stamp}" if head else stamp)
+
+
+def drop_attic(repo: Path, ref: str, log: Log) -> None:
+    """Delete the origin's backup of attic ref ``ref``, which gc has just pruned.
+
+    A pass deletes a remote attic branch only once its work is on main, and set-
+    aside work mostly never gets there, so without this every one would stay on
+    the host for good. Best-effort and logged, like every backup call."""
+    if _out(repo, "remote", "get-url", "--push", "origin") is None:
+        return
+    branch = _attic_branch(ref)
+    name = f"{repo.name}:{branch[len('refs/heads/'):]}"
+    proc = _git(repo, "ls-remote", "origin", branch)
+    if proc.returncode == 0:
+        if not proc.stdout.strip():
+            return  # never backed up, or already gone
+        proc = _git(repo, "push", "--no-verify", "origin", f":{branch}")
+    if proc.returncode == 0:
+        log.line(f"BACKUP-ATTIC-DELETED {name}")
+    else:
+        log.line(f"BACKUP-ATTIC-DELETE-FAILED {name} "
+                 f"{gitq._push_reason(proc.stdout, proc.stderr)}")
 
 
 def _wanted(cfg: Config, repo: Path, main: str, log: Log) -> dict[str, str]:

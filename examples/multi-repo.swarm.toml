@@ -54,6 +54,19 @@ repos       = ["*"]        # which component repos to mirror: globs relative to 
                            # direct child (this layout). For nested layouts:
                            # e.g. ["*", "packages/*"]. A single-repo project matches
                            # none and gets a one-repo (umbrella-only) mirror.
+# Conflicts settled with no resolver session. Keys match the path inside
+# whichever repo is merging, so a bare name covers every component's copy.
+# - The ledger is keyed by phase id: two phases ticking or annotating rows merge
+#   per row, and word by word inside one row. NOT "union": that keeps both whole
+#   regions and leaves a stale un-ticked line beside the ticked one.
+# - "union" suits files that only gain entries: CHANGELOG.md, tasks/lessons.md,
+#   and docs/STATUS.md, where each session prepends a dated top entry. Two
+#   sessions rewriting the same older paragraph would both be kept.
+auto_resolve = { "docs/PHASE-LEDGER.md" = "keyed:^- \\[[ x]\\] `([A-Za-z0-9_.-]+)`", "CHANGELOG.md" = "union", "tasks/lessons.md" = "union", "docs/STATUS.md" = "union" }
+# Run on the merged text before an automatic merge is committed; a failure
+# hands the conflict to the resolver. The ledger gate catches a merge that
+# leaves two same-repo phases runnable at once.
+auto_resolve_check = { "docs/PHASE-LEDGER.md" = "python3 ci/ledger-same-repo-gate.py" }
 
 [operator]
 # A phase that finishes `swarm done <phase> operator "<recap>"` hands concrete

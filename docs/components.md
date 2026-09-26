@@ -265,7 +265,9 @@ are removed, with no merge.
 
 **Owed pushes** (`pushowed.py`): later workers branch from local main, so a push
 that failed does not hold anything back. The repo is recorded in `push_owed`, and
-you are pinged once when it starts owing and once when it clears. The push is
+you are pinged once if it still owes a push after `[telegram].push_owed_grace_s`
+(1 h), and once more when it clears (immediately and at clearing under
+`[telegram].pings = "all"`). The push is
 retried after every integration and on the watchdog tick, and it clears as soon
 as origin has local main, whoever pushed it. `swarm status` and `swarm doctor`
 show the standing debt.
@@ -528,22 +530,48 @@ that log. A message the swarm holds back on purpose is logged there too, with
 `delivered: false` and a `suppressed` reason; the dashboard shows it as `·`, not
 as a drop, and `swarm doctor` does not count it as one. `swarm notify "<text>"` is the only way a session should message you.
 
-**What pings you:**
+**What pings you.** Only necessary messages ring, so by default
+(`[telegram].pings = "necessary"`) the phone rings only for these:
 
-- a phase finishing `fail`;
 - a worker, the operator or the Overseer asking you something;
-- a park;
-- a merge hold;
-- a repo starting or stopping owing a push;
-- an operator job's outcome flagged `--attention`, a to-do while the operator
-  is off, or an abandoned job (routine outcomes go into the Overseer's summary);
-- a launch given up;
-- a crashed or erroring supervisor;
-- a web board that did not start;
-- the Overseer's summary, with the usage block;
-- the finish summary.
+- a merge hold you must clear: a dirty tree, or a conflict no resolver could
+  start. A conflict a resolver is working on is not sent; if the resolver cannot
+  fix it, it messages you itself (`swarm notify`);
+- an operator job's outcome flagged `--attention`, an abandoned job, or a to-do
+  while the operator is off;
+- a phase that fails again after the Overseer's retry. With the Overseer on, a
+  first `fail` is its to handle (it retries a failed phase once); with it off,
+  every `fail` pings. Which failure this is comes from `done/<phase>.jsonl`: a
+  `swarm done` that finds no sentinel of its status opens a new episode
+  (`"fresh": true`), and `swarm retry` removes the sentinel;
+- a repo still owing a push after `[telegram].push_owed_grace_s` (default 1 h),
+  checked after every integration and on the watchdog tick; the "pushed" ping
+  follows only if the "owed" one went out;
+- a phase that would not start (`spawn-fail`, `worktree-fail`), once per phase;
+  a launch given up after repeated failures; a worker that died without
+  `swarm done`;
+- a supervisor crash or error; a master that would not start, or an Overseer
+  pass that would not start or ran past its timeout, on the third in a row (and
+  every third after that);
+- the Overseer's summary, with the usage block, on a cadence pass
+  (`[overseer].every_finished`) or a pass you asked for (`swarm overseer --now`).
+  Any other pass (the clock, starvation, a hold, a doctor FAIL, an owner wait)
+  records its summary without sending it, unless it runs
+  `swarm notify --attention` because something needs you. The digest tells the
+  pass which case it is in;
+- a note from the init pass or a resolver (`swarm notify`);
+- the finish summary, with the usage block;
+- the bot's answers to your `/usage` and `/help`.
 
-`ok` finishes are silent.
+**Logged, not sent:** routine operator outcomes (the Overseer's digest lists
+them), parks (you were asked when the phase started waiting), a first `fail`, a
+push owed for less than the grace (and its clearing), a conflict a resolver is
+working on, a web board that did not start (`swarm up` prints it), a single
+master or Overseer failure, a repeat failed start, and the summary of any other
+Overseer pass. Each goes to `notifications.jsonl` with `delivered: false` and a
+`suppressed` reason, shows on the dashboard's alerts tab as `·`, and is not
+counted as a drop. `[telegram].pings = "all"` sends all of them again, as before.
+`ok` finishes are silent either way.
 
 Question pings start with what the wait costs, for example
 `3 phases blocked behind this · slot held · asked 14:05`, and the question is cut to

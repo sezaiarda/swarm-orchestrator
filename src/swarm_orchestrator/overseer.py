@@ -64,6 +64,10 @@ FINISHED = "finished"
 EVERY = "every"
 MANUAL = "manual"
 
+#: A pass triggered by one of these sends its summary to the owner's phone; any
+#: other pass sends it only with ``swarm notify --attention`` (``cli._summary_hold``).
+SUMMARY_TRIGGERS = frozenset({FINISHED, MANUAL})
+
 #: Statuses that count as a phase *finishing* for the every-N counter. ``skip`` is
 #: the owner declaring a phase unnecessary — nothing ran, nothing to review.
 _COUNTED = statuses.INTEGRATES | {statuses.FAIL}

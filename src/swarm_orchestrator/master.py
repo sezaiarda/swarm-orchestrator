@@ -185,6 +185,8 @@ class Master:
         self.log = log
         self.proc: subprocess.Popen | None = None
         self.pane: str | None = None
+        # Prompt deliveries in a row that timed out or would not submit.
+        self._timeouts = 0
 
     def is_alive(self) -> bool:
         """Is a master actually running right now?
@@ -291,6 +293,7 @@ class Master:
                 f"swarm: master ({kind}) never became ready -- check the master pane",
                 kind="master-timeout",
                 source="master._deliver_prompt",
+                suppressed=self._timeout_hold(),
             )
             return False
         line = line or (
@@ -304,9 +307,22 @@ class Master:
                 f"swarm: master ({kind}) prompt would not submit -- check the master pane",
                 kind="master-timeout",
                 source="master._deliver_prompt",
+                suppressed=self._timeout_hold(),
             )
             return False
+        self._timeouts = 0
         return True
+
+    def _timeout_hold(self) -> str | None:
+        """Count one more failed delivery; the hold reason unless it makes a streak.
+
+        A single one is retried by the next pass and is not the owner's problem;
+        :data:`telegram.STREAK` in a row is a master that cannot start at all."""
+        self._timeouts += 1
+        if self._timeouts % telegram.STREAK == 0:
+            return None
+        return telegram.hold(
+            self.cfg, f"failure {self._timeouts} in a row; you hear at {telegram.STREAK}")
 
     def inject(self, text: str) -> None:
         """Nudge the live master with one line of guidance."""

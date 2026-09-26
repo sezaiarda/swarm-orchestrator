@@ -59,7 +59,7 @@ from textual.widgets import Button, Input, RadioButton, RadioSet, Select, Static
 from textual import work
 
 from .. import reload as reload_mod
-from ..config import EFFORTS, OPERATOR_NOTIFY, load as load_config
+from ..config import EFFORTS, OPERATOR_NOTIFY, PINGS, load as load_config
 from ..reload import HOT, NEXT, POLICY, RESTART
 from ..tmux import LAYOUTS
 from . import probes
@@ -412,6 +412,10 @@ FIELDS: tuple[Setting, ...] = (
     # -- [telegram] -------------------------------------------------------
     Setting("telegram_notify", STR, "script that sends the swarm's own Telegram pings"),
     Setting("telegram_commands", BOOL, "answer /usage and /help sent to the swarm bot"),
+    Setting("telegram_pings", CHOICE, "necessary = only what needs you; all = every ping",
+            choices=PINGS),
+    Setting("telegram_push_owed_grace_s", INT, "an owed push pings after this long (s)",
+            minimum=0),
     # -- [tmux] -----------------------------------------------------------
     Setting("session", STR, "tmux session name — what you see in `tmux ls`"),
     Setting("tmux_layout", CHOICE,

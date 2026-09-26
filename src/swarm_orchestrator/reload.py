@@ -160,6 +160,14 @@ POLICY: dict[str, Policy] = {
         _p("telegram_notify", "[telegram]", "notify", HOT, None,
            "the supervisor resolves the notifier per ping; note that a running"
            " worker's own `swarm done` ping uses the copy in its worktree mirror"),
+        _p("telegram_pings", "[telegram]", "pings", HOT, "SWARM_TG_PINGS",
+           "every ping reads it when it is sent; a worker's own `swarm done` and"
+           " `swarm waiting`, and an operator's `operator-done`, read the copy in"
+           " their worktree mirror, so theirs changes from the next launch"),
+        _p("telegram_push_owed_grace_s", "[telegram]", "push_owed_grace_s", HOT,
+           "SWARM_PUSH_OWED_GRACE",
+           "the supervisor compares each owed push's age against it after every"
+           " integration and on the watchdog tick", numeric=True),
         _p("tmux_layout", "[tmux]", "layout", HOT, "SWARM_LAYOUT",
            "the layout is re-applied whenever worker panes are re-tidied",
            gate=GATE_LAYOUT),

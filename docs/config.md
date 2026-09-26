@@ -72,6 +72,8 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `notify` | `<this repo>/scripts/notify.sh` | | hot | The sender. It is called with the message as `$1`. The bundled script reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's `.env`, or from the file named by `SWARM_TG_ENV`. |
+| `pings` | `"necessary"` | `SWARM_TG_PINGS` | hot | `"necessary"` sends only what needs you: questions, holds you must clear, flagged operator outcomes, a `fail` after the Overseer's retry, a push owed past the grace, errors, the cadence summary and the finish. Everything else is logged to `notifications.jsonl` marked `suppressed` and not sent. `"all"` sends every ping, as before 2026-09-26 (it also makes `[operator].notify = "attention"` send every outcome). Any other value counts as `"necessary"`. A worker's own `done`/`waiting` reads its mirror's copy, so for it the change lands at the next launch. The full list is in [components.md](components.md#telegram-and-asking-the-owner). |
+| `push_owed_grace_s` | `3600` | `SWARM_PUSH_OWED_GRACE` | hot | Under `"necessary"`, a repo owing a push pings once it has owed one this long (checked after every integration and on the watchdog tick). The "pushed" ping follows only if that one went out. |
 | `commands` | `true` | `SWARM_TG_COMMANDS` | restart | Start the bot's command listener at `swarm up`, so `/usage` and `/help` sent to the bot are answered. It reads the token and chat id from the file the sender reads, answers only that chat, and is not started when the file lacks them. |
 
 ## `[tmux]`

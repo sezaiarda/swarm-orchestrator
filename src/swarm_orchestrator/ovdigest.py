@@ -26,10 +26,10 @@ from . import notes as notes_mod
 from . import opqueue
 from . import pushowed
 from . import recap as recap_mod
-from . import statuses
+from . import statuses, telegram
 from .config import Config
 from .master import build_context
-from .overseer import Reason, overseer_dir, starvation_map
+from .overseer import SUMMARY_TRIGGERS, Reason, overseer_dir, starvation_map
 from .state import State
 
 #: How many recently finished phases the digest lists in full.
@@ -255,6 +255,11 @@ def build(
     return {
         "generated_at": now,
         "since": since,
+        # Whether this pass's `swarm notify` reaches the phone without --attention.
+        "summary_sends": (
+            telegram.sends_all(cfg)
+            or any(r.key in SUMMARY_TRIGGERS for r in reasons)
+        ),
         "reasons": [
             {"key": r.key, "text": r.text, "urgent": r.urgent, "at": r.at} for r in reasons
         ],
@@ -288,6 +293,13 @@ def render(d: dict) -> str:
     c = d["context"]
     out = [f"# Overseer digest — {when}", "", "## Why this pass"]
     out += [f"- {'[urgent] ' if r['urgent'] else ''}{r['text']}" for r in d["reasons"]] or ["- (manual)"]
+    if d.get("summary_sends", True):
+        out.append("- your summary (`swarm notify`) goes to the owner's phone")
+    else:
+        out.append(
+            "- your summary is recorded, not sent: not a cadence pass. Add `--attention`"
+            " only if something needs the owner"
+        )
     out += ["", "## The swarm now"]
     out.append(
         f"- slots: {len(c['busy_slots'])} busy {c['busy_slots'] or ''}, {len(c['free_slots'])} free"

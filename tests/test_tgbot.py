@@ -135,7 +135,8 @@ def test_the_overseers_summary_ends_with_the_usage_block(cfg, tmp_path, monkeypa
                                {"pct": 41, "resets_at": time.time() + 86400})
     (meters / usage_mod.LIMITS_LOG).write_text(json.dumps(row) + "\n")
     monkeypatch.setenv("SWARM_MASTER_KIND", "overseer")
-    assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "3 done\n1 stuck"]) == 0
+    assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "3 done\n1 stuck",
+                     "--attention"]) == 0
     sent = (tmp_path / "tg.log").read_text()
     assert sent.startswith("3 done\n1 stuck\n\nusage (as of ")
     assert "5-hour 23% · resets " in sent and "weekly 41% · resets " in sent
@@ -152,7 +153,8 @@ def test_a_notify_from_anyone_else_has_no_footer(cfg, tmp_path, monkeypatch):
 def test_a_broken_usage_read_never_loses_the_overseers_ping(cfg, tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_MASTER_KIND", "overseer")
     monkeypatch.setattr(usage_mod, "Sources", lambda _c: 1 / 0)
-    assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "summary"]) == 0
+    assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "summary",
+                     "--attention"]) == 0
     assert (tmp_path / "tg.log").read_text().startswith("summary\n\nusage: unavailable")
 
 

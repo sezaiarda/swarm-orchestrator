@@ -134,6 +134,9 @@ class Supervisor:
         # thread) until it ends. Guards "one pass at a time" and holds the finish.
         self._overseer_live: str | None = None
         self._overseer_reasons: list[overseer_mod.Reason] = []
+        # Passes in a row that would not start or ran past their timeout. One is
+        # not the owner's problem (its reasons wait for the next pass); a streak is.
+        self._overseer_bad = 0
         self._doctor_probed = 0.0
         # Automatic gc (see `_gc_tick`). Its clock resumes from the last recorded
         # run; a run that never had one anchors at start-up, so a fresh `swarm up`
@@ -298,6 +301,7 @@ class Supervisor:
         *,
         kind: str = "other",
         source: str = "",
+        suppressed: str | None = None,
     ) -> None:
         """Telegram ``msg``, at most once per ``cooldown`` seconds for this ``key``.
 
@@ -317,7 +321,8 @@ class Supervisor:
         if gap and now - self._pinged.get(key, 0.0) < gap:
             return
         self._pinged[key] = now
-        telegram.notify(self.cfg.telegram_notify, msg, kind=kind, source=source)
+        telegram.notify(self.cfg.telegram_notify, msg, kind=kind, source=source,
+                        suppressed=suppressed)
 
     # -- event dispatch ---------------------------------------------------
     def _handle(self, line: str) -> None:
@@ -675,15 +680,24 @@ class Supervisor:
             st.integ_blocked = phase
             st.integ_blocked_kind = kind
             st.integ_blocked_repo = str(repo) if repo is not None else None
+        held = None
         if kind == gitq.CONFLICT and repo is not None:
             pane = resolver_mod.spawn(self.cfg, phase, repo, self.log)
             if pane is not None:
                 with state_mod.transaction(self.cfg) as st:
                     st.windows[f"resolve:{phase}"] = pane
-            msg = (
-                f"swarm: merge conflict integrating {phase} in {repo.name}; resolver"
-                f" pane open -- run `swarm resolved {phase}` once fixed"
-            )
+                # The resolver is on it, and it messages the owner itself
+                # (`swarm notify`) if it cannot fix the conflict.
+                held = telegram.hold(self.cfg, "a resolver is on it; it tells you if it cannot fix it")
+                msg = (
+                    f"swarm: merge conflict integrating {phase} in {repo.name}; resolver"
+                    f" pane open -- run `swarm resolved {phase}` once fixed"
+                )
+            else:
+                msg = (
+                    f"swarm: merge conflict integrating {phase} in {repo.name} and no"
+                    f" resolver would start -- fix it, then `swarm resolved {phase}`"
+                )
         elif kind == gitq.DIRTY:
             where = f" in {repo.name}" if repo is not None else ""
             msg = detail or (
@@ -702,6 +716,7 @@ class Supervisor:
             kind="integrate-hold",
             phase=phase,
             source="supervisor._hold",
+            suppressed=held,
         )
 
     # -- resolved: finish a blocked integration, resume the queue ---------
@@ -1108,6 +1123,8 @@ class Supervisor:
             kind="park",
             phase=phase,
             source="supervisor._park",
+            # You were asked when it started waiting; a park only moves windows.
+            suppressed=telegram.hold(self.cfg, "you were already asked; a park only moves windows"),
         )
         if paused:
             self.log.line("PARK-PAUSED holding — no launch")
@@ -1536,6 +1553,7 @@ class Supervisor:
             " the next one; check the supervisor pane",
             kind="overseer",
             source="supervisor._on_overseer_spawned",
+            suppressed=self._overseer_streak(),
         )
         self._finish_if_settled()
 
@@ -1549,6 +1567,7 @@ class Supervisor:
             cooldown=0.0,
             kind="overseer",
             source="supervisor._overseer_timeout",
+            suppressed=self._overseer_streak(),
         )
         self._end_overseer_pass(pid, ovrecord.TIMEOUT)
 
@@ -1569,6 +1588,8 @@ class Supervisor:
             st.overseer_pass = None
             st.overseer_deadline = 0.0
         rec = ovrecord.update(self.cfg, pid, status=status, ended_at=now)
+        if status == ovrecord.DONE:
+            self._overseer_bad = 0
         self.overseer.end(now)
         self.log.line(f"OVERSEER-PASS-END {pid} {rec.status if rec else status}")
         if self.cfg.git_isolation == "worktree":
@@ -1579,6 +1600,18 @@ class Supervisor:
                 self._pump_integrations()
         self._fill_slots(f"overseer pass {pid} over")
         self._finish_if_settled()
+
+    def _overseer_streak(self) -> str | None:
+        """Count one more bad pass; the hold reason unless it makes a streak.
+
+        One pass that would not start or ran long costs nothing the next pass does
+        not pick up. :data:`telegram.STREAK` in a row is a broken Overseer, and the owner
+        hears about it (and again at every further one)."""
+        self._overseer_bad += 1
+        if self._overseer_bad % telegram.STREAK == 0:
+            return None
+        return telegram.hold(
+            self.cfg, f"bad pass {self._overseer_bad} in a row; you hear at {telegram.STREAK}")
 
     def _overseer_holds_finish(self, st: state_mod.State) -> bool:
         """A live pass, or one owed, holds the finish.
@@ -1728,8 +1761,13 @@ class Supervisor:
                 f"; {len(operator)} operator hand-off(s) undrained: "
                 f"{', '.join(operator[:8])} -- run `swarm operator <phase>`"
             )
+        from . import usage as usage_mod  # the footer only: kept off the hot import path
+
         telegram.notify(
-            self.cfg.telegram_notify, msg, kind="finish", source="supervisor._finish"
+            self.cfg.telegram_notify,
+            telegram.with_footer(msg, usage_mod.brief_for(self.cfg)),
+            kind="finish",
+            source="supervisor._finish",
         )
         self.log.line("ACTION finish")
         self._stop = True

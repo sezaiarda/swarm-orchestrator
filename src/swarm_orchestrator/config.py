@@ -64,6 +64,8 @@ class Config:
     exclude: list[str]
     telegram_notify: str
     telegram_commands: bool
+    telegram_pings: str
+    telegram_push_owed_grace_s: int
     tui_autostart: bool
     tui_cmd: str
     session: str
@@ -281,6 +283,18 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # The bot's command listener (`/usage`, `/help`), started by `swarm up`
         # beside the run. On by default: it only ever answers the owner's chat.
         telegram_commands=_bool_env("SWARM_TG_COMMANDS", telegram.get("commands", True)),
+        # Which pings reach the phone: "necessary" (only what needs a human
+        # decision or attention) or "all", the behaviour before that. A
+        # held-back message is still
+        # logged to notifications.jsonl, marked `suppressed`.
+        telegram_pings=_choice(
+            os.environ.get("SWARM_TG_PINGS", telegram.get("pings", PINGS_DEFAULT)),
+            PINGS, PINGS_DEFAULT,
+        ),
+        # A repo owing a push pings only once it has owed one this long.
+        telegram_push_owed_grace_s=_int_env(
+            "SWARM_PUSH_OWED_GRACE", telegram.get("push_owed_grace_s"), 3600, minimum=0
+        ),
         session=os.environ.get(
             "SWARM_SESSION",
             # Default to the project's own name (``myproject``), not a generic
@@ -344,8 +358,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
         # is still recorded (job file, ledger, the Overseer's digest); to keep the
         # phone quiet, by default only the ones
         # passed `--attention` are sent.
-        operator_notify=_operator_notify(
-            os.environ.get("SWARM_OPERATOR_NOTIFY", operator.get("notify", OPERATOR_NOTIFY_DEFAULT))
+        operator_notify=_choice(
+            os.environ.get("SWARM_OPERATOR_NOTIFY", operator.get("notify", OPERATOR_NOTIFY_DEFAULT)),
+            OPERATOR_NOTIFY, OPERATOR_NOTIFY_DEFAULT,
         ),
         # The Overseer: the old master, now a periodic reviewer that acts on what
         # it reads (see overseer.py). On by default -- it is the one part of the
@@ -404,15 +419,22 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 OPERATOR_NOTIFY = ("attention", "all", "none")
 OPERATOR_NOTIFY_DEFAULT = "attention"
 
+#: ``[telegram].pings``: ``necessary`` sends only what needs the owner (the
+#: rest is logged, and folded into the Overseer's summary); ``all`` sends every
+#: ping the swarm has.
+PINGS = ("necessary", "all")
+PINGS_DEFAULT = "necessary"
 
-def _operator_notify(value: object) -> str:
-    """A valid ``[operator].notify``; anything else is the quiet default.
 
-    Deliberately not a load error like :func:`_effort`: ``operator-done`` loads
-    the config, and a typo must never stop a finished job from being recorded.
+def _choice(value: object, choices: tuple[str, ...], default: str) -> str:
+    """A valid choice; anything else is ``default``.
+
+    Deliberately not a load error like :func:`_effort`: every ``swarm`` command
+    that pings (``done``, ``operator-done``) loads the config, and a typo in a
+    notification setting must never stop a finish from being recorded.
     """
     mode = str(value or "").strip().lower()
-    return mode if mode in OPERATOR_NOTIFY else OPERATOR_NOTIFY_DEFAULT
+    return mode if mode in choices else default
 
 
 def _effort(value: object) -> str:

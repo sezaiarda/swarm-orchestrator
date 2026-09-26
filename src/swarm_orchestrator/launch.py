@@ -245,6 +245,17 @@ def _unmet_deps(
     return sorted(d for d in graph[phase] if done.get(d) not in DEP_SATISFYING)
 
 
+#: A failed start: the owner hears about it once per phase, not on every retry.
+_LAUNCH_FAIL_KINDS = ("worktree-fail", "spawn-fail")
+
+
+def _launch_fail_hold(cfg: Config, phase: str) -> str | None:
+    """Why a failed start of ``phase`` is not pinged again, or ``None`` to ping."""
+    if not telegram.already_sent(cfg.state_dir, _LAUNCH_FAIL_KINDS, phase):
+        return None
+    return telegram.hold(cfg, "a start of this phase already failed and you were told")
+
+
 def launch(cfg: Config, phase: str, log: Log) -> bool:
     """Claim a slot and start a worker for ``phase``. Returns success.
 
@@ -310,6 +321,7 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
                 phase=phase,
                 source="launch.launch",
                 state_dir=cfg.state_dir,
+                suppressed=_launch_fail_hold(cfg, phase),
             )
             log.line(f"WORKTREE-FAIL {phase} {exc}")
             return FAILED
@@ -341,6 +353,7 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
             phase=phase,
             source="launch.launch",
             state_dir=cfg.state_dir,
+            suppressed=_launch_fail_hold(cfg, phase),
         )
         log.line(f"LAUNCH-FAIL {phase} slot={sid}")
         return FAILED
@@ -485,7 +498,7 @@ def _write_sentinel(
 
 
 def _append_history(
-    cfg: Config, phase: str, status: str, note: str, verdict: str
+    cfg: Config, phase: str, status: str, note: str, verdict: str, fresh: bool = True
 ) -> None:
     """Append this ``swarm done`` attempt to ``done/<phase>.jsonl``.
 
@@ -495,13 +508,40 @@ def _append_history(
     times a phase signalled done. Best-effort: a diagnostics file must never fail
     the completion signal.
     """
-    row = {"ts": time.time(), "status": status, "note": note, "verdict": verdict}
+    # `fresh`: no sentinel of this status was there before, so this call opens
+    # a new episode (a first finish, or one after `swarm retry` removed the
+    # sentinel) rather than repeating one.
+    row = {"ts": time.time(), "status": status, "note": note, "verdict": verdict,
+           "fresh": fresh}
     try:
         cfg.done_dir.mkdir(parents=True, exist_ok=True)
         with (cfg.done_dir / f"{phase}.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
     except OSError:
         pass
+
+
+def _fail_episode(cfg: Config, phase: str, fresh: bool) -> int:
+    """Which failure of ``phase`` this one is: 1 the first, 2 after one retry, ….
+
+    Counted from ``done/<phase>.jsonl`` before this call is appended. A re-run of
+    ``swarm done`` inside one attempt is not fresh (its sentinel is still there),
+    so it does not count again. A row from before ``fresh`` was recorded counts
+    as an episode: over-counting only ever sends a ping, never loses one.
+    """
+    episodes = 0
+    try:
+        lines = (cfg.done_dir / f"{phase}.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("status") == statuses.FAIL and row.get("fresh", True):
+            episodes += 1
+    return episodes + (1 if fresh else 0)
 
 
 def _log_poke_drop(cfg: Config, detail: str) -> None:
@@ -736,6 +776,7 @@ class DoneResult:
             "failed": f"telegram FAILED: {self.ping_detail}",
             "skipped": f"no telegram: {self.ping_detail}",
             "deduped": f"no telegram: {self.ping_detail}",
+            "held": f"no telegram (logged): {self.ping_detail}",
         }[self.ping]
         route = {
             "dispatch": "operator job queued — this recap is its brief",
@@ -902,14 +943,21 @@ def done(
     """
     spelling, status = status, statuses.canonical(status)
     recorded = _sentinel_note(cfg, phase, status)  # before we rewrite it
+    fresh = recorded is None
+    episode = _fail_episode(cfg, phase, fresh) if status == statuses.FAIL else 0
     verdict = _write_sentinel(cfg, phase, status, note, force=force)
-    _append_history(cfg, phase, status, note, verdict)
+    _append_history(cfg, phase, status, note, verdict, fresh)
 
     plan = _outcome_plan(
         phase, status, note, recorded, verdict, force, cfg.operator_enabled
     )
     ping, detail = plan.ping, plan.ping_detail
     if ping == "send":
+        # The Overseer retries a failed phase once, so a first failure is its to
+        # handle; the owner hears when the retry fails too, or when no Overseer runs.
+        held = None
+        if status == statuses.FAIL and episode <= 1 and cfg.overseer_enabled:
+            held = telegram.hold(cfg, "a first fail: the Overseer retries it once")
         sent = telegram.notify_detail(
             cfg.telegram_notify,
             _completion_ping(phase, status, note) or "",
@@ -917,8 +965,12 @@ def done(
             phase=phase,
             source="launch.done",
             state_dir=cfg.state_dir,
+            suppressed=held,
         )
-        ping, detail = ("sent", "") if sent.delivered else ("failed", sent.error or "")
+        if held:
+            ping, detail = "held", held
+        else:
+            ping, detail = ("sent", "") if sent.delivered else ("failed", sent.error or "")
 
     if plan.route == "owner":
         plan.route, plan.route_detail = _send_todo(cfg, phase, note, recorded, verdict)

@@ -317,7 +317,7 @@ flowchart TD
   a -- "yes" --> push
   m -- "clean" --> push["push main"]
   push -- "ok" --> p
-  push -- "refused / unreachable" --> owed["push owed: pinged once,<br/>retried later"] --> p
+  push -- "refused / unreachable" --> owed["push owed: retried later,<br/>pinged if still owed after 1 h"] --> p
   p -- "more repos" --> r
   p -- "all repos landed" --> fin["record done, drop mirror,<br/>launch into the free slot"]
   hd --> sr["swarm resolved &lt;phase&gt;"]
@@ -381,7 +381,8 @@ flowchart TD
 - **`swarm usage`:** each run's hours, phases, average 5-hour and weekly %/h,
   windows spanned, and $/h. The figures are account-wide, so other Claude sessions
   on the same account count too.
-- **On your phone:** the Overseer's Telegram summary ends with a short usage
+- **On your phone:** the Overseer's Telegram summary (sent on a cadence pass,
+  see [Telegram](#telegram-and-asking-the-owner)) and the finish summary end with a short usage
   block (5-hour and weekly %, resets, this run's %/h, phases and $/h, and how old
   the sample is), and sending `/usage` to the swarm bot answers with the same block.
 
@@ -410,7 +411,7 @@ nine tabs, switched with `1`–`9`, are:
 - **home:** ETA, usage outlook, working now, and a feed;
 - **workers**;
 - **history**;
-- **alerts:** Telegram sends;
+- **alerts:** Telegram sends, and the messages held back (`·`);
 - **disk**;
 - **settings:** edits `.swarm.toml` and runs `swarm reload`;
 - **commands:** every subcommand, with a confirmation for the destructive ones;
@@ -439,19 +440,31 @@ nine tabs, switched with `1`–`9`, are:
   `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's gitignored `.env`.
   Every send is logged to `<state>/notifications.jsonl`. `swarm notify` is the
   only way a session should message you.
-- **What pings you:**
-  - a `fail`;
+- **What pings you** (`[telegram].pings = "necessary"`, the default): only what
+  needs you.
   - a question from a worker, the operator or the Overseer;
-  - a park;
-  - a merge hold;
-  - an owed push starting or clearing;
-  - an operator outcome flagged `--attention`, or an abandoned job (routine
-    outcomes go into the Overseer's summary instead);
-  - a launch given up;
-  - a supervisor error;
-  - the finish summary.
-
-  `ok` finishes are silent.
+  - a merge hold you must clear: a dirty tree, or a conflict no resolver could
+    start (a resolver that cannot fix one messages you itself);
+  - an operator outcome flagged `--attention`, an abandoned job, or a to-do
+    while the operator is off;
+  - a `fail` after the Overseer's retry, or any `fail` while the Overseer is off;
+  - a push still owed after `push_owed_grace_s` (1 h), and then its clearing;
+  - a phase that would not start (once per phase), a launch given up, a worker
+    that died without `swarm done`;
+  - a supervisor crash or error; a master that would not start, or an Overseer
+    pass that failed or ran long, three times in a row;
+  - the Overseer's summary on a cadence pass (`every_finished`) or one you asked
+    for, or any summary it flags `--attention`;
+  - a note from the init pass or a resolver (`swarm notify`);
+  - the finish summary, with the usage block.
+- **Logged, not sent:** routine operator outcomes, parks, a first `fail` (the
+  Overseer retries it), a push owed for less than the grace, a conflict a
+  resolver is working on, a web board that did not start, a single master or
+  Overseer failure, a repeat failed start, and the summary of any other Overseer
+  pass. Each is still in `notifications.jsonl` (marked `suppressed`), on the
+  dashboard's alerts tab (as `·`), and in the Overseer's digest where it applies.
+  `[telegram].pings = "all"` sends every one of them again. `ok` finishes are
+  silent either way.
 - **Commands:** the bot also listens. Send it `/usage` for the usage block or
   `/help` for the list. `swarm up` starts the listener (`[telegram].commands`, on
   by default), `swarm down` stops it, and `swarm telegram-bot` runs it in the

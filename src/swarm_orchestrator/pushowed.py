@@ -10,9 +10,12 @@ So a failed push is now a debt on the repo (``State.push_owed``), not a hold on
 the queue. It is retried after every integration and on the watchdog tick, and
 cleared the moment origin has local main — by our retry, by a later phase's push
 of the same repo (which carries the earlier commits too), or by the owner's hand.
-The owner hears about it exactly twice: when the repo first owes a push, and when
-it stops owing one. A retry that fails again says nothing; ``swarm doctor`` and
-``swarm status`` show the standing debt with its age and reason.
+The owner hears about it at most twice: once the repo has owed a push for
+``[telegram].push_owed_grace_s`` (most debts clear on the next integration long
+before that), and when it stops owing one — only if they heard the first. A retry
+that fails again says nothing; ``swarm doctor`` and ``swarm status`` show the
+standing debt with its age and reason. ``[telegram].pings = "all"`` pings the
+moment a repo starts owing, as before.
 """
 
 from __future__ import annotations
@@ -47,12 +50,13 @@ def _since(rec: dict, now: float) -> float:
     return now if since is None else float(since)
 
 
-def owed_message(name: str, phase: str, reason: str, refused: bool) -> str:
-    """The one ping a repo gets when it starts owing a push."""
+def owed_message(name: str, phase: str, reason: str, refused: bool, age: str = "") -> str:
+    """The one ping a repo gets when it owes a push."""
     what = "push refused by its pre-push check" if refused else "push failed"
     fix = "Fix the check, or push by hand." if refused else "Fix it, or push by hand."
+    owed = f" (owed {age})" if age else ""
     return (
-        f"swarm: {name} {what} after merging {phase} — {reason}. Merges continue;"
+        f"swarm: {name} {what} after merging {phase}{owed} — {reason}. Merges continue;"
         f" the push retries after each integration. {fix}"
     )
 
@@ -88,9 +92,14 @@ def settle(
                     "since": now,
                     "refused": res.refused,
                     "tried": now,
+                    # Whether the owner was told it is owed; only then are they
+                    # told it cleared. A record without it predates the grace and
+                    # was pinged at once.
+                    "pinged": telegram.sends_all(cfg),
                 }
                 st.push_owed[key] = rec
                 opened.append((repo, rec))
+    grace = _age(cfg.telegram_push_owed_grace_s)
     for repo, rec in opened:
         log.line(f"PUSH-OWED {repo.name} phase={rec['phase']} {rec['reason']}")
         telegram.notify(
@@ -100,6 +109,7 @@ def settle(
             phase=rec["phase"],
             source="pushowed.settle",
             state_dir=cfg.state_dir,
+            suppressed=None if rec["pinged"] else f"you hear if it is still owed after {grace}",
         )
     for repo, rec in closed:
         age = _age(now - _since(rec, now))
@@ -111,6 +121,38 @@ def settle(
             kind="push-owed",
             phase=rec.get("phase"),
             source="pushowed.settle",
+            state_dir=cfg.state_dir,
+            suppressed=None if rec.get("pinged", True) else "you were never told it was owed",
+        )
+
+
+def nag(cfg: Config, log: Log, now: float | None = None) -> None:
+    """Ping each repo that has owed a push past the grace and was not told yet.
+
+    Runs wherever :func:`retry` does (after every integration, on the watchdog
+    tick), so it needs no timer of its own. Marked pinged before sending, so a
+    crash between the two costs the owner a ping rather than sending two.
+    """
+    now = time.time() if now is None else now
+    grace = cfg.telegram_push_owed_grace_s
+    due: list[tuple[str, dict]] = []
+    with state_mod.transaction(cfg) as st:
+        for key, rec in st.push_owed.items():
+            if rec.get("pinged", True) or now - _since(rec, now) < grace:
+                continue
+            rec["pinged"] = True
+            due.append((key, dict(rec)))
+    for key, rec in due:
+        name = Path(key).name
+        age = _age(now - _since(rec, now))
+        log.line(f"PUSH-OWED-PING {name} phase={rec.get('phase')} after={age}")
+        telegram.notify(
+            cfg.telegram_notify,
+            owed_message(name, str(rec.get("phase")), str(rec.get("reason")),
+                         bool(rec.get("refused")), age),
+            kind="push-owed",
+            phase=rec.get("phase"),
+            source="pushowed.nag",
             state_dir=cfg.state_dir,
         )
 
@@ -138,6 +180,7 @@ def retry(
             continue
         results[Path(key)] = gitq.retry_push(cfg, Path(key), log)
     settle(cfg, None, results, log)
+    nag(cfg, log)
 
 
 def describe(owed: dict[str, dict], now: float | None = None) -> list[str]:

@@ -220,9 +220,13 @@ def test_up_reports_and_telegrams_when_the_port_is_taken(swarm):
         assert "web board: FAILED to start" in out.stderr
         assert f"port :{port} is held by another program" in out.stderr
         assert not (swarm.state_dir / lifecycle.PIDFILE).exists()
-        lines = swarm.tg_lines()
-        assert any("the web board did not start" in ln and f"port :{port}" in ln
-                   for ln in lines), lines
+        # Printed by `up`, logged for the dashboard, but not a phone ping: the
+        # board is not the run (`[telegram].pings = "necessary"`).
+        assert not any("the web board did not start" in ln for ln in swarm.tg_lines())
+        rows = [json.loads(ln) for ln in
+                (swarm.state_dir / "notifications.jsonl").read_text().splitlines() if ln]
+        assert any(r["kind"] == "web-board" and r.get("suppressed") and f"port :{port}" in r["text"]
+                   for r in rows), rows
     finally:
         squatter.terminate()
         squatter.wait(timeout=5)

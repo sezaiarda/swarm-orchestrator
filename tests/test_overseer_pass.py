@@ -51,6 +51,11 @@ def _tg(tmp_path) -> str:
     return p.read_text() if p.is_file() else ""
 
 
+def _ledger(cfg) -> list[dict]:
+    p = cfg.state_dir / "notifications.jsonl"
+    return [json.loads(ln) for ln in p.read_text().splitlines() if ln] if p.is_file() else []
+
+
 # -- records -------------------------------------------------------------------
 def test_a_record_is_a_json_half_and_a_markdown_half_joined_by_the_loader(cfg):
     ovrecord.create(cfg, "20260923T100000Z", [{"key": "fail:P1", "text": "P1 finished fail"}],
@@ -273,8 +278,28 @@ def test_a_hung_pass_is_killed_at_its_deadline(sup, cfg, tmp_path):
     assert sup._overseer_live is None
     assert ovrecord.load_json(cfg, pid).status == ovrecord.TIMEOUT
     assert f"OVERSEER-TIMEOUT {pid}" in cfg.supervisor_log.read_text()
-    assert "was killed" in _tg(tmp_path)
+    # One long pass is not the owner's problem: logged, not sent.
+    assert "was killed" not in _tg(tmp_path)
+    [row] = [r for r in _ledger(cfg) if r["kind"] == "overseer"]
+    assert "was killed" in row["text"] and row["suppressed"]
     assert state_mod.read(cfg).overseer_pass is None
+
+
+def test_three_bad_passes_in_a_row_ping_and_a_good_one_resets_the_streak(sup, cfg, tmp_path):
+    def hang():
+        pid = _start(sup)
+        with state_mod.transaction(cfg) as st:
+            st.overseer_deadline = time.time() - 1
+        sup._overseer_tick()
+
+    hang()
+    hang()
+    assert "was killed" not in _tg(tmp_path)
+    hang()
+    assert _tg(tmp_path).count("was killed") == 1
+    sup._end_overseer_pass(_start(sup), ovrecord.DONE)
+    hang()
+    assert _tg(tmp_path).count("was killed") == 1
 
 
 def test_asking_the_owner_stretches_the_deadline_and_answering_resets_it(sup, cfg, monkeypatch, tmp_path):
@@ -302,7 +327,8 @@ def test_a_pass_that_will_not_start_gives_its_reasons_back(sup, cfg, tmp_path):
     assert sup._overseer_live is None
     assert ovrecord.load_json(cfg, pid).status == ovrecord.FAILED
     assert [(r.key, r.urgent) for r in sup.overseer.pending] == [("hold:P1", False)]
-    assert "would not start" in _tg(tmp_path)
+    assert "would not start" not in _tg(tmp_path)  # its reasons wait for the next one
+    assert any("would not start" in r["text"] for r in _ledger(cfg))
 
 
 def test_a_live_or_owed_pass_holds_the_finish(sup, cfg):

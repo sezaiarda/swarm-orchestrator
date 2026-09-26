@@ -521,6 +521,15 @@ def test_notify_all_pings_every_outcome(cfg, log, monkeypatch):
     assert "already done" in line
 
 
+def test_telegram_pings_all_restores_every_outcome_ping(cfg, log, monkeypatch):
+    """`[telegram].pings = "all"` is the one switch back to the old behaviour."""
+    monkeypatch.setenv("SWARM_TG_PINGS", "all")
+    queue(cfg, PHASE)
+    assert operator_mod.dispatch(cfg, PHASE, log) is True
+    assert cli(cfg, "operator-done", PHASE, "already done").returncode == 0
+    assert "already done" in "\n".join(tg_lines(cfg))
+
+
 def test_notify_none_silences_even_attention_but_not_questions_or_abandons(
     cfg, log, monkeypatch
 ):

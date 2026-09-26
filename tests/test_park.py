@@ -158,6 +158,12 @@ def test_waiting_arms_deadline_then_park_frees_slot_for_replacement(tmp_path, mo
         assert "P0" in st.parked and "P0" not in st.waiting
         assert not any(s.busy and s.phase == "P0" for s in st.slots)  # slot freed
         assert sup._next_timeout() is None  # nothing waiting -> block indefinitely
+        # The owner was asked when it started waiting; a park only moves windows,
+        # so it is logged for the dashboard and not sent.
+        sink = tmp_path / "tg.log"
+        assert "moved to its own window" not in (sink.read_text() if sink.exists() else "")
+        ledger = (cfg.state_dir / "notifications.jsonl").read_text()
+        assert '"kind": "park"' in ledger and '"suppressed"' in ledger
         # a replacement phase can claim the freed slot
         with state_mod.transaction(cfg) as st2:
             claimed = st2.claim_slot("R1")

@@ -227,6 +227,8 @@ def _report_web_board(cfg: Config) -> None:
         kind="web-board",
         source="cli._report_web_board",
         state_dir=cfg.state_dir,
+        # `swarm up` has just printed it; the Overseer's summary carries it too.
+        suppressed=telegram.hold(cfg, "printed by `swarm up`; the board is not the run"),
     )
 
 
@@ -645,7 +647,10 @@ def cmd_operator_done(
         print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
         return 1
     tail = f" — {item.outcome}" if item.outcome else " (no outcome given)"
-    hold = _operator_done_hold(cfg.operator_notify, attention)
+    mode = cfg.operator_notify
+    if mode == "attention" and telegram.sends_all(cfg):
+        mode = "all"  # `[telegram].pings = "all"` restores every ping, this one too
+    hold = _operator_done_hold(mode, attention)
     telegram.notify(
         cfg.telegram_notify,
         f"swarm: operator job {phase} {'needs you' if attention else 'done'}{tail}",
@@ -1259,7 +1264,26 @@ def cmd_free(cfg: Config, target: str) -> int:
     return 0
 
 
-def cmd_notify(cfg: Config, message: str) -> int:
+def _summary_hold(cfg: Config, attention: bool) -> str | None:
+    """Why an Overseer pass's summary stays off the phone, or ``None`` to send it.
+
+    It goes out on a cadence pass (``[overseer].every_finished``), a pass the
+    owner asked for (``swarm overseer --now``), or with ``--attention`` when
+    something needs the owner. Every other pass — the clock, starvation, a hold,
+    a doctor FAIL, an owner wait — records it and sends nothing, so pings stay
+    quiet unless something needs the owner.
+    """
+    if attention:
+        return None
+    pid, _ = _live_pass(cfg)
+    rec = ovrecord.load_json(cfg, pid) if pid else None
+    keys = {str(r.get("key", "")) for r in (rec.reasons if rec else [])}
+    if keys & overseer_mod.SUMMARY_TRIGGERS:
+        return None
+    return telegram.hold(cfg, "not a cadence pass and nothing flagged --attention")
+
+
+def cmd_notify(cfg: Config, message: str, attention: bool = False) -> int:
     """Send ``message`` to the owner through the swarm's own sender.
 
     The master prompts say "telegram the owner" and, until this existed, gave the
@@ -1275,16 +1299,24 @@ def cmd_notify(cfg: Config, message: str) -> int:
     weekly limits stand and what this run uses per hour.
     """
     kind = "master-note"
+    held = None
     if os.environ.get("SWARM_MASTER_KIND") == master_mod.OVERSEER:
         kind = "overseer-digest"
-        message = telegram.with_footer(message, usage_mod.brief_for(cfg))
+        held = _summary_hold(cfg, attention)
+        if not held:
+            message = telegram.with_footer(message, usage_mod.brief_for(cfg))
     ok = telegram.notify(
         cfg.telegram_notify,
         message,
         kind=kind,
         source="cli.notify",
         state_dir=cfg.state_dir,
+        suppressed=held,
     )
+    if held:
+        # Not a failure: the summary is recorded, just not sent to the phone.
+        print(f"recorded, not sent — {held} (pass --attention if it needs the owner)")
+        return 0
     print("sent" if ok else "not sent")
     return 0 if ok else 1
 
@@ -1582,7 +1614,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     np_ = sub.add_parser("notify", help="message the owner through the swarm's own telegram sender")
     np_.add_argument("message")
-    np_.set_defaults(func=lambda cfg, a: cmd_notify(cfg, a.message))
+    np_.add_argument(
+        "--attention", action="store_true",
+        help="an Overseer summary that needs the owner: send it whatever triggered the pass")
+    np_.set_defaults(func=lambda cfg, a: cmd_notify(cfg, a.message, a.attention))
 
     kp = sub.add_parser("skip", help="mark a phase done without running it")
     kp.add_argument("phase")

@@ -55,6 +55,54 @@ KINDS = (
 )
 
 
+#: ``[telegram].pings`` = "all": every ping goes out, as in earlier versions.
+ALL = "all"
+
+#: A failure that is routine once (a master that would not boot, an Overseer
+#: pass that ran long) pings when it happens this many times in a row.
+STREAK = 3
+
+
+def sends_all(cfg) -> bool:
+    """``[telegram].pings = "all"``: every ping goes out, as in earlier versions."""
+    return getattr(cfg, "telegram_pings", "") == ALL
+
+
+def hold(cfg, reason: str) -> str | None:
+    """``reason`` when ``[telegram].pings`` keeps this message off the phone.
+
+    For :func:`notify`'s ``suppressed``: under "necessary" (the default) a ping
+    the owner does not need is logged instead of sent; under "all" it is sent.
+    """
+    return None if sends_all(cfg) else reason
+
+
+def already_sent(state_dir: str | Path | None, kinds: tuple[str, ...], phase: str) -> bool:
+    """Has a ping of one of ``kinds`` for ``phase`` already reached the owner?
+
+    Read from the ledger, so it holds across processes and restarts. Best-effort:
+    an unreadable ledger answers False, and the ping goes out.
+    """
+    path = _ledger_path(state_dir)
+    if path is None:
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        if phase not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, dict) and row.get("phase") == phase
+                and row.get("kind") in kinds and row.get("delivered")):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class NotifyResult:
     """One send attempt: what went out, whether it landed, and why it didn't."""

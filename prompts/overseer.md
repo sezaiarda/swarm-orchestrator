@@ -99,8 +99,13 @@ Do not run `swarm done`, `swarm up`, `swarm down` or `swarm finish`.
 
 ## 5. Report and sign off
 
-1. **Tell the owner**, unless nothing has changed since the last pass and nothing
-   needs them: one `swarm notify "<text>"`, plain language, at most six short
+1. **Tell the owner, only when it is worth a message.** Send only necessary messages.
+   Send the summary on a cadence pass (phases finished since the last pass) or a
+   pass the owner asked for; the digest's "Why this pass" says which this is.
+   On any other pass, send it only when something needs the owner (a decision,
+   a failure you will not retry, a hold you cannot clear, work still owed), and
+   then add `--attention`; without it the summary is recorded, not sent. Either
+   way: one `swarm notify "<text>"`, plain language, at most six short
    lines — done since the last pass, running now, stuck, and what needs the
    owner. No internals they would have to decode. Operator jobs no longer ping
    the owner one by one, so fold the digest's "Operator jobs finished" list into

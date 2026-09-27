@@ -289,7 +289,7 @@ def test_detail_of_a_building_and_a_waiting_phase(feed):
     assert w["jobs"][0]["state"] == opqueue.WAITING
     n = json.loads(feed.detail("al-W9"))
     assert [x["id"] for x in n["needs"]] == ["al-W8"] and n["needs"][0]["col"] == "failed"
-    x = json.loads(feed.detail("be-W8"))
+    x = json.loads(feed.detail("be-W9"))
     assert x["card"]["col"] == "excluded"
 
 

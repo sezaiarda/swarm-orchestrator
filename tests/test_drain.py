@@ -117,7 +117,7 @@ def test_a_drain_holds_launches_then_stops_once_the_last_worker_is_done(cfg, mon
     assert st.drain["stopping_at"] and st.drain["waiting"] == []
     assert not st.finished  # the drain stops the run; it does not "finish" it
     assert len(spawned) == 1
-    assert "stopping now, then running: sleep 1" in (cfg.state_dir.parent / "tg.log").read_text()
+    assert "shutting down, as you asked; afterwards it runs: sleep 1" in (cfg.state_dir.parent / "tg.log").read_text()
     sup._drain_tick()
     assert len(spawned) == 1  # once
 
@@ -169,7 +169,7 @@ def test_down_drain_then_runs_the_command_after_the_swarm_is_gone(swarm, tmp_pat
     assert marker.read_text().strip() == "stopped"
     assert not swarm.cli("status").stdout.count("BUSY")  # nothing else launched
     assert "DRAIN-COMPLETE" in swarm.log_text() and "SUPERVISOR-STOP" in swarm.log_text()
-    assert any("stopping now" in ln for ln in swarm.tg_lines())
+    assert any("is shutting down, as you asked" in ln for ln in swarm.tg_lines())
     assert "swarm down" in (swarm.state_dir / "logs" / "drain-down.log").read_text()
 
 

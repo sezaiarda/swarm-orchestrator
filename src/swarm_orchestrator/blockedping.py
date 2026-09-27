@@ -108,9 +108,10 @@ def message(rows: list[dict]) -> str:
     count = len({r["phase"] for r in rows})
     head = (f"swarm: {rows[0]['phase']} is blocked and needs you" if count == 1
             else f"swarm: {count} phases are blocked and need you")
-    lines = [head]
+    lines = [head + f", on something outside {'its' if count == 1 else 'their'} own work:"]
     for reason, phases in groups.items():
         lines.append(f"- {reason} ({', '.join(phases)})")
+    lines.append("Once the cause is fixed, `swarm retry <phase>` puts each one back in play.")
     return "\n".join(lines)
 
 

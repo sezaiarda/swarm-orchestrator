@@ -219,8 +219,8 @@ def test_a_refused_push_is_owed_and_the_queue_keeps_moving(monkeypatch, tmp_path
         owed = [m for m in _sent(tmp_path) if "pre-push check" in m]
         assert owed == [
             f"swarm: project push refused by its pre-push check after merging P1 — "
-            f"{rec['reason']}. Merges continue; the push retries after each"
-            " integration. Fix the check, or push by hand."
+            f"{rec['reason']}. Nothing is lost: work keeps merging on this machine and"
+            " the push is retried after each merge. Fix the check, or push by hand."
         ]
         assert not any("unreachable" in m for m in _sent(tmp_path))
 

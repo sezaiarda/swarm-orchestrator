@@ -846,8 +846,10 @@ counted as a drop. `[telegram].pings = "all"` sends all of them again, as before
 `ok` finishes are silent either way.
 
 Question pings start with what the wait costs, for example
-`3 phases blocked behind this · slot held · asked 14:05`, and the question is cut to
-600 characters. The full text is on screen in the asker's pane.
+`holding up 3 phases · a worker place is tied up · asked 14:05`, and the question is
+cut to 600 characters. The full text is on screen in the asker's pane. Every ping is
+written for the owner: what is happening, what it means for the run, and whether to act
+and where, with no code detail beyond a command to run.
 
 **Commands (`tgbot.py`).** The bot also listens, so you can ask it:
 

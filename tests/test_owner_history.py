@@ -87,8 +87,8 @@ def test_a_long_serial_chain_does_not_recurse():
 # -- the ping itself ----------------------------------------------------------
 def test_cost_line_says_what_waiting_costs():
     at = time.mktime((2026, 9, 23, 14, 5, 0, 0, 0, -1))
-    assert launch.cost_line(3, "slot held", at) == "3 phases blocked behind this · slot held · asked 14:05"
-    assert launch.cost_line(1, "slot held", at).startswith("1 phase blocked behind this ·")
+    assert launch.cost_line(3, "slot held", at) == "holding up 3 phases · slot held · asked 14:05"
+    assert launch.cost_line(1, "slot held", at).startswith("holding up 1 phase ·")
     # Unknown count: say what is known rather than guess a number.
     assert launch.cost_line(None, "operator session held", at) == "operator session held · asked 14:05"
 
@@ -106,8 +106,8 @@ def test_the_waiting_ping_leads_with_the_cost_from_the_live_ledger(cfg, tmp_path
         st.done = {"D": "ok"}
     owner.waiting(cfg, "A", "roll now or later? " + "x" * 900)
     cost, body = _sent(tmp_path)[:2]
-    assert cost.startswith("3 phases blocked behind this · slot held · asked ")
-    assert body.startswith("swarm: A is waiting on you — roll now or later?")
+    assert cost.startswith("holding up 3 phases · a worker place is tied up · asked ")
+    assert body.startswith("swarm: the worker on A is waiting on you — roll now or later?")
     assert body.endswith("(full question in its window)")
     # The digest and doctor still recover the question from the ledger line.
     from swarm_orchestrator import doctor

@@ -93,7 +93,7 @@ def test_dispatch_absorbs_a_raising_handler(tmp_path, monkeypatch):
 
     log = cfg.supervisor_log.read_text(encoding="utf-8")
     assert "HANDLER-ERROR" in log and "pane %999 vanished" in log
-    assert any("supervisor error on" in ln for ln in _tg(tmp_path))
+    assert any("an internal error while handling" in ln for ln in _tg(tmp_path))
 
 
 def test_a_handler_exception_does_not_kill_the_loop(tmp_path, monkeypatch):

@@ -232,7 +232,7 @@ def describe_hold(hold: dict, now: float) -> list[str]:
 def pause_ping(window: str, h: dict, now: float) -> str:
     return (f"Swarm paused: {label(window)} usage reached {h['pct']:.0f}% (your limit is "
             f"{h['at']:g}%). Running workers finish; no new ones start. It resumes by "
-            f"itself after the reset, {when(h.get('resets_at'), now)}.")
+            f"itself after the reset, {when(h.get('resets_at'), now)}. Nothing to do.")
 
 
 def lift_ping(window: str, reading: Reading | None) -> str:

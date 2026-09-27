@@ -56,8 +56,9 @@ def owed_message(name: str, phase: str, reason: str, refused: bool, age: str = "
     fix = "Fix the check, or push by hand." if refused else "Fix it, or push by hand."
     owed = f" (owed {age})" if age else ""
     return (
-        f"swarm: {name} {what} after merging {phase}{owed} — {reason}. Merges continue;"
-        f" the push retries after each integration. {fix}"
+        f"swarm: {name} {what} after merging {phase}{owed} — {reason}. Nothing is lost:"
+        f" work keeps merging on this machine and the push is retried after each merge."
+        f" {fix}"
     )
 
 
@@ -117,7 +118,7 @@ def settle(
         telegram.notify(
             cfg.telegram_notify,
             f"swarm: {repo.name} is pushed — origin has everything since"
-            f" {rec.get('phase')} (owed {age}).",
+            f" {rec.get('phase')} (owed {age}). Nothing to do.",
             kind="push-owed",
             phase=rec.get("phase"),
             source="pushowed.settle",

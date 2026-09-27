@@ -177,7 +177,9 @@ def _reconcile_orphans(cfg: Config) -> None:
             log.line(f"RECONCILE-HELD-BOOT {names}")
             telegram.notify(
                 cfg.telegram_notify,
-                f"swarm: {cfg.slug} started with integration held — {names}",
+                f"swarm: {cfg.slug} started, but finished work could not be merged:"
+                f" {names}. All merging waits on it. `swarm doctor` shows what is in"
+                " the way; fix it, then run `swarm resolved <phase>`.",
                 kind="integrate-hold",
                 phase=first.phase,
                 source="cli._reconcile_orphans",
@@ -234,7 +236,9 @@ def _report_web_board(cfg: Config) -> None:
     print(f"  fix: {hint}", file=sys.stderr)
     telegram.notify(
         cfg.telegram_notify,
-        f"swarm: {cfg.slug} — the web board did not start ({reason}); {hint}",
+        f"swarm: {cfg.slug} is running, but the web board did not start ({reason})."
+        " The TUI still works. To fix it, give the board a free port in .swarm.toml"
+        " and restart the swarm.",
         kind="web-board",
         source="cli._report_web_board",
         state_dir=cfg.state_dir,
@@ -839,7 +843,7 @@ def cmd_operator_done(
     if mode == "attention" and telegram.sends_all(cfg):
         mode = "all"  # `[telegram].pings = "all"` restores every ping, this one too
     hold = _operator_done_hold(mode, attention)
-    head = f"swarm: operator job {phase} {'needs you' if attention else 'done'}"
+    head = f"swarm: operator job {phase} {'needs your attention' if attention else 'is done'}"
     telegram.notify(
         cfg.telegram_notify,
         f"{head}{tail}",

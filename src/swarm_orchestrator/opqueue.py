@@ -686,11 +686,12 @@ def _tell_abandoned(cfg: Config, item: Item) -> None:
     exactly once however many times something asks the queue to give up on it,
     and outside the lock, so a slow send never holds up the queue.
     """
-    tail = f" — {item.note}" if item.note else ""
+    tail = f": {item.note}" if item.note else ""
     telegram.notify(
         cfg.telegram_notify,
-        f"swarm: {item.phase} operator hand-off ABANDONED after"
-        f" {item.attempts} attempt(s){tail}",
+        f"swarm: {item.phase} operator hand-off ABANDONED: the operator gave up on"
+        f" this follow-up job after {item.attempts} attempt(s), so it is not done"
+        f"{tail}. Do it yourself, or run `swarm operator {item.phase}` to try again.",
         kind="operator-abandoned",
         phase=item.phase,
         source="opqueue.abandon",

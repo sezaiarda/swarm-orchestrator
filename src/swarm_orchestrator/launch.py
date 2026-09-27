@@ -383,7 +383,9 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
                 st.free_slot_for(phase)
             telegram.notify(
                 cfg.telegram_notify,
-                f"swarm: worktree {phase} failed: {exc}",
+                f"swarm: could not set up a workspace for {phase}, so its worker did not"
+                f" start ({exc}). The swarm tries again shortly and tells you if it"
+                " keeps failing.",
                 kind="worktree-fail",
                 phase=phase,
                 source="launch.launch",
@@ -416,7 +418,8 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
             gitq.set_aside(cfg, phase, log)
         telegram.notify(
             cfg.telegram_notify,
-            f"swarm: worker {phase} failed to start",
+            f"swarm: the worker for {phase} failed to start. The swarm tries again"
+            " shortly and tells you if it keeps failing.",
             kind="spawn-fail",
             phase=phase,
             source="launch.launch",
@@ -663,8 +666,9 @@ def _completion_ping(phase: str, status: str, note: str) -> str | None:
     if status not in statuses.PINGS:
         return None
     recap = _collapse(note)
-    tail = f" — {recap}" if recap else ""
-    return f"swarm: {phase} FAILED{tail}"
+    tail = f" — {recap.rstrip('.')}" if recap else ""
+    return (f"swarm: {phase} FAILED{tail}. The phases that depend on it wait; once the"
+            f" cause is fixed, `swarm retry {phase}` puts it back in play.")
 
 
 def _thin_recap(note: str) -> bool:
@@ -775,7 +779,8 @@ def _outcome_plan(
 def _todo_ping(phase: str, note: str) -> str:
     """The owner's to-do for a hand-off no operator will run. Plain words: which
     phase, and the action — the recap is already written as one."""
-    return f"swarm: to-do for you from {phase} (no operator is running) — {_collapse(note)}"
+    return (f"swarm: a to-do for you from {phase} (the operator is switched off, so"
+            f" nobody else will do it): {_collapse(note)}")
 
 
 def _send_todo(
@@ -1125,7 +1130,7 @@ def cost_line(blocked: int | None, held: str, asked_at: float) -> str:
     """
     parts = []
     if blocked is not None:
-        parts.append(f"{blocked} phase{'' if blocked == 1 else 's'} blocked behind this")
+        parts.append(f"holding up {blocked} phase{'' if blocked == 1 else 's'}")
     parts.append(held)
     parts.append("asked " + time.strftime("%H:%M", time.localtime(asked_at)))
     return " · ".join(parts)

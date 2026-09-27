@@ -253,8 +253,10 @@ def test_only_pinging_statuses_have_a_completion_ping(status):
 
 
 def test_the_fail_ping_carries_the_collapsed_recap():
-    assert launch._completion_ping("P1", "fail", "  build\n  broke ") == "swarm: P1 FAILED — build broke"
-    assert launch._completion_ping("P1", "fail", "   ") == "swarm: P1 FAILED"
+    assert launch._completion_ping("P1", "fail", "  build\n  broke ") == (
+        "swarm: P1 FAILED — build broke. The phases that depend on it wait; once the cause is fixed, `swarm retry P1` puts it back in play."
+    )
+    assert launch._completion_ping("P1", "fail", "   ") == "swarm: P1 FAILED. The phases that depend on it wait; once the cause is fixed, `swarm retry P1` puts it back in play."
 
 
 @pytest.mark.parametrize(
@@ -297,7 +299,7 @@ def test_only_operator_routes_and_only_with_a_real_brief():
 def test_done_fail_pings_once_and_logs_the_ping(cfg, sink):
     result = launch.done(cfg, "P1", "fail", "cargo test red on the parser")
     assert result.ping == "sent"
-    assert sent(sink) == ["swarm: P1 FAILED — cargo test red on the parser"]
+    assert sent(sink) == ["swarm: P1 FAILED — cargo test red on the parser. The phases that depend on it wait; once the cause is fixed, `swarm retry P1` puts it back in play."]
     [row] = ledger(cfg.state_dir)
     assert (row["kind"], row["phase"], row["source"]) == ("worker-done", "P1", "launch.done")
     assert "owner telegrammed" in result.render()
@@ -342,7 +344,8 @@ def test_the_retired_spelling_pings_nobody(cfg, sink, monkeypatch):
     # off (this cfg's default) is the hand-off itself, as a to-do — never silence.
     assert result.route == "owner"
     assert sent(sink) == [
-        "swarm: to-do for you from P1 (no operator is running) — check the auth change"
+        "swarm: a to-do for you from P1 (the operator is switched off, so nobody else will do it):"
+        " check the auth change"
     ]
 
 
@@ -359,9 +362,9 @@ def test_a_dropped_fail_ping_is_reported_by_done(cfg, tmp_path, monkeypatch):
 def test_waiting_pings_the_question_under_its_own_kind(cfg, sink):
     owner.waiting(cfg, "P1", "  which\n schema? ")
     cost, head = sent(sink)[:2]
-    assert head == "swarm: P1 is waiting on you — which schema?"
+    assert head == "swarm: the worker on P1 is waiting on you — which schema?"
     # The first line says what waiting costs (unit-tested in test_owner_history).
-    assert "slot held · asked " in cost
+    assert "a worker place is tied up · asked " in cost
     [row] = ledger(cfg.state_dir)
     assert (row["kind"], row["phase"], row["source"]) == ("waiting", "P1", "cli.waiting")
 
@@ -422,9 +425,10 @@ def test_blocked_phases_of_one_burst_are_one_ping_grouped_by_reason(cfg, sink):
     assert not blockedping.flush(cfg, log, start + 2 * blockedping.GATHER_S)  # nothing left
     log.close()
     assert "\n".join(sent(sink)) == (
-        "swarm: 4 phases are blocked and need you\n"
+        "swarm: 4 phases are blocked and need you, on something outside their own work:\n"
         "- The live box refuses this host's ssh key. (P1, P2, P3)\n"
-        "- the vendor API is down (P4)"
+        "- the vendor API is down (P4)\n"
+        "Once the cause is fixed, `swarm retry <phase>` puts each one back in play."
     )
     assert blockedping.deadline(cfg) is None
 

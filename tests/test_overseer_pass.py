@@ -287,9 +287,9 @@ def test_a_hung_pass_is_killed_at_its_deadline(sup, cfg, tmp_path):
     assert ovrecord.load_json(cfg, pid).status == ovrecord.TIMEOUT
     assert f"OVERSEER-TIMEOUT {pid}" in cfg.supervisor_log.read_text()
     # One long pass is not the owner's problem: logged, not sent.
-    assert "was killed" not in _tg(tmp_path)
+    assert "limit and was stopped" not in _tg(tmp_path)
     [row] = [r for r in _ledger(cfg) if r["kind"] == "overseer"]
-    assert "was killed" in row["text"] and row["suppressed"]
+    assert "limit and was stopped" in row["text"] and row["suppressed"]
     assert state_mod.read(cfg).overseer_pass is None
 
 
@@ -302,12 +302,12 @@ def test_three_bad_passes_in_a_row_ping_and_a_good_one_resets_the_streak(sup, cf
 
     hang()
     hang()
-    assert "was killed" not in _tg(tmp_path)
+    assert "limit and was stopped" not in _tg(tmp_path)
     hang()
-    assert _tg(tmp_path).count("was killed") == 1
+    assert _tg(tmp_path).count("limit and was stopped") == 1
     sup._end_overseer_pass(_start(sup), ovrecord.DONE)
     hang()
-    assert _tg(tmp_path).count("was killed") == 1
+    assert _tg(tmp_path).count("limit and was stopped") == 1
 
 
 def test_asking_the_owner_stretches_the_deadline_and_answering_resets_it(sup, cfg, monkeypatch, tmp_path):

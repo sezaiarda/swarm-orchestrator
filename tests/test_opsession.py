@@ -530,7 +530,7 @@ def test_an_outcome_flagged_for_attention_is_sent(cfg, log):
 
     assert result.returncode == 0, result.stderr
     assert opqueue.load(cfg, PHASE).attention is True
-    assert tg_lines(cfg) == [f"swarm: operator job {PHASE} needs you — api-F26 NOT rolled; roll owed"]
+    assert tg_lines(cfg) == [f"swarm: operator job {PHASE} needs your attention — api-F26 NOT rolled; roll owed"]
 
 
 def test_notify_all_pings_every_outcome(cfg, log, monkeypatch):

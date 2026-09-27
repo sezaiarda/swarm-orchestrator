@@ -77,7 +77,7 @@ def test_a_first_fail_is_the_overseers_and_a_fail_after_its_retry_pings(cfg):
     (cfg.done_dir / "P1.fail").unlink()  # what `swarm retry` does
     second = launch.done(cfg, "P1", "fail", "still red after the retry")
     assert second.ping == "sent"
-    assert sent(cfg) == "swarm: P1 FAILED — still red after the retry\n"
+    assert sent(cfg) == "swarm: P1 FAILED — still red after the retry. The phases that depend on it wait; once the cause is fixed, `swarm retry P1` puts it back in play.\n"
 
 
 def test_a_fail_pings_at_once_without_an_overseer_or_under_all(cfg):
@@ -121,7 +121,7 @@ def test_a_conflict_pings_only_when_no_resolver_is_on_it(cfg, monkeypatch, pane,
         sup._hold("P1", gitq.CONFLICT, cfg.project_dir, None)
     finally:
         sup.log.close()
-    assert ("merge conflict integrating P1" in sent(cfg)) is pinged
+    assert ("P1's work clashes with work already merged" in sent(cfg)) is pinged
     [row] = ledger(cfg)
     assert row["kind"] == "integrate-hold" and bool(row.get("suppressed")) is not pinged
 

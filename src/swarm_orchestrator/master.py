@@ -34,6 +34,8 @@ INIT = "init"
 OVERSEER = "overseer"
 #: The prompt file each kind of pass is pointed at.
 _PROMPTS = {INIT: "init_master.md", OVERSEER: "overseer.md"}
+#: What the owner reads for each kind of master session.
+_NAMES = {INIT: "start-up", OVERSEER: "Overseer"}
 
 # Env vars a master pane needs so its `swarm` calls find this run. Forwarded on
 # the tmux respawn (bare masters inherit the supervisor's env directly).
@@ -304,7 +306,9 @@ class Master:
             self.log.line("ACTION master-ready-timeout")
             telegram.notify(
                 self.cfg.telegram_notify,
-                f"swarm: master ({kind}) never became ready -- check the master pane",
+                f"swarm: the {_NAMES.get(kind, kind)} session would not start (it never"
+                " became ready)."
+                " Workers carry on; if this keeps happening, check the overseer window.",
                 kind="master-timeout",
                 source="master._deliver_prompt",
                 suppressed=self._timeout_hold(),
@@ -318,7 +322,9 @@ class Master:
             self.log.line("ACTION master-submit-lost")
             telegram.notify(
                 self.cfg.telegram_notify,
-                f"swarm: master ({kind}) prompt would not submit -- check the master pane",
+                f"swarm: the {_NAMES.get(kind, kind)} session started but would not take"
+                " its instructions."
+                " Workers carry on; if this keeps happening, check the overseer window.",
                 kind="master-timeout",
                 source="master._deliver_prompt",
                 suppressed=self._timeout_hold(),

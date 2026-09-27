@@ -99,6 +99,8 @@ def answer_line(cfg: Config, key: str, st: state_mod.State) -> str:
 def _ping(cfg: Config, key: str, who: str, question: str, cost: str) -> None:
     st = state_mod.read(cfg)
     tail = launch_mod.ping_question(question)
+    if state_mod.waiter(key)[0] == state_mod.WORKER:
+        who = f"the worker on {who}"
     lines = [cost, f"swarm: {who} is waiting on you" + (f" — {tail}" if tail else "")]
     answer = answer_line(cfg, key, st)
     if answer:
@@ -130,7 +132,8 @@ def waiting(cfg: Config, key: str, question: str) -> str:
             raise WaitError(f"no running operator job {ident}")
         operator_mod.hold_lease(cfg, ident, item.lease_until)
         who = f"operator job {ident}"
-        held = "operator window held" if key not in state_mod.read(cfg).parked else "nothing else held"
+        held = ("the operator takes no other job meanwhile" if key not in state_mod.read(cfg).parked
+                else "nothing else waits on it")
         cost = launch_mod.cost_line(None, held, item.asked_at or now)
     elif kind == state_mod.OVERSEER:
         rec = ovrecord.load_json(cfg, ident)
@@ -143,11 +146,11 @@ def waiting(cfg: Config, key: str, question: str) -> str:
             if s.overseer_pass == ident:  # a pass waiting on a person is not hung
                 s.overseer_deadline = now + opqueue.WAIT_LEASE_S
         who = "the Overseer"
-        cost = launch_mod.cost_line(None, "Overseer pass held", now)
+        cost = launch_mod.cost_line(None, "the Overseer waits on it", now)
     else:
         fresh = True
         who = ident
-        cost = launch_mod.cost_line(launch_mod._blocked_behind(cfg, ident), "slot held", now)
+        cost = launch_mod.cost_line(launch_mod._blocked_behind(cfg, ident), "a worker place is tied up", now)
     if fresh:
         _ping(cfg, key, who, question, cost)
     launch_mod._poke_fifo(cfg, f"waiting {key}\n")

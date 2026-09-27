@@ -177,8 +177,8 @@ def test_repeated_failures_give_up_ping_once_and_let_the_run_finish(sup, cfg, tm
     st = state_mod.read(cfg)
     assert st.finished
     tg = _tg(tmp_path)
-    assert sum("failed to launch 3 times" in ln for ln in tg) == 1
-    assert any("ready but unlaunched (launch kept failing): P0" in ln for ln in tg)
+    assert sum("failed to start 3 times" in ln for ln in tg) == 1
+    assert any("ready but unlaunched (their worker kept failing to start): P0" in ln for ln in tg)
 
 
 def test_resume_hands_given_up_phases_back(sup, cfg):
@@ -396,7 +396,7 @@ def test_a_reload_grow_records_the_new_panes(tmp_path, monkeypatch):
     assert asked == [[2, 3]]
     assert [(s.id, s.pane_id) for s in st.slots] == [(0, "%10"), (1, "%11"), (2, "%12")]
     assert "RELOAD-PANES" in _log(cfg)
-    assert pings and "slot(s) [3]" in pings[0]
+    assert pings and "only 1 of the 2 extra worker place(s)" in pings[0]
 
 
 # -- doctor: every slot's pane, not only the busy ones ---------------------------

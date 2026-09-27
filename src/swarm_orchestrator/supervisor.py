@@ -277,8 +277,9 @@ class Supervisor:
             self.log.line(f"SUPERVISOR-CRASH {exc!r}")
             self._ping(
                 "crash",
-                f"swarm: supervisor CRASHED ({exc!r}) -- the run is over; nothing"
-                " will be launched, integrated or finished. Run `swarm up` to restart.",
+                f"swarm: {self.cfg.slug} has stopped: the swarm hit an internal error"
+                f" ({exc}). No new work starts and finished work is not merged until"
+                " you restart it with `swarm up`.",
                 cooldown=0.0,
             )
             raise
@@ -327,7 +328,8 @@ class Supervisor:
             self.log.line(f"HANDLER-ERROR {what!r} {exc!r}")
             self._ping(
                 f"handler:{what.split(' ')[0]}",
-                f"swarm: supervisor error on {what!r}: {exc}",
+                f"swarm: an internal error while handling {what!r} ({exc}). The swarm"
+                " skipped that step and keeps running; nothing to do unless it repeats.",
             )
             return False
 
@@ -492,8 +494,9 @@ class Supervisor:
             self.log.line(f"RELOAD-ERROR {exc}")
             self._ping(
                 "reload-error",
-                f"swarm: {self.cfg.slug} config reload FAILED, still running the old "
-                f"config — {exc}",
+                f"swarm: your settings change for {self.cfg.slug} was not applied: the"
+                f" config file has an error ({exc}). The swarm keeps running on the old"
+                " settings. Fix the file, then run `swarm reload`.",
                 kind="other",
                 source="supervisor._on_reload",
             )
@@ -601,8 +604,9 @@ class Supervisor:
         if failed:
             self._ping(
                 "reload-panes",
-                f"swarm: {self.cfg.slug} reload could not create a pane for slot(s)"
-                f" {failed}; running with {len(panes)} of {len(slot_ids)} new slot(s)",
+                f"swarm: {self.cfg.slug} could open only {len(panes)} of the"
+                f" {len(slot_ids)} extra worker place(s) you asked for, so it runs with"
+                " fewer workers than set. Nothing is lost.",
                 cooldown=0.0,
             )
 
@@ -665,11 +669,12 @@ class Supervisor:
         started = drain_mod.spawn_down(self.cfg)
         self.log.line(f"DRAIN-COMPLETE stopping={started} then={then!r}")
         if started:
-            msg = f"swarm: {self.cfg.slug} finished its running work and is stopping now"
-            msg += f", then running: {then}" if then else ""
+            msg = (f"swarm: {self.cfg.slug} finished the work that was running and is"
+                   " shutting down, as you asked")
+            msg += f"; afterwards it runs: {then}" if then else ""
         else:
-            msg = (f"swarm: {self.cfg.slug} finished its running work but could not start"
-                   " the stop; run `swarm down` yourself")
+            msg = (f"swarm: {self.cfg.slug} finished the work that was running but could"
+                   " not shut itself down; run `swarm down` yourself")
         self._ping("drain", msg, cooldown=0.0, kind="drain", source="supervisor._drain_tick")
 
     # -- rule 1: done -----------------------------------------------------
@@ -855,25 +860,29 @@ class Supervisor:
                 # (`swarm notify`) if it cannot fix the conflict.
                 held = telegram.hold(self.cfg, "a resolver is on it; it tells you if it cannot fix it")
                 msg = (
-                    f"swarm: merge conflict integrating {phase} in {repo.name}; resolver"
-                    f" pane open -- run `swarm resolved {phase}` once fixed"
+                    f"swarm: {phase}'s work clashes with work already merged in"
+                    f" {repo.name}, so all merging is paused. A resolver is fixing it in"
+                    f" tmux window resolve-{phase} and restarts merging when done; it"
+                    " tells you if it cannot. Nothing to do yet"
                 )
             else:
                 msg = (
-                    f"swarm: merge conflict integrating {phase} in {repo.name} and no"
-                    f" resolver would start -- fix it, then `swarm resolved {phase}`"
+                    f"swarm: {phase}'s work clashes with work already merged in"
+                    f" {repo.name}, so all merging is paused, and the resolver would not"
+                    f" start. Fix the clash in {repo.name}, then run `swarm resolved {phase}`"
                 )
         elif kind == gitq.DIRTY:
             where = f" in {repo.name}" if repo is not None else ""
             msg = detail or gitq.off_main_reason(self.cfg, repo, phase) or (
-                f"swarm: {phase} held -- the working tree{where} has uncommitted"
-                f" changes or files in the way of the merge; commit, stash or move"
-                f" them, then `swarm resolved {phase}`"
+                f"swarm: {phase} is finished but cannot be merged: the checkout{where}"
+                f" has uncommitted changes or stray files in the way, and all merging"
+                f" waits on it. Commit, stash or move them, then run"
+                f" `swarm resolved {phase}`"
             )
         else:  # PUSH_FAILED
             msg = (
-                f"swarm: {phase} merged locally but the push failed; fix it, then"
-                f" `swarm resolved {phase}` to retry"
+                f"swarm: {phase} merged on this machine but could not be pushed; fix"
+                f" the push, then run `swarm resolved {phase}` to retry"
             )
         self.log.line(f"INTEGRATE-BLOCKED {phase} {kind}")
         telegram.notify(
@@ -900,8 +909,9 @@ class Supervisor:
             self.overseer.resolver_escalated(phase)
             telegram.notify(
                 self.cfg.telegram_notify,
-                f"swarm: {phase} not finished yet ({repo.name} still has an unfinished"
-                f" merge / dirty tree) -- resolve + commit, then re-run `swarm resolved {phase}`",
+                f"swarm: {phase} still cannot be merged: {repo.name} has an unfinished"
+                f" merge or uncommitted changes, so merging stays paused. Finish and"
+                f" commit it, then run `swarm resolved {phase}` again",
                 kind="integrate-hold",
                 phase=phase,
                 source="supervisor._on_resolved",
@@ -1165,8 +1175,8 @@ class Supervisor:
         if st.finished:
             self._ping(
                 "finished-with-ready",
-                f"swarm: run finished but {len(ready)} phase(s) never launched: "
-                f"{', '.join(ready[:8])} -- run `swarm up` to resume",
+                f"swarm: the run has ended, but {len(ready)} phase(s) are ready and never"
+                f" started: {', '.join(ready[:8])}. Run `swarm up` to carry on.",
             )
             return
         if st.on_hold or st.integ_blocked is not None or not st.free_slots():
@@ -1276,16 +1286,17 @@ class Supervisor:
             self._ping(
                 f"crash-hold:{phase}",
                 f"swarm: the worker for {phase} has stopped unexpectedly {len(recent)}"
-                " times in the last hour, so the swarm has stopped restarting it. Its"
-                f" work so far is kept. Once you have looked, `swarm launch {phase}`"
-                " starts it again from there.",
+                " times in the last hour, so the swarm has stopped restarting it and the"
+                " phases after it wait. Its work so far is kept. Once you have looked,"
+                f" `swarm launch {phase}` starts it again from there.",
                 cooldown=0.0,
             )
         else:
             self._ping(
                 f"reap:{phase}",
                 f"swarm: the worker for {phase} stopped without finishing. Its work so"
-                " far is kept, and the phase will be started again from there.",
+                " far is kept, and the phase will be started again from there. Nothing"
+                " to do.",
             )
         if self.cfg.git_isolation == "worktree":
             try:
@@ -1342,7 +1353,8 @@ class Supervisor:
         self.log.line(f"PARK {key} window={name}")
         telegram.notify(
             self.cfg.telegram_notify,
-            f"swarm: {who} moved to its own window {name} (still waiting on you)",
+            f"swarm: {who} is still waiting for your answer, now in its own tmux window"
+            f" {name} so the rest of the swarm can carry on",
             kind="park",
             phase=key,
             source="supervisor._park",
@@ -1373,7 +1385,7 @@ class Supervisor:
                     s.pane_id = replacement
             st.park(phase)
             paused = st.on_hold
-        self._parked_ping(phase, phase)
+        self._parked_ping(phase, f"the worker on {phase}")
         if paused:
             self.log.line("PARK-PAUSED holding — no launch")
             return
@@ -1585,9 +1597,10 @@ class Supervisor:
         if outcome == launch_mod.FAILED and fails == LAUNCH_GIVE_UP:
             self._ping(
                 f"launch-gave-up:{phase}",
-                f"swarm: {phase} failed to launch {fails} times in a row -- no longer"
-                f" launched automatically. Fix the cause, then `swarm launch {phase}`"
-                " (or `swarm resume` to retry every given-up phase).",
+                f"swarm: the worker for {phase} failed to start {fails} times in a row,"
+                " so the swarm stopped trying and the phases after it wait. Fix the"
+                f" cause, then run `swarm launch {phase}` (or `swarm resume` to retry"
+                " every phase it gave up on).",
                 cooldown=0.0,
             )
         self._finish_if_settled()
@@ -1871,8 +1884,9 @@ class Supervisor:
         self.log.line(f"OVERSEER-SPAWN-FAILED {pid}")
         self._ping(
             "overseer-spawn",
-            f"swarm: an Overseer pass ({pid}) would not start -- its reasons wait for"
-            " the next one; check the supervisor pane",
+            "swarm: the Overseer (the session that looks after the run) would not"
+            f" start ({pid}). Workers carry on; what it was due to look at waits for"
+            " its next pass. If this keeps happening, check the overseer window.",
             kind="overseer",
             source="supervisor._on_overseer_spawned",
             suppressed=self._overseer_streak(),
@@ -1884,8 +1898,9 @@ class Supervisor:
         self.log.line(f"OVERSEER-TIMEOUT {pid} after {self.cfg.overseer_timeout_s}s")
         self._ping(
             f"overseer-timeout:{pid}",
-            f"swarm: the Overseer pass {pid} ran past {minutes} min and was killed;"
-            " whatever it committed is being merged",
+            f"swarm: an Overseer pass ({pid}) ran past its {minutes}-minute limit and"
+            " was stopped; what it had finished is kept. Workers carry on; nothing to"
+            " do unless this keeps happening.",
             cooldown=0.0,
             kind="overseer",
             source="supervisor._overseer_timeout",
@@ -2178,16 +2193,17 @@ class Supervisor:
             # Ready phases the launcher gave up on after repeated failed
             # launches: real work nothing will retry. Say how to resume.
             msg += (
-                f"; {len(leftover)} ready but unlaunched (launch kept failing): "
-                f"{', '.join(leftover)} -- run `swarm launch <phase>` to resume"
+                f"; {len(leftover)} ready but unlaunched (their worker kept failing to"
+                f" start): {', '.join(leftover)}. Run `swarm launch <phase>` to carry on"
             )
         if operator:
             # Only reachable past the blocking check, so every one of these is an
             # item that burned its attempt cap: real work nothing will retry. They
             # are the notes the whole feature exists to stop losing — name them.
             msg += (
-                f"; {len(operator)} operator hand-off(s) undrained: "
-                f"{', '.join(operator[:8])} -- run `swarm operator <phase>`"
+                f"; {len(operator)} follow-up job(s) the operator never got done"
+                f" (undrained): {', '.join(operator[:8])}. Run `swarm operator <phase>`"
+                " to try again, or do them yourself"
             )
         telegram.notify(
             self.cfg.telegram_notify,

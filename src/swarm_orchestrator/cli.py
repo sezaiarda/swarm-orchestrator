@@ -800,8 +800,8 @@ def cmd_operator_done(
 ) -> int:
     """The session signals its job is finished, with a one-line outcome.
 
-    The outcome is recorded on the item, in the notification ledger and in the
-    next Overseer digest. Routine outcomes arrive folded into the Overseer's
+    The outcome is recorded on the item, in the notification ledger, in the
+    phase's history (through the ledger writer) and in the next Overseer digest. Routine outcomes arrive folded into the Overseer's
     summary, unless ``[operator].notify`` says otherwise; ``--attention`` sends
     it. A decision the owner has to make is never an outcome: the session asks
     it with ``swarm waiting`` while it is still there to act on the answer.
@@ -828,6 +828,12 @@ def cmd_operator_done(
     if item is None:
         print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
         return 1
+    # The outcome goes in its phase's history, written by the swarm like every report.
+    row = opqueue.owning_phase(phase)
+    if item.outcome and row in ledger_mod.load(cfg.project_dir / cfg.ledger):
+        ledgerw.queue(cfg, ledgerw.NOW, {"kind": "record", "phase": row, "outcome": "note",
+                                         "note": item.outcome, "by": f"operator job {phase}"})
+        _poke(cfg, "ledger")
     tail = f" — {item.outcome}" if item.outcome else " (no outcome given)"
     mode = cfg.operator_notify
     if mode == "attention" and telegram.sends_all(cfg):

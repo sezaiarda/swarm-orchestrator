@@ -86,7 +86,7 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   `swarm done "$SWARM_PHASE" operator "<brief>"`, the brief saying what to show
   the owner, where (URLs, file paths), and which rows their pick settles. An
   operator session then shows the owner, asks them in its own window and records
-  the picks in those rows. If the worker started a server for the review, it
+  the picks on those rows with `swarm record`. If the worker started a server for the review, it
   keeps it with `swarm keep --why …` and names that keep in the brief. The worker
   never waits for the answer itself. If the file already says this, leave it;
   if it still tells workers to open an ask, replace that clause with this one —

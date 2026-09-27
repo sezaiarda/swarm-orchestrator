@@ -644,7 +644,10 @@ class Supervisor:
             launching = len(self._launching - busy)
         waits = drain_mod.waiting_for(
             self.cfg, st, launching=launching,
-            overseer=self._overseer_live is not None,
+            # A pass waiting on the owner holds nothing up, like a waiting worker.
+            overseer=(self._overseer_live is not None
+                      and state_mod.waiter_key(state_mod.OVERSEER, self._overseer_live)
+                      not in st.waiting),
             init_pass=self._bootstrapping and self.master.is_alive(),
         )
         if waits == st.drain.get("waiting") and waits:

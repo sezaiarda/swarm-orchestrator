@@ -179,3 +179,19 @@ def test_down_drain_with_no_supervisor_stops_at_once(swarm, tmp_path):
     assert "nothing to wait for" in r.stdout
     assert swarm.wait(marker.is_file, timeout=10)
     assert Path(swarm.state_dir / "logs" / drain_mod.AFTER_LOG).is_file()
+
+
+def test_an_overseer_pass_waiting_on_the_owner_does_not_hold_a_drain(cfg, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(drain_mod, "spawn_down", lambda c: spawned.append(c) or True)
+    with state_mod.transaction(cfg) as st:
+        st.drain = {"since": time.time(), "then": ""}
+    sup = Supervisor(cfg)
+    sup._bootstrapped = True
+    sup._overseer_live = "ovs-1"
+    sup._drain_tick()
+    assert state_mod.read(cfg).drain["waiting"] == ["an Overseer pass"]
+    with state_mod.transaction(cfg) as st:
+        st.waiting[state_mod.waiter_key(state_mod.OVERSEER, "ovs-1")] = time.time() + 600
+    sup._drain_tick()
+    assert len(spawned) == 1

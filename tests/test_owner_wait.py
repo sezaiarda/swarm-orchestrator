@@ -249,5 +249,5 @@ def test_an_owner_row_is_in_needs_you_with_what_it_holds_up(cfg):
     [b] = [b for b in snap.blockers if b.kind == "owner-row"]
     assert b.phase == "OWN" and "holds up 2 rows" in b.question
     col, extra = board._place("OWN", graph, snap.done, {"P0"}, {"OWN"}, {}, [], {}, [], snap,
-                              {}, {}, {b.phase: b for b in snap.blockers}, None, {})
+                              {}, {}, {b.phase: b for b in snap.blockers}, {})
     assert col == board.NEEDS_YOU and "holds up 2 rows" in extra["q"]

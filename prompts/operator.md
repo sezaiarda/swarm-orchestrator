@@ -138,8 +138,10 @@ swarm.
 
 The same goes for a review: if the job is to show the owner something and get
 their pick (mockups, a page, a recording), show them where to look, ask with
-`swarm waiting` and AskUserQuestion, record the pick in the ledger row, commit,
-and finish.
+`swarm waiting` and AskUserQuestion, then record the pick with
+`swarm record <row> done "Owner's pick: <the answer>"` when it completes an
+owner-run row (`done` ticks it), or with `note` in place of `done` when it does
+not, and finish.
 
 ## Not yet: work whose moment has not come
 
@@ -165,7 +167,7 @@ Run, as your last action,
     swarm operator-done <job> "<one-line outcome>"
 
 Make the outcome one plain line: what you did, what you skipped because it was
-already done, and anything left over. Run it once, when the work is really
+already done, and anything left over. The swarm files it in the phase's history. Run it once, when the work is really
 finished — not to signal that you have started. It ends this session, and in a
 mirror it merges and removes your working copy, so everything must be committed
 first.

@@ -378,6 +378,22 @@ def test_operator_done_completes_the_item_and_clears_the_lease(cfg, log):
     assert Supervisor(cfg)._operator_blocking() == []
 
 
+def test_operator_done_files_its_outcome_in_the_phase_history(cfg, log):
+    from swarm_orchestrator import ledgerw
+
+    ledger = cfg.project_dir / cfg.ledger
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("- [ ] `teal-W10` · needs:— · **the teal**\n", encoding="utf-8")
+    queue(cfg, "teal-W10")
+    assert operator_mod.dispatch(cfg, "teal-W10", log) is True
+
+    assert cli(cfg, "operator-done", "teal-W10", "rolled the kit back").returncode == 0
+
+    [op] = ledgerw.pending(cfg)[ledgerw.NOW]["ops"]
+    assert (op["kind"], op["phase"], op["outcome"], op["note"]) == (
+        "record", "teal-W10", "note", "rolled the kit back")
+
+
 def test_operator_done_on_a_phase_with_no_hand_off_is_refused(cfg):
     assert cli(cfg, "operator-done", PHASE).returncode == 1
 

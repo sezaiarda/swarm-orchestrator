@@ -337,3 +337,11 @@ def test_a_landed_doc_is_pushed_like_every_swarm_written_file(cfg, tmp_path):
     outcome, sha = bigpic.land(cfg, DRAFT, "big picture: refresh", _log(cfg))
     assert outcome == bigpic.LANDED
     assert _git(origin, "rev-parse", "--short", "master") == sha
+
+
+def test_no_pass_starts_while_the_swarm_drains_to_a_stop(cfg):
+    r = _runner(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.drain = {"since": time.time(), "then": ""}
+    r.tick()  # the doc does not exist yet, which alone would start one
+    assert not r.mem.live

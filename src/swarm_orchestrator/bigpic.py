@@ -434,7 +434,9 @@ class Runner:
             self._land(self.mem.land_pending, now)
         else:
             doc = self.cfg.project_dir / self.cfg.big_picture_doc
-            why = due(self.cfg, self.mem, now, paused=st.paused, doc_exists=doc.is_file())
+            # A drain stops the swarm soon: a pass started now would be cut off.
+            why = due(self.cfg, self.mem, now, paused=st.paused or bool(st.drain),
+                      doc_exists=doc.is_file())
             if why:
                 self._start(why, st, now)
         if asdict(self.mem) != before:

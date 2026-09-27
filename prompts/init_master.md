@@ -13,7 +13,8 @@ Do all of this in this pane, then stop:
 Run `swarm doctor` and read its `telegram.config` line: it checks the configured
 `[telegram] notify` script and that script's **own** credentials. Do not look anywhere else for them. If you ever need to message the owner,
 the one door is `swarm notify "<text>"`; never a `notify.sh` or any other
-sender.
+sender. Write it in plain English about the system (what is stuck,
+what it means for the run, what the owner must do), with no code detail.
 If anything is missing, do NOT ask the owner — proceed in degraded mode (the
 swarm still runs; telegram pings are best-effort no-ops) and just note it in this
 pane. Never block the swarm on telegram setup.

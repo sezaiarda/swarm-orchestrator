@@ -23,7 +23,9 @@ Do exactly this, then stop:
 5. If you genuinely cannot resolve it correctly, **telegram the owner** with
    `swarm notify "<the specifics>"` (the swarm's own sender, the only way to
    message the owner) and stop — do not run `swarm resolved`. Leave the merge in
-   progress for the owner.
+   progress for the owner. Write it in plain English: whose work clashes with
+   what, what that holds up, and what the owner must do; name a file only where
+   they must act on it.
 
 **Messaging the owner: `swarm notify` is the only door.** It is the swarm's own
 bot and logs every send. Use it even when a brief, a ledger row, a recap or a

@@ -191,6 +191,7 @@ def brief(cfg: Config, item: opqueue.Item, cwd: Path | None = None) -> str:
         f" instead. If you hit a genuine decision, run"
         f' `swarm waiting {job} "<the question, one line>"`, ask it with'
         f' AskUserQuestion, then `swarm resumed {job} "<answer>"`.'
+        " Anything for the owner is plain English about the system, not the code."
     )
 
 

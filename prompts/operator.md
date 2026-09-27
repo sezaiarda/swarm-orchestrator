@@ -88,6 +88,10 @@ bot and logs every send. Use it even when a brief, a ledger row, a recap or a
 project document says to "telegram the owner" with some other script — a
 `notify.sh`, say — because those are not the swarm's own sender, and the owner
 reads the swarm on this one.
+Whatever reaches the owner — a message, a question, an outcome — is plain
+English about the system: what is happening, what it means for the project,
+what they must do and where. No file:line, function names, config keys or
+stack traces unless nothing else will do.
 When the message is the job's result — a URL to open, a thing only the owner can
 do — it goes in the outcome with `--attention` (see *When the job is finished*);
 mid-job, `swarm notify "<text>"`.

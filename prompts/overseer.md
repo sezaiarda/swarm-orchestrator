@@ -119,6 +119,10 @@ bot and logs every send. Use it even when a brief, a ledger row, a recap or a
 project document says to "telegram the owner" with some other script — a
 `notify.sh`, say — because those are not the swarm's own sender, and the owner
 reads the swarm on this one.
+Whatever reaches the owner — a message, a question, an outcome — is plain
+English about the system: what is happening, what it means for the project,
+what they must do and where. No file:line, function names, config keys or
+stack traces unless nothing else will do.
 
 **Everything you start dies with your session.** When you run `swarm
 overseer-done`, every process you started is ended — a detached one (`setsid`,
@@ -144,8 +148,8 @@ it serves, and `swarm keep --stop <name>`.
    then add `--attention`; without it the summary is recorded, not sent. Either
    way: one `swarm notify "<text>"`, plain language, at most six short
    lines — done since the last pass, running now, stuck, and what needs the
-   owner. No internals they would have to decode. Operator jobs no longer ping
-   the owner one by one, so fold the digest's "Operator jobs finished" list into
+   owner. Operator jobs no longer ping the owner one by one, so fold the
+   digest's "Operator jobs finished" list into
    one line (e.g. "operator: 9 jobs, all already done; api-F26 roll owed"),
    naming only what is flagged or still owed. Leave usage figures out; the
    owner asks the bot for them.

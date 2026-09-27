@@ -64,6 +64,7 @@ from .data import (
     fmt_stamp,
     fmt_when,
     forecast,
+    held_merge,
     phase_eta,
     usage_outlook,
 )
@@ -338,7 +339,7 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
     snap = dash.snapshot
     slots = list(dash.slot_rows())
     if not slots:
-        return [(paint(snap.reason or "no slots — has `swarm up` run?", MUTED), None, None)]
+        return [(paint(snap.reason or "no workers yet — `swarm up` starts them", MUTED), None, None)]
 
     blocked = {b.phase: b for b in snap.blockers}
     phase_w = max(8, min(20, width - 22 - ETA_W))
@@ -473,6 +474,9 @@ def need_rows(needs: list, width: int = 76, selected: str | None = None,
             facts.append(f"waited {fmt_coarse(max(0.0, now - need.since))}")
         if need.blocks:
             facts.append(f"blocks {need.blocks} phase{'s' if need.blocks != 1 else ''}")
+        where = answer_where(need)
+        if where:
+            facts.append(where)
         name = need.ref if need.phase is None else (need.ref or need.phase)
         tail = " · ".join(facts)
         name_w = max(8, min(24, width - len(tail) - 6))
@@ -481,6 +485,17 @@ def need_rows(needs: list, width: int = 76, selected: str | None = None,
         question = clip(need.question, max(10, width - 6)) or "no question text was captured"
         out.append((head + "\n" + paint(f"    {escape(question)}", BRIGHT), need.key, need))
     return out
+
+
+def answer_where(need) -> str:
+    """Where the owner answers ``need``, when the kind alone says so."""
+    from ..state import wait_window  # local: only needed for this one name
+
+    if need.kind == tl.NEED_LABEL["waiting"]:
+        return "answer in its worker pane"
+    if need.kind == tl.NEED_LABEL["parked"] and need.phase:
+        return f"answer in tmux window {wait_window(need.phase)}"
+    return ""
 
 
 # -- the feed -------------------------------------------------------------
@@ -523,7 +538,7 @@ def feed_style(item) -> tuple[str, str, str]:
     if item.kind == tl.OPERATOR:
         if item.status == "done":
             return "operator ✓", OPERATOR, GLYPH[OPERATOR]
-        return "op gave up", BAD, GLYPH[BAD]
+        return "job gave up", BAD, GLYPH[BAD]
     label, state = _FEED_KIND.get(item.kind, (item.kind, MUTED))
     shape = GLYPH[OVERSEER] if item.kind == tl.OVERSEER else (
         GLYPH[YOU] if item.kind == tl.OWNER else ("!" if item.kind == "risk" else "›"))
@@ -646,17 +661,17 @@ def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None)
     elif snap.drain and snap.supervisor_alive:
         parts.append((escape(drain_line(snap.drain)), WARN))
     elif snap.paused:
-        parts.append(("paused — `swarm resume`", WARN))
+        parts.append(("paused, no new workers — `swarm resume`", WARN))
     elif snap.usage_hold:
         parts.append((snap.usage_hold, WARN))
     elif not snap.supervisor_alive and not snap.finished:
-        parts.append(("supervisor down — `swarm up`", BAD))
+        parts.append(("swarm not running — `swarm up`", BAD))
     if snap.integ_blocked:
-        kind = snap.integ_blocked_kind or "conflict"
-        parts.append((f"merge queue held: {snap.integ_blocked} {kind}", BAD))
+        parts.append((f"merging stopped: {snap.integ_blocked}, "
+                      f"{held_merge(snap.integ_blocked_kind)}", BAD))
     dropped = [n for n in (dash.notifications or []) if n.dropped]
     if dropped:
-        parts.append((f"{len(dropped)} telegram(s) dropped", BAD))
+        parts.append((f"{len(dropped)} ping(s) never reached your phone", BAD))
 
     busy = any(s.busy for s in snap.slots)
     age = None if snap.last_event_at is None else max(0.0, now - snap.last_event_at)

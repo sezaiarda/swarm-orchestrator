@@ -146,6 +146,9 @@ const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&
 const now = () => Date.now() / 1000 + S.skew;
 const TONE = {needs_you: "warn", blocked: "mu", ready: "acc", building: "info", merging: "warn", operator: "acc", done: "ok", failed: "bad", excluded: "mu"};
 const COLNAME = {};
+// A blocked row's root, in words.
+const ROOTKIND = {unknown: "not in the ledger", excluded: "yours to do", failed: "failed", parked: "waiting on you", building: "being built", ready: "ready to start", blocked: "blocked"};
+const rootText = (c) => `waits on <b class="mono">${esc(c.root)}</b> <span class="mu">(${esc(ROOTKIND[c.root_kind] || c.root_kind)}; holds up ${c.root_blocks})</span>`;
 
 function dur(s) {
   if (s == null || !isFinite(s)) return "—";
@@ -313,12 +316,12 @@ function meta(c) {
     case "building": {
       bits.push(`slot ${c.slot}`);
       if (c.since) bits.push(`<span data-since="${c.since}">${dur(now() - c.since)}</span>` + (c.typical ? ` / ~${dur(c.typical)}` : ""));
-      if (c.ctx != null) { const col = c.ctx >= 60 ? "var(--bad)" : c.ctx >= 30 ? "var(--warn)" : "var(--ok)"; bits.push(`ctx <span class="ctx"><i style="width:${Math.min(100, c.ctx)}%;background:${col}"></i></span> ${Math.round(c.ctx)}%`); }
+      if (c.ctx != null) { const col = c.ctx >= 60 ? "var(--bad)" : c.ctx >= 30 ? "var(--warn)" : "var(--ok)"; bits.push(`context <span class="ctx"><i style="width:${Math.min(100, c.ctx)}%;background:${col}"></i></span> ${Math.round(c.ctx)}%`); }
       if (c.last) bits.push(`active <span data-ago="${c.last}">${ago(c.last)}</span>`);
       break;
     }
     case "blocked":
-      if (c.root) bits.push(`root <b class="mono">${esc(c.root)}</b> <span class="mu">(${esc(c.root_kind)}, holds ${c.root_blocks})</span>`);
+      if (c.root) bits.push(rootText(c));
       else if (c.sub) bits.push(esc(c.sub));
       if (c.needs) bits.push(`needs ${c.needs.map(esc).join(", ")}${c.unmet > c.needs.length ? "…" : ""}`);
       break;
@@ -473,7 +476,7 @@ function paintSheet(id, d, keepScroll) {
     const sec = (t, h) => h ? `<section><h3>${t}</h3>${h}</section>` : "";
     const camp = d.campaign ? `<p><span class="mu">campaign</span> <span class="mono">${esc(d.campaign.name)}</span>${d.campaign.adr ? " · " + esc(d.campaign.adr) : ""}${d.campaign.what ? ` — ${esc(d.campaign.what)}` : ""}</p>` : "";
     body += camp;
-    body += `<p><span class="pill"><span class="dot d-${esc(c.col)}"></span>${esc(COLNAME[c.col] || c.col || "")}</span> ${esc(c.sub || "")}${c.root ? ` · root <b class="mono">${esc(c.root)}</b> (${esc(c.root_kind)}, holds ${c.root_blocks})` : ""}</p>`;
+    body += `<p><span class="pill"><span class="dot d-${esc(c.col)}"></span>${esc(COLNAME[c.col] || c.col || "")}</span> ${esc(c.sub || "")}${c.root ? " · " + rootText(c) : ""}</p>`;
     if (d.question) body += sec("Waiting on you", `<div class="md">${md(d.question)}</div>`);
     if (d.build) {
       const bl = d.build;

@@ -356,8 +356,8 @@ def worker_detail(entry, dash) -> str:
     if gone:
         lines.append(
             paint(
-                "✖ PANE GONE — state still says this slot is busy, but nothing is "
-                "running in it. The run will not advance until it is freed.",
+                "✖ PANE GONE — the swarm still counts this slot as busy, but its "
+                "worker is no longer running, so the slot does no work until it is freed.",
                 BAD,
             )
         )
@@ -383,7 +383,8 @@ def worker_detail(entry, dash) -> str:
         lines.append(field("context", f"{m.context_tokens / 1000:.0f}k{window}",
                            state=BAD if m.context_tokens >= CONTEXT_BUDGET else None))
         if m.peak_tokens:
-            note = " — past the ~300k budget: split candidate" if m.peak_tokens >= CONTEXT_BUDGET else ""
+            note = (" — past the ~300k budget: this phase may be too big for one worker"
+                    if m.peak_tokens >= CONTEXT_BUDGET else "")
             lines.append(field("peak", f"{m.peak_tokens / 1000:.0f}k{note}",
                                state=WARN if note else None))
     elif ctx is not None:
@@ -857,7 +858,7 @@ class Workers(TableTab):
     COLUMNS = WORKER_COLUMNS
     PRIORITY = WORKER_PRIORITY
     DETAIL_TITLE = "slot"
-    EMPTY_DETAIL = "no slots yet — has `swarm up` run?"
+    EMPTY_DETAIL = "no workers yet — `swarm up` starts them"
 
     def _update(self, dash) -> None:
         rows = list(dash.slot_rows())

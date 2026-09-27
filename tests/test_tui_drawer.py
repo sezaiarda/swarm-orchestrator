@@ -117,7 +117,7 @@ def test_a_held_merge_queue_is_an_error_a_question_is_a_warning():
     assert by_phase["P1"].severity == "warning"
     assert by_phase["P2"].severity == "error"
     assert by_phase["P1"].title == "needs you: P1"
-    assert by_phase["P1"].body == f"waiting · which schema?\n{drawer.TOAST_HINT}"
+    assert by_phase["P1"].body == f"worker asks you · which schema?\n{drawer.TOAST_HINT}"
 
 
 def test_an_alert_falls_back_to_the_ping_then_the_detail():
@@ -218,7 +218,7 @@ def test_on_a_narrow_drawer_the_name_yields_before_the_age():
     width = drawer.WIDTH - 4  # the drawer's real content width
     rows = drawer.blocker_rows(FakeDash(snap(blocker(long, since=NOW - 7200))), width, now=NOW)
     head = plain(rows[0].text).splitlines()[0]
-    assert head.endswith(f"waiting · {data.fmt_ago(NOW - 7200, NOW)}")
+    assert head.endswith(f"worker asks you · {data.fmt_ago(NOW - 7200, NOW)}")
     assert "…" in head and long not in head
     assert len(head) <= width
 

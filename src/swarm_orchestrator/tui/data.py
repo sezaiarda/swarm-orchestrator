@@ -285,6 +285,20 @@ class Progress:
         return 0.0 if self.total <= 0 else 100.0 * self.done / self.total
 
 
+#: Why merging stopped, in words, by the kind the supervisor records.
+HELD_MERGE = {
+    "conflict": "a conflict with main",
+    "dirty": "uncommitted changes in the way",
+    "push_failed": "a failed push",
+}
+
+
+def held_merge(kind: str | None) -> str:
+    """What stopped a merge, for a person: ``conflict`` -> "a conflict with main"."""
+    kind = kind or "conflict"
+    return HELD_MERGE.get(kind, kind.replace("_", " "))
+
+
 @dataclass(frozen=True)
 class Snapshot:
     """One coherent read of the whole run, ready to render."""
@@ -416,7 +430,7 @@ def build_snapshot(
     notification index, this owns the joining rules.
     """
     if not state:
-        return Snapshot(ok=False, reason="no state yet — has `swarm up` run?")
+        return Snapshot(ok=False, reason="the swarm has not run here yet — `swarm up` starts it")
     graph = graph if graph is not None else {}
     launch_times = launch_times or {}
     questions = questions or {}
@@ -478,19 +492,22 @@ def build_snapshot(
                 kind="parked",
                 question=questions.get(phase, ""),
                 since=launch_times.get(phase),
-                detail="off-grid in its own window — blocks finish until answered",
+                detail=f"its worker waits in tmux window {state_mod.wait_window(phase)};"
+                " the run cannot finish until you answer",
             )
         )
     blocked_phase = state.get("integ_blocked")
     if blocked_phase:
         kind = state.get("integ_blocked_kind") or "conflict"
-        repo = state.get("integ_blocked_repo") or "?"
+        repo = Path(state.get("integ_blocked_repo") or "?").name
+        fix = (f"a resolver is fixing it in tmux window resolve-{blocked_phase}"
+               if kind == "conflict" else f"fix it, then run `swarm resolved {blocked_phase}`")
         blockers.append(
             Blocker(
                 phase=str(blocked_phase),
                 kind="integ",
-                question=f"merge {kind} in {repo} — the whole merge queue is held",
-                detail=f"`swarm resolved {blocked_phase}` releases it",
+                question=f"{held_merge(kind)} in {repo} stops all merging; {fix}",
+                detail=f"`swarm resolved {blocked_phase}` starts merging again",
             )
         )
     # The retired spelling only, and unconditionally: an older run can still hold
@@ -528,7 +545,8 @@ def build_snapshot(
                     question=item.last_error if item.asked else item.note,
                     since=item.queued_at or None,
                     detail=item.note if item.asked
-                    else (item.last_error or "the operator queue gave up on it"),
+                    else (item.last_error or "the operator job gave up after its retries;"
+                          " it is yours to do by hand now"),
                 )
             )
 
@@ -538,8 +556,9 @@ def build_snapshot(
                                         in_flight):
         blockers.append(
             Blocker(phase=row, kind="owner-row",
-                    question=f"only you can do this, and it holds up {n} row{'' if n == 1 else 's'}",
-                    detail="tick it in the ledger, or `swarm skip` it, once it is done")
+                    question=f"only you can do this, and {n} row{' waits' if n == 1 else 's wait'}"
+                    f" on it; once done, tick it in the ledger or run `swarm skip {row}`",
+                    detail=f"once it is done, tick it in the ledger or run `swarm skip {row}`")
         )
 
     pid = state.get("supervisor_pid")

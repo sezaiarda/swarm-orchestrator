@@ -143,10 +143,10 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
 
     if phase in set(cfg.exclude):
         note = _exclude_comment(cfg, phase)
-        tail = f' — [tasks].exclude says: "{note}"' if note else ""
+        tail = f' — the config note says: "{note}"' if note else ""
         already = f" (already recorded `{st.done[phase]}`)" if phase in st.done else ""
         return Explanation(
-            phase, EXCLUDED, f"excluded by [tasks].exclude{already}{tail}"
+            phase, EXCLUDED, f"yours to do: the config keeps the swarm off it{already}{tail}"
         )
 
     slot = next((s for s in st.busy_slots() if s.phase == phase), None)
@@ -156,18 +156,18 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
         )
 
     if st.integ_blocked == phase:
-        kind = st.integ_blocked_kind or "held"
+        kind = (st.integ_blocked_kind or "held").replace("_", " ")
         where = Path(st.integ_blocked_repo).name if st.integ_blocked_repo else "?"
         return Explanation(
             phase,
             INTEG_BLOCKED,
-            f"its worker finished, but integration is HELD ({kind} in {where}) —"
-            f" clear it, then `swarm resolved {phase}`",
+            f"its worker finished, but merging it stopped ({kind} in {where}) and"
+            f" nothing else can land until it is fixed; then `swarm resolved {phase}`",
         )
     if phase in st.integ_queue:
         pos = st.integ_queue.index(phase)
         ahead = f", {pos} ahead of it" if pos else ", at the head"
-        held = f" (queue held on {st.integ_blocked})" if st.integ_blocked else ""
+        held = f" (merging is stopped at {st.integ_blocked})" if st.integ_blocked else ""
         return Explanation(
             phase,
             INTEGRATING,
@@ -178,27 +178,28 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
         return Explanation(
             phase,
             PARKED,
-            "parked — its worker asked you a question, freed its slot and is"
-            f" still alive in its own `wait:{phase}` window; answer it there",
+            "waiting on YOU — its worker asked you a question and waits in tmux"
+            f" window {state_mod.wait_window(phase)}; answer it there",
         )
     if phase in st.waiting:
         return Explanation(
             phase,
             WAITING,
-            "waiting on YOU — its worker asked a question and still holds its"
-            f" slot (it parks in {max(0, int(st.waiting[phase] - time.time()))}s)",
+            "waiting on YOU — its worker asked you a question in its pane and"
+            " keeps its worker slot until you answer (in"
+            f" {max(0, int(st.waiting[phase] - time.time()))}s it moves to its own window)",
         )
 
     if phase in st.done:
         status = st.done[phase]
         if status == statuses.LEDGER:
-            detail = "ticked `[x]` in the ledger — nothing left to run"
+            detail = "ticked in the ledger — nothing left to run"
         elif status in ledger_mod.SATISFIES_DEPS:
             tail = "" if status == "ok" else f" ({status})"
             detail = f"already done{tail} — nothing left to run"
         else:
             detail = (
-                f"recorded `{status}`: it was attempted and its branch discarded,"
+                f"recorded `{status}`: it was tried and its work was set aside,"
                 f" so it is not re-offered — `swarm retry {phase}` to try again"
             )
         return Explanation(phase, DONE, detail, status=status)
@@ -207,7 +208,7 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
     if unmet:
         total = len(graph[phase])
         return Explanation(
-            phase, BLOCKED, f"blocked: {len(unmet)} of {total} dependencies not landed"
+            phase, BLOCKED, f"blocked: {len(unmet)} of the {total} rows it needs are not built yet"
         )
 
     if st.paused:
@@ -227,7 +228,7 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
             phase,
             READY,
             f"ready — but all {len(st.slots)} slots are busy; it starts as soon as"
-            " one frees",
+            " a worker is free",
         )
     return Explanation(
         phase, READY, f"ready NOW — nothing is blocking it (`swarm launch {phase}`)"

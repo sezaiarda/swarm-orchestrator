@@ -155,8 +155,8 @@ def test_blocked_names_its_root_and_how_much_it_holds(feed):
 def test_cards_say_why_they_sit_where_they_do(feed):
     cards = _cards(feed.board)
     assert cards["al-W6"]["held"] is True and "conflict" in cards["al-W6"]["sub"]
-    assert cards["al-W5"]["sub"] == "merge queue #2"
-    assert cards["be-W6"]["sub"] == "merged; push owed"
+    assert cards["al-W5"]["sub"] == "waiting to merge, #2"
+    assert cards["be-W6"]["sub"] == "merged; the push is retried"
     assert cards["be-W3"]["q"] == "deploy now or tonight?"
     assert cards["be-W4"]["sub"] == "ticked in the ledger"
     assert cards["be-W8"]["sub"] == "ticked in the ledger"  # owner-run, and done

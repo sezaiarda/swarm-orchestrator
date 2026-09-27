@@ -40,7 +40,7 @@ from ..drain import line as drain_line
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
 from ..tui.data import (
-    five_outlook, forecast, kept_rows, limit_outlook, typical_durations,
+    five_outlook, forecast, held_merge, kept_rows, limit_outlook, typical_durations,
 )
 from .rows import clip
 
@@ -57,15 +57,15 @@ EXCLUDED = "excluded"
 #: ``(key, title, one line of what the column means)``, in board order: the
 #: pipeline left to right, with what needs a person first.
 COLUMNS: tuple[tuple[str, str, str], ...] = (
-    (NEEDS_YOU, "Needs you", "waiting on your answer"),
-    (BLOCKED, "Blocked", "a dependency has not landed"),
-    (READY, "Ready", "launches when a slot frees"),
-    (BUILDING, "Building", "a worker holds a slot"),
+    (NEEDS_YOU, "Needs you", "waiting on you"),
+    (BLOCKED, "Blocked", "waits for work that is not built yet"),
+    (READY, "Ready", "starts when a worker is free"),
+    (BUILDING, "Building", "a worker is on it"),
     (MERGING, "Merging / held", "finished, landing on main"),
-    (OPERATOR, "Operator", "a side job runs after it"),
-    (DONE, "Done", "landed"),
-    (FAILED, "Failed", "attempted; its branch was discarded"),
-    (EXCLUDED, "Excluded", "owner-run, never launched"),
+    (OPERATOR, "Operator", "a follow-up job runs after it"),
+    (DONE, "Done", "built and on main"),
+    (FAILED, "Failed", "tried; its work was set aside"),
+    (EXCLUDED, "Excluded", "yours to do; the swarm never starts these"),
 )
 #: Columns whose phases are still owed work — what the ETA counts.
 OPEN = frozenset({NEEDS_YOU, BLOCKED, READY, BUILDING, MERGING})
@@ -128,7 +128,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         cards[pid] = card
     _building_extras(cards, busy, dash, turns or {})
     _done_times(cards, dash)
-    extra_cards = _job_cards(jobs, graph) + _pass_cards(passes)
+    extra_cards = _job_cards(jobs, graph, parked) + _pass_cards(passes, parked)
 
     columns = []
     for key, title, hint in COLUMNS:
@@ -192,35 +192,36 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
     gave_up = next((j for j in mine if j.state == opqueue.ABANDONED), None)
     blocker = questions.get(pid)
     if pid in waiting:
-        return NEEDS_YOU, {"sub": "waiting on you (holds its slot)",
+        return NEEDS_YOU, {"sub": "asks you · answer in its worker pane",
                            "q": clip(blocker.question if blocker else "", _QUESTION_CHARS),
                            "since": blocker.since if blocker else None,
                            "parks_at": waiting.get(pid)}
     if pid in parked:
-        return NEEDS_YOU, {"sub": "parked on your answer",
+        return NEEDS_YOU, {"sub": f"asks you · answer in tmux window {_wait_window(pid)}",
                            "q": clip(blocker.question if blocker else "", _QUESTION_CHARS),
                            "since": blocker.since if blocker else None}
     if status == statuses.NEEDS_OWNER:
-        return NEEDS_YOU, {"sub": "finished; needs you",
+        return NEEDS_YOU, {"sub": "built, and left you a task",
                            "q": clip(blocker.question if blocker else "", _QUESTION_CHARS)}
     if ask is not None or (gave_up is not None and gave_up.asked):
         job = ask or gave_up
-        return NEEDS_YOU, {"sub": "operator job asks you", "job": job.phase,
+        return NEEDS_YOU, {"sub": _job_asks(job, parked), "job": job.phase,
                            "q": clip(job.question or job.last_error, _QUESTION_CHARS),
                            "since": job.asked_at or job.queued_at or None}
     if gave_up is not None:
-        return NEEDS_YOU, {"sub": "operator gave up", "job": gave_up.phase,
+        return NEEDS_YOU, {"sub": "operator job gave up; yours to do by hand",
+                           "job": gave_up.phase,
                            "q": clip(gave_up.last_error or gave_up.note, _QUESTION_CHARS)}
     if pid in busy:
         return BUILDING, {"slot": busy[pid].id}
     if snap.integ_blocked == pid:
-        kind = snap.integ_blocked_kind or "conflict"
-        return MERGING, {"sub": f"merge held: {kind}", "held": True}
+        return MERGING, {"sub": f"merging stopped: {held_merge(snap.integ_blocked_kind)}",
+                         "held": True}
     if pid in queue:
         pos = queue.index(pid)
-        return MERGING, {"sub": "next to merge" if pos == 0 else f"merge queue #{pos + 1}"}
+        return MERGING, {"sub": "next to merge" if pos == 0 else f"waiting to merge, #{pos + 1}"}
     if pid in owed:
-        return MERGING, {"sub": "merged; push owed", "held": True}
+        return MERGING, {"sub": "merged; the push is retried", "held": True}
     live = [j for j in mine if j.state in (opqueue.QUEUED, opqueue.RUNNING)]
     if live:
         return OPERATOR, {"sub": f"operator {live[0].state}", "job": live[0].phase}
@@ -230,17 +231,17 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
         elif status == statuses.LEDGER:
             sub = "ticked in the ledger"
         elif status == statuses.OPERATOR:
-            sub = "built · operator done" if mine and all(
-                j.state == opqueue.DONE for j in mine) else "built · operator"
+            sub = "built · operator job done" if mine and all(
+                j.state == opqueue.DONE for j in mine) else "built · operator job to come"
         else:
             sub = "built"
         return DONE, {"sub": sub, "st": status}
     if blocker is not None and blocker.kind == "owner-row":
         return NEEDS_YOU, {"sub": "only you can do this", "q": blocker.question}
     if pid in excluded:
-        return EXCLUDED, {"sub": "owner-run"}
+        return EXCLUDED, {"sub": "yours to do"}
     if status == statuses.FAIL:
-        return FAILED, {"st": status}
+        return FAILED, {"st": status, "sub": "stopped; its work was set aside"}
     unmet = sorted(d for d in graph.get(pid, ()) if d not in satisfied)
     if unmet:
         roots = sorted(roots_of.get(pid, []), key=lambda b: -b["blocks"])
@@ -251,9 +252,26 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
             if len(roots) > 1:
                 extra["roots"] = [b["phase"] for b in roots[:6]]
         else:
-            extra["sub"] = "dependency cycle"
+            extra["sub"] = "dependency cycle: the ledger needs fixing"
         return BLOCKED, extra
     return READY, {}
+
+
+def _wait_window(key: str) -> str:
+    from ..state import wait_window  # local: the board is otherwise state-free
+
+    return wait_window(key)
+
+
+def _job_asks(job, parked: list) -> str:
+    """An operator job's ask, and the tmux window it waits in."""
+    from ..state import OPERATOR as KIND, waiter_key
+
+    if job.state != opqueue.WAITING:
+        return "operator job asked you, then ended"
+    key = waiter_key(KIND, job.phase)
+    window = _wait_window(key) if key in parked else "operator"
+    return f"operator job asks you · answer in tmux window {window}"
 
 
 def _building_extras(cards: dict, busy: dict, dash, turns: dict) -> None:
@@ -298,7 +316,7 @@ def _done_times(cards: dict, dash) -> None:
             card["at"] = at
 
 
-def _job_cards(jobs: dict, graph: dict) -> list[dict]:
+def _job_cards(jobs: dict, graph: dict, parked: list = ()) -> list[dict]:
     """Operator jobs that belong to no ledger phase (``swarm operator-add``)."""
     out = []
     for owner, items in jobs.items():
@@ -308,23 +326,27 @@ def _job_cards(jobs: dict, graph: dict) -> list[dict]:
             base = {"id": job.phase, "kind": "job", "c": "operator",
                     "t": clip(job.note, 160), "job": job.phase}
             if job.state == opqueue.WAITING or (job.state == opqueue.ABANDONED and job.asked):
-                out.append({**base, "col": NEEDS_YOU, "sub": "operator job asks you",
+                out.append({**base, "col": NEEDS_YOU, "sub": _job_asks(job, parked),
                             "q": clip(job.question or job.last_error, _QUESTION_CHARS)})
             elif job.state == opqueue.ABANDONED:
-                out.append({**base, "col": NEEDS_YOU, "sub": "operator gave up",
+                out.append({**base, "col": NEEDS_YOU,
+                            "sub": "operator job gave up; yours to do by hand",
                             "q": clip(job.last_error, _QUESTION_CHARS)})
             elif job.state in (opqueue.QUEUED, opqueue.RUNNING):
                 out.append({**base, "col": OPERATOR, "sub": f"operator {job.state}"})
     return out
 
 
-def _pass_cards(passes: list) -> list[dict]:
+def _pass_cards(passes: list, parked: list = ()) -> list[dict]:
     """An Overseer pass waiting on the owner is a question like any other."""
     out = []
     for rec in passes or []:
         if rec.status == "running" and rec.question and not rec.answer:
-            out.append({"id": f"overseer:{rec.id}", "kind": "pass", "c": "overseer",
+            key = f"overseer:{rec.id}"
+            window = _wait_window(key) if key in parked else "overseer"
+            out.append({"id": key, "kind": "pass", "c": "overseer",
                         "t": "the Overseer asks you", "col": NEEDS_YOU,
+                        "sub": f"answer in tmux window {window}",
                         "q": clip(rec.question, _QUESTION_CHARS),
                         "since": rec.asked_at or rec.started_at or None})
     return out

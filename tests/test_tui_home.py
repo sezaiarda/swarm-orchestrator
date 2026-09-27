@@ -508,20 +508,20 @@ def test_footer_lists_only_what_is_wrong():
     snap = healthy(integ_blocked="dash-W2", integ_blocked_kind="conflict")
     text = plain(home.footer_line(FakeDash(snap), 90, now=NOW))
     assert "all clear" not in text
-    assert "merge queue held: dash-W2 conflict" in text
-    assert "telegram" not in text and "supervisor" not in text
+    assert "merging stopped: dash-W2, a conflict with main" in text
+    assert "ping" not in text and "not running" not in text
 
 
 def test_footer_flags_dropped_telegrams():
     note = data.Notification(ts=NOW, kind="waiting", phase="P1", source="w", text="t",
                              delivered=False, error="curl: (6)")
     text = plain(home.footer_line(FakeDash(healthy(), notifications=[note]), 90, now=NOW))
-    assert "1 telegram(s) dropped" in text
+    assert "1 ping(s) never reached your phone" in text
 
 
 def test_footer_flags_a_dead_supervisor():
     snap = data.Snapshot(ok=True, last_event_at=NOW - 12)
-    assert "supervisor down" in plain(home.footer_line(FakeDash(snap), 76, now=NOW))
+    assert "swarm not running" in plain(home.footer_line(FakeDash(snap), 76, now=NOW))
 
 
 def test_footer_says_what_a_drain_waits_for():
@@ -534,7 +534,7 @@ def test_footer_says_what_a_drain_waits_for():
 def test_footer_paused_reads_as_paused_not_dead():
     snap = healthy(paused=True)
     text = plain(home.footer_line(FakeDash(snap), 76, now=NOW))
-    assert "paused" in text and "supervisor down" not in text
+    assert "paused" in text and "not running" not in text
 
 
 @pytest.mark.parametrize(

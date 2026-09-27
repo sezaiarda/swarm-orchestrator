@@ -34,7 +34,7 @@ from textual.widgets import Static
 
 from .data import fmt_ago, fmt_clock, question_index
 from .theme import BAD, COLOR, GLYPH, MUTED, OK, YOU, paint, token
-from .timeline import blocker_since
+from .timeline import NEED_LABEL, blocker_since
 
 #: Rows the drawer holds. Past this it stops being a nudge and starts being the
 #: alerts tab, which already exists and is better at it.
@@ -147,7 +147,7 @@ def alerts(dash) -> list[Alert]:
                 key=alert_key(blocker),
                 severity="error" if blocker.kind in FAILED_KINDS else "warning",
                 title=f"needs you: {blocker.phase}",
-                body=f"{blocker.kind} · {text}\n{TOAST_HINT}",
+                body=f"{NEED_LABEL.get(blocker.kind, blocker.kind)} · {text}\n{TOAST_HINT}",
                 phase=blocker.phase,
             )
         )
@@ -158,7 +158,8 @@ def alerts(dash) -> list[Alert]:
                     key=f"fail:{phase}",
                     severity="error",
                     title=f"{phase} failed",
-                    body=f"the phase ended fail — `swarm why {phase}`\n{TOAST_HINT}",
+                    body=f"its work was set aside and the phases after it wait"
+                    f" — `swarm why {phase}` says more\n{TOAST_HINT}",
                     phase=phase,
                 )
             )
@@ -167,8 +168,8 @@ def alerts(dash) -> list[Alert]:
             Alert(
                 key=f"down:{snap.supervisor_pid}",
                 severity="error",
-                title="supervisor down",
-                body=f"nothing is driving the run — `swarm up`\n{TOAST_HINT}",
+                title="the swarm is not running",
+                body=f"nothing starts or merges until you run `swarm up`\n{TOAST_HINT}",
             )
         )
     return out
@@ -273,7 +274,8 @@ def blocker_rows(dash, width: int = WIDTH - 4, now: float | None = None) -> list
         # and the phase name yields first. `source-provider-Pkg` plus a kind and
         # an age is 48 columns against a 40-column drawer.
         room = width - _BLOCKER_GUTTER
-        tail = clip(f"{blocker.kind} · {fmt_ago(since, now)}", max(8, room - 6))
+        label = NEED_LABEL.get(blocker.kind, blocker.kind)
+        tail = clip(f"{label} · {fmt_ago(since, now)}", max(8, room - 6))
         name = clip(escape(blocker.phase), max(6, room - len(tail)))
         lines = [f"  [{COLOR[state]}]{GLYPH[state]}[/] [bold]{name}[/]  " + paint(tail, state)]
         text = blocker_text(blocker, questions)

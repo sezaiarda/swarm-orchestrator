@@ -111,13 +111,13 @@ class Need:
 
 #: What each blocker kind is, in the owner's words rather than the state file's.
 NEED_LABEL = {
-    "waiting": "worker asks",
-    "parked": "worker asks (parked)",
-    "integ": "merge held",
-    statuses.NEEDS_OWNER: "needs you",
+    "waiting": "worker asks you",
+    "parked": "parked, asks you",
+    "integ": "merging stopped",
+    statuses.NEEDS_OWNER: "left you a task",
     "operator-ask": "operator asks",
     "operator-abandoned": "operator gave up",
-    OVERSEER: "overseer asks",
+    OVERSEER: "Overseer asks",
     "owner-row": "yours to do",
 }
 

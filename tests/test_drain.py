@@ -167,7 +167,9 @@ def test_down_drain_then_runs_the_command_after_the_swarm_is_gone(swarm, tmp_pat
     assert swarm.wait(marker.is_file, timeout=30), (
         swarm.log_text() + (swarm.state_dir / "logs" / "drain-down.log").read_text())
     assert marker.read_text().strip() == "stopped"
-    assert not swarm.cli("status").stdout.count("BUSY")  # nothing else launched
+    status = swarm.cli("status").stdout
+    assert not status.count("BUSY")  # nothing else launched
+    assert swarm.state()["drain"] == {} and "Draining" not in status  # the stop is over
     assert "DRAIN-COMPLETE" in swarm.log_text() and "SUPERVISOR-STOP" in swarm.log_text()
     assert any("is shutting down, as you asked" in ln for ln in swarm.tg_lines())
     assert "swarm down" in (swarm.state_dir / "logs" / "drain-down.log").read_text()

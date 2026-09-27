@@ -427,6 +427,9 @@ def _down_then(cfg: Config, then: str) -> int:
         # Run from the dashboard, whose pipe died with the session: the down
         # itself had finished, and the after-command must still run.
         rc = 0
+    # The stop a drain waited for has happened: `status` must not still say it is coming.
+    with state_mod.transaction(cfg) as st:
+        st.drain = {}
     if then:
         log = drain_mod.run_after(cfg, then)
         try:

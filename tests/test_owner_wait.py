@@ -247,7 +247,7 @@ def test_an_owner_row_is_in_needs_you_with_what_it_holds_up(cfg):
     graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
     snap = tui_data.build_snapshot(cfg, state, graph=graph)
     [b] = [b for b in snap.blockers if b.kind == "owner-row"]
-    assert b.phase == "OWN" and "holds up 2 rows" in b.question
+    assert b.phase == "OWN" and "2 rows wait on it" in b.question
     col, extra = board._place("OWN", graph, snap.done, {"P0"}, {"OWN"}, {}, [], {}, [], snap,
                               {}, {}, {b.phase: b for b in snap.blockers}, {})
-    assert col == board.NEEDS_YOU and "holds up 2 rows" in extra["q"]
+    assert col == board.NEEDS_YOU and "2 rows wait on it" in extra["q"]

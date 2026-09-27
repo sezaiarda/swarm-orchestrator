@@ -527,9 +527,19 @@ def _ledger_text(cfg: Config) -> str:
         return ""
 
 
-def check_row(text: str, phase: str, needs: list[str], taken: set[str] = frozenset()) -> None:
+def _recorded(cfg: Config) -> dict[str, str]:
+    """The swarm's own phase records, for :func:`check_row`."""
+    from . import state as state_mod
+
+    return state_mod.read(cfg).done
+
+
+def check_row(text: str, phase: str, needs: list[str], taken: set[str] = frozenset(),
+              done: dict[str, str] | None = None) -> None:
     """Refuse a new row whose id is taken, whose needs name no row, or that
-    would make a dependency problem the ledger does not already have."""
+    would make a dependency problem the ledger does not already have. A cycle
+    through a done row (``done`` plus the rows ``text`` ticks) is none: nobody
+    waits on that row, as :func:`ledger.validate` explains."""
     if not ledger_mod._PHASE_RE.match(phase or ""):
         raise ReportError(f"not a phase id: {phase!r}")
     graph = ledger_mod.parse(text)
@@ -538,11 +548,12 @@ def check_row(text: str, phase: str, needs: list[str], taken: set[str] = frozens
     unknown = [n for n in needs if n not in graph and n not in taken]
     if unknown:
         raise ReportError(f"needs names no ledger row: {', '.join(unknown)}")
-    before = set(ledger_mod.validate(graph))
+    landed = ledger_mod.done_rows(done or {}, text)
+    before = set(ledger_mod.validate(graph, landed))
     # Parsed with the row in place: an existing row that already names the new
     # id in its needs gains that edge only now.
     after = ledger_mod.parse(text.rstrip("\n") + "\n" + make_row(phase, "-", needs, [], []) + "\n")
-    new = [i for i in ledger_mod.validate(after) if i not in before]
+    new = [i for i in ledger_mod.validate(after, landed) if i not in before]
     if new:
         raise ReportError("; ".join(new))
 
@@ -555,7 +566,7 @@ def file_follow_up(cfg: Config, by: str, phase: str, title: str, needs: list[str
     taken = {op["id"] for data in pending(cfg).values() for op in data["ops"]
              if op.get("kind") == "row"}
     text = _ledger_text(cfg)
-    check_row(text, phase, needs, taken)
+    check_row(text, phase, needs, taken, _recorded(cfg))
     key = key_for(by)
     queue(cfg, key, {"kind": "row", "by": by, "id": phase, "title": title.strip(),
                      "needs": needs, "dirs": dirs, "tags": tags, "scope": scope.strip()})
@@ -648,7 +659,7 @@ def apply(cfg: Config, root: Path, key: str, data: dict, status: str | None,
         elif kind == "row":
             before = text
             try:
-                check_row(text, op["id"], op.get("needs", []))
+                check_row(text, op["id"], op.get("needs", []), done=_recorded(cfg))
                 row = make_row(op["id"], op["title"], op.get("needs", []),
                                op.get("dirs", []), op.get("tags", []))
                 text = insert_row(text, op.get("by", ""), row)

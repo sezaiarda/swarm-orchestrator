@@ -394,7 +394,8 @@ def phase_progress(
         blocked=len(blocked),
         excluded=len(excluded_set),
         next_up=ready[:6],
-        issues=ledger_mod.validate(graph) if graph else [],
+        issues=ledger_mod.validate(
+            graph, {p for p, s in done.items() if s in statuses.SATISFIES_DEPS}),
     )
 
 

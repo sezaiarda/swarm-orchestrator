@@ -231,6 +231,14 @@ def with_ticked(
     return view
 
 
+def done_rows(done: dict[str, str], text: str) -> set[str]:
+    """Phases whose work is in: the swarm's records plus the rows the ledger
+    ticks, as the launcher and the web board read them. :func:`validate` walks
+    no edge through one."""
+    view = with_ticked(done, ticked(text))
+    return {p for p, status in view.items() if status in SATISFIES_DEPS}
+
+
 def validate(graph: dict[str, set[str]], landed: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Return human-readable structural problems that would silently stall a run.
 

@@ -55,7 +55,9 @@ def test_status_json_is_machine_readable(cfg, capsys):
 
 
 # -- the ledger is the project's, wherever the command runs from ----------
-CYCLE = "- [ ] `a-P0` · needs:`a-P1`\n- [ ] `a-P1` · needs:`a-P0`\n"
+# Open rows: the fixture's state records a-P0/a-P1 done, and no edge through a
+# done row can hold anyone up.
+CYCLE = "- [ ] `b-P0` · needs:`b-P1`\n- [ ] `b-P1` · needs:`b-P0`\n"
 
 
 def test_check_reads_the_project_ledger_from_another_cwd(cfg, tmp_path, monkeypatch, capsys):
@@ -117,3 +119,14 @@ def test_a_skip_survives_the_next_swarm_up(cfg):
     assert cli.cmd_skip(cfg, "a-P7") == 0
     assert gitq.sentinel_done(cfg)["a-P7"] == "skip"
     assert state_mod.read(cfg).done["a-P7"] == "skip"
+
+
+def test_check_walks_no_edge_through_a_done_row(cfg, capsys):
+    """A cycle that only closes through a ticked or recorded row stalls nobody."""
+    (cfg.project_dir / cfg.ledger).write_text(
+        "- [x] `b-P0` · needs:`b-P2`\n- [ ] `b-P2` · needs:`b-P0`\n"
+        "- [ ] `b-P3` · needs:`a-P0`\n- [ ] `a-P0` · needs:`b-P3`\n",
+        encoding="utf-8",
+    )
+    assert cli.cmd_check(cfg, strict=False) == 0
+    assert "no issue(s)" in capsys.readouterr().out

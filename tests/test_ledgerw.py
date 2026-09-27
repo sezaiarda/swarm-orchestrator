@@ -90,6 +90,18 @@ def test_a_cycle_is_refused():
                           "a-W5", ["a-W3"])
 
 
+def test_a_cycle_only_through_a_done_row_is_no_cycle():
+    """a-W1 is ticked; b-W2 is the swarm's record. Nobody waits on either."""
+    text = LEDGER.replace("`a-W1` · dir:`alpha` · needs:—", "`a-W1` · dir:`alpha` · needs:`a-W5`")
+    ledgerw.check_row(text, "a-W5", ["a-W2"])
+    text += "- [ ] `b-W2` · needs:`b-W3`\n- [ ] `b-W3` · needs:—\n"
+    ledgerw.check_row(text.replace("`b-W3` · needs:—", "`b-W3` · needs:`b-W4`"),
+                      "b-W4", ["b-W2"], done={"b-W2": "ok"})
+    with pytest.raises(ledgerw.ReportError, match="cycle"):
+        ledgerw.check_row(text.replace("`b-W3` · needs:—", "`b-W3` · needs:`b-W4`"),
+                          "b-W4", ["b-W2"])
+
+
 # -- history files -------------------------------------------------------------
 def test_history_appends_per_family_and_splits_past_the_limit(tmp_path):
     ledgerw.append_history(tmp_path, "h", 0, "read-W1", ledgerw.entry("d1 · done", "alpha"), "t1")

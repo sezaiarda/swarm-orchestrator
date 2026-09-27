@@ -34,7 +34,7 @@ exact flags.
 | `tui` | The dashboard (window 0). |
 | `web [--host H] [--port N]` | Serve the read-only board. |
 | `telegram-bot` | Answer `/usage` and `/help` from the owner's Telegram chat, in the foreground. `swarm up` starts it detached. |
-| `check [--strict]` | Preflight: Telegram, ledger, prompt lint. Exit 1 on a failure or a contradicted prompt line; `--strict` also fails on a wasteful one. |
+| `check [--strict]` | Preflight: Telegram, ledger, prompt lint. A dependency cycle counts only among rows not yet done: a ticked or recorded row holds nobody up, as on the board. Exit 1 on a failure or a contradicted prompt line; `--strict` also fails on a wasteful one. |
 
 ## Phases
 
@@ -73,7 +73,7 @@ else lands at once. See [components.md](components.md#the-ledger-writer).
 |---|---|
 | `done <phase> <outcome> ["recap"]` | (worker) Ticks the row when the phase lands (`ok`, `operator`), sets its short status (`done (date)`, `failed (date)`, `blocked (date)`, `later, after <date>`), and files the recap and the phase's `swarm note` decisions in its history. |
 | `record <phase> done\|failed\|blocked\|later\|note ["text"] [--after YYYY-MM-DD]` | (ask, operator, Overseer) The same for a row with no worker of its own: `done` ticks it, `note` only files the text. Refused for an id with no row. |
-| `follow-up <phase> <new-id> --title "one line" [--needs a,b] [--dir d] [--tag t] ["what it must deliver"]` | File a new open row after `<phase>`'s section, with the text in the new phase's history. Refused at once for a taken id, a need with no row, or a new dependency cycle; `[tasks].ledger_gate` is run when it is applied, and a rejected row goes into `<phase>`'s history instead. |
+| `follow-up <phase> <new-id> --title "one line" [--needs a,b] [--dir d] [--tag t] ["what it must deliver"]` | File a new open row after `<phase>`'s section, with the text in the new phase's history. Refused at once for a taken id, a need with no row, or a new dependency cycle among rows not yet done; `[tasks].ledger_gate` is run when it is applied, and a rejected row goes into `<phase>`'s history instead. |
 | `lesson <phase> "text" [--title T]` | Append `## (date, `phase`) title` and the text to `[tasks].lessons`. |
 
 `python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--gate CMD] [--components] [--write]`

@@ -1134,8 +1134,10 @@ def cmd_check(cfg: Config, strict: bool) -> int:
     print(f"telegram: {'ok' if ok else 'FAIL'} — {detail}")
     bad = bad or not ok
     try:
-        graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
-        issues = ledger_mod.validate(graph)
+        ledger_path = cfg.project_dir / cfg.ledger
+        graph = ledger_mod.load(ledger_path)
+        text = ledger_path.read_text(encoding="utf-8") if ledger_path.is_file() else ""
+        issues = ledger_mod.validate(graph, ledger_mod.done_rows(state_mod.read(cfg).done, text))
         print(f"ledger: {len(graph)} phases, {len(issues) or 'no'} issue(s)")
         for i in issues:
             print(f"  - {i}")

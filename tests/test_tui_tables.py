@@ -296,21 +296,20 @@ def test_notification_row_has_one_cell_per_column():
     row = tables.notification_row(note())
     assert len(row) == len(tables.NOTIFICATION_COLUMNS)
     assert "✓" in row[0] and COLOR[OK] in row[0]
-    assert "supervisor.wait" in row[4]
+    assert not any("supervisor.wait" in c for c in row)  # code paths stay in the log
 
 
 def test_notification_row_shouts_about_a_dropped_ping():
     """A ping that never landed is how an unattended run goes wrong in silence."""
     row = tables.notification_row(note(delivered=False, error="telegram 429"))
     assert "✗" in row[0]
-    assert COLOR[BAD] in row[0] and COLOR[BAD] in row[2] and COLOR[BAD] in row[5]
+    assert COLOR[BAD] in row[0] and COLOR[BAD] in row[2] and COLOR[BAD] in row[4]
 
 
 def test_notification_row_survives_an_empty_record():
     row = tables.notification_row(Notification(ts=None, kind="", phase=None, source="",
                                                text="", delivered=False, error=""))
     assert len(row) == len(tables.NOTIFICATION_COLUMNS)
-    assert "unknown" in row[4]
 
 
 def test_notification_detail_leads_with_the_failure():
@@ -323,7 +322,7 @@ def test_notification_detail_leads_with_the_failure():
 def test_notification_detail_of_a_delivered_ping():
     out = tables.notification_detail(note())
     assert "delivered" in out
-    assert "supervisor.wait" in out
+    assert "supervisor.wait" not in out
 
 
 # -- markup safety ---------------------------------------------------------

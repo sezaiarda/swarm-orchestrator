@@ -349,7 +349,7 @@ def notification_rows(dash, width: int = WIDTH - 4) -> list[Row]:
     for note in notes:
         state = MUTED if note.suppressed else (OK if note.delivered else BAD)
         glyph = "·" if note.suppressed else ("✓" if note.delivered else "✗")
-        who = note.phase or note.source or note.kind or "—"
+        who = note.phase or note.kind or "—"
         body = escape(clip(f"{who} · {note.text or '—'}", max(12, width - _PING_GUTTER)))
         out.append(
             Row(

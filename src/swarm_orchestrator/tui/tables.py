@@ -529,11 +529,10 @@ NOTIFICATION_COLUMNS: tuple[tuple[str, int], ...] = (
     ("time", 13),
     ("kind", 14),
     ("phase", 16),
-    ("source", 20),
     ("message", 56),
 )
-NOTIFICATION_PRIORITY = (0, 1, 2, 0, 3, 0)
-NOTIFICATION_FLEX = 5
+NOTIFICATION_PRIORITY = (0, 1, 2, 0, 0)
+NOTIFICATION_FLEX = 4
 
 #: Cycled with `F`. "failed" is first after "all" because a dropped ping is the
 #: reason to ever open this tab: it is how an unattended run goes wrong silently.
@@ -547,7 +546,8 @@ def notification_key(index: int) -> str:
 
 def notification_row(note: Notification, message_w: int = 56) -> tuple[str, ...]:
     """One Notifications row. A failed delivery is red in three columns; a
-    message the swarm chose not to send is a muted ``·``."""
+    message the swarm chose not to send is a muted ``·``. Which code sent it
+    stays in the log: the owner reads what happened, not where."""
     bad = BAD if note.dropped else None
     glyph = "·" if note.suppressed else ("✓" if note.delivered else "✗")
     return (
@@ -555,7 +555,6 @@ def notification_row(note: Notification, message_w: int = 56) -> tuple[str, ...]
         cell(fmt_stamp(note.ts), 13, MUTED),
         cell(note.kind or "—", 14, bad),
         cell(note.phase or "—", 16),
-        cell(note.source or "unknown", 20, MUTED),
         cell(note.text or "—", message_w, bad),
     )
 
@@ -573,7 +572,6 @@ def notification_detail(note: Notification) -> str:
         field("kind", escape(note.kind or "—")),
         field("phase", escape(note.phase or "—")),
         field("sent", f"{fmt_stamp(note.ts)}  ({fmt_ago(note.ts)})"),
-        field("sent by", escape(note.source or "unknown code path")),
     ]
     if note.error:
         lines.append(section("error", state=BAD))

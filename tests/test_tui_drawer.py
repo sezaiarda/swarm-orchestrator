@@ -289,11 +289,11 @@ def test_a_ping_that_never_landed_is_red():
     assert "✗" in plain(rows[0].text) and COLOR[BAD] in rows[0].text
 
 
-def test_a_ping_with_no_phase_names_its_source():
-    rows = drawer.notification_rows(
-        FakeDash(snap(), notifications=[note(phase=None, text="run over", source="supervisor")])
-    )
-    assert "supervisor · run over" in plain(rows[0].text)
+def test_a_ping_with_no_phase_names_its_kind_not_the_code_that_sent_it():
+    rows = drawer.notification_rows(FakeDash(snap(), notifications=[
+        note(phase=None, kind="overseer", text="run over", source="supervisor._ovs")]))
+    assert "overseer · run over" in plain(rows[0].text)
+    assert "supervisor" not in plain(rows[0].text)
     assert rows[0].phase is None
 
 

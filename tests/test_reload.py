@@ -1,10 +1,7 @@
 """Live-config reload policy: the matrix, the gates, and the hold-over.
 
-The single most valuable test here is
-:func:`test_policy_classifies_every_config_field` — it asserts
-``set(POLICY) == {f.name for f in fields(Config) if f.init}``, so a new setting
-cannot be added to :class:`Config` without someone deciding what a live reload
-should do with it. Everything else pins the behaviours a naive reload gets wrong:
+Every setting declares its reload class where it is declared (see
+``test_config_schema.py``). These tests pin the behaviours a naive reload gets wrong:
 shrinking ``max_workers`` must retire a busy slot rather than delete its record
 (deleting it turns the worker's eventual ``swarm done`` into a DONE-DUPLICATE
 no-op that strands the phase), ``park_after`` must move the deadlines already
@@ -21,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from swarm_orchestrator import reload as reload_mod
-from swarm_orchestrator.config import Config, load
+from swarm_orchestrator.config import SETTINGS, Config, load
 from swarm_orchestrator.reload import ENV, HOT, NEXT, RESTART, Facts
 
 _MIN = '[swarm]\nmax_workers = 4\n'
@@ -65,19 +62,7 @@ def test_a_file_that_still_sets_retired_keys_loads_and_reloads(tmp_path, monkeyp
     assert [c for c in reload_mod.diff(cfg, cfg, _facts()) if c.old != c.new] == []
 
 
-# -- the matrix must stay exhaustive --------------------------------------
-def test_policy_classifies_every_config_field():
-    assert set(reload_mod.POLICY) == {f.name for f in fields(Config) if f.init}
-    assert reload_mod.coverage_gap() == set()
-
-
-def test_every_policy_has_a_known_class_and_a_reason():
-    for name, policy in reload_mod.POLICY.items():
-        assert policy.klass in (HOT, NEXT, RESTART), name
-        assert policy.why, name
-        assert policy.section and policy.key, name
-
-
+# -- the classes that matter most -----------------------------------------
 @pytest.mark.parametrize(
     "name", ["build_max_concurrent", "build_jobs", "build_cache"]
 )
@@ -85,14 +70,14 @@ def test_build_fields_are_next_because_the_env_is_frozen_at_launch(name):
     # launch._worker_env writes SWARM_BUILD_* into each worker's environment and
     # config._int_env gives the environment strict precedence: a running worker
     # holds a copy no reload can reach.
-    assert reload_mod.POLICY[name].klass == NEXT
+    assert SETTINGS[name].klass == NEXT
 
 
 @pytest.mark.parametrize(
     "name", ["slug", "project_dir", "driver", "session", "git_isolation"]
 )
 def test_run_identity_fields_are_restart(name):
-    assert reload_mod.POLICY[name].klass == RESTART
+    assert SETTINGS[name].klass == RESTART
 
 
 @pytest.mark.parametrize("name", ["tui_autostart", "tui_cmd"])
@@ -100,7 +85,7 @@ def test_boot_only_fields_are_restart(name):
     # session.setup creates and respawns the dash pane exactly once, at `swarm
     # up`. There is no later moment a reload could reach, so "restart the run to
     # change it" is the honest answer rather than a NEXT that never arrives.
-    assert reload_mod.POLICY[name].klass == RESTART
+    assert SETTINGS[name].klass == RESTART
 
 
 def test_a_tui_edit_is_refused_and_held_over(tmp_path, monkeypatch):

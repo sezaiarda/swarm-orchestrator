@@ -32,8 +32,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from swarm_orchestrator import reload as reload_mod  # noqa: E402
-from swarm_orchestrator.config import load as load_config  # noqa: E402
+from swarm_orchestrator.config import SETTINGS, load as load_config  # noqa: E402
 from swarm_orchestrator.tui import configform as cf  # noqa: E402
 
 CORPUS = r"""[swarm]
@@ -279,32 +278,6 @@ def test_toml_literal_round_trips_through_tomllib(value, expected):
 
 
 # -- the field table ------------------------------------------------------
-def test_every_policy_field_has_a_row():
-    """A field cannot reach Config without reaching this screen.
-
-    ``reload.coverage_gap`` already forces someone to decide what a reload does
-    with a new field; this forces them to say what it is *for* as well.
-    """
-    assert cf.coverage_gap() == set()
-    assert reload_mod.coverage_gap() == set()
-
-
-def test_the_reload_class_is_read_from_policy_never_restated():
-    for setting in cf.FIELDS:
-        assert setting.klass is reload_mod.POLICY[setting.name].klass
-        assert setting.env is reload_mod.POLICY[setting.name].env
-    assert cf.SETTINGS["max_workers"].klass == reload_mod.HOT
-    assert cf.SETTINGS["done_grace_s"].klass == reload_mod.NEXT
-    assert cf.SETTINGS["git_isolation"].klass == reload_mod.RESTART
-
-
-def test_every_row_says_what_the_setting_does_in_one_short_line():
-    for setting in cf.FIELDS:
-        assert setting.doc and not setting.doc.rstrip().endswith(".")
-        assert len(setting.doc) <= 50, f"{setting.name}: too long for the column"
-        assert "\n" not in setting.doc
-
-
 def test_the_form_is_grouped_in_file_order():
     sections = [name for name, _ in cf.by_section()]
     assert sections == ["[swarm]", "[worker]", "[tasks]", "[telegram]", "[tmux]",
@@ -336,9 +309,9 @@ def cfg(tmp_path, monkeypatch):
     """
     project = tmp_path / "project"
     project.mkdir()
-    for policy in reload_mod.POLICY.values():
-        if policy.env:
-            monkeypatch.delenv(policy.env, raising=False)
+    for setting in SETTINGS.values():
+        if setting.env:
+            monkeypatch.delenv(setting.env, raising=False)
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     cfg = load_config(project_dir=str(project))
     cfg.ensure_dirs()

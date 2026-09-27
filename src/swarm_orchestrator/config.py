@@ -4,6 +4,11 @@ Reads a per-project ``.swarm.toml`` (stdlib ``tomllib``), applies defaults, and
 resolves the runtime state directory under ``~/.local/state``. Test/real seams
 (driver, fake commands, telegram sink, readiness marker) are honoured via
 environment variables so the hermetic tests never touch tmux or ``claude``.
+
+Every setting is declared once, as a field of :class:`Config` carrying its
+:class:`Setting`: table, key, default, env override, validation, what a live
+reload does with it and one line of what it is for. :func:`load`, ``reload.py``
+and the TUI config form all read :data:`SETTINGS`; nothing restates it.
 """
 
 from __future__ import annotations
@@ -12,12 +17,11 @@ import hashlib
 import os
 import subprocess
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+from typing import Any, Callable
 
-from .tmux import AUTO_LAYOUT, normalize_layout
-
-DEFAULT_EXCLUDE: list[str] = []
+from .tmux import AUTO_LAYOUT, LAYOUTS, normalize_layout
 
 
 def _slugify(name: str) -> str:
@@ -43,85 +47,603 @@ def _default_slug(pdir: Path) -> str:
     return f"{_slugify(pdir.name)}-{digest}"
 
 
+#: What ``claude --effort`` accepts (CLI 2.1.276). "" means pass nothing.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+#: ``[operator].notify``: ``attention`` pings only an outcome passed
+#: ``--attention``; ``all`` pings every outcome; ``none`` pings no outcome.
+OPERATOR_NOTIFY = ("attention", "all", "none")
+OPERATOR_NOTIFY_DEFAULT = "attention"
+
+#: ``[telegram].pings``: ``necessary`` sends only what needs the owner (the
+#: rest is logged, and folded into the Overseer's summary); ``all`` sends every
+#: ping the swarm has.
+PINGS = ("necessary", "all")
+PINGS_DEFAULT = "necessary"
+
+
+#: ``[usage].rules``: which window, at what percentage, does what.
+USAGE_WINDOWS = ("week", "five_hour")
+USAGE_ACTIONS = ("pause", "down")
+USAGE_RULES_DEFAULT = (
+    {"window": "week", "at": 60, "action": "pause"},
+    {"window": "week", "at": 70, "action": "down"},
+    {"window": "five_hour", "at": 90, "action": "pause"},
+)
+
+
+def _usage_rules(raw: object) -> list[dict]:
+    """Validated ``[usage].rules``. A malformed rule fails the load, like a bad
+    effort: a cap that silently does not apply is worse than a loud error."""
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"[usage].rules must be a list of tables, got {raw!r}")
+    out = []
+    for i, rule in enumerate(raw):
+        where = f"[usage].rules[{i}]"
+        if not isinstance(rule, dict):
+            raise ValueError(f"{where} must be a table, got {rule!r}")
+        window, action, at = rule.get("window"), rule.get("action"), rule.get("at")
+        if window not in USAGE_WINDOWS:
+            raise ValueError(f"{where}.window must be one of {', '.join(USAGE_WINDOWS)}, "
+                             f"got {window!r}")
+        if action not in USAGE_ACTIONS:
+            raise ValueError(f"{where}.action must be one of {', '.join(USAGE_ACTIONS)}, "
+                             f"got {action!r}")
+        if isinstance(at, bool) or not isinstance(at, (int, float)) or not 0 < at <= 100:
+            raise ValueError(f"{where}.at must be a percentage above 0 and at most 100, "
+                             f"got {at!r}")
+        out.append({"window": window, "at": at, "action": action})
+    return out
+
+
+def _choice(value: object, choices: tuple[str, ...], default: str) -> str:
+    """A valid choice; anything else is ``default``.
+
+    Deliberately not a load error like :func:`_effort`: every ``swarm`` command
+    that pings (``done``, ``operator-done``) loads the config, and a typo in a
+    notification setting must never stop a finish from being recorded.
+    """
+    mode = str(value or "").strip().lower()
+    return mode if mode in choices else default
+
+
+def _effort(value: object) -> str:
+    """A validated ``[worker].effort``; a typo fails at load, not in every pane."""
+    level = str(value or "").strip().lower()
+    if level and level not in EFFORTS:
+        raise ValueError(f"[worker].effort must be one of {', '.join(EFFORTS)} or \"\", got {value!r}")
+    return level
+
+
+def _workers(value: object) -> int:
+    """``[swarm].max_workers``: a swarm with < 1 slots can never claim a phase and
+    would stall in silence, so one slot is the floor and below it fails the load."""
+    n = int(value)
+    if n < 1:
+        raise ValueError(f"[swarm].max_workers must be >= 1, got {n}")
+    return n
+
+
+def _str_table(value: object) -> dict[str, str]:
+    return {str(k): str(v) for k, v in (value or {}).items()}
+
+
+def _int_env(name: str | None, value: object, default: int, minimum: int) -> int:
+    """An int config value, floored at ``minimum``: the env override, else the
+    config value, else the code default — the first that parses. ``default`` is
+    always a valid int, so a malformed env override *or* a wrong-type config
+    value degrades to it instead of crashing ``load()`` for every command."""
+    for candidate in (os.environ.get(name) if name else None, value, default):
+        if candidate is None:
+            continue
+        try:
+            return max(minimum, int(candidate))
+        except (TypeError, ValueError):
+            continue
+    return max(minimum, default)
+
+
+def _bool_env(name: str | None, default: bool) -> bool:
+    raw = os.environ.get(name) if name else None
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+# -- the schema -------------------------------------------------------------
+# Reload classes (what `swarm reload` does with an edit; see reload.py):
+HOT = "hot"  # applied to the running swarm now
+NEXT = "next"  # reaches the next worker/master/session launched
+RESTART = "restart"  # refused and held; needs `swarm down` / `swarm up`
+
+# Value kinds. They pick the parser here and the widget in the TUI form.
+INT = "int"
+STR = "str"
+BOOL = "bool"
+LIST = "list"
+CHOICE = "choice"
+FROZEN = "frozen"  # not a file scalar: the form shows it, never edits it
+
+CLI = "(cli)"  # the table of a value that comes from the command line, not the file
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One ``.swarm.toml`` key: how it is read, what it is for, and what a live
+    reload does with it (``klass``, ``why``, and a ``gate`` that ``reload.py``
+    resolves against the running swarm)."""
+
+    table: str
+    key: str
+    default: Any  # a value, or a callable of the project dir
+    klass: str
+    doc: str  # one line for the TUI form
+    why: str  # why this reload class: the form's tooltip and `swarm reload`'s reason
+    kind: str
+    env: str | None = None
+    minimum: int | None = None
+    choices: tuple[str, ...] = ()
+    gate: str | None = None
+    parse: Callable[[Any], Any] | None = None
+    name: str = ""  # the Config field; filled in from the class
+
+    @property
+    def section(self) -> str:
+        """``[swarm]`` — or ``(cli)``, for a value the file does not hold."""
+        return self.table if self.table == CLI else f"[{self.table}]"
+
+    @property
+    def numeric(self) -> bool:
+        """An int: a malformed env override does *not* shadow the file (see
+        :func:`_int_env`, which walks past it)."""
+        return self.kind == INT
+
+    def read(self, table: dict, pdir: Path) -> Any:
+        """This setting's value: the env override, else the file, else the default."""
+        default = self.default(pdir) if callable(self.default) else self.default
+        env = os.environ.get(self.env) if self.env else None
+        if self.kind == INT and self.parse is None:
+            return _int_env(self.env, table.get(self.key), default, self.minimum or 0)
+        if self.kind == BOOL:
+            return _bool_env(self.env, table.get(self.key, default))
+        raw = table.get(self.key, default) if env is None else env
+        if self.parse is not None:
+            return self.parse(raw)
+        if self.kind == LIST:
+            if env is not None:
+                return [s.strip() for s in env.split(",") if s.strip()]
+            return [str(v) for v in raw]
+        return str(raw)
+
+
+_KINDS = {bool: BOOL, int: INT, str: STR, list: LIST}
+
+
+def _k(table: str, key: str, default: Any, klass: str, *, doc: str, why: str,
+       kind: str | None = None, **rest: Any) -> Any:
+    """A :class:`Config` field declaring its :class:`Setting`. The kind follows
+    the default's type unless it is given (or ``choices`` make it a CHOICE)."""
+    kind = kind or (CHOICE if rest.get("choices") else _KINDS[type(default)])
+    return field(metadata={"setting": Setting(table, key, default, klass, doc, why, kind,
+                                              **rest)})
+
+
 @dataclass
 class Config:
-    """Resolved configuration + runtime paths for one project."""
+    """Resolved configuration + runtime paths for one project.
 
-    project_dir: Path
-    slug: str
-    max_workers: int
-    master_model: str
-    command_template: str
-    command_file: str
-    env_marker: str
-    worker_cmd: str
-    ready_marker: str
-    worker_settings: str
-    worker_effort: str
-    done_grace_s: int
-    park_after: int
-    ledger: str
-    exclude: list[str]
-    history_dir: str
-    history_split_kb: int
-    lessons: str
-    ledger_gate: str
-    telegram_notify: str
-    telegram_commands: bool
-    telegram_pings: str
-    telegram_push_owed_grace_s: int
-    tui_autostart: bool
-    tui_cmd: str
-    session: str
-    tmux_layout: str
-    tmux_panes_per_window: int
-    driver: str
-    master_cmd: str
-    resolver_cmd: str
-    resolver_model: str
-    watchdog_s: int
-    git_isolation: str
-    git_main_branch: str
-    git_repos: list[str]
-    git_auto_resolve: dict[str, str]
-    git_auto_resolve_check: dict[str, str]
-    build_max_concurrent: int
-    build_jobs: int
-    build_cache: bool
-    operator_enabled: bool
-    operator_cmd: str
-    operator_model: str
-    operator_triage_model: str
-    operator_notify: str
-    overseer_enabled: bool
-    overseer_cmd: str
-    overseer_model: str
-    overseer_min_gap_s: int
-    overseer_every_finished: int
-    overseer_every_s: int
-    overseer_owner_wait_s: int
-    overseer_starve_s: int
-    overseer_hold_wait_s: int
-    overseer_timeout_s: int
-    big_picture_every: int
-    big_picture_max_age_h: int
-    big_picture_doc: str
-    big_picture_model: str
-    big_picture_cmd: str
-    gc_auto: bool
-    gc_every_s: int
-    gc_idle_s: int
-    gc_keep_days: int
-    gc_attic_days: int
-    backup_every_s: int
-    backup_on_down: bool
-    web_enabled: bool
-    web_host: str
-    web_port: int
-    usage_enabled: bool
-    usage_check_s: int
-    usage_stale_s: int
-    usage_rules: list[dict]
+    Declared in the order the TUI form draws it: by table, in file order.
+    """
+
+    # -- [swarm] ----------------------------------------------------------
+    max_workers: int = _k(
+        "swarm", "max_workers", 4, HOT, minimum=1, gate="resize", parse=_workers,
+        doc="phases in flight at once (one pane each)",
+        why="slots are plain state records; growing appends, shrinking retires")
+    # On by default: without it a supervisor that died stayed down for hours
+    # with slots marked busy and nothing able to notice. 0 = purely event-driven.
+    watchdog_s: int = _k(
+        "swarm", "watchdog_s", 300, HOT, env="SWARM_WATCHDOG", minimum=0,
+        gate="watchdog-refresh",
+        doc="seconds between liveness sweeps; 0 = off",
+        why="the supervisor caches it as `self.watchdog_s` in __init__, so a"
+            " reload must refresh that attribute too — swapping `self.cfg` alone"
+            " leaves the old sweep interval running")
+    master_model: str = _k(
+        "swarm", "master_model", "", NEXT,
+        doc='model for the master session; "" inherits',
+        why="baked into the master's command line when the pane is respawned")
+    master_cmd: str = _k(
+        "swarm", "master_cmd", "", NEXT, env="SWARM_MASTER_CMD",
+        doc='command the master pane runs; "" = the built-in',
+        why="baked into the master's command line when the pane is respawned")
+    resolver_cmd: str = _k(
+        "swarm", "resolver_cmd", "", NEXT, env="SWARM_RESOLVER_CMD",
+        doc="command that opens a conflict-resolver session",
+        why="read once, when a conflict opens a resolver pane; an already-open"
+            " resolver keeps the command it was spawned with")
+    # Resolving is a short mechanical splice; it need not pay for the strongest model.
+    resolver_model: str = _k(
+        "swarm", "resolver_model", "sonnet", NEXT,
+        doc='model for the resolver; "" inherits',
+        why="baked into the resolver's command line when a conflict opens its pane")
+    driver: str = _k(
+        "swarm", "driver", "tmux", RESTART, env="SWARM_DRIVER", choices=("tmux", "bare"),
+        doc="tmux = real panes; bare = headless test driver",
+        why="the current topology was built by the old driver; swapping it mid-run"
+            " leaves panes nothing can address")
+    slug: str = _k(
+        "swarm", "slug", _default_slug, RESTART, env="SWARM_SLUG", kind=STR,
+        doc="names this run's state dir — its identity on disk",
+        why="the slug IS the state dir: a new one is a new, empty run while the"
+            " supervisor still holds the old FIFO and flock")
+
+    # -- [worker] ---------------------------------------------------------
+    # The delay lives in the worker's own `swarm done`, so the single-threaded
+    # supervisor loop never blocks on it.
+    done_grace_s: int = _k(
+        "worker", "done_grace_s", 0, NEXT, env="SWARM_DONE_GRACE", minimum=0,
+        doc="seconds a worker holds its slot after `done`",
+        why="`swarm done` runs in the worker's cwd — its worktree mirror — so it"
+            " reads the .swarm.toml copy branched at launch, not this one")
+    park_after: int = _k(
+        "worker", "park_after", 120, HOT, env="SWARM_PARK_AFTER", minimum=0,
+        gate="park-shift",
+        doc="seconds a worker may wait on you before parking",
+        why="the supervisor reads it when it arms a park timer")
+    command_template: str = _k(
+        "worker", "command_template", "/prime {phase}", NEXT,
+        doc="prime line typed into a new pane ({phase} expands)",
+        why="the prime line is typed into a worker's pane once, at launch")
+    command_file: str = _k(
+        "worker", "command_file", ".claude/commands/prime.md", NEXT,
+        doc="slash-command file the init master patches",
+        why="resolved while composing the launch line for a new worker")
+    worker_cmd: str = _k(
+        "worker", "worker_cmd", "claude -n worker:{phase}", NEXT, env="SWARM_WORKER_CMD",
+        doc="command each worker pane is launched with",
+        why="it is the command a pane is respawned with")
+    # Merged over user settings on each worker's `claude` so a worker's own
+    # teammates run in-process — no extra tmux panes.
+    worker_settings: str = _k(
+        "worker", "worker_settings", '{"teammateMode":"in-process"}', NEXT,
+        env="SWARM_WORKER_SETTINGS",
+        doc="settings JSON merged into each worker's `claude`",
+        why="merged into the `claude` invocation at spawn time")
+    # Pinned rather than inherited: a worker otherwise runs at whatever the
+    # owner's own settings say today, and a bump there would make every phase dearer.
+    worker_effort: str = _k(
+        "worker", "effort", "high", NEXT, env="SWARM_WORKER_EFFORT",
+        choices=("", *EFFORTS), parse=_effort,
+        doc='claude --effort per worker; "" = inherit yours',
+        why="passed as `claude --effort` on the command line a pane is spawned with")
+    env_marker: str = _k(
+        "worker", "env_marker", "SWARM_PHASE", NEXT,
+        doc="env var carrying the phase name into the worker",
+        why="the variable name is written into the worker's environment at spawn;"
+            " a live worker still answers to the old one")
+    # "" => auto: match the running claude version (see ready_needle).
+    ready_marker: str = _k(
+        "worker", "ready_marker", "", NEXT, env="SWARM_READY_MARKER",
+        doc='"pane booted" banner; "" = the claude version',
+        why="only consulted while waiting for a freshly spawned pane to boot")
+
+    # -- [tasks] ----------------------------------------------------------
+    ledger: str = _k(
+        "tasks", "ledger", "docs/PHASE-LEDGER.md", HOT,
+        doc="phase ledger the master reads (project-relative)",
+        why="build_context loads the ledger from disk on every pass")
+    exclude: list[str] = _k(
+        "tasks", "exclude", [], HOT,
+        doc="phases the swarm must never launch (comma-sep)",
+        why="ledger.ready() takes the exclusion set as an argument on every pass")
+    history_dir: str = _k(
+        "tasks", "history", "docs/phases", HOT,
+        doc="where each phase family's history is filed",
+        why="the ledger writer resolves the history path on every flush")
+    history_split_kb: int = _k(
+        "tasks", "history_split_kb", 256, HOT, minimum=0,
+        doc="a family file past this splits per phase (KB)",
+        why="checked each time a family file is appended to")
+    lessons: str = _k(
+        "tasks", "lessons", "tasks/lessons.md", HOT,
+        doc="file `swarm lesson` appends to (project-relative)",
+        why="the ledger writer resolves the lessons path on every flush")
+    ledger_gate: str = _k(
+        "tasks", "ledger_gate", "", HOT,
+        doc='command that checks the ledger; "" = none',
+        why="run each time a follow-up row is applied")
+
+    # -- [telegram] -------------------------------------------------------
+    # The swarm's OWN sender, resolved from this package: falling back to some
+    # other bot would put two audiences on one channel.
+    telegram_notify: str = _k(
+        "telegram", "notify", str(_REPO_NOTIFY), HOT,
+        doc="script that sends the swarm's own Telegram pings",
+        why="the supervisor resolves the notifier per ping; note that a running"
+            " worker's own `swarm done` ping uses the copy in its worktree mirror")
+    telegram_commands: bool = _k(
+        "telegram", "commands", True, RESTART, env="SWARM_TG_COMMANDS",
+        doc="answer /usage and /help sent to the swarm bot",
+        why="the command listener is started once, by `swarm up`, and stopped by"
+            " `swarm down`; there is no later moment a reload could start or stop it")
+    # A held-back ping is still logged to notifications.jsonl, marked `suppressed`.
+    telegram_pings: str = _k(
+        "telegram", "pings", PINGS_DEFAULT, HOT, env="SWARM_TG_PINGS", choices=PINGS,
+        parse=lambda v: _choice(v, PINGS, PINGS_DEFAULT),
+        doc="necessary = only what needs you; all = every ping",
+        why="every ping reads it when it is sent; a worker's own `swarm done` and"
+            " `swarm waiting`, and an operator's `operator-done`, read the copy in"
+            " their worktree mirror, so theirs changes from the next launch")
+    telegram_push_owed_grace_s: int = _k(
+        "telegram", "push_owed_grace_s", 3600, HOT, env="SWARM_PUSH_OWED_GRACE", minimum=0,
+        doc="an owed push pings after this long (s)",
+        why="the supervisor compares each owed push's age against it after every"
+            " integration and on the watchdog tick")
+
+    # -- [tmux] -----------------------------------------------------------
+    # The project's own name, not a generic `swarm`: it is what `tmux ls` shows,
+    # and one box can host several runs at once.
+    session: str = _k(
+        "tmux", "session", lambda pdir: _slugify(pdir.name) or "swarm", RESTART,
+        env="SWARM_SESSION", kind=STR,
+        doc="tmux session name — what you see in `tmux ls`",
+        why="every pane and window id recorded in state.json belongs to the old"
+            " tmux session")
+    tmux_layout: str = _k(
+        "tmux", "layout", AUTO_LAYOUT, HOT, env="SWARM_LAYOUT", gate="layout-pinned",
+        choices=tuple(LAYOUTS), parse=lambda v: normalize_layout(str(v)),
+        doc="pane arrangement (auto = 1 full/2 cols/3+ tiled)",
+        why="the layout is re-applied whenever worker panes are re-tidied")
+    tmux_panes_per_window: int = _k(
+        "tmux", "panes_per_window", 4, RESTART, env="SWARM_PANES_PER_WINDOW", minimum=1,
+        doc="worker panes per window before workers-2",
+        why="the worker windows were paged at `swarm up`; a slot added later"
+            " would follow a different page size than the panes already there")
+
+    # -- [build] ----------------------------------------------------------
+    build_max_concurrent: int = _k(
+        "build", "max_concurrent", 2, NEXT, env="SWARM_BUILD_MAX", minimum=0,
+        doc="concurrent heavy `swarm build` runs; rest queue",
+        why="launch._worker_env freezes SWARM_BUILD_MAX into each worker's"
+            " environment, and _int_env gives the environment strict precedence")
+    build_jobs: int = _k(
+        "build", "jobs", 6, NEXT, env="SWARM_BUILD_JOBS", minimum=0,
+        doc="CARGO_BUILD_JOBS handed to each build",
+        why="launch._worker_env freezes SWARM_BUILD_JOBS and CARGO_BUILD_JOBS into"
+            " each worker's environment at spawn")
+    build_cache: bool = _k(
+        "build", "cache", True, NEXT, env="SWARM_BUILD_CACHE",
+        doc="share one cargo target cache across worktrees",
+        why="only read while linking a new worktree's target/ at worktree_add")
+
+    # -- [gc] -------------------------------------------------------------
+    # Nothing else prunes the build caches. Every 15 minutes, because a busy run
+    # writes a whole superseded generation of a repo's units per phase.
+    gc_auto: bool = _k(
+        "gc", "auto", True, HOT, env="SWARM_GC_AUTO",
+        doc="prune build output / dead mirrors automatically",
+        why="the supervisor's gc scheduler reads it on every wake; a gc already"
+            " running is left to finish")
+    gc_every_s: int = _k(
+        "gc", "every_s", 900, HOT, env="SWARM_GC_EVERY", minimum=0,
+        doc="auto gc at most this often (s); 0 = idle-only",
+        why="the last-run clock is compared against it on every wake")
+    gc_idle_s: int = _k(
+        "gc", "idle_s", 1800, HOT, env="SWARM_GC_IDLE", minimum=0,
+        doc="also once per idle stretch this long (s); 0 = off",
+        why="the idle episode's age is compared against it on every wake")
+    # Three days keeps every dependency a phase in the current campaign built.
+    gc_keep_days: int = _k(
+        "gc", "keep_days", 3, HOT, env="SWARM_GC_KEEP_DAYS", minimum=1,
+        doc="keep build output used within N days",
+        why="read when the next gc builds its plan")
+    gc_attic_days: int = _k(
+        "gc", "attic_days", 30, HOT, env="SWARM_GC_ATTIC_DAYS", minimum=1,
+        doc="keep set-aside work (swarm-attic refs) N days",
+        why="read when the next gc builds its plan")
+
+    # -- [backup] ---------------------------------------------------------
+    backup_every_s: int = _k(
+        "backup", "every_s", 1800, HOT, env="SWARM_BACKUP_EVERY", minimum=0,
+        doc="back up unmerged work to origin every N s; 0 = off",
+        why="the last-pass clock is compared against it on every wake; a pass"
+            " already running is left to finish")
+    backup_on_down: bool = _k(
+        "backup", "on_down", True, HOT, env="SWARM_BACKUP_ON_DOWN",
+        doc="push unmerged work to origin on `swarm down`",
+        why="read by `swarm down` itself, which loads the file afresh")
+
+    # -- [git] ------------------------------------------------------------
+    git_isolation: str = _k(
+        "git", "isolation", "none", RESTART, env="SWARM_GIT_ISOLATION",
+        choices=("worktree", "none"),
+        doc="worktree = own mirror + queue; none = in place",
+        why="live worktrees and a populated merge queue only make sense under the"
+            " isolation mode that created them")
+    git_main_branch: str = _k(
+        "git", "main_branch", "master", HOT, env="SWARM_GIT_MAIN", gate="in-flight",
+        doc="branch the integrator merges phase branches into",
+        why="the integrator reads it per merge — but a phase mirrored off the old"
+            " main must not then be merged into a different one")
+    # Default "*": every git repo directly under the project root (a monorepo of
+    # repos); a single-repo project matches nothing and mirrors only the umbrella.
+    git_repos: list[str] = _k(
+        "git", "repos", ["*"], HOT, env="SWARM_GIT_REPOS", gate="repos-shrink",
+        doc="globs picking the child repos a mirror includes",
+        why="the repo set is globbed per worktree_add; adding is safe, but a repo"
+            " dropped between a phase's worktree_add and its integrate is never"
+            " visited, so its branch leaks and its commits never merge")
+    git_auto_resolve: dict[str, str] = _k(
+        "git", "auto_resolve", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc="glob -> union|keyed:<re>, tried before a resolver",
+        why="gitq._auto_resolve reads the strategy table at the moment a conflict"
+            " happens, so the next conflict uses the new rules — it cannot"
+            " retroactively fix an integration that is already held; retry that one"
+            " with `swarm resolved <phase>` once the tree is clean")
+    git_auto_resolve_check: dict[str, str] = _k(
+        "git", "auto_resolve_check", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc="glob -> command that must pass after one",
+        why="gitq._auto_resolve reads the check table right after it settles a"
+            " conflict, so the next automatic merge runs the new checks")
+
+    # -- [operator] -------------------------------------------------------
+    # Positive opt-in: the only thing between a test suite and an autonomous
+    # session holding the owner's authority. Off, the queue is never written.
+    operator_enabled: bool = _k(
+        "operator", "enabled", False, NEXT, env="SWARM_OPERATOR",
+        doc="arm autonomous sessions for `operator` finishes",
+        why="the gate is read by the worker's own `swarm done`, which runs in its"
+            " worktree mirror — so it reads the .swarm.toml copy branched at"
+            " launch, not this one")
+    operator_cmd: str = _k(
+        "operator", "cmd", "", NEXT, env="SWARM_OPERATOR_CMD",
+        doc='command an operator session runs; "" = built-in',
+        why="read once, when a queued hand-off opens an operator pane; an"
+            " already-open session keeps the command it was spawned with")
+    operator_model: str = _k(
+        "operator", "model", "", NEXT,
+        doc='model for an operator session; "" inherits',
+        why="baked into the operator session's command line when its pane is"
+            " spawned")
+    # An alias, never a dated build: triage runs unattended, and a pinned
+    # snapshot's retirement would silently send every hand-off to `later`.
+    operator_triage_model: str = _k(
+        "operator", "triage_model", "haiku", NEXT,
+        doc="model that decides now vs later",
+        why="triage is spawned by the worker's `swarm done` from its worktree"
+            " mirror, so it reads the branched .swarm.toml copy")
+    operator_notify: str = _k(
+        "operator", "notify", OPERATOR_NOTIFY_DEFAULT, NEXT, env="SWARM_OPERATOR_NOTIFY",
+        choices=OPERATOR_NOTIFY,
+        parse=lambda v: _choice(v, OPERATOR_NOTIFY, OPERATOR_NOTIFY_DEFAULT),
+        doc="which operator outcomes ping you",
+        why="read by the session's own `swarm operator-done`, which under worktree"
+            " isolation runs in its mirror and reads the .swarm.toml copy branched"
+            " when the job opened; the next job reads this one")
+
+    # -- [overseer] -------------------------------------------------------
+    overseer_enabled: bool = _k(
+        "overseer", "enabled", True, HOT, env="SWARM_OVERSEER",
+        doc="run periodic Overseer review passes",
+        why="the supervisor's trigger policy reads it on every wake; a pass"
+            " already running is left to finish")
+    overseer_cmd: str = _k(
+        "overseer", "cmd", "", NEXT, env="SWARM_OVERSEER_CMD",
+        doc='command an Overseer pass runs; "" = built-in',
+        why="baked into the Overseer pane's command line when a pass is spawned")
+    overseer_model: str = _k(
+        "overseer", "model", "", NEXT,
+        doc='model for the Overseer; "" = master_model',
+        why="baked into the Overseer session's command line when a pass is spawned")
+    overseer_min_gap_s: int = _k(
+        "overseer", "min_gap_s", 600, HOT, env="SWARM_OVERSEER_MIN_GAP", minimum=0,
+        doc="min seconds between non-urgent passes",
+        why="read each time the policy asks whether a pass is due")
+    overseer_every_finished: int = _k(
+        "overseer", "every_finished", 3, HOT, env="SWARM_OVERSEER_EVERY_FINISHED", minimum=0,
+        doc="a pass every N finished phases; 0 = off",
+        why="the finished-phase counter is compared against it on every wake")
+    overseer_every_s: int = _k(
+        "overseer", "every_s", 10800, HOT, env="SWARM_OVERSEER_EVERY", minimum=0,
+        doc="a pass at least this often (s); 0 = off",
+        why="the cadence clock is compared against it on every wake")
+    overseer_owner_wait_s: int = _k(
+        "overseer", "owner_wait_s", 3600, HOT, env="SWARM_OVERSEER_OWNER_WAIT", minimum=0,
+        doc="owner-wait age that triggers a pass (s)",
+        why="each waiting phase's age is compared against it on every wake")
+    overseer_starve_s: int = _k(
+        "overseer", "starve_s", 600, HOT, env="SWARM_OVERSEER_STARVE", minimum=0,
+        doc="idle-slot starvation before a pass (s)",
+        why="the starvation episode's age is compared against it on every wake")
+    overseer_hold_wait_s: int = _k(
+        "overseer", "hold_wait_s", 600, HOT, env="SWARM_OVERSEER_HOLD_WAIT", minimum=0,
+        doc="merge hold a resolver has before a pass (s)",
+        why="the held merge's age is compared against it on every wake")
+    # A hung pass must never hold the pane forever: past this it is killed and
+    # its committed work landed.
+    overseer_timeout_s: int = _k(
+        "overseer", "timeout_s", 2700, NEXT, env="SWARM_OVERSEER_TIMEOUT", minimum=1,
+        doc="seconds before a hung pass is killed",
+        why="a pass's deadline is fixed when it starts; the next pass gets the new one")
+
+    # -- [usage] ----------------------------------------------------------
+    usage_enabled: bool = _k(
+        "usage", "enabled", True, HOT, env="SWARM_USAGE",
+        doc="pause or stop the swarm at usage limits",
+        why="a reload re-checks the caps at once; turning them off lifts a usage hold")
+    usage_check_s: int = _k(
+        "usage", "check_s", 600, HOT, env="SWARM_USAGE_CHECK", minimum=60,
+        doc="seconds between usage checks",
+        why="the last check's clock is compared against it on every wake")
+    usage_stale_s: int = _k(
+        "usage", "stale_s", 1800, HOT, env="SWARM_USAGE_STALE", minimum=300,
+        doc="a reading older than this is not trusted (s)",
+        why="read by every usage check")
+    usage_rules: list[dict] = _k(
+        "usage", "rules", USAGE_RULES_DEFAULT, HOT, kind=FROZEN, parse=_usage_rules,
+        doc="window, percent and action of each cap",
+        why="a reload re-checks the caps at once, so a raised limit lifts its hold")
+
+    # -- [big_picture] ----------------------------------------------------
+    big_picture_every: int = _k(
+        "big_picture", "every", 10, HOT, env="SWARM_BIG_PICTURE_EVERY", minimum=0,
+        doc="refresh every N integrated phases; 0 = off",
+        why="the integrated-phase counter is compared against it on every wake")
+    big_picture_max_age_h: int = _k(
+        "big_picture", "max_age_h", 0, HOT, env="SWARM_BIG_PICTURE_MAX_AGE_H", minimum=0,
+        doc="refresh a doc this many hours old; 0 = off",
+        why="the doc's age is compared against it on every wake")
+    big_picture_doc: str = _k(
+        "big_picture", "doc", "docs/BIG-PICTURE.md", HOT,
+        doc="the doc's path inside the project",
+        why="read when a pass is briefed and when its doc lands; a pass already"
+            " running lands at the new path")
+    big_picture_model: str = _k(
+        "big_picture", "model", "opus", NEXT,
+        doc='model for a big-picture pass; "" inherits',
+        why="baked into the session's command line when a pass is spawned")
+    big_picture_cmd: str = _k(
+        "big_picture", "cmd", "", NEXT, env="SWARM_BIG_PICTURE_CMD",
+        doc='command a big-picture pass runs; "" = built-in',
+        why="baked into the session's command line when a pass is spawned")
+
+    # -- [tui] ------------------------------------------------------------
+    tui_autostart: bool = _k(
+        "tui", "autostart", True, RESTART, env="SWARM_TUI_AUTOSTART",
+        doc="open this dashboard automatically at `swarm up`",
+        why="the dashboard pane is created once, by session.setup at `swarm up`;"
+            " there is no later moment a reload could reach")
+    tui_cmd: str = _k(
+        "tui", "cmd", "swarm tui", RESTART, env="SWARM_TUI_CMD",
+        doc="command the dashboard pane is respawned with",
+        why="the dashboard pane is respawned once, by session.setup at `swarm up`;"
+            " a live dash keeps the command it was started with")
+
+    # -- [web] ------------------------------------------------------------
+    # Open to the LAN by the owner's choice: it serves computed JSON only, never
+    # a file by path, and redacts anything shaped like a secret.
+    web_enabled: bool = _k(
+        "web", "enabled", True, RESTART, env="SWARM_WEB",
+        doc="start the web board at `swarm up`",
+        why="the board's window is created once, by `swarm up`; there is no later"
+            " moment a reload could start or stop it")
+    web_host: str = _k(
+        "web", "host", "0.0.0.0", RESTART, env="SWARM_WEB_HOST",
+        doc="web board bind address (0.0.0.0 = all)",
+        why="the listening socket is bound once, when the board starts")
+    web_port: int = _k(
+        "web", "port", 8765, RESTART, env="SWARM_WEB_PORT", minimum=0,
+        doc="port the web board listens on",
+        why="the listening socket is bound once, when the board starts")
+
+    # -- (cli) ------------------------------------------------------------
+    project_dir: Path = _k(
+        CLI, "--project-dir", None, RESTART, kind=FROZEN,
+        doc="the project root — --project-dir or the cwd",
+        why="every worktree, lock and repo path is derived from it; the live"
+            " worktrees are under the old one")
+
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -206,6 +728,12 @@ class Config:
             d.mkdir(parents=True, exist_ok=True)
 
 
+#: Every setting, by Config field name, in form order.
+SETTINGS: dict[str, Setting] = {
+    f.name: replace(f.metadata["setting"], name=f.name) for f in fields(Config) if f.init
+}
+
+
 def _find_config_file(explicit: str | None, project_dir: Path) -> Path | None:
     if explicit:
         p = Path(explicit).expanduser()
@@ -226,376 +754,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     if cfg_file is not None:
         with cfg_file.open("rb") as fh:
             data = tomllib.load(fh)
-
-    swarm = data.get("swarm", {})
-    worker = data.get("worker", {})
-    tasks = data.get("tasks", {})
-    telegram = data.get("telegram", {})
-    tui = data.get("tui", {})
-    tmux = data.get("tmux", {})
-    git = data.get("git", {})
-    build = data.get("build", {})
-    operator = data.get("operator", {})
-    overseer = data.get("overseer", {})
-    big_picture = data.get("big_picture", {})
-    gc = data.get("gc", {})
-    backup = data.get("backup", {})
-    web = data.get("web", {})
-    usage = data.get("usage", {})
-
-    driver = os.environ.get("SWARM_DRIVER", swarm.get("driver", "tmux"))
-    max_workers = int(swarm.get("max_workers", 4))
-    if max_workers < 1:
-        # A swarm with < 1 slots can never claim a phase and would stall in
-        # silence. One slot is the floor; anything below it is a misconfig.
-        raise ValueError(f"[swarm].max_workers must be >= 1, got {max_workers}")
-    return Config(
-        project_dir=pdir,
-        slug=os.environ.get("SWARM_SLUG", swarm.get("slug", _default_slug(pdir))),
-        max_workers=max_workers,
-        master_model=str(swarm.get("master_model", "")),
-        command_template=str(worker.get("command_template", "/prime {phase}")),
-        command_file=str(worker.get("command_file", ".claude/commands/prime.md")),
-        env_marker=str(worker.get("env_marker", "SWARM_PHASE")),
-        worker_cmd=os.environ.get(
-            "SWARM_WORKER_CMD", worker.get("worker_cmd", "claude -n worker:{phase}")
-        ),
-        ready_marker=os.environ.get(
-            # "" => auto: match the running claude version (see ready_needle).
-            # An explicit value (config or SWARM_READY_MARKER) overrides.
-            "SWARM_READY_MARKER", worker.get("ready_marker", "")
-        ),
-        worker_settings=os.environ.get(
-            # Merged over user settings on each worker's `claude` (see
-            # _worker_shell) so a worker's own teammates run in-process — no
-            # extra tmux panes. Set to "" to disable (e.g. a non-claude worker).
-            "SWARM_WORKER_SETTINGS",
-            worker.get("worker_settings", '{"teammateMode":"in-process"}'),
-        ),
-        # `claude --effort` for every worker. Pinned rather than inherited: a
-        # worker otherwise runs at whatever ~/.claude/settings.json says today,
-        # and an owner who bumps their own sessions to xhigh would silently make
-        # every phase ~35-60% dearer. "" = inherit the user's setting.
-        worker_effort=_effort(os.environ.get("SWARM_WORKER_EFFORT", worker.get("effort", "high"))),
-        # Seconds a worker holds its slot after signalling `done` before the
-        # supervisor is poked to reclaim it (a "finish buffer" so the worker can
-        # flush last work). 0 (the default) = advance immediately, unchanged
-        # behaviour. The delay lives in the worker's own `swarm done`, so the
-        # single-threaded supervisor loop never blocks.
-        done_grace_s=_int_env(
-            "SWARM_DONE_GRACE", worker.get("done_grace_s"), 0, minimum=0
-        ),
-        # Seconds a worker may sit `swarm waiting` on the owner before the
-        # supervisor parks it (moves its live pane to its own window and frees the
-        # grid slot for a replacement). 120 (the default) balances "give the owner
-        # a chance to answer in place" against "don't strand a slot"; 0 disables
-        # parking entirely (a waiting worker just holds its slot as before).
-        park_after=_int_env(
-            "SWARM_PARK_AFTER", worker.get("park_after"), 120, minimum=0
-        ),
-        ledger=str(tasks.get("ledger", "docs/PHASE-LEDGER.md")),
-        exclude=list(tasks.get("exclude", DEFAULT_EXCLUDE)),
-        # Where the swarm files what was written about each phase: one file per
-        # phase family (`read-W12` -> `read.md`), a directory of one file per
-        # phase once the family file passes `history_split_kb`.
-        history_dir=str(tasks.get("history", "docs/phases")),
-        history_split_kb=max(0, int(tasks.get("history_split_kb", 256))),
-        lessons=str(tasks.get("lessons", "tasks/lessons.md")),
-        # A command that checks the ledger (run in the project checkout, with
-        # SWARM_LEDGER naming the file); a follow-up row it rejects is refused.
-        ledger_gate=str(tasks.get("ledger_gate", "")),
-        tui_autostart=_bool_env("SWARM_TUI_AUTOSTART", tui.get("autostart", True)),
-        tui_cmd=os.environ.get("SWARM_TUI_CMD", str(tui.get("cmd", "swarm tui"))),
-        telegram_notify=str(
-            # The swarm's OWN sender, resolved from this package: a default
-            # that pointed at some other bot would put two audiences on one
-            # channel.
-            telegram.get("notify", str(_REPO_NOTIFY))
-        ),
-        # The bot's command listener (`/usage`, `/help`), started by `swarm up`
-        # beside the run. On by default: it only ever answers the owner's chat.
-        telegram_commands=_bool_env("SWARM_TG_COMMANDS", telegram.get("commands", True)),
-        # Which pings reach the phone: "necessary" (only what needs a human
-        # decision or attention) or "all", the behaviour before that. A
-        # held-back message is still
-        # logged to notifications.jsonl, marked `suppressed`.
-        telegram_pings=_choice(
-            os.environ.get("SWARM_TG_PINGS", telegram.get("pings", PINGS_DEFAULT)),
-            PINGS, PINGS_DEFAULT,
-        ),
-        # A repo owing a push pings only once it has owed one this long.
-        telegram_push_owed_grace_s=_int_env(
-            "SWARM_PUSH_OWED_GRACE", telegram.get("push_owed_grace_s"), 3600, minimum=0
-        ),
-        session=os.environ.get(
-            "SWARM_SESSION",
-            # Default to the project's own name (``myproject``), not a generic
-            # ``swarm``: the session name is what you see in `tmux ls` and in the
-            # status bar, and one box can host several runs at once. An explicit
-            # [tmux].session still wins.
-            tmux.get("session", _slugify(pdir.name) or "swarm"),
-        ),
-        # How the worker windows arrange their slot panes ("auto" = the historic
-        # 1-full / 2-side-by-side / 3-4-tiled rule). `swarm layout <name>` flips
-        # it live for the running session; this is the boot default.
-        tmux_layout=normalize_layout(
-            str(os.environ.get("SWARM_LAYOUT", tmux.get("layout", AUTO_LAYOUT)))
-        ),
-        # Worker panes per tmux window before the grid pages to `workers-2`, ….
-        tmux_panes_per_window=_int_env(
-            "SWARM_PANES_PER_WINDOW", tmux.get("panes_per_window"), 4, minimum=1
-        ),
-        driver=driver,
-        master_cmd=os.environ.get("SWARM_MASTER_CMD", swarm.get("master_cmd", "")),
-        resolver_cmd=os.environ.get(
-            "SWARM_RESOLVER_CMD", swarm.get("resolver_cmd", "")
-        ),
-        # Resolving is a short mechanical splice, so it need not pay for the
-        # strongest model; "" inherits the user's setting.
-        resolver_model=str(swarm.get("resolver_model", "sonnet")),
-        # Seconds between the supervisor's liveness reconcile sweeps: frees a slot
-        # whose worker pane died, re-nudges an idle master, finishes a settled run.
-        # 0 disables it and restores the purely event-driven loop the module
-        # docstring describes. It defaults ON because the alternative is the
-        # measured failure: a supervisor that exited and stayed down for hours
-        # with two slots marked busy and nothing able to notice.
-        watchdog_s=_int_env("SWARM_WATCHDOG", swarm.get("watchdog_s"), 300, minimum=0),
-        git_isolation=os.environ.get(
-            # "none" (default) == today's behavior: workers commit main in place.
-            # "worktree" opts into isolated worktrees + the serialized merge-queue.
-            "SWARM_GIT_ISOLATION", str(git.get("isolation", "none"))
-        ),
-        # path-glob -> "union" | "keyed:<regex>". Tried before a resolver session
-        # is spawned; anything unmatched or genuinely conflicting falls through.
-        git_auto_resolve={
-            str(k): str(v) for k, v in (git.get("auto_resolve") or {}).items()
-        },
-        # path-glob -> shell command, run in the repo after an auto_resolve of a
-        # matching path; a non-zero exit hands the conflict to the resolver.
-        git_auto_resolve_check={
-            str(k): str(v) for k, v in (git.get("auto_resolve_check") or {}).items()
-        },
-        git_main_branch=os.environ.get(
-            "SWARM_GIT_MAIN", str(git.get("main_branch", "master"))
-        ),
-        git_repos=_git_repos(git),
-        build_max_concurrent=_int_env(
-            "SWARM_BUILD_MAX", build.get("max_concurrent"), 2, minimum=0
-        ),
-        build_jobs=_int_env("SWARM_BUILD_JOBS", build.get("jobs"), 6, minimum=0),
-        build_cache=_bool_env("SWARM_BUILD_CACHE", build.get("cache", True)),
-        # Positive opt-in, and the only thing between a test suite and an
-        # autonomous session holding the owner's full authority. False means the
-        # queue is never even written -- a queue nothing will drain is worse than
-        # no queue, because it looks like the hand-off was recorded.
-        operator_enabled=_bool_env("SWARM_OPERATOR", operator.get("enabled", False)),
-        operator_cmd=os.environ.get(
-            "SWARM_OPERATOR_CMD", str(operator.get("cmd", ""))
-        ),
-        operator_model=str(operator.get("model", "")),
-        # An ALIAS, never a dated build (recap.MODEL says why): triage runs
-        # unattended on every operator finish, so pinning it to a snapshot means
-        # the day that snapshot retires every hand-off silently falls to `later`.
-        # Spelled out rather than imported from `recap` -- recap imports us.
-        operator_triage_model=str(operator.get("triage_model", "haiku")),
-        # Which `operator-done` outcomes reach the owner's phone. Every outcome
-        # is still recorded (job file, ledger, the Overseer's digest); to keep the
-        # phone quiet, by default only the ones
-        # passed `--attention` are sent.
-        operator_notify=_choice(
-            os.environ.get("SWARM_OPERATOR_NOTIFY", operator.get("notify", OPERATOR_NOTIFY_DEFAULT)),
-            OPERATOR_NOTIFY, OPERATOR_NOTIFY_DEFAULT,
-        ),
-        # The Overseer: the old master, now a periodic reviewer that acts on what
-        # it reads (see overseer.py). On by default -- it is the one part of the
-        # swarm that notices a failure, a hold or a starved backlog and does
-        # something about it. `enabled = false` restores launch-and-integrate only.
-        overseer_enabled=_bool_env("SWARM_OVERSEER", overseer.get("enabled", True)),
-        overseer_cmd=os.environ.get("SWARM_OVERSEER_CMD", str(overseer.get("cmd", ""))),
-        # "" = the master's model: the Overseer IS the master's session, repurposed.
-        overseer_model=str(overseer.get("model", "")),
-        overseer_min_gap_s=_int_env(
-            "SWARM_OVERSEER_MIN_GAP", overseer.get("min_gap_s"), 600, minimum=0
-        ),
-        overseer_every_finished=_int_env(
-            "SWARM_OVERSEER_EVERY_FINISHED", overseer.get("every_finished"), 3, minimum=0
-        ),
-        overseer_every_s=_int_env(
-            "SWARM_OVERSEER_EVERY", overseer.get("every_s"), 10800, minimum=0
-        ),
-        overseer_owner_wait_s=_int_env(
-            "SWARM_OVERSEER_OWNER_WAIT", overseer.get("owner_wait_s"), 3600, minimum=0
-        ),
-        overseer_starve_s=_int_env(
-            "SWARM_OVERSEER_STARVE", overseer.get("starve_s"), 600, minimum=0
-        ),
-        # A merge hold the resolver has not cleared in this long gets a pass.
-        overseer_hold_wait_s=_int_env(
-            "SWARM_OVERSEER_HOLD_WAIT", overseer.get("hold_wait_s"), 600, minimum=0
-        ),
-        # A hung pass must never hold the pane (or the finish) forever: past this
-        # the session is killed, logged and its committed work landed.
-        overseer_timeout_s=_int_env(
-            "SWARM_OVERSEER_TIMEOUT", overseer.get("timeout_s"), 2700, minimum=1
-        ),
-        # The big-picture pass (see bigpic.py): a session that rewrites one
-        # project doc every `every` integrated phases, so a worker reads where the
-        # project stands instead of surveying it. 0 = no counter; `max_age_h`
-        # refreshes a doc that old once anything has landed since (0 = never).
-        big_picture_every=_int_env(
-            "SWARM_BIG_PICTURE_EVERY", big_picture.get("every"), 10, minimum=0
-        ),
-        big_picture_max_age_h=_int_env(
-            "SWARM_BIG_PICTURE_MAX_AGE_H", big_picture.get("max_age_h"), 0, minimum=0
-        ),
-        big_picture_doc=str(big_picture.get("doc", "docs/BIG-PICTURE.md")),
-        big_picture_model=str(big_picture.get("model", "opus")),
-        # Replaces the built-in session (the tests' seam, as `[ask].cmd` is the ask's).
-        big_picture_cmd=os.environ.get("SWARM_BIG_PICTURE_CMD", str(big_picture.get("cmd", ""))),
-        # Automatic `swarm gc` from the supervisor: nothing else ever prunes the
-        # build caches, which can grow very large. It runs at most
-        # once per `every_s` and once per idle episode longer than `idle_s`, only
-        # when it can take every build slot without waiting (never during a build).
-        # Every 15 minutes, because a busy run writes a whole superseded generation
-        # of a repo's units per phase; a daily run can let one grow very large.
-        gc_auto=_bool_env("SWARM_GC_AUTO", gc.get("auto", True)),
-        gc_every_s=_int_env("SWARM_GC_EVERY", gc.get("every_s"), 900, minimum=0),
-        gc_idle_s=_int_env("SWARM_GC_IDLE", gc.get("idle_s"), 1800, minimum=0),
-        # Build output untouched this many days goes (`cargo sweep --time N`).
-        # Three days keeps every dependency a phase in the current campaign built.
-        gc_keep_days=_int_env("SWARM_GC_KEEP_DAYS", gc.get("keep_days"), 3, minimum=1),
-        # Work set aside under refs/swarm-attic (a discarded or failed phase's
-        # commits) stays this long before gc drops the ref.
-        gc_attic_days=_int_env("SWARM_GC_ATTIC_DAYS", gc.get("attic_days"), 30, minimum=1),
-        # Backup pushes (see backup.py): every unmerged phase's commits, its
-        # uncommitted edits as a snapshot, and its kept attic refs, copied to the
-        # repo's origin so a lost machine loses no work. Every `every_s` (0 = no
-        # periodic pass) and once more by `swarm down` while `on_down` is set.
-        backup_every_s=_int_env("SWARM_BACKUP_EVERY", backup.get("every_s"), 1800, minimum=0),
-        backup_on_down=_bool_env("SWARM_BACKUP_ON_DOWN", backup.get("on_down", True)),
-        # The read-only web board (`swarm web`), started by `swarm up` in its own
-        # window. On by default so the run can be followed from a
-        # phone; bound to every interface because the LAN is the point, and open
-        # (no token) by design -- it serves computed JSON only, never
-        # a file by path, and redacts anything shaped like a secret.
-        web_enabled=_bool_env("SWARM_WEB", web.get("enabled", True)),
-        web_host=os.environ.get("SWARM_WEB_HOST", str(web.get("host", "0.0.0.0"))),
-        web_port=_int_env("SWARM_WEB_PORT", web.get("port"), 8765, minimum=0),
-        # Usage caps (see caps.py): the supervisor reads the 5-hour and weekly
-        # figures every `check_s` and applies `rules` at the swarm level. A tap
-        # reading older than `stale_s` is not trusted, and is the one moment the
-        # supervisor asks Claude Code's usage endpoint instead.
-        usage_enabled=_bool_env("SWARM_USAGE", usage.get("enabled", True)),
-        usage_check_s=_int_env("SWARM_USAGE_CHECK", usage.get("check_s"), 600, minimum=60),
-        usage_stale_s=_int_env("SWARM_USAGE_STALE", usage.get("stale_s"), 1800, minimum=300),
-        usage_rules=_usage_rules(usage.get("rules", USAGE_RULES_DEFAULT)),
-    )
-
-
-#: What ``claude --effort`` accepts (CLI 2.1.276). "" means pass nothing.
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
-
-#: ``[operator].notify``: ``attention`` pings only an outcome passed
-#: ``--attention``; ``all`` pings every outcome; ``none`` pings no outcome.
-OPERATOR_NOTIFY = ("attention", "all", "none")
-OPERATOR_NOTIFY_DEFAULT = "attention"
-
-#: ``[telegram].pings``: ``necessary`` sends only what needs the owner (the
-#: rest is logged, and folded into the Overseer's summary); ``all`` sends every
-#: ping the swarm has.
-PINGS = ("necessary", "all")
-PINGS_DEFAULT = "necessary"
-
-
-#: ``[usage].rules``: which window, at what percentage, does what.
-USAGE_WINDOWS = ("week", "five_hour")
-USAGE_ACTIONS = ("pause", "down")
-USAGE_RULES_DEFAULT = (
-    {"window": "week", "at": 60, "action": "pause"},
-    {"window": "week", "at": 70, "action": "down"},
-    {"window": "five_hour", "at": 90, "action": "pause"},
-)
-
-
-def _usage_rules(raw: object) -> list[dict]:
-    """Validated ``[usage].rules``. A malformed rule fails the load, like a bad
-    effort: a cap that silently does not apply is worse than a loud error."""
-    if not isinstance(raw, (list, tuple)):
-        raise ValueError(f"[usage].rules must be a list of tables, got {raw!r}")
-    out = []
-    for i, rule in enumerate(raw):
-        where = f"[usage].rules[{i}]"
-        if not isinstance(rule, dict):
-            raise ValueError(f"{where} must be a table, got {rule!r}")
-        window, action, at = rule.get("window"), rule.get("action"), rule.get("at")
-        if window not in USAGE_WINDOWS:
-            raise ValueError(f"{where}.window must be one of {', '.join(USAGE_WINDOWS)}, "
-                             f"got {window!r}")
-        if action not in USAGE_ACTIONS:
-            raise ValueError(f"{where}.action must be one of {', '.join(USAGE_ACTIONS)}, "
-                             f"got {action!r}")
-        if isinstance(at, bool) or not isinstance(at, (int, float)) or not 0 < at <= 100:
-            raise ValueError(f"{where}.at must be a percentage above 0 and at most 100, "
-                             f"got {at!r}")
-        out.append({"window": window, "at": at, "action": action})
-    return out
-
-
-def _choice(value: object, choices: tuple[str, ...], default: str) -> str:
-    """A valid choice; anything else is ``default``.
-
-    Deliberately not a load error like :func:`_effort`: every ``swarm`` command
-    that pings (``done``, ``operator-done``) loads the config, and a typo in a
-    notification setting must never stop a finish from being recorded.
-    """
-    mode = str(value or "").strip().lower()
-    return mode if mode in choices else default
-
-
-def _effort(value: object) -> str:
-    """A validated ``[worker].effort``; a typo fails at load, not in every pane."""
-    level = str(value or "").strip().lower()
-    if level and level not in EFFORTS:
-        raise ValueError(f"[worker].effort must be one of {', '.join(EFFORTS)} or \"\", got {value!r}")
-    return level
-
-
-def _int_env(name: str, value: object, default: int, minimum: int) -> int:
-    """An int config value, floored at ``minimum``: the env override, else the
-    config value, else the code default — the first that parses. ``default`` is
-    always a valid int, so a malformed env override *or* a wrong-type config
-    value degrades to it instead of crashing ``load()`` for every command."""
-    for candidate in (os.environ.get(name), value, default):
-        if candidate is None:
-            continue
-        try:
-            return max(minimum, int(candidate))
-        except (TypeError, ValueError):
-            continue
-    return max(minimum, default)
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return raw.strip().lower() not in ("", "0", "false", "no", "off")
-
-
-def _git_repos(git: dict) -> list[str]:
-    """Globs (relative to the project root) that select the component repos a
-    phase's worktree mirror should include, besides the umbrella itself.
-
-    Default ``["*"]`` = every independent git repo that is a direct child of the
-    project root (matches a monorepo-of-repos like myproject). Set explicitly for
-    nested layouts, e.g. ``repos = ["*", "packages/*"]``. ``SWARM_GIT_REPOS`` (a
-    comma-separated list) overrides for tests/one-offs. A single-repo project
-    simply matches nothing here and gets a one-repo (umbrella-only) mirror.
-    """
-    env = os.environ.get("SWARM_GIT_REPOS")
-    if env is not None:
-        return [s.strip() for s in env.split(",") if s.strip()]
-    return [str(p) for p in git.get("repos", ["*"])]
+    values = {name: s.read(data.get(s.table, {}), pdir)
+              for name, s in SETTINGS.items() if s.table != CLI}
+    return Config(project_dir=pdir, **values)
 
 
 def claude_version() -> str:

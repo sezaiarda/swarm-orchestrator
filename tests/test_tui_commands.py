@@ -19,8 +19,7 @@ import pytest
 pytest.importorskip("textual")
 
 from swarm_orchestrator import cli  # noqa: E402
-from swarm_orchestrator import reload as reload_mod  # noqa: E402
-from swarm_orchestrator.config import load as load_config  # noqa: E402
+from swarm_orchestrator.config import SETTINGS, load as load_config  # noqa: E402
 from swarm_orchestrator.tui import commands as cm  # noqa: E402
 
 
@@ -210,9 +209,9 @@ def cfg(tmp_path, monkeypatch):
     """
     project = tmp_path / "project"
     project.mkdir()
-    for policy in reload_mod.POLICY.values():
-        if policy.env:
-            monkeypatch.delenv(policy.env, raising=False)
+    for setting in SETTINGS.values():
+        if setting.env:
+            monkeypatch.delenv(setting.env, raising=False)
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("SWARM_DRIVER", "bare")
     cfg = load_config(project_dir=str(project))

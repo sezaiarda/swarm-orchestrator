@@ -1,8 +1,10 @@
 # `.swarm.toml` reference
 
-Every key the loader reads (`src/swarm_orchestrator/config.py`), with its default,
-the environment variable that overrides it, and what `swarm reload` does with an
-edit to it. The file lives at the project root (or pass `--config`). A missing
+Every key the loader reads, with its default, the environment variable that
+overrides it, and what `swarm reload` does with an edit to it. Each key is
+declared once, on its `Config` field in `src/swarm_orchestrator/config.py`; the
+loader, `swarm reload` and the TUI config form all read that declaration, and a
+test checks these tables against it. The file lives at the project root (or pass `--config`). A missing
 table or key takes the default, so a minimal file works.
 
 A key the loader does not read is ignored, so a file that still sets a retired

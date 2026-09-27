@@ -6,13 +6,11 @@ bytes they already have in ``$EDITOR``, asks them to remember from memory what
 ``done_grace_s`` does, and answers none of the only question that matters at 2am
 — *if I change this, when does it actually take effect?*
 
-So this is a form. Every ``init`` field of :class:`~swarm_orchestrator.config.Config`
+So this is a form. Every setting in :data:`~swarm_orchestrator.config.SETTINGS`
 gets a row: a typed widget, the live value, one line of what it does, and its
-reload class taken straight from :data:`~swarm_orchestrator.reload.POLICY` — HOT
-(now), NEXT (next worker/master launch), RESTART (needs ``swarm down``/``up``).
-That classification is never re-derived here. POLICY is the single source of
-truth for it, and :func:`reload.coverage_gap` already refuses to let a new Config
-field exist without one, so this screen cannot silently fall behind the config.
+reload class — HOT (now), NEXT (next worker/master launch), RESTART (needs
+``swarm down``/``up``). All of that is read from the setting, which is declared
+once, on the :class:`Config` field itself, so this screen cannot fall behind it.
 
 Three things are load-bearing.
 
@@ -48,7 +46,6 @@ import os
 import re
 import tempfile
 import tomllib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -59,9 +56,8 @@ from textual.widgets import Button, Input, RadioButton, RadioSet, Select, Static
 from textual import work
 
 from .. import reload as reload_mod
-from ..config import EFFORTS, OPERATOR_NOTIFY, PINGS, load as load_config
-from ..reload import HOT, NEXT, POLICY, RESTART
-from ..tmux import LAYOUTS
+from ..config import (BOOL, CHOICE, FROZEN, HOT, INT, LIST, NEXT, RESTART, SETTINGS,
+                      Setting, load as load_config)
 from . import probes
 from .dash import Dash
 from .data import read_state
@@ -322,202 +318,20 @@ def toml_set_many(text: str, edits: dict[tuple[str, str], Any]) -> str:
 
 
 # ==========================================================================
-# The settings model: what each field is, and one line of what it does.
-#
-# The reload class, the TOML table, the key and the env var all come from
-# POLICY. What POLICY does not carry is the *widget* (it is a policy table, not
-# a UI) and a plain-English line of what the setting is for — which is the whole
-# reason the owner should not have to remember what `done_grace_s` means. Those
-# two live here, and `test_tui_config.py` asserts this table covers POLICY
-# exactly, so a field can never reach Config without reaching this screen.
+# The settings model: every row is a :class:`config.Setting`, drawn in the
+# order :class:`Config` declares them. The widget follows its kind, the tooltip
+# is its reload reason, and the description is its one-line ``doc``.
 # ==========================================================================
 
-INT = "int"
-STR = "str"
-BOOL = "bool"
-LIST = "list"
-CHOICE = "choice"
-FROZEN = "frozen"  # shown, never editable here: not a file value, or not a scalar
-
-# The order the tables are drawn in — the order the file itself uses.
-SECTION_ORDER = ("swarm", "worker", "tasks", "telegram", "tmux", "build", "gc", "backup", "git",
-                 "operator", "overseer", "usage", "big_picture", "tui", "web", "(cli)")
-
-
-@dataclass(frozen=True)
-class Setting:
-    """One row of the form: a Config field, a widget kind, and a description."""
-
-    name: str
-    kind: str
-    doc: str
-    choices: tuple[str, ...] = ()
-    minimum: int | None = None
-
-    @property
-    def policy(self):
-        return POLICY[self.name]
-
-    @property
-    def table(self) -> str:
-        """The TOML table name, ``[swarm]`` -> ``swarm``."""
-        return self.policy.section.strip("[]")
-
-    @property
-    def key(self) -> str:
-        return self.policy.key
-
-    @property
-    def klass(self) -> str:
-        return self.policy.klass
-
-    @property
-    def env(self) -> str | None:
-        return self.policy.env
-
-    @property
-    def why(self) -> str:
-        """POLICY's reason for the reload class — the tooltip, never re-worded."""
-        return self.policy.why
-
-
-FIELDS: tuple[Setting, ...] = (
-    # -- [swarm] ----------------------------------------------------------
-    Setting("max_workers", INT, "phases in flight at once (one pane each)", minimum=1),
-    Setting("watchdog_s", INT, "seconds between liveness sweeps; 0 = off",
-            minimum=0),
-    Setting("master_model", STR, 'model for the master session; "" inherits'),
-    Setting("master_cmd", STR, 'command the master pane runs; "" = the built-in'),
-    Setting("resolver_cmd", STR, "command that opens a conflict-resolver session"),
-    Setting("resolver_model", STR, 'model for the resolver; "" inherits'),
-    Setting("driver", CHOICE, "tmux = real panes; bare = headless test driver",
-            choices=("tmux", "bare")),
-    Setting("slug", STR, "names this run's state dir — its identity on disk"),
-    # -- [worker] ---------------------------------------------------------
-    Setting("done_grace_s", INT,
-            "seconds a worker holds its slot after `done`", minimum=0),
-    Setting("park_after", INT,
-            "seconds a worker may wait on you before parking", minimum=0),
-    Setting("command_template", STR, "prime line typed into a new pane ({phase} expands)"),
-    Setting("command_file", STR, "slash-command file the init master patches"),
-    Setting("worker_cmd", STR, "command each worker pane is launched with"),
-    Setting("worker_settings", STR, "settings JSON merged into each worker's `claude`"),
-    Setting("worker_effort", CHOICE, 'claude --effort per worker; "" = inherit yours',
-            choices=("", *EFFORTS)),
-    Setting("env_marker", STR, "env var carrying the phase name into the worker"),
-    Setting("ready_marker", STR,
-            '"pane booted" banner; "" = the claude version'),
-    # -- [tasks] ----------------------------------------------------------
-    Setting("ledger", STR, "phase ledger the master reads (project-relative)"),
-    Setting("exclude", LIST, "phases the swarm must never launch (comma-sep)"),
-    Setting("history_dir", STR, "where each phase family's history is filed"),
-    Setting("history_split_kb", INT, "a family file past this splits per phase (KB)",
-            minimum=0),
-    Setting("lessons", STR, "file `swarm lesson` appends to (project-relative)"),
-    Setting("ledger_gate", STR, 'command that checks the ledger; "" = none'),
-    # -- [telegram] -------------------------------------------------------
-    Setting("telegram_notify", STR, "script that sends the swarm's own Telegram pings"),
-    Setting("telegram_commands", BOOL, "answer /usage and /help sent to the swarm bot"),
-    Setting("telegram_pings", CHOICE, "necessary = only what needs you; all = every ping",
-            choices=PINGS),
-    Setting("telegram_push_owed_grace_s", INT, "an owed push pings after this long (s)",
-            minimum=0),
-    # -- [tmux] -----------------------------------------------------------
-    Setting("session", STR, "tmux session name — what you see in `tmux ls`"),
-    Setting("tmux_layout", CHOICE,
-            "pane arrangement (auto = 1 full/2 cols/3+ tiled)",
-            choices=tuple(LAYOUTS)),
-    Setting("tmux_panes_per_window", INT, "worker panes per window before workers-2",
-            minimum=1),
-    # -- [build] ----------------------------------------------------------
-    Setting("build_max_concurrent", INT,
-            "concurrent heavy `swarm build` runs; rest queue", minimum=0),
-    Setting("build_jobs", INT, "CARGO_BUILD_JOBS handed to each build", minimum=0),
-    Setting("build_cache", BOOL, "share one cargo target cache across worktrees"),
-    # -- [gc] -------------------------------------------------------------
-    Setting("gc_auto", BOOL, "prune build output / dead mirrors automatically"),
-    Setting("gc_every_s", INT, "auto gc at most this often (s); 0 = idle-only", minimum=0),
-    Setting("gc_idle_s", INT, "also once per idle stretch this long (s); 0 = off", minimum=0),
-    Setting("gc_keep_days", INT, "keep build output used within N days", minimum=1),
-    Setting("gc_attic_days", INT, "keep set-aside work (swarm-attic refs) N days", minimum=1),
-    # -- [backup] ---------------------------------------------------------
-    Setting("backup_every_s", INT, "back up unmerged work to origin every N s; 0 = off",
-            minimum=0),
-    Setting("backup_on_down", BOOL, "push unmerged work to origin on `swarm down`"),
-    # -- [git] ------------------------------------------------------------
-    Setting("git_isolation", CHOICE,
-            "worktree = own mirror + queue; none = in place",
-            choices=("worktree", "none")),
-    Setting("git_main_branch", STR, "branch the integrator merges phase branches into"),
-    Setting("git_repos", LIST, "globs picking the child repos a mirror includes"),
-    Setting("git_auto_resolve", FROZEN,
-            "glob -> union|keyed:<re>, tried before a resolver"),
-    Setting("git_auto_resolve_check", FROZEN,
-            "glob -> command that must pass after one"),
-    # -- [operator] -------------------------------------------------------
-    Setting("operator_enabled", BOOL,
-            "arm autonomous sessions for `operator` finishes"),
-    Setting("operator_cmd", STR, 'command an operator session runs; "" = built-in'),
-    Setting("operator_model", STR, 'model for an operator session; "" inherits'),
-    Setting("operator_triage_model", STR, "model that decides now vs later"),
-    Setting("operator_notify", CHOICE,
-            "which operator outcomes ping you",
-            choices=OPERATOR_NOTIFY),
-    # -- [overseer] -------------------------------------------------------
-    Setting("overseer_enabled", BOOL, "run periodic Overseer review passes"),
-    Setting("overseer_cmd", STR, 'command an Overseer pass runs; "" = built-in'),
-    Setting("overseer_model", STR, 'model for the Overseer; "" = master_model'),
-    Setting("overseer_min_gap_s", INT, "min seconds between non-urgent passes", minimum=0),
-    Setting("overseer_every_finished", INT, "a pass every N finished phases; 0 = off",
-            minimum=0),
-    Setting("overseer_every_s", INT, "a pass at least this often (s); 0 = off", minimum=0),
-    Setting("overseer_owner_wait_s", INT, "owner-wait age that triggers a pass (s)",
-            minimum=0),
-    Setting("overseer_starve_s", INT, "idle-slot starvation before a pass (s)", minimum=0),
-    Setting("overseer_hold_wait_s", INT, "merge hold a resolver has before a pass (s)",
-            minimum=0),
-    Setting("overseer_timeout_s", INT, "seconds before a hung pass is killed", minimum=1),
-    # -- [usage] ----------------------------------------------------------
-    Setting("usage_enabled", BOOL, "pause or stop the swarm at usage limits"),
-    Setting("usage_check_s", INT, "seconds between usage checks", minimum=60),
-    Setting("usage_stale_s", INT, "a reading older than this is not trusted (s)",
-            minimum=300),
-    Setting("usage_rules", FROZEN, "window, percent and action of each cap"),
-    # -- [big_picture] ----------------------------------------------------
-    Setting("big_picture_every", INT, "refresh every N integrated phases; 0 = off",
-            minimum=0),
-    Setting("big_picture_max_age_h", INT, "refresh a doc this many hours old; 0 = off",
-            minimum=0),
-    Setting("big_picture_doc", STR, "the doc's path inside the project"),
-    Setting("big_picture_model", STR, 'model for a big-picture pass; "" inherits'),
-    Setting("big_picture_cmd", STR, 'command a big-picture pass runs; "" = built-in'),
-    # -- [tui] ------------------------------------------------------------
-    Setting("tui_autostart", BOOL, "open this dashboard automatically at `swarm up`"),
-    Setting("tui_cmd", STR, "command the dashboard pane is respawned with"),
-    # -- [web] ------------------------------------------------------------
-    Setting("web_enabled", BOOL, "start the web board at `swarm up`"),
-    Setting("web_host", STR, "web board bind address (0.0.0.0 = all)"),
-    Setting("web_port", INT, "port the web board listens on", minimum=0),
-    # -- (cli) ------------------------------------------------------------
-    Setting("project_dir", FROZEN, "the project root — --project-dir or the cwd"),
-)
-
-SETTINGS: dict[str, Setting] = {s.name: s for s in FIELDS}
+FIELDS: tuple[Setting, ...] = tuple(SETTINGS.values())
 
 
 def by_section() -> list[tuple[str, list[Setting]]]:
     """The form's groups, in file order, each in declaration order."""
     groups: dict[str, list[Setting]] = {}
     for setting in FIELDS:
-        groups.setdefault(setting.policy.section, []).append(setting)
-    order = {f"[{name}]" if name != "(cli)" else name: i
-             for i, name in enumerate(SECTION_ORDER)}
-    return sorted(groups.items(), key=lambda kv: order.get(kv[0], len(order)))
-
-
-def coverage_gap() -> set[str]:
-    """POLICY fields this form does not draw. Empty is the only healthy answer."""
-    return set(POLICY) ^ set(SETTINGS)
+        groups.setdefault(setting.section, []).append(setting)
+    return list(groups.items())
 
 
 def pinned(cfg, env: dict[str, str] | None = None) -> dict[str, str]:

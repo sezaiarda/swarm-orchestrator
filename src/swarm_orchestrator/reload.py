@@ -8,8 +8,9 @@ run in a state neither the old nor the new config describes.
 
 So this module decides, and decides only. It is pure and side-effect free, in the
 same spirit as :func:`ledger.ready` and :func:`session.plan_worker_windows`: the
-supervisor and the CLI own the doing. :data:`POLICY` classifies **every** ``init``
-field of :class:`Config` into one of three classes, :func:`diff` turns two loaded
+supervisor and the CLI own the doing. Every setting in :data:`config.SETTINGS`
+carries one of three classes (and, where the live run decides, a gate that is
+resolved here); :func:`diff` turns two loaded
 configs plus a description of the live run into a list of :class:`Change`, and
 :func:`hold_over` produces the config that is actually safe to adopt.
 
@@ -58,15 +59,12 @@ from __future__ import annotations
 import dataclasses
 import os
 import time
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .config import Config
+from .config import HOT, NEXT, RESTART, SETTINGS, Config, Setting
 from .state import State
 
-HOT = "hot"
-NEXT = "next"
-RESTART = "restart"
 # Not a policy class — an *outcome*: the file changed (or could) but a SWARM_*
 # variable shadows it, so the reload provably does nothing.
 ENV = "env"
@@ -78,249 +76,7 @@ GATE_LAYOUT = "layout-pinned"
 GATE_IN_FLIGHT = "in-flight"
 GATE_REPOS = "repos-shrink"
 GATE_WATCHDOG = "watchdog-refresh"
-
-
-@dataclass(frozen=True)
-class Policy:
-    """How one config field behaves under a live reload."""
-
-    name: str
-    section: str
-    key: str
-    klass: str
-    env: str | None
-    why: str
-    gate: str | None = None
-    numeric: bool = False  # an int field: a malformed env override does NOT shadow
-
-
-def _p(name, section, key, klass, env, why, gate=None, numeric=False) -> Policy:
-    return Policy(name, section, key, klass, env, why, gate, numeric)
-
-
-POLICY: dict[str, Policy] = {
-    p.name: p
-    for p in (
-        # -- run identity: changing these forks the run ---------------------
-        _p("project_dir", "(cli)", "--project-dir", RESTART, None,
-           "every worktree, lock and repo path is derived from it; the live"
-           " worktrees are under the old one"),
-        _p("slug", "[swarm]", "slug", RESTART, "SWARM_SLUG",
-           "the slug IS the state dir: a new one is a new, empty run while the"
-           " supervisor still holds the old FIFO and flock"),
-        _p("driver", "[swarm]", "driver", RESTART, "SWARM_DRIVER",
-           "the live topology was built by the old driver; swapping it mid-run"
-           " leaves panes nothing can address"),
-        _p("session", "[tmux]", "session", RESTART, "SWARM_SESSION",
-           "every pane and window id recorded in state.json belongs to the old"
-           " tmux session"),
-        _p("tmux_panes_per_window", "[tmux]", "panes_per_window", RESTART,
-           "SWARM_PANES_PER_WINDOW",
-           "the worker windows were paged at `swarm up`; a slot added later"
-           " would follow a different page size than the panes already there",
-           numeric=True),
-        _p("git_isolation", "[git]", "isolation", RESTART, "SWARM_GIT_ISOLATION",
-           "live worktrees and a populated merge queue only make sense under the"
-           " isolation mode that created them"),
-        _p("tui_autostart", "[tui]", "autostart", RESTART, "SWARM_TUI_AUTOSTART",
-           "the dashboard pane is created once, by session.setup at `swarm up`;"
-           " there is no later moment a reload could reach"),
-        _p("tui_cmd", "[tui]", "cmd", RESTART, "SWARM_TUI_CMD",
-           "the dashboard pane is respawned once, by session.setup at `swarm up`;"
-           " a live dash keeps the command it was started with"),
-
-        _p("telegram_commands", "[telegram]", "commands", RESTART, "SWARM_TG_COMMANDS",
-           "the command listener is started once, by `swarm up`, and stopped by"
-           " `swarm down`; there is no later moment a reload could start or stop it"),
-        _p("web_enabled", "[web]", "enabled", RESTART, "SWARM_WEB",
-           "the board's window is created once, by `swarm up`; there is no later"
-           " moment a reload could start or stop it"),
-        _p("web_host", "[web]", "host", RESTART, "SWARM_WEB_HOST",
-           "the listening socket is bound once, when the board starts"),
-        _p("web_port", "[web]", "port", RESTART, "SWARM_WEB_PORT",
-           "the listening socket is bound once, when the board starts",
-           numeric=True),
-
-        # -- hot: re-read at every use --------------------------------------
-        _p("max_workers", "[swarm]", "max_workers", HOT, None,
-           "slots are plain state records; growing appends, shrinking retires",
-           gate=GATE_RESIZE),
-        _p("park_after", "[worker]", "park_after", HOT, "SWARM_PARK_AFTER",
-           "the supervisor reads it when it arms a park timer",
-           gate=GATE_PARK, numeric=True),
-        _p("watchdog_s", "[swarm]", "watchdog_s", HOT, "SWARM_WATCHDOG",
-           "the supervisor caches it as `self.watchdog_s` in __init__, so a"
-           " reload must refresh that attribute too — swapping `self.cfg` alone"
-           " leaves the old sweep interval running",
-           gate=GATE_WATCHDOG, numeric=True),
-        _p("git_auto_resolve", "[git]", "auto_resolve", HOT, None,
-           "gitq._auto_resolve reads the strategy table at the moment a conflict"
-           " happens, so the next conflict uses the new rules — it cannot"
-           " retroactively fix an integration that is already held; retry that one"
-           " with `swarm resolved <phase>` once the tree is clean"),
-        _p("git_auto_resolve_check", "[git]", "auto_resolve_check", HOT, None,
-           "gitq._auto_resolve reads the check table right after it settles a"
-           " conflict, so the next automatic merge runs the new checks"),
-        _p("ledger", "[tasks]", "ledger", HOT, None,
-           "build_context loads the ledger from disk on every pass"),
-        _p("exclude", "[tasks]", "exclude", HOT, None,
-           "ledger.ready() takes the exclusion set as an argument on every pass"),
-        _p("history_dir", "[tasks]", "history", HOT, None,
-           "the ledger writer resolves the history path on every flush"),
-        _p("history_split_kb", "[tasks]", "history_split_kb", HOT, None,
-           "checked each time a family file is appended to", numeric=True),
-        _p("lessons", "[tasks]", "lessons", HOT, None,
-           "the ledger writer resolves the lessons path on every flush"),
-        _p("ledger_gate", "[tasks]", "ledger_gate", HOT, None,
-           "run each time a follow-up row is applied"),
-        _p("telegram_notify", "[telegram]", "notify", HOT, None,
-           "the supervisor resolves the notifier per ping; note that a running"
-           " worker's own `swarm done` ping uses the copy in its worktree mirror"),
-        _p("telegram_pings", "[telegram]", "pings", HOT, "SWARM_TG_PINGS",
-           "every ping reads it when it is sent; a worker's own `swarm done` and"
-           " `swarm waiting`, and an operator's `operator-done`, read the copy in"
-           " their worktree mirror, so theirs changes from the next launch"),
-        _p("telegram_push_owed_grace_s", "[telegram]", "push_owed_grace_s", HOT,
-           "SWARM_PUSH_OWED_GRACE",
-           "the supervisor compares each owed push's age against it after every"
-           " integration and on the watchdog tick", numeric=True),
-        _p("tmux_layout", "[tmux]", "layout", HOT, "SWARM_LAYOUT",
-           "the layout is re-applied whenever worker panes are re-tidied",
-           gate=GATE_LAYOUT),
-        _p("git_main_branch", "[git]", "main_branch", HOT, "SWARM_GIT_MAIN",
-           "the integrator reads it per merge — but a phase mirrored off the old"
-           " main must not then be merged into a different one",
-           gate=GATE_IN_FLIGHT),
-        _p("git_repos", "[git]", "repos", HOT, "SWARM_GIT_REPOS",
-           "the repo set is globbed per worktree_add; adding is safe, but a repo"
-           " dropped between a phase's worktree_add and its integrate is never"
-           " visited, so its branch leaks and its commits never merge",
-           gate=GATE_REPOS),
-
-        # -- next launch: frozen into a pane or an environment at spawn ------
-        _p("master_model", "[swarm]", "master_model", NEXT, None,
-           "baked into the master's command line when the pane is respawned"),
-        _p("master_cmd", "[swarm]", "master_cmd", NEXT, "SWARM_MASTER_CMD",
-           "baked into the master's command line when the pane is respawned"),
-        _p("resolver_cmd", "[swarm]", "resolver_cmd", NEXT, "SWARM_RESOLVER_CMD",
-           "read once, when a conflict opens a resolver pane; an already-open"
-           " resolver keeps the command it was spawned with"),
-        _p("resolver_model", "[swarm]", "resolver_model", NEXT, None,
-           "baked into the resolver's command line when a conflict opens its pane"),
-        _p("command_template", "[worker]", "command_template", NEXT, None,
-           "the prime line is typed into a worker's pane once, at launch"),
-        _p("command_file", "[worker]", "command_file", NEXT, None,
-           "resolved while composing the launch line for a new worker"),
-        _p("env_marker", "[worker]", "env_marker", NEXT, None,
-           "the variable name is written into the worker's environment at spawn;"
-           " a live worker still answers to the old one"),
-        _p("worker_cmd", "[worker]", "worker_cmd", NEXT, "SWARM_WORKER_CMD",
-           "it is the command a pane is respawned with"),
-        _p("ready_marker", "[worker]", "ready_marker", NEXT, "SWARM_READY_MARKER",
-           "only consulted while waiting for a freshly spawned pane to boot"),
-        _p("worker_settings", "[worker]", "worker_settings", NEXT,
-           "SWARM_WORKER_SETTINGS",
-           "merged into the `claude` invocation at spawn time"),
-        _p("worker_effort", "[worker]", "effort", NEXT, "SWARM_WORKER_EFFORT",
-           "passed as `claude --effort` on the command line a pane is spawned with"),
-        _p("done_grace_s", "[worker]", "done_grace_s", NEXT, "SWARM_DONE_GRACE",
-           "`swarm done` runs in the worker's cwd — its worktree mirror — so it"
-           " reads the .swarm.toml copy branched at launch, not this one",
-           numeric=True),
-        _p("build_max_concurrent", "[build]", "max_concurrent", NEXT,
-           "SWARM_BUILD_MAX",
-           "launch._worker_env freezes SWARM_BUILD_MAX into each worker's"
-           " environment, and _int_env gives the environment strict precedence",
-           numeric=True),
-        _p("build_jobs", "[build]", "jobs", NEXT, "SWARM_BUILD_JOBS",
-           "launch._worker_env freezes SWARM_BUILD_JOBS and CARGO_BUILD_JOBS into"
-           " each worker's environment at spawn", numeric=True),
-        _p("build_cache", "[build]", "cache", NEXT, "SWARM_BUILD_CACHE",
-           "only read while linking a new worktree's target/ at worktree_add"),
-        _p("operator_enabled", "[operator]", "enabled", NEXT, "SWARM_OPERATOR",
-           "the gate is read by the worker's own `swarm done`, which runs in its"
-           " worktree mirror — so it reads the .swarm.toml copy branched at"
-           " launch, not this one"),
-        _p("operator_cmd", "[operator]", "cmd", NEXT, "SWARM_OPERATOR_CMD",
-           "read once, when a queued hand-off opens an operator pane; an"
-           " already-open session keeps the command it was spawned with"),
-        _p("operator_model", "[operator]", "model", NEXT, None,
-           "baked into the operator session's command line when its pane is"
-           " spawned"),
-        _p("operator_triage_model", "[operator]", "triage_model", NEXT, None,
-           "triage is spawned by the worker's `swarm done` from its worktree"
-           " mirror, so it reads the branched .swarm.toml copy"),
-        _p("operator_notify", "[operator]", "notify", NEXT, "SWARM_OPERATOR_NOTIFY",
-           "read by the session's own `swarm operator-done`, which under worktree"
-           " isolation runs in its mirror and reads the .swarm.toml copy branched"
-           " when the job opened; the next job reads this one"),
-        _p("overseer_enabled", "[overseer]", "enabled", HOT, "SWARM_OVERSEER",
-           "the supervisor's trigger policy reads it on every wake; a pass"
-           " already running is left to finish"),
-        _p("overseer_cmd", "[overseer]", "cmd", NEXT, "SWARM_OVERSEER_CMD",
-           "baked into the Overseer pane's command line when a pass is spawned"),
-        _p("overseer_model", "[overseer]", "model", NEXT, None,
-           "baked into the Overseer session's command line when a pass is spawned"),
-        _p("overseer_min_gap_s", "[overseer]", "min_gap_s", HOT, "SWARM_OVERSEER_MIN_GAP",
-           "read each time the policy asks whether a pass is due", numeric=True),
-        _p("overseer_every_finished", "[overseer]", "every_finished", HOT,
-           "SWARM_OVERSEER_EVERY_FINISHED",
-           "the finished-phase counter is compared against it on every wake",
-           numeric=True),
-        _p("overseer_every_s", "[overseer]", "every_s", HOT, "SWARM_OVERSEER_EVERY",
-           "the cadence clock is compared against it on every wake", numeric=True),
-        _p("overseer_owner_wait_s", "[overseer]", "owner_wait_s", HOT,
-           "SWARM_OVERSEER_OWNER_WAIT",
-           "each waiting phase's age is compared against it on every wake",
-           numeric=True),
-        _p("overseer_starve_s", "[overseer]", "starve_s", HOT, "SWARM_OVERSEER_STARVE",
-           "the starvation episode's age is compared against it on every wake",
-           numeric=True),
-        _p("overseer_hold_wait_s", "[overseer]", "hold_wait_s", HOT,
-           "SWARM_OVERSEER_HOLD_WAIT",
-           "the held merge's age is compared against it on every wake", numeric=True),
-        _p("overseer_timeout_s", "[overseer]", "timeout_s", NEXT, "SWARM_OVERSEER_TIMEOUT",
-           "a pass's deadline is fixed when it starts; the next pass gets the new one",
-           numeric=True),
-        _p("big_picture_every", "[big_picture]", "every", HOT, "SWARM_BIG_PICTURE_EVERY",
-           "the integrated-phase counter is compared against it on every wake",
-           numeric=True),
-        _p("big_picture_max_age_h", "[big_picture]", "max_age_h", HOT,
-           "SWARM_BIG_PICTURE_MAX_AGE_H",
-           "the doc's age is compared against it on every wake", numeric=True),
-        _p("big_picture_doc", "[big_picture]", "doc", HOT, None,
-           "read when a pass is briefed and when its doc lands; a pass already"
-           " running lands at the new path"),
-        _p("big_picture_model", "[big_picture]", "model", NEXT, None,
-           "baked into the session's command line when a pass is spawned"),
-        _p("big_picture_cmd", "[big_picture]", "cmd", NEXT, "SWARM_BIG_PICTURE_CMD",
-           "baked into the session's command line when a pass is spawned"),
-        _p("gc_auto", "[gc]", "auto", HOT, "SWARM_GC_AUTO",
-           "the supervisor's gc scheduler reads it on every wake; a gc already"
-           " running is left to finish"),
-        _p("gc_every_s", "[gc]", "every_s", HOT, "SWARM_GC_EVERY",
-           "the last-run clock is compared against it on every wake", numeric=True),
-        _p("gc_idle_s", "[gc]", "idle_s", HOT, "SWARM_GC_IDLE",
-           "the idle episode's age is compared against it on every wake", numeric=True),
-        _p("gc_keep_days", "[gc]", "keep_days", HOT, "SWARM_GC_KEEP_DAYS",
-           "read when the next gc builds its plan", numeric=True),
-        _p("gc_attic_days", "[gc]", "attic_days", HOT, "SWARM_GC_ATTIC_DAYS",
-           "read when the next gc builds its plan", numeric=True),
-        _p("usage_enabled", "[usage]", "enabled", HOT, "SWARM_USAGE",
-           "a reload re-checks the caps at once; turning them off lifts a usage hold"),
-        _p("usage_check_s", "[usage]", "check_s", HOT, "SWARM_USAGE_CHECK",
-           "the last check's clock is compared against it on every wake", numeric=True),
-        _p("usage_stale_s", "[usage]", "stale_s", HOT, "SWARM_USAGE_STALE",
-           "read by every usage check", numeric=True),
-        _p("usage_rules", "[usage]", "rules", HOT, None,
-           "a reload re-checks the caps at once, so a raised limit lifts its hold"),
-        _p("backup_every_s", "[backup]", "every_s", HOT, "SWARM_BACKUP_EVERY",
-           "the last-pass clock is compared against it on every wake; a pass"
-           " already running is left to finish", numeric=True),
-        _p("backup_on_down", "[backup]", "on_down", HOT, "SWARM_BACKUP_ON_DOWN",
-           "read by `swarm down` itself, which loads the file afresh"),
-    )
-}
+GATES = (GATE_RESIZE, GATE_PARK, GATE_LAYOUT, GATE_IN_FLIGHT, GATE_REPOS, GATE_WATCHDOG)
 
 
 @dataclass
@@ -372,7 +128,7 @@ class Change:
     name: str
     section: str
     key: str
-    klass: str  # the POLICY class
+    klass: str  # the setting's reload class
     effective: str  # what actually happens: HOT / NEXT / RESTART / ENV
     old: Any = None
     new: Any = None
@@ -408,14 +164,14 @@ def diff(old_cfg: Config, new_cfg: Config, facts: Facts) -> list[Change]:
     """Classify every difference between two loaded configs against the live run.
 
     Two kinds of entry come back. Fields whose value actually changed get their
-    :data:`POLICY` class, possibly downgraded by a gate. Fields that did *not*
+    reload class, possibly downgraded by a gate. Fields that did *not*
     change but are pinned by a ``SWARM_*`` variable get an :data:`ENV` entry
     anyway — because a config edit to one of those is invisible here by
     construction (``load()`` applied the same override to both sides), and
     reporting nothing is exactly the silence this is meant to prevent.
     """
     out: list[Change] = []
-    for name, policy in POLICY.items():
+    for name, policy in SETTINGS.items():
         old = getattr(old_cfg, name)
         new = getattr(new_cfg, name)
         shadow = _shadow(policy, facts.env)
@@ -447,7 +203,7 @@ def diff(old_cfg: Config, new_cfg: Config, facts: Facts) -> list[Change]:
     return out
 
 
-def _env_change(policy: Policy, value: Any, var: str) -> Change:
+def _env_change(policy: Setting, value: Any, var: str) -> Change:
     return Change(
         name=policy.name,
         section=policy.section,
@@ -465,7 +221,7 @@ def _env_change(policy: Policy, value: Any, var: str) -> Change:
 
 
 def _apply_gate(
-    change: Change, policy: Policy, old: Any, new: Any, facts: Facts
+    change: Change, policy: Setting, old: Any, new: Any, facts: Facts
 ) -> None:
     """Resolve a policy's gate against the live run, filling effect + actions."""
     if policy.klass == RESTART:
@@ -558,7 +314,7 @@ def _gate_park(change: Change, old: int, new: int, facts: Facts) -> None:
 
 
 def _gate_repos(
-    change: Change, old: list[str], new: list[str], facts: Facts, policy: Policy
+    change: Change, old: list[str], new: list[str], facts: Facts, policy: Setting
 ) -> None:
     """Growing ``[git].repos`` is free; shrinking it mid-flight leaks a branch."""
     dropped = [g for g in old if g not in new]
@@ -578,7 +334,7 @@ def _gate_repos(
     change.effect = "applied now — growing the repo set is always safe"
 
 
-def _shadow(policy: Policy, env: dict[str, str]) -> str | None:
+def _shadow(policy: Setting, env: dict[str, str]) -> str | None:
     """The ``SWARM_*`` variable that overrides this field, if it is really set.
 
     A numeric field is only shadowed by a value that *parses*: :func:`config._int_env`
@@ -723,9 +479,3 @@ def _fmt(value: Any) -> str:
         return "{" + ", ".join(f"{k}={v}" for k, v in sorted(value.items())) + "}"
     return str(value)
 
-
-def coverage_gap() -> set[str]:
-    """Config fields :data:`POLICY` does not classify. Empty is the only healthy
-    answer; the policy test asserts it, so a new field cannot be added to
-    :class:`Config` without someone deciding what a reload should do with it."""
-    return {f.name for f in fields(Config) if f.init} ^ set(POLICY)

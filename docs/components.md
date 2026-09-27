@@ -882,6 +882,9 @@ with `--attention`, and a decision with `--ask "<question>"`; either opens an as
   every `fail` pings. Which failure this is comes from `done/<phase>.jsonl`: a
   `swarm done` that finds no sentinel of its status opens a new episode
   (`"fresh": true`), and `swarm retry` removes the sentinel;
+- phases that finish `blocked` (past that retry), gathered: one ping 15 minutes
+  after the first of a burst lists every phase blocked since, grouped by reason
+  (the recap's first sentence), so one outside cause is one ping;
 - a repo still owing a push after `[telegram].push_owed_grace_s` (default 1 h),
   checked after every integration and on the watchdog tick; the "pushed" ping
   follows only if the "owed" one went out;

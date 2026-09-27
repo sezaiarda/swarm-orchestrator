@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import blockedping
 from . import gitq
 from . import ledger as ledger_mod
 from . import ledgerw
@@ -1049,6 +1050,11 @@ def done(
         held = None
         if status == statuses.FAIL and episode <= 1 and cfg.overseer_enabled:
             held = telegram.hold(cfg, "a first fail: the Overseer retries it once")
+        elif spelling == statuses.BLOCKED:
+            # One outside cause blocks many phases at once: one ping for the burst.
+            held = telegram.hold(cfg, blockedping.HELD)
+            if held:
+                blockedping.gather(cfg, phase, note)
         sent = telegram.notify_detail(
             cfg.telegram_notify,
             _completion_ping(phase, status, note) or "",

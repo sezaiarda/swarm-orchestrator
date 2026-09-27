@@ -400,3 +400,37 @@ def test_a_resolver_messaging_the_owner_tells_the_supervisor_it_gave_up(
     monkeypatch.setenv("SWARM_SESSION_ID", "overseer:x")
     cli.cmd_notify(cfg, "hello")
     assert poked == ["resolver-escalated P1\n"]
+
+
+# -- a burst of `blocked` finishes is one ping -----------------------------------
+def test_blocked_phases_of_one_burst_are_one_ping_grouped_by_reason(cfg, sink):
+    from swarm_orchestrator import blockedping
+    from swarm_orchestrator.logutil import Log
+
+    wall = "The live box refuses this host's ssh key. Deploy needs it."
+    for phase in ("P1", "P2", "P3"):
+        result = launch.done(cfg, phase, "blocked", f"{phase}: {wall}")
+        assert result.ping == "held"
+    launch.done(cfg, "P4", "blocked", "the vendor API is down")
+    assert sent(sink) == []
+    assert [r["suppressed"] for r in ledger(cfg.state_dir)] == [blockedping.HELD] * 4
+
+    log = Log(cfg.supervisor_log)
+    start = blockedping.deadline(cfg) - blockedping.GATHER_S
+    assert not blockedping.flush(cfg, log, start + blockedping.GATHER_S - 1)
+    assert blockedping.flush(cfg, log, start + blockedping.GATHER_S)
+    assert not blockedping.flush(cfg, log, start + 2 * blockedping.GATHER_S)  # nothing left
+    log.close()
+    assert "\n".join(sent(sink)) == (
+        "swarm: 4 phases are blocked and need you\n"
+        "- The live box refuses this host's ssh key. (P1, P2, P3)\n"
+        "- the vendor API is down (P4)"
+    )
+    assert blockedping.deadline(cfg) is None
+
+
+def test_every_blocked_phase_pings_under_all_pings(cfg, sink, monkeypatch):
+    monkeypatch.setattr(cfg, "telegram_pings", telegram.ALL)
+    launch.done(cfg, "P1", "blocked", "the box refuses the key")
+    launch.done(cfg, "P2", "blocked", "the box refuses the key")
+    assert len(sent(sink)) == 2

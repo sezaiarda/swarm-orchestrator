@@ -51,7 +51,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `done <phase> [ok\|operator\|fail\|blocked\|later] ["recap"] [--after YYYY-MM-DD] [--force]` | Signal completion. Writes the sentinel, then pings, routes and pokes as the status says. `blocked` and `later` are handled as `fail`; `later` pings nobody and, with `--after`, keeps the row from running before that date. The recap is also queued for the ledger (below). Refused, before anything is written, for a malformed phase id, a phase no worker is running, or (inside a worker) a phase other than the worker's own. A repeat for a phase already recorded is a no-op. |
+| `done <phase> [ok\|operator\|fail\|blocked\|later] ["recap"] [--after YYYY-MM-DD] [--force]` | Signal completion. Writes the sentinel, then pings, routes and pokes as the status says. `blocked` and `later` are handled as `fail`; `blocked` phases that finish close together share one ping; `later` pings nobody and, with `--after`, keeps the row from running before that date. The recap is also queued for the ledger (below). Refused, before anything is written, for a malformed phase id, a phase no worker is running, or (inside a worker) a phase other than the worker's own. A repeat for a phase already recorded is a no-op. |
 | `waiting <phase> ["question"]` | Tell the owner you are blocked on them. Arms the park timer. |
 | `resumed <phase> ["answer"]` | The owner answered. Records the answer and cancels the park. |
 | `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |

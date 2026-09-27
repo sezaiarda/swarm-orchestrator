@@ -53,6 +53,7 @@ from . import ask as ask_mod
 from . import caps
 from . import backup as backup_mod
 from . import bigpic as bigpic_mod
+from . import blockedping
 from . import doctor as doctor_mod
 from . import drain as drain_mod
 from . import gc as gc_mod
@@ -254,6 +255,7 @@ class Supervisor:
                 self._dispatch("overseer", self._overseer_tick)
                 self._dispatch("big-picture", self.bigpic.tick)
                 self._dispatch("gc", self._gc_tick)
+                self._dispatch("blocked-pings", blockedping.flush, self.cfg, self.log)
                 self._dispatch("usage", self._usage_tick)
                 self._dispatch("backup", self._backup_tick)
                 self._dispatch("drain", self._drain_tick)
@@ -1132,6 +1134,9 @@ class Supervisor:
         if self._overseer_live is not None and deadline > now:
             stamps.append(deadline)
         stamps.extend(t for t in self._gc_deadlines() if t > now)
+        blocked_at = blockedping.deadline(self.cfg)
+        if blocked_at is not None:
+            stamps.append(max(now, blocked_at))
         if self.cfg.usage_enabled and self._usage_last + self.cfg.usage_check_s > now:
             stamps.append(self._usage_last + self.cfg.usage_check_s)
         if self.cfg.backup_every_s and not self._backup_running():

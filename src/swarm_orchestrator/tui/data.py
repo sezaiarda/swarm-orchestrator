@@ -316,6 +316,8 @@ class Snapshot:
     usage_hold: str = ""
     #: ``State.drain``: the run is winding down to a stop (see :mod:`drain`).
     drain: dict = field(default_factory=dict)
+    #: ``State.pause_at``: when a scheduled pause happens; 0.0 when none is.
+    pause_at: float = 0.0
     finished: bool = False
     master_alive: bool = False
     supervisor_pid: int | None = None
@@ -571,6 +573,7 @@ def build_snapshot(
         paused=bool(state.get("paused")),
         usage_hold=" ".join(caps.describe_hold(state.get("usage_hold") or {}, time.time())),
         drain=dict(state.get("drain") or {}) if isinstance(state.get("drain"), dict) else {},
+        pause_at=_as_float(state.get("pause_at")) or 0.0,
         finished=bool(state.get("finished")),
         master_alive=bool(state.get("master_alive")),
         supervisor_pid=pid if isinstance(pid, int) else None,

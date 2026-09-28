@@ -25,6 +25,7 @@ from . import buildsem
 from . import notes as notes_mod
 from . import operator as operator_mod
 from . import owner as owner_mod
+from . import pauseat
 from . import opqueue
 from . import overseer as overseer_mod
 from . import ovrecord
@@ -1642,11 +1643,67 @@ def _warn_if_no_supervisor(cfg: Config, what: str) -> None:
         )
 
 
-def cmd_pause(cfg: Config) -> int:
+def cmd_pause(cfg: Config, delay: str | None = None, at: str | None = None,
+              cancel: bool = False) -> int:
+    """Pause now, or (``--in`` / ``--at``) schedule the pause for later, or drop
+    the one scheduled. There is only ever one: a new schedule replaces it."""
+    if cancel:
+        return cmd_pause_cancel(cfg)
+    if delay or at:
+        return cmd_pause_schedule(cfg, delay, at)
     with state_mod.transaction(cfg) as st:
         st.paused = True
     print("swarm paused — no new workers launch; in-flight workers finish")
     _warn_if_no_supervisor(cfg, "pause")
+    return 0
+
+
+def _log_pause_schedule(cfg: Config, message: str) -> None:
+    log = Log(cfg.supervisor_log)
+    try:
+        log.line(message)
+    finally:
+        log.close()
+
+
+def cmd_pause_schedule(cfg: Config, delay: str | None, at: str | None) -> int:
+    """Record when the supervisor pauses the swarm, and wake it so its next
+    wake-up counts the moment in."""
+    now = time.time()
+    try:
+        pause_at = now + pauseat.parse_in(delay) if delay else pauseat.next_at(at or "", now)
+    except ValueError as exc:
+        print(f"swarm pause: {exc}", file=sys.stderr)
+        return 2
+    with state_mod.transaction(cfg) as st:
+        prior = st.pause_at
+        st.pause_at = pause_at
+    replaced = f" replaces={pauseat.stamp(prior)}" if prior else ""
+    _log_pause_schedule(cfg, f"PAUSE-SCHEDULED at={pauseat.stamp(pause_at)}"
+                             f" in={pause_at - now:.0f}s{replaced}")
+    _poke(cfg, "pause-scheduled")
+    print(f"swarm pauses at {pauseat.when(pause_at, now)} — then no new workers launch;"
+          " in-flight workers finish")
+    if prior:
+        print(f"  this replaces the pause that was scheduled for {pauseat.when(prior, now)}")
+    print("  `swarm pause --cancel` drops it; `swarm resume` drops it too")
+    _warn_if_no_supervisor(cfg, "pause")
+    return 0
+
+
+def cmd_pause_cancel(cfg: Config) -> int:
+    now = time.time()
+    with state_mod.transaction(cfg) as st:
+        prior = st.pause_at
+        st.pause_at = 0.0
+        paused = st.paused
+    if not prior:
+        print("no pause is scheduled")
+        return 0
+    _log_pause_schedule(cfg, f"PAUSE-SCHEDULE-CANCELLED at={pauseat.stamp(prior)} by=cancel")
+    _poke(cfg, "pause-scheduled")
+    print(f"scheduled pause at {pauseat.when(prior, now)} cancelled — "
+          + ("the swarm is still paused" if paused else "launching carries on"))
     return 0
 
 
@@ -1656,6 +1713,9 @@ def cmd_resume(cfg: Config, override_cap: bool = False) -> int:
     now = time.time()
     with state_mod.transaction(cfg) as st:
         st.paused = False
+        # "Go on" also means not later: a scheduled pause would silently undo it.
+        scheduled = st.pause_at
+        st.pause_at = 0.0
         # A resume is "go on": it cancels a drain too, unless the stop has begun.
         drained = bool(st.drain) and not st.drain.get("stopping_at")
         if drained:
@@ -1665,9 +1725,14 @@ def cmd_resume(cfg: Config, override_cap: bool = False) -> int:
             for window, h in hold.items():
                 st.usage_override[window] = h.get("resets_at") or now
             st.usage_hold = {}
+    if scheduled:
+        _log_pause_schedule(
+            cfg, f"PAUSE-SCHEDULE-CANCELLED at={pauseat.stamp(scheduled)} by=resume")
     _poke(cfg, "resume")
     if drained:
         print("drain cancelled")
+    if scheduled:
+        print(f"scheduled pause at {pauseat.when(scheduled, now)} cancelled")
     if hold and not override_cap:
         for line in caps.describe_hold(hold, now):
             print(line)
@@ -1801,6 +1866,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["telegram_bot"] = tgbot.status_line(cfg)
         data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
         data["drain_line"] = drain_mod.line(st.drain)
+        data["pause_line"] = pauseat.line(st.pause_at)
         data["big_picture"] = bigpic_mod.status_text(cfg, bigpic_mod.load(cfg))
         data["owner_rows"] = [{"row": r, "blocks": n}
                               for r, n in owner_mod.current_owner_rows(cfg, st)]
@@ -1815,6 +1881,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     ]
     if st.drain:
         lines.insert(1, drain_mod.line(st.drain))
+    if st.pause_at:
+        lines.insert(1, pauseat.line(st.pause_at))
     for s in st.slots:
         mark = f"BUSY {s.phase}" if s.busy else "free"
         wt = f" branch={s.branch}" if s.branch else ""
@@ -1922,8 +1990,14 @@ def _build_parser() -> argparse.ArgumentParser:
     stp.add_argument("--all", action="store_true",
                      help="include the full done map (default: counts per status)")
     stp.set_defaults(func=lambda cfg, a: cmd_status(cfg, as_json=a.json, show_all=a.all))
-    sub.add_parser("pause", help="stop launching new workers (in-flight finish)").set_defaults(
-        func=lambda cfg, a: cmd_pause(cfg))
+    pap = sub.add_parser(
+        "pause", help="stop launching new workers (in-flight finish), now or later")
+    when = pap.add_mutually_exclusive_group()
+    when.add_argument("--in", dest="delay", metavar="DURATION",
+                      help="pause this long from now: 12h, 90m, 1h30m, 2d")
+    when.add_argument("--at", metavar="HH:MM", help="pause at the next HH:MM, local time")
+    when.add_argument("--cancel", action="store_true", help="drop a scheduled pause")
+    pap.set_defaults(func=lambda cfg, a: cmd_pause(cfg, a.delay, a.at, a.cancel))
     rsm = sub.add_parser("resume", help="resume launching workers into free slots")
     rsm.add_argument("--override-cap", action="store_true",
                      help="also run through a usage cap's hold until its window resets")

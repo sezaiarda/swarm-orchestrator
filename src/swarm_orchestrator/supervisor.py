@@ -65,6 +65,7 @@ from . import owner as owner_mod
 from . import overseer as overseer_mod
 from . import ovdigest
 from . import ovrecord
+from . import pauseat
 from . import pushowed
 from . import resolver as resolver_mod
 from . import ledger as ledger_mod
@@ -243,7 +244,9 @@ class Supervisor:
                     continue
                 # Fire on EVERY wake — a FIFO event, a park-deadline timeout or a
                 # watchdog tick (the latter two leave `ready` empty and fall
-                # through the guard below).
+                # through the guard below). A due scheduled pause goes first, so
+                # nothing this wake does can launch past it.
+                self._dispatch("scheduled-pause", self._pause_at_tick)
                 self._dispatch("park-deadlines", self._check_park_deadlines)
                 self._dispatch("operator-queue", self._check_operator_queue)
                 self._dispatch("watchdog", self._watchdog_tick)
@@ -397,6 +400,10 @@ class Supervisor:
             self._on_resume()
         elif verb == "drain":
             self._on_drain()
+        elif verb == "pause-scheduled":
+            # `swarm pause --in/--at/--cancel`: the poke is only a wake, so the
+            # next `select` timeout counts the new moment in (or drops it).
+            self.log.line("EVENT pause-scheduled")
         elif verb == "reload":
             self._on_reload()
         elif verb == "operator":
@@ -1048,7 +1055,12 @@ class Supervisor:
         and with ``watchdog_s = 0`` there is no other wake at all. A deadline
         already in the past clamps to 0.0 so the next wake acts on it
         immediately."""
-        stamps = list(state_mod.read(self.cfg).waiting.values())
+        st = state_mod.read(self.cfg)
+        stamps = list(st.waiting.values())
+        # A scheduled pause. One already due clamps to 0.0 below, so the very
+        # next wake (the first one after a restart, say) sets it.
+        if st.pause_at:
+            stamps.append(st.pause_at)
         queued = opqueue.next_deadline(self.cfg)
         if queued is not None:
             stamps.append(queued)
@@ -1068,7 +1080,7 @@ class Supervisor:
         ov = self.overseer.next_deadline(now)
         if ov is not None:
             stamps.append(ov)
-        deadline = state_mod.read(self.cfg).overseer_deadline
+        deadline = st.overseer_deadline
         if self._overseer_live is not None and deadline > now:
             stamps.append(deadline)
         stamps.extend(t for t in self._gc_deadlines() if t > now)
@@ -1105,6 +1117,24 @@ class Supervisor:
             return deadline
         cap = max(0.0, self._last_sweep + self.watchdog_s - time.time())
         return cap if deadline is None else min(deadline, cap)
+
+    def _pause_at_tick(self) -> None:
+        """Pause the swarm once its scheduled pause is due, exactly as
+        ``swarm pause`` does: no new workers launch, running ones finish.
+
+        Runs on every wake; :meth:`_next_timeout` makes sure there is one at the
+        moment, and the first wake after a restart catches one that passed while
+        the supervisor was down."""
+        now = time.time()
+        if not 0 < state_mod.read(self.cfg).pause_at <= now:
+            return
+        with state_mod.transaction(self.cfg) as st:
+            due = st.pause_at
+            if not 0 < due <= now:
+                return  # cancelled or moved since the read above
+            st.pause_at = 0.0
+            st.paused = True
+        self.log.line(f"PAUSE-SCHEDULED-FIRED due={pauseat.stamp(due)} late={now - due:.0f}s")
 
     def _touch(self) -> None:
         """Record that something moved (used to measure a stall)."""

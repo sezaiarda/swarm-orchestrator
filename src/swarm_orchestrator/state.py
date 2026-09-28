@@ -170,6 +170,11 @@ class State:
     # dashboard, the board and ``swarm status`` can say it without asking it.
     # Dropped by ``init_state``: a drain ends with the run it was stopping.
     drain: dict = field(default_factory=dict)
+    # ``swarm pause --in 12h`` / ``--at 03:00``: the moment the supervisor sets
+    # ``paused`` itself (epoch seconds, 0 = none; see :mod:`pauseat`). Survives
+    # ``swarm up`` like a usage hold, so a moment that passed while the swarm
+    # was down pauses it on its first wake.
+    pause_at: float = 0.0
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -424,6 +429,7 @@ class State:
             usage_override=dict(data.get("usage_override") or {}),
             usage_api_at=float(data.get("usage_api_at") or 0.0),
             drain=dict(data.get("drain") or {}),
+            pause_at=float(data.get("pause_at") or 0.0),
         )
 
     @classmethod
@@ -495,6 +501,7 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
         fresh.usage_fired = dict(state.usage_fired)
         fresh.usage_override = dict(state.usage_override)
         fresh.usage_api_at = state.usage_api_at
+        fresh.pause_at = state.pause_at
         fresh.bootstrapping = True  # the supervisor clears it (see the field)
         state.__dict__.update(fresh.__dict__)
         return state

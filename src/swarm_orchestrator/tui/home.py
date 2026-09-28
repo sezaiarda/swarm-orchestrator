@@ -49,6 +49,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from ..drain import line as drain_line
+from ..pauseat import line as pause_line
 from . import probes
 from . import timeline as tl
 from .campaign import active, summarise
@@ -679,6 +680,9 @@ def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None)
         parts.append((f"nothing has happened for {fmt_duration(age)}", BAD))
     elif busy and age is not None and age > STALE_WARN_S:
         parts.append((f"quiet for {fmt_duration(age)}", WARN))
+    # Not a problem, but a hold the owner set for later: said until it happens.
+    if snap.ok and snap.pause_at:
+        parts.append((pause_line(snap.pause_at, now), WARN))
 
     if not parts:
         parts.append(("all clear", OK))

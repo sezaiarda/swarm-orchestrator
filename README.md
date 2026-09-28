@@ -571,7 +571,9 @@ stateDiagram-v2
   `ready` until `swarm retry` clears it (`--cascade` also resets dependents that
   had already run).
 - **Waiting and parked** phases keep the run open until they finish.
-- **Pause:** `swarm pause` holds new launches while running workers finish. A
+- **Pause:** `swarm pause` holds new launches while running workers finish;
+  `swarm pause --in 12h` (or `--at 03:00`) does the same later, `--cancel` drops
+  that, and `swarm status` shows it until it happens. A
   usage cap holds them the same way, on its own record (see
   [Meters, usage and runs](#meters-usage-and-runs)).
 - **Done-ness** comes from the swarm's own records (`state.json`, seeded from

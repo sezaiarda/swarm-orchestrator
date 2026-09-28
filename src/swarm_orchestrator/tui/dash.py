@@ -14,6 +14,7 @@ from .. import bigpic, opqueue, ovrecord
 from .. import pace as pace_mod
 from .. import runs as runs_mod
 from .. import state as state_mod
+from .. import telegram
 from .. import usage as usage_mod
 from ..meters import LIMITS_LOG, METERS_DIR
 from . import probes
@@ -92,6 +93,8 @@ class Dash:
         self.tail = LogTail(cfg.supervisor_log)
         self.snapshot = Snapshot()
         self.notifications: list = []
+        #: When the owner last acknowledged the dropped pings (0 = never).
+        self.pings_acked_at = 0.0
         self.sentinels: dict = {}
         self.recaps: dict = {}
         self.notes: dict = {}
@@ -189,6 +192,9 @@ class Dash:
             changed.add("log")
         if self._changed("notifications", self.notifications_path):
             self.notifications = load_notifications(self.notifications_path)
+            changed.add("notifications")
+        if self._changed("pings-ack", self.cfg.state_dir / telegram.ACK_NAME):
+            self.pings_acked_at = telegram.acked_at(self.cfg.state_dir)
             changed.add("notifications")
         if self._changed("done", self.cfg.done_dir):
             self.sentinels = load_sentinels(self.cfg.done_dir)
@@ -318,7 +324,8 @@ class Dash:
             ticked=self.ticked,
         )
         self.history = build_history(
-            events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes
+            events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes,
+            state=state if isinstance(state, dict) else None, ticked=self.ticked,
         )
         self.eta_runs, _ = eta_sample(self.history, self.epoch)
         self.finished, self.bulk = finish_times(

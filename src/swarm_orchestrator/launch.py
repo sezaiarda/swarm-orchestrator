@@ -31,6 +31,7 @@ from . import state as state_mod
 from . import statuses
 from . import telegram, tmux
 from .config import Config, ready_needle
+from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
 
@@ -381,6 +382,7 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         except gitq.GitError as exc:
             with state_mod.transaction(cfg) as st:
                 st.free_slot_for(phase)
+            logutil.run_ended(log, phase, "launch-failed")
             telegram.notify(
                 cfg.telegram_notify,
                 f"swarm: could not set up a workspace for {phase}, so its worker did not"
@@ -413,6 +415,7 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
                 pass  # the pane is gone: nothing left running in the worktree
         with state_mod.transaction(cfg) as st:
             st.free_slot_for(phase)
+        logutil.run_ended(log, phase, "launch-failed")
         if worktree is not None:
             # An empty mirror goes; one an earlier attempt left work in stays.
             gitq.set_aside(cfg, phase, log)

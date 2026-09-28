@@ -61,6 +61,7 @@ from .data import (
     fmt_clock,
     fmt_coarse,
     fmt_duration,
+    open_drops,
     fmt_range,
     fmt_stamp,
     fmt_when,
@@ -722,9 +723,9 @@ def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None)
     if snap.integ_blocked:
         parts.append((f"merging stopped: {snap.integ_blocked}, "
                       f"{held_merge(snap.integ_blocked_kind)}", BAD))
-    dropped = [n for n in (dash.notifications or []) if n.dropped]
+    dropped = open_drops(dash.notifications or [], getattr(dash, "pings_acked_at", 0.0))
     if dropped:
-        parts.append((f"{len(dropped)} ping(s) never reached your phone", BAD))
+        parts.append((f"{len(dropped)} ping(s) never reached your phone (4, then x clears)", BAD))
 
     busy = any(s.busy for s in snap.slots)
     age = None if snap.last_event_at is None else max(0.0, now - snap.last_event_at)

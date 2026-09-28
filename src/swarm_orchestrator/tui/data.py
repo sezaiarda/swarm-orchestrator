@@ -39,6 +39,7 @@ from .. import ledger as ledger_mod
 from .. import opqueue
 from .. import pace as pace_mod
 from .. import statuses
+from .. import telegram
 from .. import logutil
 from ..logutil import parse_ts
 
@@ -634,6 +635,12 @@ class Notification:
         return not self.delivered and not self.suppressed
 
 
+def open_drops(notifications: list[Notification], acked: float = 0.0) -> list[Notification]:
+    """The pings that never reached the owner and that the owner has not
+    acknowledged (``swarm notify --ack``): what the warnings count."""
+    return [n for n in notifications or [] if n.dropped and telegram.unacknowledged(n.ts, acked)]
+
+
 def parse_notification(line: str) -> Notification | None:
     """One JSONL line, or ``None`` if it isn't a usable object.
 
@@ -903,6 +910,39 @@ def load_all_notes(notes_dir: Path) -> dict[str, list[Note]]:
 
 
 # -- history --------------------------------------------------------------
+#: A phase run whose claim ended without ``swarm done``: ``swarm up`` rebuilt the
+#: slots, the watchdog reaped a dead pane, ``swarm free``/``skip`` let it go, or
+#: its worker never started. Not a ``swarm done`` status: it exists only here.
+LOST = "lost"
+#: How a history status reads, where the status code alone would not say it.
+RUN_WORDS = {LOST: "worker gone", statuses.LEDGER: "done elsewhere"}
+#: Why a run ended without a report, by its ``RUN-ENDED reason=`` (or by what
+#: closed it at read time, for a log written before that line existed).
+ENDED_WHY = {
+    "restart": "the swarm was restarted (`swarm up`) while it held a slot",
+    "reaped": "its pane died and the watchdog freed the slot",
+    "freed": "its slot was freed with `swarm free`",
+    "skipped": "it was skipped with `swarm skip`",
+    "launch-failed": "its worker never started",
+    "relaunched": "the phase was started again before this run reported",
+    "stale": "no slot holds it any more",
+}
+
+
+#: Lines that freed a claimed slot before ``RUN-ENDED`` existed, by what they mean.
+_ENDED_BY = {
+    "watchdog-reap": "reaped",
+    "launch-fail": "launch-failed",
+    "worktree-fail": "launch-failed",
+    "launch-error": "launch-failed",
+}
+
+
+def run_word(status: str | None) -> str | None:
+    """A history status in the owner's words: ``lost`` reads "worker gone"."""
+    return RUN_WORDS.get(status or "", status)
+
+
 @dataclass(frozen=True)
 class PhaseRun:
     """One attempt at one phase, joined across the log, sentinel and recap."""
@@ -917,17 +957,43 @@ class PhaseRun:
     slot: str | None = None
     attempts: int = 0
     notes: int = 0
+    #: Still live, but not in a slot: ``parked``, ``waiting`` or ``integrating``.
+    hold: str = ""
+    #: Why its claim ended without a report (an :data:`ENDED_WHY` key), even when
+    #: a sentinel or the ledger later said how the phase came out.
+    why: str = ""
 
     @property
     def duration_s(self) -> float | None:
         if self.started_at is None:
             return None
+        if self.ended_at is None and self.status is not None:
+            return None  # over, and when it ended is not known
         end = self.ended_at if self.ended_at is not None else time.time()
         return max(0.0, end - self.started_at)
 
     @property
     def running(self) -> bool:
-        return self.started_at is not None and self.ended_at is None
+        return (self.started_at is not None and self.ended_at is None
+                and self.status is None and not self.hold)
+
+
+def _live_holds(state: dict) -> dict[str, str]:
+    """Phase -> how the current state holds it: ``running`` (a busy slot), else
+    ``waiting``, ``parked`` or ``integrating``. Only a busy slot is running."""
+    out: dict[str, str] = {}
+    for phase, _ in normalize_queue(state.get("integ_queue")):
+        out[phase] = "integrating"
+    if isinstance(state.get("integ_blocked"), str):
+        out[state["integ_blocked"]] = "integrating"
+    for name in ("parked", "waiting"):
+        for key in state.get(name) or []:
+            if isinstance(key, str) and ":" not in key:  # a worker's key is its phase
+                out[key] = name
+    for raw in state.get("slots") or []:
+        if isinstance(raw, dict) and raw.get("busy") and isinstance(raw.get("phase"), str):
+            out[raw["phase"]] = "running"
+    return out
 
 
 def build_history(
@@ -936,6 +1002,8 @@ def build_history(
     recaps: dict[str, Recap] | None = None,
     done_dir: Path | None = None,
     notes: dict[str, list[Note]] | None = None,
+    state: dict | None = None,
+    ticked: set[str] | None = None,
 ) -> list[PhaseRun]:
     """Every phase run ever seen, newest first.
 
@@ -945,28 +1013,67 @@ def build_history(
     produced a sentinel — still appears, with whatever times are known. The recap
     summary and the sentinel note attach to the *last* run of each phase, since
     both are single-slot per phase on disk.
+
+    A claim that ended without ``swarm done`` is closed as :data:`LOST` by its
+    ``RUN-ENDED`` line, by the next ``SUPERVISOR-START`` (every start follows
+    ``swarm up``, which rebuilds the slots) or by a fresh claim of the same phase.
+    With ``state`` given, what is still open is checked against it: a run is
+    ``running`` only while a busy slot holds its phase, so a log that never
+    recorded the end cannot keep a dead worker "running". A lost run that left a
+    sentinel reads as that sentinel; one the ledger has ticked since (``ticked``)
+    and this swarm holds no report of reads as "done elsewhere".
     """
     sentinels = sentinels or {}
     recaps = recaps or {}
     ordered = sorted(events, key=lambda e: (e.ts is None, e.ts or 0.0))
     open_runs: dict[str, dict] = {}
     runs: list[dict] = []
+
+    def lose(run: dict, ts: float | None, why: str) -> None:
+        run.update(ended_at=ts, status=LOST, why=why)
+        runs.append(run)
+
     for ev in ordered:
         if ev.kind in ("launch", "claim") and ev.phase:
-            if ev.kind == "claim" and ev.phase in open_runs:
-                continue  # CLAIM then LAUNCH is one run, not two
+            prior = open_runs.get(ev.phase)
+            if prior is not None and ev.kind == "claim":
+                if prior["by"] == "claim":
+                    continue  # the same claim logged twice is one run
+                lose(open_runs.pop(ev.phase), None, "relaunched")
+            elif prior is not None and prior["by"] == "launch":
+                lose(open_runs.pop(ev.phase), None, "relaunched")
+            # else: CLAIM then LAUNCH is one run; the launch is when it started.
             open_runs[ev.phase] = {
                 "phase": ev.phase,
                 "started_at": ev.ts,
                 "slot": ev.fields.get("slot"),
+                "by": ev.kind,
             }
         elif ev.kind == "done" and ev.phase:
             run = open_runs.pop(ev.phase, {"phase": ev.phase, "started_at": None, "slot": None})
             run["ended_at"] = ev.ts
             run["status"] = ev.status
             run["parked"] = ev.fields.get("parked", "").lower() == "true"
+            run["closed"] = "done"
             runs.append(run)
-    runs.extend(open_runs.values())
+        elif ev.kind == logutil.RUN_ENDED.lower() and ev.phase in open_runs:
+            lose(open_runs.pop(ev.phase), ev.ts, ev.fields.get("reason") or "stale")
+        elif ev.kind in _ENDED_BY and ev.phase in open_runs:
+            # A log from before RUN-ENDED: the line that freed the slot is the end.
+            lose(open_runs.pop(ev.phase), ev.ts, _ENDED_BY[ev.kind])
+        elif ev.kind == "supervisor-start":
+            for phase in list(open_runs):
+                lose(open_runs.pop(phase), ev.ts, "restart")
+
+    holds = _live_holds(state) if isinstance(state, dict) else None
+    for run in open_runs.values():
+        hold = "running" if holds is None else holds.get(run["phase"])
+        if hold is None:
+            lose(run, None, "stale")
+            continue
+        if hold != "running":
+            run["hold"] = hold
+        runs.append(run)
 
     seen = {r["phase"] for r in runs}
     for phase, sentinel in sentinels.items():
@@ -978,6 +1085,7 @@ def build_history(
                     "ended_at": sentinel.mtime,
                     "status": sentinel.status,
                     "slot": None,
+                    "closed": "done",
                 }
             )
 
@@ -991,25 +1099,39 @@ def build_history(
         is_last = last_index.get(phase) == idx
         sentinel = sentinels.get(phase) if is_last else None
         recap = recaps.get(phase) if is_last else None
+        status, ended = run.get("status"), run.get("ended_at")
+        if run.get("closed") == "done":
+            # The SENTINEL wins over the log event, not the other way round.
+            # `EVENT done <phase> ok` is not trustworthy as a status: the
+            # merge queue used to hardcode "ok" when advancing an integrated
+            # phase, so every needs-owner run in an existing log reads as ok
+            # (all of them did). The sentinel filename is what the
+            # worker itself wrote and is the durable record every other
+            # consumer treats as authoritative.
+            status = (sentinel.status if sentinel else None) or status
+        elif status == LOST and is_last:
+            start = run.get("started_at")
+            if sentinel and (start is None or (sentinel.mtime or 0.0) >= start):
+                # It did report — with the supervisor down, or after its slot went.
+                status = sentinel.status
+                if sentinel.mtime is not None:
+                    ended = sentinel.mtime if ended is None else min(ended, sentinel.mtime)
+            elif phase in (ticked or ()):
+                status = statuses.LEDGER
         out.append(
             PhaseRun(
                 phase=phase,
-                # The SENTINEL wins over the log event, not the other way round.
-                # `EVENT done <phase> ok` is not trustworthy as a status: the
-                # merge queue used to hardcode "ok" when advancing an integrated
-                # phase, so every needs-owner run in an existing log reads as ok
-                # (all of them did). The sentinel filename is what the
-                # worker itself wrote and is the durable record every other
-                # consumer treats as authoritative.
-                status=(sentinel.status if sentinel else None) or run.get("status"),
+                status=status,
                 started_at=run.get("started_at"),
-                ended_at=run.get("ended_at"),
+                ended_at=ended,
                 summary=recap.summary if recap else "",
                 note=sentinel.note if sentinel else "",
                 parked=bool(run.get("parked")),
                 slot=run.get("slot"),
                 attempts=len(load_attempts(done_dir, phase)) if (done_dir and is_last) else 0,
                 notes=len((notes or {}).get(phase, ())) if is_last else 0,
+                hold=run.get("hold", ""),
+                why=run.get("why", ""),
             )
         )
     out.sort(key=lambda r: (r.ended_at or r.started_at or 0.0), reverse=True)

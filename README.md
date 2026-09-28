@@ -482,6 +482,9 @@ ten tabs, switched with `1`–`9` and `0`, are:
   Every send is logged to `<state>/notifications.jsonl`. `swarm notify` is the
   only way a session should message you, even when a brief or a ledger row
   names another script (a `notify.sh`, say); the prompts say so.
+  Once you have seen the pings that never arrived, `swarm notify --ack` (or `x`
+  on the alerts tab) clears the warning: the footer and `swarm doctor` count
+  only drops after that. The log itself is kept as it is.
 - **What pings you** (`[telegram].pings = "necessary"`, the default): only what
   needs you.
   - a question from a worker, the operator or the Overseer;

@@ -821,15 +821,31 @@ def _check_telegram(cfg: Config) -> list[Check]:
         )
     else:
         failed = [r for r in rows if not r.get("delivered")]
+        acked = telegram.acked_at(cfg.state_dir)
+        open_ = telegram.open_drops(rows, acked)
         last = rows[-1]
         age = _human_age(time.time() - float(last.get("ts") or 0)) if last.get("ts") else "unknown"
-        if failed:
-            recent = str(failed[-1].get("error") or "?")[:120]
+        if open_:
+            recent = str(open_[-1].get("error") or "?")[:120]
+            count = (f"{len(open_)} send(s) DROPPED since you acknowledged the earlier ones"
+                     if acked else f"{len(open_)}/{len(rows)} sends were DROPPED")
+            # Still failing (the newest send was dropped) or failed lately: FAIL.
+            # A problem fixed since then only warns, and the ack clears it.
+            fixed = bool(last.get("delivered")) and not _recent_drop(open_)
             sends = Check(
                 "telegram.sends",
-                FAIL,
-                f"{len(failed)}/{len(rows)} sends were DROPPED; last error: {recent}",
-                "run scripts/notify.sh 'test' by hand and read its stderr",
+                WARN if fixed else FAIL,
+                f"{count}; last error: {recent}"
+                + (f"; sends have worked since, last {age} ago" if fixed else ""),
+                "run scripts/notify.sh 'test' by hand and read its stderr; once you have"
+                " seen them, `swarm notify --ack` (or x on the alerts tab) clears them",
+            )
+        elif failed:
+            sends = Check(
+                "telegram.sends",
+                OK,
+                f"{len(rows)} send(s) logged, none dropped since you acknowledged"
+                f" {len(failed)} earlier drop(s), last {age} ago{held_note}",
             )
         else:
             sends = Check(
@@ -838,6 +854,19 @@ def _check_telegram(cfg: Config) -> list[Check]:
                 f"{len(rows)} send(s) logged, all delivered, last {age} ago{held_note}",
             )
     return [config, sends]
+
+
+#: A dropped ping younger than this is a live problem, whatever came after it.
+RECENT_DROP_S = 6 * 3600
+
+
+def _recent_drop(drops: list[dict], now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    for row in drops:
+        ts = row.get("ts")
+        if isinstance(ts, (int, float)) and now - float(ts) < RECENT_DROP_S:
+            return True
+    return False
 
 
 def _check_disk(cfg: Config) -> list[Check]:

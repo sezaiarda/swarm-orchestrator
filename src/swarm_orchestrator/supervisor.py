@@ -1312,6 +1312,7 @@ class Supervisor:
         with state_mod.transaction(self.cfg) as st:
             st.free_slot_for(phase)
             st.last_event_at = now
+        logutil.run_ended(self.log, phase, "reaped")
         if crash_looping:
             self._ping(
                 f"crash-hold:{phase}",
@@ -1603,7 +1604,9 @@ class Supervisor:
             self.log.line(f"LAUNCH-ERROR {phase} {exc!r}")
             outcome = launch_mod.FAILED
             with state_mod.transaction(cfg) as st:
-                st.free_slot_for(phase)  # don't strand the claim nothing will run
+                held = st.free_slot_for(phase) is not None  # don't strand the claim
+            if held:
+                logutil.run_ended(self.log, phase, "launch-failed")
         with self._launch_lock:
             self._launching.discard(phase)
             if outcome == launch_mod.FAILED:

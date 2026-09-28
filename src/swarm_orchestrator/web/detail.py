@@ -21,7 +21,7 @@ from .. import ledgerw
 from .. import notes as notes_mod
 from .. import opqueue
 from ..tui.campaign import campaign_of
-from ..tui.data import load_attempts
+from ..tui.data import load_attempts, run_word
 from ..why import _exclude_comment
 from .rows import MAX_ROW_CHARS, clip
 
@@ -92,7 +92,8 @@ def phase(cfg, dash, board: dict, rows: dict, metas: dict, pid: str,
         "completion": {"status": sentinel.status, "note": sentinel.note, "ts": sentinel.mtime}
         if sentinel else None,
         "attempts": _attempts(cfg, pid),
-        "runs": [{"started": r.started_at, "ended": r.ended_at, "status": r.status,
+        "runs": [{"started": r.started_at, "ended": r.ended_at,
+                  "status": r.hold or run_word(r.status),
                   "slot": r.slot, "took": r.duration_s if r.started_at else None,
                   "parked": r.parked} for r in runs[:20]],
         "notes": _notes(dash, pid),

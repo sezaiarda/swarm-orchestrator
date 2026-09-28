@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from . import logutil
 from .config import Config
 
 
@@ -206,6 +207,17 @@ class State:
             or phase in self.waiting
             or any(s.busy and s.phase == phase for s in self.slots)
         )
+
+    def claimed_phases(self) -> list[str]:
+        """Every phase with a live worker claim: a busy slot, or a worker that
+        is waiting on the owner or parked. Operator and Overseer keys are not
+        phases and are left out."""
+        out = [s.phase for s in self.slots if s.busy and s.phase]
+        for key in [*self.waiting, *self.parked]:
+            kind, ident = waiter(key)
+            if kind == WORKER and ident not in out:
+                out.append(ident)
+        return out
 
     def integrating(self) -> set[str]:
         """Phases whose finished work is queued or held for merging. Their
@@ -478,7 +490,7 @@ def transaction(cfg: Config) -> Iterator[State]:
             fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
-def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
+def init_state(cfg: Config, windows: dict[str, str] | None = None, log=None) -> State:
     """Rebuild the run's slots from config, preserving completed-phase progress.
 
     ``swarm up`` re-derives the slot list from ``max_workers`` (so a changed
@@ -488,8 +500,15 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None) -> State:
     not re-run already-finished phases. A genuinely clean slate = delete the state
     dir. First boot has no prior file, so ``done`` starts empty as before. Owed
     pushes carry over for the same reason: the unpushed commits are still there.
+
+    Every worker claim the old state held ends here, whether or not its worker
+    ever said ``swarm done``; with a ``log`` each gets its ``RUN-ENDED`` line, so
+    the phase history never keeps a wiped claim open as "running".
     """
     with transaction(cfg) as state:
+        if log is not None:
+            for phase in state.claimed_phases():
+                logutil.run_ended(log, phase, "restart")
         prior_done = dict(state.done)
         fresh = State.fresh(cfg.max_workers)
         fresh.windows = windows or {}

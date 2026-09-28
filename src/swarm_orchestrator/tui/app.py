@@ -138,6 +138,7 @@ class HelpScreen(ModalScreen[None]):
 [b]on their own tab[/b]
   [{COLOR[OK]}]/[/] commands: filter   [{COLOR[OK]}]esc[/] clear it
   [{COLOR[OK]}]F[/] alerts: all / failed / delivered
+  [{COLOR[OK]}]x[/] alerts: clear the "never reached your phone" warning (the log is kept)
   [{COLOR[OK]}]r[/] disk: rescan   [{COLOR[MUTED]}](it never scans on a timer)[/]
   [{COLOR[OK]}]x[/] shells: stop the selected kept process (asks first)
 
@@ -431,6 +432,21 @@ class SwarmApp(App):
             return
         run("keep", ["--stop", event.kept],
             "ends the kept process and everything in its process group, and drops its record")
+
+    def on_ack_pings(self, event) -> None:
+        """``x`` on the alerts tab: ``swarm notify --ack``, in-process (one small
+        file). Nothing to confirm: it sends nothing and the ping log is kept."""
+        event.stop()
+        from .. import telegram
+
+        try:
+            telegram.acknowledge(self.cfg.state_dir)
+        except OSError as exc:
+            self.notify(f"could not record it: {exc}", severity="error")
+            return
+        self.notify("acknowledged — only pings that fail from now on will be counted")
+        self.dash.poll()
+        self.refresh_all()
 
     def action_doctor(self) -> None:
         """Run the health checks and show them, from whichever tab you were on."""

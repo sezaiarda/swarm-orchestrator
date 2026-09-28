@@ -79,6 +79,54 @@ def hold(cfg, reason: str) -> str | None:
     return None if sends_all(cfg) else reason
 
 
+#: The owner's "I have seen the pings that never arrived": ``{"ts": <epoch>}``.
+#: Drops up to that moment stop counting against the run; ``notifications.jsonl``
+#: itself is history and is never rewritten.
+ACK_NAME = "notifications.ack.json"
+
+
+def acked_at(state_dir: str | Path) -> float:
+    """When the owner last acknowledged the dropped pings; ``0.0`` if never."""
+    try:
+        data = json.loads((Path(state_dir) / ACK_NAME).read_text(encoding="utf-8"))
+        return float(data.get("ts") or 0.0) if isinstance(data, dict) else 0.0
+    except (OSError, ValueError, TypeError):
+        return 0.0
+
+
+def acknowledge(state_dir: str | Path, now: float | None = None) -> float:
+    """Acknowledge every drop so far; return the moment recorded."""
+    now = time.time() if now is None else now
+    path = Path(state_dir) / ACK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(json.dumps({"ts": now}), encoding="utf-8")
+    os.replace(tmp, path)
+    return now
+
+
+def unacknowledged(ts: float | None, acked: float) -> bool:
+    """Is a ping sent at ``ts`` newer than the acknowledgement? One without a
+    time cannot be placed after it, so an acknowledgement covers it."""
+    if acked <= 0:
+        return True
+    return ts is not None and ts > acked
+
+
+def open_drops(rows: list[dict], acked: float) -> list[dict]:
+    """Ledger rows that were meant to reach the owner, did not, and are not
+    acknowledged. A held-back (``suppressed``) message is not a drop."""
+    out = []
+    for row in rows:
+        if row.get("delivered") or row.get("suppressed"):
+            continue
+        ts = row.get("ts")
+        ts = float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None
+        if unacknowledged(ts, acked):
+            out.append(row)
+    return out
+
+
 def already_sent(state_dir: str | Path | None, kinds: tuple[str, ...], phase: str) -> bool:
     """Has a ping of one of ``kinds`` for ``phase`` already reached the owner?
 

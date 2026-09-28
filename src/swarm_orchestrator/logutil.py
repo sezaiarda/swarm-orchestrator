@@ -128,6 +128,19 @@ class Log:
                 self._fh = None
 
 
+#: The line that closes a phase run which ended without ``swarm done``. The phase
+#: history pairs ``CLAIM``/``LAUNCH`` with ``EVENT done``; a claim that ended any
+#: other way (``swarm up`` rebuilt the slots, the watchdog reaped a dead pane,
+#: ``swarm free``, a worker that never started) wrote nothing, so the dashboard
+#: said "running" for days about a worker that was long gone.
+RUN_ENDED = "RUN-ENDED"
+
+
+def run_ended(log, phase: str, reason: str) -> None:
+    """Record that ``phase``'s claim ended without a report. ``reason`` is one token."""
+    log.line(f"{RUN_ENDED} {phase} reason={reason}")
+
+
 def _boot_epoch() -> float | None:
     """Wall-clock time of this boot, or None if unavailable (non-Linux)."""
     try:

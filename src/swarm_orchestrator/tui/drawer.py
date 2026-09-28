@@ -32,7 +32,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
-from .data import fmt_ago, fmt_clock, question_index
+from .data import fmt_ago, fmt_clock, open_drops, question_index
 from .theme import BAD, COLOR, GLYPH, MUTED, OK, YOU, paint, token
 from .timeline import NEED_LABEL, blocker_since
 
@@ -365,8 +365,7 @@ def notification_rows(dash, width: int = WIDTH - 4) -> list[Row]:
 
 def pings_head(dash) -> str:
     """``pings`` — red, and counting, the moment one of them never landed."""
-    notes = dash.notifications or []
-    dropped = sum(1 for note in notes if note.dropped)
+    dropped = len(open_drops(dash.notifications or [], getattr(dash, "pings_acked_at", 0.0)))
     if dropped:
         return paint(f"pings · {dropped} NOT DELIVERED", BAD)
     return paint("pings", MUTED)

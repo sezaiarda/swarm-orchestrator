@@ -115,6 +115,10 @@ STATE = {
     "operator-abandoned": BAD,
     "fail": BAD,
     "failed": BAD,
+    # History: a claim that ended without `swarm done`, and a phase the ledger
+    # ticked with no report here (words from :data:`tui.data.RUN_WORDS`).
+    "worker gone": WARN,
+    "done elsewhere": OK,
     "gone": BAD,
     "dead": BAD,
     "down": BAD,

@@ -796,7 +796,11 @@ Overseer pass is its summary. Every send, delivered or not,
 is logged to `<state>/notifications.jsonl`, and the dashboard's alerts tab reads
 that log. A message the swarm holds back on purpose is logged there too, with
 `delivered: false` and a `suppressed` reason; the dashboard shows it as `·`, not
-as a drop, and `swarm doctor` does not count it as one. `swarm notify "<text>"` is the only way a session should message you.
+as a drop, and `swarm doctor` does not count it as one. `swarm notify --ack` (or
+`x` on the alerts tab) acknowledges the drops so far without touching the log;
+the footer, the drawer and `swarm doctor` then count only later ones, and doctor
+only fails on a drop that is recent or on sends that are still failing.
+`swarm notify "<text>"` is the only way a session should message you.
 Every shipped prompt, and the init pass's patch to the worker command, says so
 in so many words: use `swarm notify` even when a brief, a ledger row, a recap or
 a project document names another script (a `notify.sh`, say). A message

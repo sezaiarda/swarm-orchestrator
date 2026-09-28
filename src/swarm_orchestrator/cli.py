@@ -270,12 +270,12 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
             file=sys.stderr,
         )
         return 1
-    state_mod.init_state(cfg)
-    _start_run(cfg, "up")
-    # Every up, whatever the isolation: it is what re-queues a hand-off whose
-    # sentinel outlived its item — and the swarm also runs with isolation "none".
     log = Log(cfg.supervisor_log)
     try:
+        state_mod.init_state(cfg, log=log)
+        _start_run(cfg, "up")
+        # Every up, whatever the isolation: it is what re-queues a hand-off whose
+        # sentinel outlived its item — and the swarm also runs with isolation "none".
         rebuilt = opqueue.reconcile(cfg, log)
     finally:
         log.close()
@@ -1494,6 +1494,15 @@ def cmd_finish(cfg: Config, force: bool = False) -> int:
     return 0
 
 
+def _log_run_ended(cfg: Config, phase: str, reason: str) -> None:
+    """Close ``phase``'s run in the history from a CLI command that ended its claim."""
+    log = Log(cfg.supervisor_log)
+    try:
+        logutil.run_ended(log, phase, reason)
+    finally:
+        log.close()
+
+
 def cmd_free(cfg: Config, target: str) -> int:
     """Free a slot by id or phase, and wake the supervisor to refill it.
 
@@ -1509,6 +1518,7 @@ def cmd_free(cfg: Config, target: str) -> int:
     freed = False
     was_parked = False
     wait_win = None
+    ended: str | None = None  # the phase whose claim this ends, if any
     with state_mod.transaction(cfg) as st:
         if target.isdigit():
             slot = st.slot_by_id(int(target))
@@ -1519,14 +1529,19 @@ def cmd_free(cfg: Config, target: str) -> int:
                 slot.worktree = None
                 slot.branch = None
                 freed = True
+                ended = phase
                 if phase:
                     was_parked = st.clear_phase(phase)
                     wait_win = st.windows.pop(f"wait:{phase}", None)
         else:
+            held = target in st.claimed_phases()
             freed = st.free_slot_for(target) is not None or target in st.done
             was_parked = st.clear_phase(target)
             wait_win = st.windows.pop(f"wait:{target}", None)
             freed = freed or was_parked
+            ended = target if held else None
+    if ended:
+        _log_run_ended(cfg, ended, "freed")
     if wait_win and cfg.driver == "tmux":
         tmux.kill_window(wait_win)
     if not freed:
@@ -1557,6 +1572,48 @@ def _summary_hold(cfg: Config, attention: bool) -> str | None:
     if keys & overseer_mod.SUMMARY_TRIGGERS:
         return None
     return telegram.hold(cfg, "not a cadence pass and nothing flagged --attention")
+
+
+def _notify_entry(cfg: Config, a) -> int:
+    if a.ack:
+        if a.message is not None:
+            print("swarm notify --ack takes no message", file=sys.stderr)
+            return 2
+        return cmd_notify_ack(cfg)
+    if a.message is None:
+        print("swarm notify: a message is required (or --ack)", file=sys.stderr)
+        return 2
+    return cmd_notify(cfg, a.message, a.attention)
+
+
+def cmd_notify_ack(cfg: Config) -> int:
+    """Acknowledge the dropped pings: only drops after now count as not delivered.
+
+    An acknowledged drop stops nagging: a drop already known about need not
+    stay in the count. ``notifications.jsonl`` stays as it is — it is the
+    record of what happened; the acknowledgement is a moment beside it.
+    """
+    rows = []
+    path = cfg.state_dir / telegram.LEDGER_NAME
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    drops = telegram.open_drops(rows, telegram.acked_at(cfg.state_dir))
+    if not drops:
+        print("no undelivered pings to acknowledge")
+        return 0
+    telegram.acknowledge(cfg.state_dir)
+    print(f"acknowledged {len(drops)} ping(s) that never reached your phone;"
+          " only drops from now on will be counted (the ping log is unchanged)")
+    return 0
 
 
 def cmd_notify(cfg: Config, message: str, attention: bool = False) -> int:
@@ -1613,8 +1670,11 @@ def cmd_skip(cfg: Config, phase: str) -> int:
     a dependent the skip made ready waited for some unrelated event to launch.
     """
     with state_mod.transaction(cfg) as st:
+        held = phase in st.claimed_phases()
         was_parked = st.clear_phase(phase, "skip")
         wait_win = st.windows.pop(f"wait:{phase}", None)
+    if held:
+        _log_run_ended(cfg, phase, "skipped")
     if was_parked and wait_win and cfg.driver == "tmux":
         tmux.kill_window(wait_win)
     launch_mod._write_sentinel(cfg, phase, "skip", "skipped with `swarm skip`")
@@ -2115,11 +2175,15 @@ def _build_parser() -> argparse.ArgumentParser:
     fp.set_defaults(func=lambda cfg, a: cmd_free(cfg, a.target))
 
     np_ = sub.add_parser("notify", help="message the owner through the swarm's own telegram sender")
-    np_.add_argument("message")
+    np_.add_argument("message", nargs="?")
     np_.add_argument(
         "--attention", action="store_true",
         help="an Overseer summary that needs the owner: send it whatever triggered the pass")
-    np_.set_defaults(func=lambda cfg, a: cmd_notify(cfg, a.message, a.attention))
+    np_.add_argument(
+        "--ack", action="store_true",
+        help="acknowledge the pings that never reached your phone: the dashboard and"
+             " doctor count only drops after this (sends nothing; the ping log is kept)")
+    np_.set_defaults(func=_notify_entry)
 
     kp = sub.add_parser("skip", help="mark a phase done without running it")
     kp.add_argument("phase")

@@ -47,6 +47,7 @@ from textual.coordinate import Coordinate
 from textual.message import Message
 from textual.widgets import DataTable
 
+from .. import statuses
 from . import data
 from .campaign import campaign_of
 from .data import (
@@ -425,7 +426,7 @@ HISTORY_COLUMNS: tuple[tuple[str, int], ...] = (
     ("", 2),
     ("phase", 20),
     ("campaign", 12),
-    ("status", 11),
+    ("status", 14),
     ("started", 13),
     ("took", 8),
     ("what it did", 58),
@@ -448,7 +449,11 @@ def history_key(run: PhaseRun) -> str:
 
 
 def history_status(run: PhaseRun) -> str:
-    return "running" if run.running else (run.status or "?")
+    """``running`` only while a busy slot holds the phase; else how it is held or
+    how it ended, in words (``lost`` reads "worker gone")."""
+    if run.running:
+        return "running"
+    return run.hold or data.run_word(run.status) or "?"
 
 
 def history_row(run: PhaseRun, recap_w: int = 58) -> tuple[str, ...]:
@@ -460,11 +465,23 @@ def history_row(run: PhaseRun, recap_w: int = 58) -> tuple[str, ...]:
         glyph("running" if status == "running" else status),
         cell(run.phase, 20),
         cell(campaign_of(run.phase or ""), 12, MUTED),
-        paint(clip(status, 11), state),
+        paint(clip(status, 14), state),
         cell(fmt_stamp(run.started_at), 13, MUTED),
         cell(fmt_duration(run.duration_s), 8),
         cell(recap or "— no recap recorded —", recap_w, None if recap else MUTED),
     )
+
+
+def _ended_line(run: PhaseRun) -> str:
+    """Why a run is not running although it never said ``swarm done``."""
+    why = data.ENDED_WHY.get(run.why, run.why)
+    if run.status == statuses.LEDGER:
+        tail = f" (here, {why})" if why else ""
+        return ("the ledger has ticked it since — it was finished on another machine"
+                f" or by hand, and this swarm holds no report of it{tail}")
+    if run.status == data.LOST:
+        return f"its worker ended without a report: {why or 'no slot holds it'}"
+    return ""
 
 
 def history_detail(run: PhaseRun, dash) -> str:
@@ -487,6 +504,9 @@ def history_detail(run: PhaseRun, dash) -> str:
     if run.parked:
         meta.append("parked")
     lines.append(paint(escape(" · ".join(meta)), MUTED))
+    ended = _ended_line(run)
+    if ended:
+        lines.append(paint(escape(ended), WARN if run.status == data.LOST else MUTED))
     what = (getattr(dash, "campaign_what", None) or {}).get(camp)
     if what:
         lines.append(paint(escape(clip(what, 100)), MUTED))
@@ -923,11 +943,14 @@ class History(TableTab):
 
         failed = sum(1 for run in history if run.status == "fail")
         running = sum(1 for run in history if run.running)
+        lost = sum(1 for run in history if run.status == data.LOST)
         head = [f"{len(history)} run(s)"]
         if running:
             head.append(paint(f"{running} in flight", INFO))
         if failed:
             head.append(paint(f"{failed} failed", BAD))
+        if lost:
+            head.append(paint(f"{lost} ended without a report", MUTED))
         self.set_head("  ·  ".join(head))
         self.update_detail(dash)
 
@@ -1150,6 +1173,10 @@ class Shells(TableTab):
 
 
 # -- notifications tab -----------------------------------------------------
+class AckPings(Message):
+    """``x`` on the alerts tab: the owner has seen the pings that never arrived."""
+
+
 class Notifications(TableTab):
     """The "why did I get pinged" ledger, and — the point — which pings never landed.
 
@@ -1165,7 +1192,10 @@ class Notifications(TableTab):
     DETAIL_TITLE = "notification"
     MODES = NOTIFICATION_MODES
 
-    BINDINGS = [Binding("F", "cycle_mode", "filter delivered", show=False)]
+    BINDINGS = [
+        Binding("F", "cycle_mode", "filter delivered", show=False),
+        Binding("x", "ack_drops", "clear not-delivered"),
+    ]
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -1197,15 +1227,21 @@ class Notifications(TableTab):
             lambda note: notification_row(note, width),
         )
 
-        dropped = sum(1 for note in everything if note.dropped)
+        dropped = len(data.open_drops(everything, getattr(dash, "pings_acked_at", 0.0)))
+        seen = sum(1 for note in everything if note.dropped) - dropped
         head = [f"{len(pairs)} of {len(everything)} ping(s)"]
         head.append(f"showing [{COLOR[ACCENT]}]{self.mode}[/] (F)")
         if dropped:
-            head.append(paint(f"{dropped} NOT DELIVERED", BAD))
+            head.append(paint(f"{dropped} NOT DELIVERED (x clears)", BAD))
+        if seen:
+            head.append(paint(f"{seen} earlier not delivered, acknowledged", MUTED))
         self.set_head("  ·  ".join(head))
         panel = self.detail_panel
         panel.set_class(bool(dropped), "-bad")
         self.update_detail(dash)
+
+    def action_ack_drops(self) -> None:
+        self.post_message(AckPings())
 
     def detail_text(self, dash) -> str:
         note = self.selected

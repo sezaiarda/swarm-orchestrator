@@ -40,8 +40,8 @@ from ..drain import line as drain_line
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
 from ..tui.data import (
-    five_outlook, fmt_range, forecast, held_merge, kept_rows, limit_outlook, pace_basis,
-    typical_durations,
+    LOST, five_outlook, fmt_range, forecast, held_merge, kept_rows, limit_outlook, pace_basis,
+    run_word, typical_durations,
 )
 from .rows import clip
 
@@ -494,9 +494,10 @@ def _activity(dash, passes: list) -> dict:
         })
     finished = []
     for run in getattr(dash, "history", None) or []:
-        if run.running or not run.ended_at:
+        # A claim that ended without a report is not a finish.
+        if run.running or run.hold or not run.ended_at or run.status == LOST:
             continue
-        finished.append({"id": run.phase, "c": campaign_of(run.phase), "st": run.status,
+        finished.append({"id": run.phase, "c": campaign_of(run.phase), "st": run_word(run.status),
                          "at": run.ended_at, "took": run.duration_s if run.started_at else None,
                          "recap": clip(run.summary, 500), "note": clip(run.note, 500)})
         if len(finished) >= 30:

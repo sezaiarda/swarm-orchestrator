@@ -285,8 +285,14 @@ function header(b) {
     parts.push(`<div class="meter" title="${esc(w.text || "")}"><b>${label} ${pct == null ? "—" : Math.round(pct) + "%"}</b><span class="bar" role="img" aria-label="${label} usage ${pct == null ? "unknown" : Math.round(pct) + " percent"}"><i style="width:${pct || 0}%;background:${col}"></i></span></div><div class="sub ${esc(w.tone === "bad" ? "bad" : w.tone === "warn" ? "warn" : "")}">${esc((rate + run + reset).replace(/^ · /, "") || w.text || "")}</div>`);
   }
   const e = h.eta || {};
-  const eta = e.seconds ? `~${dur(e.seconds)} left · done ~${clock((b.generated_at || now()) + e.seconds)}${e.from_history ? " (from history)" : ""}` : (e.label || "—");
-  parts.push(`<div class="meter"><b>ETA</b><span class="sub">${esc(eta)} · ${e.remaining || 0} open</span></div>`);
+  let eta = e.label || "—";
+  if (e.seconds) {
+    const t0 = e.starts_at || b.generated_at || now();
+    const a = clock(t0 + e.seconds), z = clock(t0 + (e.seconds_hi || e.seconds));
+    eta = e.paused ? `${e.span} of work · paused`
+      : `${e.span} ${e.starts_at ? "of work" : "left"} · done ~${a === z ? a : a + "–" + z}`;
+  }
+  parts.push(`<div class="meter" title="${esc(e.basis || "")}"><b>ETA</b><span class="sub">${esc(eta)} · ${e.remaining || 0} open${e.basis ? " · " + esc(e.basis) : ""}</span></div>`);
   const r = h.run;
   parts.push(`<div class="meter"><b>run</b><span class="sub">${r ? esc((r.id || "") + " · " + dur((r.hours || 0) * 3600) + " · " + (r.finished || 0) + " done" + (r.usd != null ? " · $" + r.usd.toFixed(0) : "")) : "no run open"}</span></div>`);
   const p = h.last_pass;

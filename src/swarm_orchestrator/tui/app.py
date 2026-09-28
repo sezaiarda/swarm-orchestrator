@@ -297,6 +297,10 @@ class SwarmApp(App):
         so a hidden one loses nothing by being skipped — it is repainted on the
         way in by ``on_tabbed_content_tab_activated``.
         """
+        # A tick can land while the app is tearing its widgets down, and a
+        # query_one there raised NoMatches out of the timer: nothing to paint.
+        if not self.query("#tabs"):
+            return
         try:
             self.query_one(StatusBar).update_from(self.dash)
         except Exception as exc:  # noqa: BLE001
@@ -304,7 +308,8 @@ class SwarmApp(App):
         # The drawer is not a tab, and it has to run every tick even while shut:
         # deciding whether a blocker is new enough to toast is the whole point.
         if Drawer is not None:
-            self._repaint(self.query_one(Drawer))
+            for drawer in self.query(Drawer):
+                self._repaint(drawer)
         self._repaint(self.active_tab)
 
     def _repaint(self, node) -> None:

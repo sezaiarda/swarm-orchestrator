@@ -597,7 +597,7 @@ whose `worker_settings` sets its own `statusLine` keeps it and gets no tap.
 
 A **run** is the span from `swarm up` to `swarm down`. `swarm reset` (or `R` in
 the dashboard) closes the open run and starts a new one without restarting
-anything, so ETA and usage count from that moment. Runs live in
+anything, so usage counts from that moment. Runs live in
 `<state>/history/runs/<id>/`, and a mid-run change to the worker count or
 isolation splits the run's averages.
 
@@ -703,7 +703,16 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
 - live, paused, draining (and what for), finished, or supervisor down;
 - busy slots;
 - campaign progress: everything done (built, ticked in the ledger or skipped) over
-  everything the campaign schedules, the same count as the web board;
+  everything the campaign schedules, the same count as the web board and
+  `swarm status`. An excluded row counts once it is done and is out of the count
+  until then. The headline says how many done rows the ledger still shows `[ ]`;
+- the ETA: the rest of the campaign at the swarm's recent pace, a range. The pace
+  is the last 20 finishes of the past week, timed by the commit that ticked each
+  row (`git log` over the ledger, cached by `HEAD` in `<state>/cache/`), less the
+  paused, held and down time this machine's log recorded. It is scaled from the
+  worker count `.swarm.toml` had then to the one it has now; the headline says
+  what it was timed on, and says "too few recent finishes" rather than guess.
+  The chart of phases done reads the same history, so it runs to today;
 - the time since the last event, which turns amber after 30 minutes and red after
   2 hours while a slot is busy;
 - how many phases wait on you.

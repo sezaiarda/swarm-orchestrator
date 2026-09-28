@@ -56,15 +56,17 @@ from .campaign import active, summarise
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
 from .data import (
     CONTEXT_BUDGET,
-    completions_series,
-    eta,
+    Series,
     eta_runs_of,
     fmt_clock,
     fmt_coarse,
     fmt_duration,
+    fmt_range,
     fmt_stamp,
     fmt_when,
+    fmt_when_range,
     forecast,
+    pace_basis,
     held_merge,
     phase_eta,
     usage_outlook,
@@ -201,7 +203,8 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     busy = {s.phase for s in snap.slots if s.busy and s.phase}
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     camps = [
-        c for c in summarise(dash.graph or {}, snap.landed, busy, excluded)
+        c for c in summarise(dash.graph or {}, snap.landed, busy, excluded,
+                             getattr(dash, "ticked", None))
         if c.live_total > c.skipped  # a campaign of nothing but skips is noise
     ]
     if not camps:
@@ -217,14 +220,11 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     what = (getattr(dash, "campaign_what", None) or {}).get(cur.name, "")
 
     workers = len(snap.slots) or int(getattr(dash.cfg, "max_workers", 0) or 0)
-    args = (eta_runs_of(dash), cur.live_total - cur.built, workers)
-    left = eta(*args, running=len(cur.running), ready=len(cur.ready))
-    finish_in, _ = forecast(*args, running=len(cur.running), ready=len(cur.ready))
-    if finish_in and cur.live_total > cur.built:
-        left += f" · done ~{fmt_when(time.time() + finish_in)}"
-        # This run has too few finished phases of its own to time the next.
-        if getattr(dash, "eta_from_history", False):
-            left += " (from history)"
+    pace = getattr(dash, "pace", None)
+    fc = forecast(pace, cur.live_total - cur.built, workers,
+                  running=len(cur.running), ready=len(cur.ready))
+    finish_in = fc.latest
+    left, basis = finish_text(fc, snap, pace, workers)
     fill = OK if cur.complete else (INFO if cur.running or cur.ready else MUTED)
     second = (
         f"{PAD}{paint(bar(cur.built, max(1, cur.live_total), max(10, inner - len(left) - 2)), fill)}"
@@ -246,12 +246,17 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
         )
     if not snap.ok:
         counts.append(paint("run not started — `swarm up`", MUTED))
+    if cur.held:
+        counts.append(paint(f"{cur.held} done but still open in the ledger", MUTED))
     if getattr(dash, "big_picture", ""):
         counts.append(paint(escape(dash.big_picture), MUTED))
     lines = [first]
     if what and not compact:
         lines.append(PAD + paint(escape(clip(what, inner)), MUTED))
-    lines += [second, PAD + " · ".join(counts)]
+    lines.append(second)
+    if basis and not compact:
+        lines.append(PAD + paint(clip(basis, inner), MUTED))
+    lines.append(PAD + " · ".join(counts))
     # Only once a worker's status line has reported: a run launched before the
     # meters tap existed would otherwise carry a permanent "not reported" line.
     if getattr(dash, "meters", None):
@@ -266,6 +271,30 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
             for text, state in outlook:
                 lines.append(PAD + paint(clip(text, inner), state))
     return rows(*lines)
+
+
+def finish_text(fc, snap, pace, workers: int, now: float | None = None) -> tuple[str, str]:
+    """``(time left, what it was timed on)`` for the headline.
+
+    The clock starts when the swarm can next work: a usage cap that holds it
+    until Wednesday does not let it finish this afternoon, and a paused swarm
+    finishes whenever the owner resumes it, which no clock can say.
+    """
+    if fc.soonest is None or fc.latest <= 0:
+        return fc.label, ""
+    now = time.time() if now is None else now
+    span = fmt_range(fc.soonest, fc.latest)
+    basis = pace_basis(pace, workers)
+    if snap.paused:
+        return f"{span} of work · paused", basis
+    start = now
+    if snap.hold_until > now:
+        start = snap.hold_until
+        basis = f"{basis} · the cap lifts {fmt_when(start, now)}" if basis else ""
+        left = f"{span} of work"
+    else:
+        left = f"{span} left"
+    return f"{left} · done ~{fmt_when_range(start + fc.soonest, start + fc.latest, now)}", basis
 
 
 # -- working now ----------------------------------------------------------
@@ -387,12 +416,36 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
 
 
 # -- phases done ----------------------------------------------------------
-def can_plot(dash) -> bool:
-    """Whether the run has finished enough phases, over enough time, to chart."""
-    events = getattr(getattr(dash, "tail", None), "events", None) or []
-    series = completions_series(events)
+#: How far back the chart reaches: long enough to show a pace, short enough that
+#: last month's campaign does not flatten this week's.
+CHART_S = 7 * 86400
+#: The chart runs on to now, so it is redrawn this often even when nothing finished.
+CHART_REDRAW_S = 600.0
+
+
+def finish_series(dash, now: float | None = None) -> Series:
+    """Phases finished in the last :data:`CHART_S`, wherever they were built, to now.
+
+    From ``dash.finished`` — the ledger's own tick times — not this machine's
+    log: that log only knows what ran here, so phases built on another machine
+    would be missing from the chart. It runs on to now, so a hold
+    reads as the flat line it is.
+    """
+    now = time.time() if now is None else now
+    times = sorted(t for t in (getattr(dash, "finished", None) or {}).values()
+                   if now - CHART_S <= t <= now)
+    points = [(t, float(n)) for n, t in enumerate(times, 1)]
+    if points and points[-1][0] < now:
+        points.append((now, float(len(times))))
+    return Series("phases done", points)
+
+
+def can_plot(dash, now: float | None = None) -> bool:
+    """Whether enough phases finished, over enough time, to chart."""
+    series = finish_series(dash, now)
     span = series.span
-    return len(series.points) >= 2 and span is not None and span[1] > span[0]
+    # The last point holds the count: at least two finishes, over some time.
+    return bool(series.points) and series.points[-1][1] >= 2 and span[1] > span[0]
 
 
 def next_lines(dash, width: int = 44, limit: int = 6) -> list[str]:
@@ -427,8 +480,8 @@ def next_lines(dash, width: int = 44, limit: int = 6) -> list[str]:
     return out
 
 
-def chart_lines(dash, width: int = 44, height: int = 5) -> list[str]:
-    """Cumulative completions against the run's wall clock.
+def chart_lines(dash, width: int = 44, height: int = 5, now: float | None = None) -> list[str]:
+    """Cumulative completions against the wall clock (:func:`finish_series`).
 
     The one graph worth a permanent box: it answers "is this thing still moving"
     without reading a single number. Sampled onto a uniform time grid first —
@@ -436,10 +489,9 @@ def chart_lines(dash, width: int = 44, height: int = 5) -> list[str]:
     completions in a minute the same width as a six-hour stall, and the axis
     under it would be a lie.
     """
-    if not can_plot(dash):
+    if not can_plot(dash, now):
         return [paint("not enough finished phases to plot", MUTED)]
-    events = getattr(getattr(dash, "tail", None), "events", None) or []
-    series = completions_series(events)
+    series = finish_series(dash, now)
     span = series.span
 
     body = area(hold_last(series.points, time_grid(span[0], span[1], width)), width, height)
@@ -1013,9 +1065,10 @@ class Home(Vertical):
         self._cursor = min(self._cursor, max(0, len(self._targets) - 1))
 
     def _chart_rows(self, dash, width: int, height: int) -> list[str]:
-        """The chart, redrawn only when the log actually grew."""
-        events = getattr(getattr(dash, "tail", None), "events", None) or []
-        key = (len(events), width, height)
+        """The chart, redrawn when a phase finished, and every ten minutes as it runs to now."""
+        finished = getattr(dash, "finished", None) or {}
+        key = (len(finished), max(finished.values(), default=0.0), width, height,
+               int(time.time() // CHART_REDRAW_S))
         if key != self._chart_key:
             self._chart_key = key
             self._chart = self._build_lines(lambda: chart_lines(dash, width, height))

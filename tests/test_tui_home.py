@@ -27,6 +27,7 @@ from types import SimpleNamespace
 import pytest
 from textual.content import Content
 
+from swarm_orchestrator import pace as pace_mod
 from swarm_orchestrator.tui import data, home
 from swarm_orchestrator.tui import timeline as tl
 from swarm_orchestrator.tui.theme import BAD, COLOR, YOU
@@ -64,6 +65,9 @@ class FakeDash:
         self.tails = kw.get("tails", {})
         self.contexts = kw.get("contexts", {})
         self.tail = SimpleNamespace(events=kw.get("events", []))
+        self.finished = kw.get("finished", {})
+        self.pace = kw.get("pace")
+        self.ticked = kw.get("ticked")
         self.cfg = kw.get(
             "cfg", SimpleNamespace(exclude=[], state_dir=None, project_dir=".", max_workers=4)
         )
@@ -131,45 +135,31 @@ def test_set_text_skips_an_unchanged_assignment():
 
 
 # -- the ETA --------------------------------------------------------------
-def finished(count, seconds=600.0, status="ok"):
-    return [
-        data.PhaseRun(phase=f"P{i}", status=status, started_at=NOW, ended_at=NOW + seconds)
-        for i in range(count)
-    ]
+def pace(per_hour=2.0, workers=2.0, phases=20, hours=9.5):
+    return pace_mod.Pace(phases=phases, hours=hours, per_hour=per_hour, workers=workers)
 
 
 def test_eta_refuses_to_guess_from_too_little_data():
-    """Two completions is not a sample, and a made-up hour is worse than none."""
-    assert data.eta(finished(2), 10, 4, running=2, ready=3) == "estimating…"
-    assert data.eta([], 10, 4, running=2, ready=3) == "estimating…"
+    """Too few recent finishes is not a pace, and a made-up hour is worse than none."""
+    assert data.eta(None, 10, 4, running=2, ready=3) == data.TOO_FEW
 
 
 def test_eta_says_stalled_rather_than_inventing_a_clock():
     """Nothing running and nothing ready is not slow — it is stuck."""
-    assert data.eta(finished(9), 10, 4, running=0, ready=0) == "stalled"
+    assert data.eta(pace(), 10, 4, running=0, ready=0) == "stalled"
 
 
-def test_eta_counts_waves_not_phases():
-    """8 phases left across 4 slots is 2 waves of the median, not 8 medians."""
-    assert data.eta(finished(6, 600.0), 8, 4, running=2, ready=6) == "~20m left"
-    assert data.eta(finished(6, 600.0), 8, 1, running=1, ready=7) == "~1h 20m left"
-
-
-def test_eta_is_not_dragged_by_one_outlier():
-    """The median is the point: a single three-hour phase must not move the rest."""
-    runs = finished(5, 600.0) + [
-        data.PhaseRun(phase="slow", status="ok", started_at=NOW, ended_at=NOW + 10800)
-    ]
-    assert data.eta(runs, 4, 4, running=1, ready=3) == "~10m left"
-
-
-def test_eta_ignores_a_phase_that_is_still_running():
-    running = [data.PhaseRun(phase="live", status=None, started_at=NOW)]
-    assert data.eta(running + finished(2), 5, 2, running=1, ready=4) == "estimating…"
+def test_eta_scales_the_pace_to_the_workers_there_are_now():
+    """Two phases an hour at two workers is one to two an hour at one: a range, not a point."""
+    assert data.eta(pace(), 4, 1, running=1, ready=3) == "~2–4h left"
+    assert data.eta(pace(), 4, 2, running=1, ready=3) == "~2h left"
+    # A pace of unknown concurrency is not scaled at all; the basis says it is rough.
+    assert data.eta(pace(workers=None), 4, 1, running=1) == "~2h left"
+    assert data.pace_basis(pace(workers=None), 1).startswith("rough pace")
 
 
 def test_eta_is_done_when_nothing_is_left():
-    assert data.eta(finished(9), 0, 4, running=1, ready=1) == "done"
+    assert data.eta(pace(), 0, 4, running=1, ready=1) == "done"
 
 
 def test_fmt_coarse_never_claims_a_second():
@@ -228,20 +218,51 @@ def test_headline_says_when_the_big_picture_was_refreshed():
     assert "big picture 2.0h ago" in plain(home.headline(dash, 76))
 
 
-def test_headline_carries_an_eta():
+def test_headline_carries_an_eta_and_what_it_was_timed_on():
     graph = {f"dash-W{i}": set() for i in range(1, 9)}
     dash = FakeDash(
         data.Snapshot(ok=True, done={"dash-W1": "ok"}, slots=[slot(0, "dash-W2")]),
         graph=graph,
-        history=finished(6, 600.0),
+        pace=pace(),
     )
-    assert "left" in plain(home.headline(dash, 76))
+    text = plain(home.headline(dash, 100))
+    assert "~4–7h left · done ~" in text  # 7 left at 2/h, scaled from 2 workers to 1
+    assert "pace: last 20 finishes in 10h" in text
+    assert "at 2 workers, 1 now" in text
+    assert "(from history)" not in text
 
 
-def test_headline_says_estimating_before_it_can_know():
+def test_headline_says_when_there_is_too_little_to_time():
     graph = {f"dash-W{i}": set() for i in range(1, 9)}
     dash = FakeDash(data.Snapshot(ok=True, slots=[slot(0, "dash-W1")]), graph=graph)
-    assert "estimating…" in plain(home.headline(dash, 76))
+    assert data.TOO_FEW in plain(home.headline(dash, 76))
+
+
+def test_a_held_swarm_finishes_after_the_cap_lifts_and_a_paused_one_has_no_clock():
+    """"done ~16:28" while a weekly cap holds every worker until Wednesday is a lie."""
+    graph = {f"dash-W{i}": set() for i in range(1, 5)}
+    lifts = NOW + 40 * 3600
+    snap = data.Snapshot(ok=True, slots=[slot(0, None, busy=False)], hold_until=lifts)
+    fc = data.forecast(pace(), 2, 1, ready=2)
+    left, basis = home.finish_text(fc, snap, pace(), 1, now=NOW)
+    assert left.startswith("~1–2h of work · done ~")
+    assert data.fmt_when_range(lifts + 3600, lifts + 7200, NOW) in left
+    assert "the cap lifts" in basis
+    paused = data.Snapshot(ok=True, paused=True)
+    assert home.finish_text(fc, paused, pace(), 1, now=NOW)[0] == "~1–2h of work · paused"
+    live = data.Snapshot(ok=True, slots=[slot(0, None, busy=False)],
+                         hold_until=time.time() + 40 * 3600)
+    full = plain(home.headline(FakeDash(live, graph=graph, pace=pace()), 100))
+    assert "of work · done ~" in full and "the cap lifts" in full
+
+
+def test_headline_says_how_many_done_rows_the_ledger_still_shows_open():
+    """30/34 against a ledger with 9 open rows needs its five explained, on the screen."""
+    graph = {f"perf-F{i}": set() for i in range(1, 7)}
+    landed = {"perf-F1": "ledger", "perf-F2": "ledger", "perf-F3": "operator", "perf-F4": "ok"}
+    snap = data.Snapshot(ok=True, landed=landed, slots=[slot(0, "perf-F5")])
+    text = plain(home.headline(FakeDash(snap, graph=graph, ticked={"perf-F1", "perf-F2"}), 100))
+    assert "4 / 6 phases" in text and "2 done but still open in the ledger" in text
 
 
 def test_headline_says_stalled_when_nothing_can_move():
@@ -352,33 +373,40 @@ def test_worker_note_prefers_the_live_pane():
 
 
 # -- phases done ----------------------------------------------------------
+def finishes(count, step=600.0, end=NOW):
+    return {f"P{i}": end - (count - i) * step for i in range(count)}
+
+
 def test_chart_lines_need_something_to_plot():
-    assert "not enough" in plain(home.chart_lines(FakeDash(), 40, 5)[0])
-    one = FakeDash(events=[done_event(NOW, "P1")])
-    assert "not enough" in plain(home.chart_lines(one, 40, 5)[0])
+    assert "not enough" in plain(home.chart_lines(FakeDash(), 40, 5, now=NOW)[0])
+    one = FakeDash(finished=finishes(1))
+    assert "not enough" in plain(home.chart_lines(one, 40, 5, now=NOW)[0])
 
 
 def test_chart_lines_are_height_plus_an_axis_and_never_overflow():
     """A chart one column too wide does not look wrong — it reflows the panel."""
-    events = [done_event(NOW + i * 600, f"P{i}") for i in range(12)]
-    lines = home.chart_lines(FakeDash(events=events), 40, 5)
+    lines = home.chart_lines(FakeDash(finished=finishes(12)), 40, 5, now=NOW)
     assert len(lines) == 6
     assert all(len(plain(line)) == 40 for line in lines)
 
 
 def test_chart_lines_put_the_ticks_under_the_curve():
     """The axis starts where the plot does, past the y-scale gutter."""
-    events = [done_event(NOW + i * 600, f"P{i}") for i in range(12)]
-    lines = home.chart_lines(FakeDash(events=events), 40, 5)
+    lines = home.chart_lines(FakeDash(finished=finishes(12)), 40, 5, now=NOW)
     gutter = plain(lines[0]).index("┤") + 1
     assert plain(lines[-1])[:gutter].strip() == ""
     assert plain(lines[-1]).strip()
 
 
-def test_chart_lines_ignore_a_failure():
-    """A failed phase did not complete; plotting it says the run moved when it did not."""
-    events = [done_event(NOW + i, f"P{i}", "fail") for i in range(6)]
-    assert "not enough" in plain(home.chart_lines(FakeDash(events=events), 40, 5)[0])
+def test_the_chart_counts_every_machine_s_finishes_and_runs_on_to_now():
+    """It stopped when the swarm moved machines; the ledger's ticks carry it to today."""
+    here = finishes(4, end=NOW - 3 * 86400)
+    there = {f"Q{i}": NOW - 86400 + i * 600 for i in range(60)}
+    series = home.finish_series(FakeDash(finished=here | there), NOW)
+    assert series.points[-1] == (NOW, 64.0)
+    assert series.span[0] == min(here.values())
+    old = {"ancient": NOW - 30 * 86400}  # past the window: not this chart's business
+    assert home.finish_series(FakeDash(finished=old | here), NOW).points[-1][1] == 4.0
 
 
 # -- the feed -------------------------------------------------------------
@@ -607,6 +635,7 @@ def busy_dash():
             for i in range(4)
         ],
         events=[done_event(NOW - 8000 + i * 700, f"dash-W{i}") for i in range(1, 12)],
+        finished={f"dash-W{i}": time.time() - 8000 + i * 700 for i in range(1, 12)},
     )
 
 
@@ -742,8 +771,9 @@ def test_a_free_slot_is_not_selectable():
     assert app.opened == []
 
 
-def test_chart_is_not_redrawn_while_the_log_stands_still():
-    """Resampling a whole run's events twice a second is the cost this avoids."""
+def test_chart_is_not_redrawn_while_nothing_finishes(monkeypatch):
+    """Resampling a week of finishes twice a second is the cost this avoids."""
+    monkeypatch.setattr(home, "CHART_REDRAW_S", 1e12)  # no clock roll mid-test
     calls = []
 
     async def steps(app, screen, pilot):
@@ -755,7 +785,7 @@ def test_chart_is_not_redrawn_while_the_log_stands_still():
             await pilot.pause()
             screen.update(dash)
             await pilot.pause()
-            dash.tail.events.append(done_event(NOW, "dash-W12"))
+            dash.finished = dict(dash.finished, **{"dash-W12": time.time()})
             screen.update(dash)
             await pilot.pause()
         finally:

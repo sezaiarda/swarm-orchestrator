@@ -40,7 +40,8 @@ from ..drain import line as drain_line
 from ..overseer import starvation_map
 from ..tui.campaign import campaign_of
 from ..tui.data import (
-    five_outlook, forecast, held_merge, kept_rows, limit_outlook, typical_durations,
+    five_outlook, fmt_range, forecast, held_merge, kept_rows, limit_outlook, pace_basis,
+    typical_durations,
 )
 from .rows import clip
 
@@ -416,12 +417,19 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         cols[c["col"]] = cols.get(c["col"], 0) + 1
     workers = len(snap.slots) or int(getattr(cfg, "max_workers", 0) or 0)
     remaining = sum(1 for c in cards.values() if c["col"] in OPEN)
-    seconds, label = forecast(getattr(dash, "eta_runs", None) or [], remaining, workers,
-                              running=cols.get(BUILDING, 0), ready=cols.get(READY, 0))
-    # Seconds, not a clock time: the client adds them to ``generated_at``, so a
-    # quiet board does not change (and wake every phone) just because time passed.
-    eta = {"remaining": remaining, "label": label, "seconds": seconds,
-           "from_history": bool(getattr(dash, "eta_from_history", False))}
+    pace = getattr(dash, "pace", None)
+    fc = forecast(pace, remaining, workers,
+                  running=cols.get(BUILDING, 0), ready=cols.get(READY, 0))
+    seconds = fc.latest
+    # Seconds, not a clock time: the client adds them to ``generated_at`` (or to
+    # when a usage cap lifts), so a quiet board does not change (and wake every
+    # phone) just because time passed. The range and its basis are the TUI's.
+    eta = {"remaining": remaining, "label": fc.label, "seconds": fc.soonest,
+           "seconds_hi": fc.latest,
+           "span": fmt_range(fc.soonest, fc.latest) if fc.soonest else "",
+           "basis": pace_basis(pace, workers),
+           "starts_at": snap.hold_until if snap.hold_until > now else None,
+           "paused": bool(snap.paused)}
     run = getattr(dash, "run", None) or None
     usage = getattr(dash, "usage", None) or {}
     last = passes[0] if passes else None

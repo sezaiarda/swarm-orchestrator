@@ -6,11 +6,16 @@ import json
 from datetime import datetime
 
 from swarm_orchestrator import meters
+from swarm_orchestrator.pace import Pace
 from swarm_orchestrator.tui.data import (
+    TOO_FEW,
+    Forecast,
     Limits,
     PhaseRun,
     eta,
+    fmt_range,
     fmt_when,
+    fmt_when_range,
     forecast,
     limit_outlook,
     load_limits,
@@ -28,16 +33,38 @@ def runs(*hours: float) -> list[PhaseRun]:
 
 
 # -- run and phase ETA -----------------------------------------------------------
-def test_forecast_is_median_times_waves_and_eta_still_says_it_the_same_way():
-    history = runs(1, 1, 1, 9)  # one outlier must not drag the forecast
-    assert forecast(history, remaining=4, max_workers=2, running=1) == (2 * H, "")
-    assert eta(history, remaining=4, max_workers=2, running=1) == "~2h 00m left"
+def test_forecast_is_the_recent_pace_as_a_range_scaled_to_the_workers_now():
+    p = Pace(phases=20, hours=12.0, per_hour=19 / 12.0, workers=2.0)
+    fc = forecast(p, remaining=4, workers=1, running=0, ready=2)
+    # 4 phases at 1.58/h is 2.5 h; at half the workers, up to twice that.
+    assert (round(fc.soonest), round(fc.latest)) == (round(4 / (19 / 12) * H), round(8 / (19 / 12) * H))
+    assert fc.label == "" and eta(p, 4, 1, ready=2) == "~3–5h left"
+    same = forecast(p, remaining=4, workers=2, running=1)
+    assert same.soonest == same.latest  # measured at the concurrency it runs at: one figure
+    # More workers than phases left do not help: one phase at two workers is one phase.
+    one = forecast(p, remaining=1, workers=2, running=1)
+    assert one.latest == 2 * one.soonest
 
 
 def test_forecast_refuses_rather_than_guesses():
-    assert forecast(runs(1, 1), 3, 1, running=1) == (None, "estimating…")
-    assert forecast(runs(1, 1, 1), 3, 1) == (None, "stalled")
-    assert forecast(runs(1, 1, 1), 0, 1) == (0.0, "done")
+    p = Pace(phases=20, hours=12.0, per_hour=1.5, workers=1.0)
+    assert forecast(None, 3, 1, running=1) == Forecast(label=TOO_FEW)
+    assert forecast(p, 3, 1) == Forecast(label="stalled")
+    assert forecast(p, 0, 1) == Forecast(0.0, 0.0, "done")
+
+
+def test_a_forecast_is_said_at_the_resolution_it_is_good_to():
+    assert fmt_range(40 * 60) == "~40m"
+    assert fmt_range(22 * 60, 43 * 60) == "~20–45m"
+    assert fmt_range(2.4 * H, 4.6 * H) == "~2–5h"
+    assert fmt_range(3 * H, 3.2 * H) == "~3h"
+    assert fmt_range(30 * H, 60 * H) == "~1–2 days"
+    assert fmt_range(20) == "~5m"  # never "0m"
+    assert fmt_when_range(NOW + 2 * H, NOW + 4 * H, NOW) == "14:00–16:00"
+    assert fmt_when_range(NOW + 2 * H, NOW + 2 * H + 60, NOW) == "14:00"
+    tomorrow = datetime.fromtimestamp(NOW + 26 * H).strftime("%a")
+    assert fmt_when_range(NOW + 26 * H, NOW + 27 * H, NOW) == f"{tomorrow} 14:00–15:00"
+    assert fmt_when_range(NOW + 2 * H, NOW + 26 * H, NOW) == f"14:00 – {tomorrow} 14:00"
 
 
 def test_a_phase_inside_the_median_has_time_left_and_past_it_is_over():

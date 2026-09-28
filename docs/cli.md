@@ -16,7 +16,7 @@ exact flags.
 | `finish [--force]` | Ask the supervisor to stop now. Refused while operator jobs are queued unless `--force`. |
 | `pause [--in 12h \| --at HH:MM \| --cancel]` | Hold new launches now; running workers finish. `--in` (`12h`, `90m`, `1h30m`, `2d`) or `--at` (the next such local time) schedules the same pause for later, replacing any earlier schedule; it survives `swarm down`/`up` and one that came due while the swarm was down fires on the next `up`. `--cancel` drops it, and so does `resume`. |
 | `resume [--override-cap]` | Fill free slots again, and hand given-up phases back. A usage cap's hold is not lifted by `resume`, which says what holds and when it lifts; `--override-cap` runs through it until its window resets. |
-| `reset` | Close the open run and start a new one: ETA and usage count from now. Nothing restarts. |
+| `reset` | Close the open run and start a new one: usage counts from now. Nothing restarts. |
 | `reload [--dry-run]` | Apply a `.swarm.toml` edit to the running swarm. |
 | `layout [name]` | Show or change the worker-pane arrangement, live. |
 
@@ -24,7 +24,7 @@ exact flags.
 
 | command | what it does |
 |---|---|
-| `status [--all] [--json]` | A drain and what it still waits for, slots, merge queue, waiting and parked sessions, operator queue, owner-run rows only you can do (`owner_rows` in `--json`), owed pushes, the big-picture doc's last refresh, the done map as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
+| `status [--all] [--json]` | A drain and what it still waits for, slots, merge queue, waiting and parked sessions, operator queue, owner-run rows only you can do (`owner_rows` in `--json`), owed pushes, the big-picture doc's last refresh, the whole ledger's standing counted as the dashboard counts it (`phases:`; `phases` in `--json`), this machine's done records as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
 | `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`. |
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |

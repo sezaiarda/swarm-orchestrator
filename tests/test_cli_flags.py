@@ -36,7 +36,7 @@ def cfg(tmp_path, monkeypatch):
 def test_status_counts_the_done_map_unless_all(cfg, capsys):
     assert cli.cmd_status(cfg) == 0
     out = capsys.readouterr().out
-    assert "done: 3 (fail=1 ok=1 skip=1) failed: a-P2" in out
+    assert "records here: 3 (fail=1 ok=1 skip=1) failed: a-P2" in out
     assert "a-P0" not in out
 
     assert cli.cmd_status(cfg, show_all=True) == 0

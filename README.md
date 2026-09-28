@@ -391,8 +391,9 @@ flowchart TD
   `<state>/meters/`. It then runs your own status line, so the pane looks the
   same.
 - **Runs:** a run lasts from `swarm up` to `swarm down`. `swarm reset` (or `R` in
-  the dashboard) starts a new run without restarting anything, so ETA and usage
-  count from now.
+  the dashboard) starts a new run without restarting anything, so usage counts
+  from now. The ETA does not reset: it is timed on the swarm's recent pace, read
+  from the ledger's git history, so phases built on another machine count too.
 - **`swarm usage`:** each run's hours, phases, average 5-hour and weekly %/h,
   windows spanned, and $/h. The figures are account-wide, so other Claude sessions
   on the same account count too.

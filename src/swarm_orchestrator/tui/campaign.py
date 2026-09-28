@@ -55,6 +55,9 @@ class Campaign:
     ready: list[str] = field(default_factory=list)
     blocked: int = 0
     excluded: int = 0
+    #: Of ``built``, the rows the swarm holds done that the ledger has not
+    #: ticked: an operator hand-off still to prove, a standing target it ran.
+    held: int = 0
 
     @property
     def active(self) -> bool:
@@ -85,10 +88,18 @@ def summarise(
     done: dict[str, str],
     busy: set[str] | None = None,
     excluded: set[str] | None = None,
+    ticked: set[str] | None = None,
 ) -> list[Campaign]:
     """Campaign standings, active first, then by size.
 
-    ``graph`` is the ledger (phase -> deps), ``done`` the state map. A phase is
+    ``graph`` is the ledger (phase -> deps), ``done`` the launcher's view of the
+    state map (:func:`ledger.with_ticked`). This is THE count: the TUI header,
+    the status bar and ``swarm status`` all read it, and the web board places
+    its cards by the same rules. Done is a status that releases dependents,
+    whoever produced it — built here, ticked in the ledger, skipped. An
+    excluded row counts once it is done (an owner-run row the owner ticked is
+    progress) and is out of the count until then. ``ticked``, when given, lets
+    ``held`` say how many done rows the ledger itself still shows open. A phase is
     *ready* when every dependency is satisfied and it has not been attempted — a
     ``fail`` does NOT satisfy a dependency, matching ledger.SATISFIES_DEPS, so a
     dependent of a failed phase reads as blocked rather than ready.
@@ -103,7 +114,7 @@ def summarise(
         b = buckets.setdefault(
             name,
             {"total": 0, "built": 0, "skipped": 0, "failed": 0,
-             "running": [], "ready": [], "blocked": 0, "excluded": 0},
+             "running": [], "ready": [], "blocked": 0, "excluded": 0, "held": 0},
         )
         b["total"] += 1
         status = done.get(phase)
@@ -112,6 +123,7 @@ def summarise(
         elif status in SATISFIED:
             b["built"] += 1  # a finished owner-run row too, as on the web board
             b["skipped"] += status == statuses.SKIP
+            b["held"] += ticked is not None and phase not in ticked
         elif phase in excluded:
             b["excluded"] += 1
         elif status == "fail":
@@ -132,11 +144,14 @@ def summarise(
             ready=sorted(b["ready"]),
             blocked=b["blocked"],
             excluded=b["excluded"],
+            held=b["held"],
         )
         for name, b in buckets.items()
     ]
-    # A finished campaign is never the headline while one with work left idles.
-    out.sort(key=lambda c: (not c.active, c.complete, -c.live_total, c.name))
+    # A finished campaign is never the headline while one with work left idles,
+    # and one merely ready never while another has a worker on it: the headline
+    # names what is being built, not the biggest campaign that could be.
+    out.sort(key=lambda c: (not c.active, not c.running, c.complete, -c.live_total, c.name))
     return out
 
 
@@ -146,6 +161,22 @@ def active(campaigns: list[Campaign]) -> Campaign | None:
         if c.active:
             return c
     return None
+
+
+def overall(campaigns: list[Campaign]) -> Campaign:
+    """Every campaign added up: the whole ledger, counted the same way."""
+    return Campaign(
+        name="all",
+        total=sum(c.total for c in campaigns),
+        built=sum(c.built for c in campaigns),
+        skipped=sum(c.skipped for c in campaigns),
+        failed=sum(c.failed for c in campaigns),
+        running=sorted(p for c in campaigns for p in c.running),
+        ready=sorted(p for c in campaigns for p in c.ready),
+        blocked=sum(c.blocked for c in campaigns),
+        excluded=sum(c.excluded for c in campaigns),
+        held=sum(c.held for c in campaigns),
+    )
 
 
 def history_line(campaigns: list[Campaign]) -> str:

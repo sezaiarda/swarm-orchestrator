@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .. import bigpic, opqueue, ovrecord
+from .. import pace as pace_mod
 from .. import runs as runs_mod
 from .. import state as state_mod
 from .. import usage as usage_mod
@@ -29,10 +30,12 @@ from .data import (
     completion_density,
     completions_series,
     eta_sample,
+    finish_times,
     fmt_ago,
     fmt_clock,
     fmt_duration,
     fmt_stamp,
+    idle_spans,
     integration_holds,
     launch_times,
     live_meters,
@@ -102,11 +105,18 @@ class Dash:
         self.repos: dict[str, probes.RepoStat] = {}  # phase -> commits/dirty
         self.meters: dict[str, Meter] = {}  # phase -> its worker's status-line figures
         self.limits: Limits | None = None
-        # The open run (``None`` = a state dir from before runs), the phase runs
-        # its ETA is made from, and whether those had to be borrowed from history.
+        # The open run (``None`` = a state dir from before runs) and the phase
+        # runs a running phase's own ETA is made from.
         self.run: dict | None = None
         self.eta_runs: list[PhaseRun] = []
-        self.eta_from_history = False
+        #: The project's git history of ticks and worker counts (:mod:`pace`).
+        self.ledger_history = pace_mod.History()
+        #: Every done phase -> when it finished, wherever it was built; the
+        #: chart and the pace read this, never this machine's log alone.
+        self.finished: dict[str, float] = {}
+        self.bulk: set[str] = set()
+        #: The swarm's recent throughput, or ``None`` when too little is recent.
+        self.pace: pace_mod.Pace | None = None
         #: The open run's usage summary (legacy period when no run is open).
         self.usage: dict | None = None
         #: Closed runs' stored summaries, newest first — the runs tab.
@@ -208,10 +218,16 @@ class Dash:
             active |= {b.phase for b in self.snapshot.blockers if b.phase}
             self.meters = live_meters(self._all_meters, self.epoch, active)
             self.limits = load_limits(self.meters, self.meters_dir / LIMITS_LOG)
-        if self._changed("ledger", Path(self.cfg.project_dir) / self.cfg.ledger):
+        ledger_moved = self._changed("ledger", Path(self.cfg.project_dir) / self.cfg.ledger)
+        if ledger_moved:
             self.graph = load_graph(self.cfg)
             self.ticked = load_ticked(self.cfg)
             self.campaign_what = campaign_lines(self.cfg)
+            changed.add("ledger")
+        # A tick or a worker-count change lands as a commit; git is asked only
+        # when one of the two files moved, and answers from a cache keyed on HEAD.
+        if self._changed("config", self.config_path) | ledger_moved:
+            self.ledger_history = pace_mod.load(self.cfg)
             changed.add("ledger")
         if changed & {"state", "log", "notifications", "done", "recaps", "ledger",
                       "notes", "operator", "run"}:
@@ -304,7 +320,12 @@ class Dash:
         self.history = build_history(
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes
         )
-        self.eta_runs, self.eta_from_history = eta_sample(self.history, self.epoch)
+        self.eta_runs, _ = eta_sample(self.history, self.epoch)
+        self.finished, self.bulk = finish_times(
+            self.snapshot.landed, self.ticked, self.ledger_history, self.history)
+        now = time.time()
+        self.pace = pace_mod.measure(self.finished, self.bulk, idle_spans(events, now),
+                                     self.ledger_history.workers, now)
 
     def probe(self, now: float | None = None) -> None:
         """Refresh the live probes. Runs on a worker thread — never on the UI.

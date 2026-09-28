@@ -1838,11 +1838,44 @@ def _done_counts(done: dict[str, str]) -> dict[str, int]:
 
 
 def _done_summary(done: dict[str, str]) -> str:
-    """The done map as counts per status, naming the failures (they need you)."""
+    """The done map as counts per status, naming the failures (they need you).
+
+    These are this machine's records only — phases built elsewhere and ticked in
+    the ledger are not among them — so it is labelled as such; how far along the
+    ledger is, is :func:`_phase_standing`'s line.
+    """
     parts = " ".join(f"{k}={v}" for k, v in _done_counts(done).items())
     failed = sorted(p for p, s in done.items() if s == statuses.FAIL)
     tail = f" failed: {' '.join(failed)}" if failed else ""
-    return f"done: {len(done)} ({parts or 'none'}){tail} — `--all` lists every phase"
+    return f"records here: {len(done)} ({parts or 'none'}){tail} — `--all` lists every phase"
+
+
+def _phase_standing(cfg: Config, st) -> dict:
+    """The whole ledger counted exactly as the dashboard counts it.
+
+    :func:`tui.campaign.summarise` over the launcher's done view, so this line,
+    the TUI header and the web board can never disagree about what is done.
+    """
+    from .tui import campaign
+
+    path = cfg.project_dir / cfg.ledger
+    graph = ledger_mod.load(path)
+    ticked = ledger_mod.load_ticked(path)
+    busy = {s.phase for s in st.busy_slots() if s.phase}
+    landed = ledger_mod.with_ticked(st.done, ticked, busy | set(st.parked) | set(st.waiting))
+    t = campaign.overall(campaign.summarise(graph, landed, busy, set(cfg.exclude or []), ticked))
+    return {"done": t.built, "total": t.live_total, "held": t.held, "running": len(t.running),
+            "ready": len(t.ready), "blocked": t.blocked, "failed": t.failed,
+            "excluded": t.excluded}
+
+
+def _standing_line(n: dict) -> str:
+    held = (f" ({n['held']} of them done by the swarm, still open in the ledger)"
+            if n["held"] else "")
+    rest = " · ".join(f"{n[k]} {k}" for k in ("running", "ready", "blocked", "failed") if n[k])
+    excluded = f" · {n['excluded']} yours to do, not counted" if n["excluded"] else ""
+    return (f"phases: {n['done']} of {n['total']} done{held}"
+            f"{' · ' + rest if rest else ''}{excluded}")
 
 
 def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> int:
@@ -1856,6 +1889,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
             data.pop("done")
             data["done_counts"] = _done_counts(st.done)
             data["failed"] = sorted(p for p, s in st.done.items() if s == statuses.FAIL)
+        data["phases"] = _phase_standing(cfg, st)
         data["config"] = {
             "slug": cfg.slug, "driver": cfg.driver, "isolation": cfg.git_isolation,
             "main_branch": cfg.git_main_branch, "layout": st.layout or cfg.tmux_layout,
@@ -1899,6 +1933,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.extend(caps.summary_for(cfg, st.usage_hold))
+    lines.append(_standing_line(_phase_standing(cfg, st)))
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
     lines.append(web_lifecycle.status_line(cfg))
     lines.append(tgbot.status_line(cfg))

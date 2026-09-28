@@ -322,7 +322,7 @@ def test_eta_borrows_the_history_until_the_run_has_three_and_says_so():
     assert borrowed and len(data.typical_durations(got)) == 6
     assert eta_sample(old, None) == (old, False)  # legacy: all history, no label
     got, borrowed = eta_sample([_run("N0", T0, T0 + 600)], T0)  # nothing to borrow
-    assert not borrowed and data.forecast(got, 3, 1, running=1)[1] == "estimating…"
+    assert not borrowed
 
 
 def test_meters_of_phases_not_in_this_run_are_dropped_unless_busy():

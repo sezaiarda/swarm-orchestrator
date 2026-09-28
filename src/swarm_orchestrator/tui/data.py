@@ -25,7 +25,6 @@ Two forward-compatibility decisions are worth spelling out:
 from __future__ import annotations
 
 import json
-import math
 import re
 import shlex
 import time
@@ -38,6 +37,7 @@ from .. import caps
 from .. import keep as keep_mod
 from .. import ledger as ledger_mod
 from .. import opqueue
+from .. import pace as pace_mod
 from .. import statuses
 from .. import logutil
 from ..logutil import parse_ts
@@ -314,6 +314,8 @@ class Snapshot:
     paused: bool = False
     #: Why a usage cap holds new workers, in plain English; "" when none does.
     usage_hold: str = ""
+    #: When the latest-lifting cap that holds it resets; 0.0 when none does.
+    hold_until: float = 0.0
     #: ``State.drain``: the run is winding down to a stop (see :mod:`drain`).
     drain: dict = field(default_factory=dict)
     #: ``State.pause_at``: when a scheduled pause happens; 0.0 when none is.
@@ -396,11 +398,13 @@ def phase_progress(
         return Progress(done=len(done), running=len(busy_phases))
     ready = ledger_mod.ready(graph, done, busy_phases, excluded)
     running = {p for p in busy_phases if p in graph}
-    done_set = {p for p in graph if p in done}
-    failed = {p for p in done_set if done[p] == statuses.FAIL}
+    # Done the way every other count says it (:mod:`.campaign`): a status that
+    # releases dependents. A ``fail`` was attempted, not done.
+    done_set = {p for p in graph if done.get(p) in statuses.SATISFIES_DEPS} - running
     # A finished row is done even when it is owner-run, as on the web board.
     excluded_set = {p for p in excluded if p in graph} - done_set - running
-    blocked = set(graph) - done_set - running - set(ready) - excluded_set
+    failed = {p for p in graph if done.get(p) == statuses.FAIL} - running - excluded_set
+    blocked = set(graph) - done_set - failed - running - set(ready) - excluded_set
     return Progress(
         total=len(graph),
         done=len(done_set),
@@ -572,6 +576,9 @@ def build_snapshot(
         landed=landed,
         paused=bool(state.get("paused")),
         usage_hold=" ".join(caps.describe_hold(state.get("usage_hold") or {}, time.time())),
+        hold_until=max((_as_float(h.get("resets_at")) or 0.0
+                        for h in (state.get("usage_hold") or {}).values() if isinstance(h, dict)),
+                       default=0.0),
         drain=dict(state.get("drain") or {}) if isinstance(state.get("drain"), dict) else {},
         pause_at=_as_float(state.get("pause_at")) or 0.0,
         finished=bool(state.get("finished")),
@@ -1123,22 +1130,19 @@ ETA_MIN_SAMPLES = 3
 ETA_WINDOW = 20
 
 
-def eta(runs: list[PhaseRun], remaining: int, max_workers: int,
+def eta(pace: pace_mod.Pace | None, remaining: int, workers: int,
         running: int = 0, ready: int = 0) -> str:
     """How long the rest of the run will take, or why that cannot be said.
 
-    Returns the string the headline prints. Mean duration times phases left is
-    wrong twice over: one three-hour outlier drags the mean for the rest of the
-    run, and the swarm builds ``max_workers`` phases at a time, so what is left
-    on the wall clock is the number of *waves*, not the number of phases. Median
-    times waves is the smallest model that gets both of those right.
-
-    It refuses rather than guesses. Fewer than :data:`ETA_MIN_SAMPLES`
-    completions is not a sample; and a run with nothing running and nothing ready
-    is not slow, it is stalled — an ETA there would be a lie with a clock on it.
+    Returns the string the headline prints. It refuses rather than guesses: too
+    few recent finishes is not a pace, and a run with nothing running and
+    nothing ready is not slow, it is stalled — an ETA there would be a lie with
+    a clock on it.
     """
-    seconds, label = forecast(runs, remaining, max_workers, running=running, ready=ready)
-    return label if seconds is None or remaining <= 0 else f"~{fmt_coarse(seconds)} left"
+    fc = forecast(pace, remaining, workers, running=running, ready=ready)
+    if fc.soonest is None or remaining <= 0:
+        return fc.label
+    return f"{fmt_range(fc.soonest, fc.latest)} left"
 
 
 def typical_durations(runs: list[PhaseRun]) -> list[float]:
@@ -1176,18 +1180,114 @@ def eta_runs_of(dash) -> list[PhaseRun]:
     return list(got) if got is not None else list(getattr(dash, "history", None) or [])
 
 
-def forecast(runs: list[PhaseRun], remaining: int, max_workers: int,
-             running: int = 0, ready: int = 0) -> tuple[float | None, str]:
-    """:func:`eta` as ``(seconds, label)``: seconds when it can be said, else why not."""
+#: What the headline says when there is no pace to time the rest on.
+TOO_FEW = "too few recent finishes to time"
+
+
+@dataclass(frozen=True)
+class Forecast:
+    """How long the rest will take — a range in seconds — or why that cannot be said."""
+
+    soonest: float | None = None
+    latest: float | None = None
+    label: str = ""
+
+
+def forecast(pace: pace_mod.Pace | None, remaining: int, workers: int,
+             running: int = 0, ready: int = 0) -> Forecast:
+    """The rest at the swarm's recent pace (:func:`pace.outlook`), or why not.
+
+    It used to be the median phase's length times the number of waves. A phase's
+    own length is only part of what it costs the swarm: the merge, the grace
+    before a slot is reused, the operator hand-off and the build queue all sit
+    between two finishes, and "~45m left" for four phases the swarm has never
+    finished faster than one every half hour was the result. The time between
+    finishes, as the ledger recorded it, carries all of that.
+    """
     if remaining <= 0:
-        return 0.0, "done"
+        return Forecast(0.0, 0.0, "done")
     if running <= 0 and ready <= 0:
-        return None, "stalled"
-    seen = typical_durations(runs)
-    if len(seen) < ETA_MIN_SAMPLES:
-        return None, "estimating…"
-    waves = math.ceil(remaining / max(1, min(max_workers or 1, remaining)))
-    return waves * median(seen), ""
+        return Forecast(label="stalled")
+    if pace is None:
+        return Forecast(label=TOO_FEW)
+    soonest, latest = pace_mod.outlook(pace, remaining, workers)
+    return Forecast(soonest, latest)
+
+
+def pace_basis(pace: pace_mod.Pace | None, workers: int) -> str:
+    """What a forecast was timed on, in words: the headline's small print."""
+    if pace is None:
+        return ""
+    done = f"last {pace.phases} finishes in {fmt_range(pace.hours * 3600).lstrip('~')}"
+    if pace.workers is None:
+        return f"rough pace: {done}, worker count unknown"
+    then = round(pace.workers, 1)
+    now_txt = "" if then == workers else f", {workers} now"
+    return f"pace: {done} at {then:g} worker{'' if then == 1 else 's'}{now_txt}"
+
+
+def finish_times(landed: dict[str, str], ticked: set[str], history: pace_mod.History,
+                 runs: list[PhaseRun]) -> tuple[dict[str, float], set[str]]:
+    """``(phase -> when it finished, bulk rows)`` for every phase that counts as done.
+
+    Done is the one definition every count uses: a status in ``landed`` that
+    releases dependents. The time is the commit that ticked the row in the
+    ledger — the same on every machine — or, for a row the swarm holds done that
+    the ledger has not ticked, when this machine's run of it ended. A skip the
+    ledger does not tick has no time: nobody built it. ``bulk`` are the rows a
+    many-row commit ticked, which :func:`pace.measure` leaves out of the pace.
+    """
+    local: dict[str, float] = {}
+    for run in runs or []:  # newest first: the first finish seen is the latest
+        if run.status in COMPLETED_STATUSES and run.ended_at is not None:
+            local.setdefault(run.phase, run.ended_at)
+    out: dict[str, float] = {}
+    bulk: set[str] = set()
+    for phase, status in landed.items():
+        if status not in statuses.SATISFIES_DEPS:
+            continue
+        tick = history.ticks.get(phase) if phase in ticked else None
+        if tick is not None:
+            out[phase] = tick[0]
+            if tick[1] > pace_mod.BULK:
+                bulk.add(phase)
+        elif phase in local:
+            out[phase] = local[phase]
+    return out, bulk
+
+
+def idle_spans(events: list[Event], now: float | None = None) -> list[tuple[float, float]]:
+    """When this machine's log says the swarm could not work.
+
+    Its supervisor was down, the owner paused it (every ``WATCHDOG`` line says
+    ``paused=``), or a usage cap held it (``USAGE-HOLD``/``USAGE-RELEASE``, and
+    the ``held=`` of every ``USAGE-CHECK``, which is all a restart logs about a
+    hold it inherited). A two-day hold is not a slow swarm.
+    """
+    spans: list[tuple[float, float]] = []
+    down = paused = held = False
+    since: float | None = None
+    for ev in sorted((e for e in events if e.ts is not None), key=lambda e: e.ts):
+        kind = ev.kind
+        if kind in ("supervisor-start", "supervisor-stop"):
+            down = kind == "supervisor-stop"
+        elif kind == "watchdog" and "paused" in ev.fields:
+            paused = ev.fields["paused"] == "True"
+        elif kind in ("usage-hold", "usage-release"):
+            held = kind == "usage-hold"
+        elif kind == "usage-check" and "held" in ev.fields:
+            held = ev.fields["held"] not in ("", "-")
+        else:
+            continue
+        idle = down or paused or held
+        if idle and since is None:
+            since = ev.ts
+        elif not idle and since is not None:
+            spans.append((since, ev.ts))
+            since = None
+    if since is not None:
+        spans.append((since, time.time() if now is None else now))
+    return spans
 
 
 def phase_eta(runs: list[PhaseRun], elapsed_s: float | None) -> tuple[float | None, bool]:
@@ -1225,6 +1325,42 @@ def fmt_when(ts: float | None, now: float | None = None) -> str:
     if abs(ts - now) < 6 * 86400:
         return when.strftime("%a %H:%M")
     return when.strftime("%m-%d %H:%M")
+
+
+def fmt_range(soonest: float, latest: float | None = None) -> str:
+    """A forecast at the resolution it is good to: ``~40m``, ``~2–4h``, ``~2–3 days``.
+
+    A pace measured over a day is not good to the minute, so minutes come in
+    fives, hours whole and anything past a day and a half in days.
+    """
+    latest = soonest if latest is None else latest
+    if latest < 90 * 60:
+        step, unit = 300.0, "m"
+    elif latest < 36 * 3600:
+        step, unit = 3600.0, "h"
+    else:
+        step, unit = 86400.0, " days"
+    lo = max(1, round(soonest / step)) * step
+    hi = max(1, round(latest / step)) * step
+    if unit == "m":
+        lo, hi = int(lo // 60), int(hi // 60)
+    else:
+        lo, hi = int(lo // step), int(hi // step)
+    if unit == " days" and hi == 1:
+        unit = " day"
+    return f"~{lo}{unit}" if lo == hi else f"~{lo}–{hi}{unit}"
+
+
+def fmt_when_range(soonest: float, latest: float, now: float | None = None) -> str:
+    """:func:`fmt_when` for a range, to ten minutes: ``18:00–20:00``, ``Wed 13:00–15:00``."""
+    ten = 600.0
+    a = fmt_when(round(soonest / ten) * ten, now)
+    b = fmt_when(round(latest / ten) * ten, now)
+    if a == b:
+        return a
+    day_a, _, _ = a.rpartition(" ")
+    day_b, _, clock_b = b.rpartition(" ")
+    return f"{a}–{clock_b}" if day_a == day_b else f"{a} – {b}"
 
 
 # -- meters: what each worker's status line reported ------------------------

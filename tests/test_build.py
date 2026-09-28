@@ -136,6 +136,23 @@ def test_target_cache_symlink_shared_per_repo(tmp_path, monkeypatch):
     log.close()
 
 
+def test_target_cache_recreates_dangling_cache_link(tmp_path, monkeypatch):
+    # The cache entry points at the main checkout's target/, which a cargo clean
+    # or the disk guard removed: recreate it rather than fall back to a cold build.
+    cfg = _cfg(tmp_path, monkeypatch)
+    log = Log(tmp_path / "l.log")
+    main_target = tmp_path / "payments" / "target"
+    cfg.build_cache_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.build_cache_dir / "payments").symlink_to(main_target)
+    wt = tmp_path / "wt" / "payments-P4"
+    _rust_wt(wt)
+    gitq._link_target_cache(cfg, wt, tmp_path / "payments", log)
+    assert (wt / "target").is_symlink()
+    assert main_target.is_dir()
+    assert "TARGET-CACHE-SKIP" not in (tmp_path / "l.log").read_text()
+    log.close()
+
+
 def test_no_symlink_when_target_not_ignored(tmp_path, monkeypatch):
     # A Rust worktree that does NOT gitignore target -> skip, so the machine-local
     # symlink can never be `git add -A`'d and merged into canonical main.

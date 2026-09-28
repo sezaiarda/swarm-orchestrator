@@ -534,7 +534,9 @@ def _link_target_cache(cfg: Config, wt: Path, repo: Path, log: Log) -> None:
         return
     shared = cfg.build_cache_dir / _slug(repo)
     try:
-        shared.mkdir(parents=True, exist_ok=True)
+        # resolve(): the cache entry may itself be a symlink to the main
+        # checkout's target/, dangling once that target is cleaned or evicted.
+        shared.resolve().mkdir(parents=True, exist_ok=True)
         link.symlink_to(shared)
     except OSError as exc:
         log.line(f"TARGET-CACHE-SKIP {repo.name} {exc}")

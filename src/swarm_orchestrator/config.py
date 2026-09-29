@@ -433,6 +433,13 @@ class Config:
         "gc", "idle_s", 1800, HOT, env="SWARM_GC_IDLE", minimum=0,
         doc="also once per idle stretch this long (s); 0 = off",
         why="the idle episode's age is compared against it on every wake")
+    # With several workers queued on one build slot the slot is almost never free
+    # at the instant gc looks, so a gc that did not wait skipped most of its tries
+    # and the disk guard's whole-tree eviction did the pruning.
+    gc_wait_s: int = _k(
+        "gc", "wait_s", 600, HOT, env="SWARM_GC_WAIT", minimum=0,
+        doc="auto gc waits this long (s) for the build slots",
+        why="read when the next automatic gc takes the build gate")
     # Three days keeps every dependency a phase in the current campaign built.
     gc_keep_days: int = _k(
         "gc", "keep_days", 3, HOT, env="SWARM_GC_KEEP_DAYS", minimum=1,

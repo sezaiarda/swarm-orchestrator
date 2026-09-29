@@ -86,7 +86,9 @@ from . import state as state_mod
 from .config import Config
 from .state import State
 
-_POLL_S = 0.5
+# Ten times faster than a queued builder polls (buildsem._POLL_S), so a gc that
+# is waiting for the gate takes a freed slot ahead of the next build.
+_POLL_S = 0.05
 _SWEEP_TIMEOUT_S = 600.0
 _GIT_TIMEOUT_S = 60.0
 
@@ -1200,16 +1202,19 @@ class AutoResult:
 def auto(cfg: Config, log=None) -> AutoResult:
     """One unattended gc: the dead-weight tiers only, never during a build.
 
-    The build gate is tried *without waiting* (``gate_timeout_s = 0``) and held
-    for the whole run, planning included — so the sizes it measures are the
-    sizes it deletes, and no build can start mid-sweep. A busy slot, or a live
-    cargo/rustc under a tree it would touch, is ``busy``: the caller retries
-    later instead of queueing builds behind it. The opt-in tiers are never used,
+    The build gate is waited for up to ``[gc].wait_s`` and held for the whole
+    run, planning included — so the sizes it measures are the sizes it deletes,
+    and no build can start mid-sweep. Waiting is what lets it run at all on a
+    busy swarm: :func:`build_gate` polls faster than a queued builder, so it
+    takes the slot between two builds and the next build queues behind one
+    short sweep. A slot still busy after the wait, or a live cargo/rustc under a
+    tree it would touch, is ``busy``: the caller retries later. The opt-in tiers are never used,
     and neither is ``--canonical``; the canonical project is reached only through
     the build-cache links (:func:`cache_roots`).
     """
     opts = GcOptions(
-        yes=True, sweep_days=cfg.gc_keep_days, gate_timeout_s=0.0, estimate=False
+        yes=True, sweep_days=cfg.gc_keep_days, gate_timeout_s=float(cfg.gc_wait_s),
+        estimate=False,
     )
     if cfg.build_max_concurrent < 1:
         return AutoResult(AUTO_FAILED, detail="[build].max_concurrent is 0 — no gate to hold")

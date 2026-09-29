@@ -251,6 +251,7 @@ read where the project stands instead of surveying it. See
 | `auto` | `true` | `SWARM_GC_AUTO` | hot | Let the supervisor run `swarm gc` by itself. |
 | `every_s` | `900` | `SWARM_GC_EVERY` | hot | At most this often (a busy build slot defers it a few minutes). `0` leaves only the idle trigger. |
 | `idle_s` | `1800` | `SWARM_GC_IDLE` | hot | Also once per idle stretch (no busy slot) of this length. `0` turns this off. |
+| `wait_s` | `600` | `SWARM_GC_WAIT` | hot | How long an automatic gc waits for the build slots before it gives up and retries later. It polls faster than a queued build, so it runs between two builds instead of never. `0` only takes a slot that is free right now. |
 | `keep_days` | `3` | `SWARM_GC_KEEP_DAYS` | hot | Build output used within this many days survives `cargo sweep`. |
 | `attic_days` | `30` | `SWARM_GC_ATTIC_DAYS` | hot | Work the swarm set aside instead of deleting (a discarded phase's commits, under `refs/swarm-attic/<phase>/<utc-stamp>`) is kept this many days before gc drops the ref, and its backup branch on origin with it. |
 

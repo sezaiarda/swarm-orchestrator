@@ -196,6 +196,34 @@ def _worker_env(
     return env
 
 
+#: The cargo settings every swarm build runs with, so that workers, the operator
+#: and the landing's lane check all write ONE generation of units into the shared
+#: per-repo target (the profile is part of cargo's unit hash: a build with other
+#: settings adds a second full copy beside the first rather than reusing it).
+#:
+#: ``CARGO_INCREMENTAL=0``: see :func:`session_env`.
+#:
+#: ``CARGO_PROFILE_{DEV,TEST}_DEBUG=0``: debuginfo is most of every test binary,
+#: and cargo links one binary per ``tests/*.rs`` file, each carrying the whole
+#: dependency graph. A ``--all-features`` build writes many such executables,
+#: and stripping debuginfo from them shrinks the cache considerably, even under a global
+#: ``debug = "line-tables-only"``. Those generations, regrown each phase, are what
+#: the disk guard kept evicting. Panics and failed asserts still name file and
+#: line (that is compiled in, not debuginfo); only backtrace line numbers go.
+#:
+#: An explicit value in the environment wins over each default.
+CARGO_ENV = {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+}
+
+
+def cargo_env() -> dict[str, str]:
+    """:data:`CARGO_ENV`, with any value already set in the environment kept."""
+    return {key: os.environ.get(key) or val for key, val in CARGO_ENV.items()}
+
+
 def tmp_env(cfg: Config, name: str) -> dict[str, str]:
     """``TMPDIR``/``TMP``/``TEMP`` pointing at the session's own on-disk temp dir.
 
@@ -246,8 +274,7 @@ def session_env(
     ``CARGO_INCREMENTAL=0`` because incremental state is pure dead weight here:
     every phase builds a *different* source tree against one shared ``target/``,
     so no phase can ever reuse another's incremental cache — it only fills the disk
-    with dead weight. An explicit ``CARGO_INCREMENTAL`` in the environment still
-    wins (``setdefault`` over the inherited value).
+    with dead weight. The rest of :data:`CARGO_ENV` (no debuginfo) comes with it.
 
     ``tmp`` names the session's own ``TMPDIR`` (:func:`tmp_env`): the phase for a
     worker, the mirror name for the operator and the Overseer.
@@ -261,7 +288,7 @@ def session_env(
         env[SESSION_ENV] = session
     if tmp:
         env.update(tmp_env(cfg, tmp))
-    env.setdefault("CARGO_INCREMENTAL", os.environ.get("CARGO_INCREMENTAL") or "0")
+    env.update(cargo_env())
     for key in ("SWARM_SLUG", "SWARM_TG_SINK", "SWARM_BIN", "SWARM_DRIVER"):
         val = os.environ.get(key)
         if val is not None:

@@ -357,7 +357,10 @@ def _run(cmd: str, wt: Path, fh, timeout: float) -> bool:
     if not cmd:
         return True
     try:
-        proc = subprocess.Popen(cmd, shell=True, cwd=wt, stdin=subprocess.DEVNULL,
+        # The workers' cargo settings: the check builds into the same shared
+        # target, and any other profile would write a second copy of every unit.
+        env = {**os.environ, **launch_mod.cargo_env()}
+        proc = subprocess.Popen(cmd, shell=True, cwd=wt, stdin=subprocess.DEVNULL, env=env,
                                 stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as exc:  # the worktree went: nothing was tested, so red
         fh.write(f"\n# could not start: {exc}\n")

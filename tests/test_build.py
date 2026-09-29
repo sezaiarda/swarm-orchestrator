@@ -110,6 +110,32 @@ def test_worker_env_build_vars_worktree_only(tmp_path, monkeypatch):
     assert wt["SWARM_BUILD_MAX"] == str(cfg.build_max_concurrent)
 
 
+def test_every_session_builds_without_debuginfo_or_incremental(tmp_path, monkeypatch):
+    """One cargo profile for every swarm build, so the shared target holds one
+    generation of units; a value the owner exported still wins."""
+    for key in launch.CARGO_ENV:
+        monkeypatch.delenv(key, raising=False)
+    cfg = _cfg(tmp_path, monkeypatch)
+    env = launch._worker_env(cfg, "P1", worktree=tmp_path / "wt")
+    assert {k: env[k] for k in launch.CARGO_ENV} == {
+        "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",
+    }
+    monkeypatch.setenv("CARGO_PROFILE_DEV_DEBUG", "line-tables-only")
+    assert launch.session_env(cfg)["CARGO_PROFILE_DEV_DEBUG"] == "line-tables-only"
+
+
+def test_the_lane_check_builds_with_the_workers_cargo_env(tmp_path, monkeypatch):
+    from swarm_orchestrator import landing
+
+    for key in launch.CARGO_ENV:
+        monkeypatch.delenv(key, raising=False)
+    out = tmp_path / "out.log"
+    with out.open("w") as fh:
+        assert landing._run('echo "debug=$CARGO_PROFILE_TEST_DEBUG inc=$CARGO_INCREMENTAL"',
+                            tmp_path, fh, 30)
+    assert "debug=0 inc=0" in out.read_text()
+
+
 # -- the shared target cache symlink --------------------------------------
 def _rust_wt(wt: Path, *, ignore_target: bool = True) -> None:
     """A worktree that looks like a Rust repo checkout (git tree + Cargo.toml)."""

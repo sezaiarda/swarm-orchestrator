@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -500,17 +501,23 @@ def _tick(sup) -> None:
         sup._gc_thread.join(5)
 
 
-def test_auto_gc_skips_a_held_build_slot_and_retries_later(cfg):
-    """The real `auto`: a build holding the only slot means `busy`, and nothing
-    is planned or deleted while it runs."""
-    _fill(cfg.tmp_dir / "P-dead" / "f")
+def _hold_slot0(cfg) -> int:
     cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
     fd = os.open(cfg.buildsem_dir / "slot0", os.O_CREAT | os.O_RDWR, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
+
+
+def test_auto_gc_skips_a_held_build_slot_and_retries_later(cfg, monkeypatch):
+    """The real `auto`: a build holding the only slot past `[gc].wait_s` means
+    `busy`, and nothing is planned or deleted while it runs."""
+    monkeypatch.setattr(cfg, "gc_wait_s", 1)
+    _fill(cfg.tmp_dir / "P-dead" / "f")
+    fd = _hold_slot0(cfg)
     try:
         t0 = time.monotonic()
         result = gc_mod.auto(cfg)
-        assert time.monotonic() - t0 < 5  # never waits for the slot
+        assert time.monotonic() - t0 < 5  # waits `[gc].wait_s`, no longer
     finally:
         os.close(fd)
     assert result.outcome == gc_mod.AUTO_BUSY
@@ -518,6 +525,20 @@ def test_auto_gc_skips_a_held_build_slot_and_retries_later(cfg):
 
     done = gc_mod.auto(cfg)  # slot free again
     assert done.outcome == gc_mod.AUTO_DONE and done.by_kind.get("stale-tmp", 0) > 0
+    assert not (cfg.tmp_dir / "P-dead").exists()
+
+
+def test_auto_gc_waits_for_the_slot_and_runs_between_two_builds(cfg, monkeypatch):
+    """A slot freed during the wait is taken — ahead of a builder polling for it —
+    so a gc on a swarm that is never idle still runs."""
+    monkeypatch.setattr(cfg, "gc_wait_s", 30)
+    _fill(cfg.tmp_dir / "P-dead" / "f")
+    fd = _hold_slot0(cfg)
+    threading.Timer(0.5, os.close, args=(fd,)).start()  # the build ends mid-wait
+    t0 = time.monotonic()
+    result = gc_mod.auto(cfg)
+    assert 0.4 < time.monotonic() - t0 < 10
+    assert result.outcome == gc_mod.AUTO_DONE and result.by_kind.get("stale-tmp", 0) > 0
     assert not (cfg.tmp_dir / "P-dead").exists()
 
 

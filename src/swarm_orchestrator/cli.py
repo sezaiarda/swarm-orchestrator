@@ -218,12 +218,22 @@ def _attach(cfg: Config) -> None:
         print(f"could not attach to tmux session {cfg.session!r}: {exc}", file=sys.stderr)
 
 
-def _report_web_board(cfg: Config) -> None:
-    """After ``up`` starts the board (tmux window or detached process), say
-    whether it actually came up — port-taken and crash both used to go silent:
-    the pane died, ``swarm up`` printed the URLs anyway, and nothing but a
-    since-corrected ``status``/``doctor`` connect check ever disagreed."""
-    state, detail = web_lifecycle.wait_probe(cfg)
+#: How long ``up`` waits for the dashboard to boot and bind the board it serves.
+WEB_HOSTED_WAIT_S = 20.0
+
+
+def web_hosted(cfg: Config) -> bool:
+    """Whether the dashboard serves the web board (``up`` then starts none): only
+    under tmux, where ``up`` opens the dashboard in window 0."""
+    return cfg.driver == "tmux" and bool(cfg.tui_autostart)
+
+
+def _report_web_board(cfg: Config, hosted: bool = False) -> None:
+    """After ``up`` starts the board (in the dashboard, or a detached process),
+    say whether it actually came up — port-taken and crash both used to go
+    silent: the pane died, ``swarm up`` printed the URLs anyway, and nothing but
+    a since-corrected ``status``/``doctor`` connect check ever disagreed."""
+    state, detail = web_lifecycle.wait_probe(cfg, WEB_HOSTED_WAIT_S if hosted else 5.0)
     if state == web_lifecycle.OURS:
         print(f"web board: {' '.join(web_lifecycle.urls(cfg))}")
         return
@@ -231,7 +241,9 @@ def _report_web_board(cfg: Config) -> None:
         who = f" ({detail})" if detail else ""
         reason = f"port :{cfg.web_port} is held by another program{who}"
     else:
-        reason = f"nothing answered on :{cfg.web_port} — check <state>/logs/web.log"
+        where = ("the dashboard's status bar says why" if hosted
+                 else "check <state>/logs/web.log")
+        reason = f"nothing answered on :{cfg.web_port} — {where}"
     hint = "set [web].port in .swarm.toml to a free port and restart"
     print(f"web board: FAILED to start — {reason}", file=sys.stderr)
     print(f"  fix: {hint}", file=sys.stderr)
@@ -303,11 +315,12 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
     _poke(cfg, "bootstrap")
     print(f"swarm up: supervisor pid={pid} driver={cfg.driver}")
     if cfg.web_enabled:
-        # Under tmux the board already runs in its own window (session.setup);
-        # the headless driver has no session, so it gets its own process.
-        if cfg.driver != "tmux":
+        # The dashboard serves the board (tui.webboard); with no dashboard — the
+        # headless driver, or `[tui] autostart` off — it gets its own process.
+        hosted = web_hosted(cfg)
+        if not hosted:
             web_lifecycle.start_detached(cfg)
-        _report_web_board(cfg)
+        _report_web_board(cfg, hosted)
     if cfg.telegram_commands:
         # A side helper, never part of the run: whatever happens to it, `up` goes on.
         _, what = tgbot.start_detached(cfg)

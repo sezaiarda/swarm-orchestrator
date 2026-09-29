@@ -729,16 +729,33 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
   2 hours while a slot is busy;
 - how many phases wait on you.
 
-`n` opens the **needs-you** drawer. `1`–`9` and `0` switch between the tabs:
+It also serves the web board (below), and the status bar ends with its address.
+
+`n` opens the **needs-you** drawer. `1`–`9` and `0` switch between the tabs (the
+strip at the top lists them; the footer keeps the other keys, and `?` lists all):
 
 1. **home:** the overall ETA with what it was made on and what waits on you,
-   usage outlook, needs you, the phase books (every campaign with rows left,
-   soonest finish first; `enter` opens one: its rows, what holds each, and P95),
-   working now, a chart of phases done, and a feed of finishes, decisions,
-   answers, operator outcomes and Overseer passes.
+   then a grid. Left: the phase books (every campaign with rows left, soonest
+   finish first; `enter` opens one: its rows, what holds each, and P95), working
+   now, a chart of phases done, and a feed of finishes, decisions, answers,
+   operator outcomes and Overseer passes. Right:
+   - **usage:** the 5-hour and weekly meters with the `[usage].rules` marked on
+     them and when each resets, the rules, this run's burn, the next cap the run
+     reaches (at the forecast's burn per busy worker-hour, times the workers busy
+     now) against when the work is done, and a chart of each window over time
+     (the last day of 5-hour, the current week) with the caps drawn across it;
+   - **alerts & notifications:** what needs you (`◆`), what is wrong now (the
+     footer's list, and any warning or failure from the last doctor run), then
+     every ping newest first: `✓` delivered, `·` held, `✗` never arrived.
+     `enter` opens one; `x` acknowledges the ones that never arrived;
+   - **shells:** what `swarm keep` left running.
+
+   Under 110 columns the right column moves under the feed and needs you
+   returns as a strip at the top.
 2. **workers:** one row per slot. A busy slot whose pane died shows `gone`.
 3. **history:** every phase run, with what it did.
-4. **alerts:** the notification log. `F` cycles all, failed and delivered.
+4. **alerts:** the whole notification log with each ping's detail. `F`
+   cycles all, failed and delivered.
 5. **disk:** sizes of mirrors, caches and the state dir. Scanned on demand (`r`).
 6. **settings:** a typed form over every config key, with its reload class.
    Applying it edits `.swarm.toml` in place, keeping comments, then runs
@@ -760,9 +777,13 @@ columns hide as it narrows.
 
 ## The web board (`swarm web`)
 
-A read-only Kanban board for a phone or a browser. Under tmux,
-`swarm up` starts it in the last window (`web`). Under the `bare` driver, it runs
-as a detached process. `swarm down` stops it. `swarm up`, `swarm status` and
+A read-only Kanban board for a phone or a browser. Under tmux the dashboard
+serves it from its own process and stops it when it exits; it first checks the
+port, so a board already answering there (a `swarm web` run by hand) is left
+alone and named in the status bar, and it takes over once that one stops. With no
+dashboard (the `bare` driver, or `[tui] autostart = false`) `swarm up` starts it
+as a detached process and `swarm down` stops it. A board that starts while the
+previous one is still closing waits up to 5 s for the port instead of failing. `swarm up`, `swarm status` and
 `swarm doctor` print its address: the machine's Tailscale IP (`tailscale ip -4`),
 or its LAN addresses when Tailscale is not running.
 
@@ -813,7 +834,7 @@ is logged to `<state>/notifications.jsonl`, and the dashboard's alerts tab reads
 that log. A message the swarm holds back on purpose is logged there too, with
 `delivered: false` and a `suppressed` reason; the dashboard shows it as `·`, not
 as a drop, and `swarm doctor` does not count it as one. `swarm notify --ack` (or
-`x` on the alerts tab) acknowledges the drops so far without touching the log;
+`x` on home or the alerts tab) acknowledges the drops so far without touching the log;
 the footer, the drawer and `swarm doctor` then count only later ones, and doctor
 only fails on a drop that is recent or on sends that are still failing.
 `swarm notify "<text>"` is the only way a session should message you.

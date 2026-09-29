@@ -11,8 +11,9 @@ at most ``[tmux].panes_per_window`` (default :data:`PANES_PER_WINDOW`; ``workers
 full pane / 2 LEFT|RIGHT / 3-4 tiled; or a pinned preset such as
 ``even-vertical`` for a TOP/BOTTOM stack). Windows are referenced by captured id everywhere downstream; slot pane ids
 are recorded in state so accounting is tag-driven (workers run their own teammates
-in-process, so no teammate panes ever appear). Last, when ``[web] enabled``, a
-``web`` window serving the LAN board (:mod:`swarm_orchestrator.web`).
+in-process, so no teammate panes ever appear). There is no ``web`` window: the
+dashboard serves the board itself (:mod:`swarm_orchestrator.tui.webboard`), and
+without a dashboard ``swarm up`` starts it detached.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from . import procs
 from . import state as state_mod
 from . import tmux
 from .config import Config
-from .web import lifecycle as web_lifecycle
 
 #: The default of ``[tmux].panes_per_window``.
 PANES_PER_WINDOW = 4
@@ -95,18 +95,6 @@ def setup(cfg: Config) -> dict[str, str]:
             slot_panes[gidx] = pane
         windows[name] = win
         base += size
-
-    if cfg.web_enabled:
-        # The LAN board, in the LAST window so every index the owner's fingers
-        # know (0 dash … 3 workers) stays where it was; inside the session so it
-        # lives and dies with it — `swarm down` kills it with every other window.
-        web_win = tmux.new_window(cfg.session, "web")
-        windows["web"] = web_win
-        tmux.respawn_pane(
-            tmux.list_panes(web_win)[0],
-            f"cd {shlex.quote(str(cfg.project_dir))} && exec {web_lifecycle.command(cfg)}",
-            env={"SWARM_STATE_DIR": str(cfg.state_dir)},
-        )
 
     if cfg.tui_autostart:
         # cd first: tmux.new_session takes no -c, so window 0 inherits whatever

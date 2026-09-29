@@ -14,7 +14,7 @@ repository layout: it drives one repo or an umbrella of many, configured by one
 through it every day.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="swarm-orchestrator at runtime: a detached supervisor reads control.fifo and owns state.json; it launches Claude Code sessions into a tmux session with a dashboard, an overseer window, an operator window, worker slots and a web board; it merges finished phases into the project's repos and pings the owner on Telegram" width="900">
+  <img src="docs/architecture.svg" alt="swarm-orchestrator at runtime: a detached supervisor reads control.fifo and owns state.json; it launches Claude Code sessions into a tmux session with a dashboard (which serves the web board), an overseer window, an operator window and worker slots; it merges finished phases into the project's repos and pings the owner on Telegram" width="900">
 </p>
 
 ## Contents
@@ -485,7 +485,7 @@ ten tabs, switched with `1`–`9` and `0`, are:
   only way a session should message you, even when a brief or a ledger row
   names another script (a `notify.sh`, say); the prompts say so.
   Once you have seen the pings that never arrived, `swarm notify --ack` (or `x`
-  on the alerts tab) clears the warning: the footer and `swarm doctor` count
+  on home or the alerts tab) clears the warning: the footer and `swarm doctor` count
   only drops after that. The log itself is kept as it is.
 - **What pings you** (`[telegram].pings = "necessary"`, the default): only what
   needs you.
@@ -656,9 +656,9 @@ git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
    swarm up              # session + supervisor + init pass, then attaches you
    ```
 
-**Moving around:** `Ctrl-b 0` is the dashboard, `1` the overseer window, `2` the
-operator, `3` the first workers window (`4`, … page through the rest), and the
-last window is the web board.
+**Moving around:** `Ctrl-b 0` is the dashboard (which also serves the web board),
+`1` the overseer window, `2` the operator, and `3` the first workers window (`4`,
+… page through the rest).
 `Ctrl-b d` detaches while the supervisor keeps
 running. Inside tmux already, `swarm up` switches your client instead of
 attaching; `swarm up --no-attach` is for scripts.

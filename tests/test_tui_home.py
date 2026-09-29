@@ -787,7 +787,7 @@ def test_chart_is_not_redrawn_while_nothing_finishes(monkeypatch):
         finally:
             home.chart_lines = original
 
-    drive(steps)
+    drive(steps, size=(100, 40))  # tall enough to show the chart: a hidden one is not drawn
     assert len(calls) == 2
 
 

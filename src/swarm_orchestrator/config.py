@@ -625,9 +625,9 @@ class Config:
     # a file by path, and redacts anything shaped like a secret.
     web_enabled: bool = _k(
         "web", "enabled", True, RESTART, env="SWARM_WEB",
-        doc="start the web board at `swarm up`",
-        why="the board's window is created once, by `swarm up`; there is no later"
-            " moment a reload could start or stop it")
+        doc="serve the web board (the dashboard serves it)",
+        why="the dashboard decides at start whether it serves the board, and `swarm up`"
+            " whether to start one; there is no later moment a reload could reach")
     web_host: str = _k(
         "web", "host", "0.0.0.0", RESTART, env="SWARM_WEB_HOST",
         doc="web board bind address (0.0.0.0 = all)",

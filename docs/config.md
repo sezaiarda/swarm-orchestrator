@@ -227,7 +227,7 @@ failure is logged (`BACKUP` in `supervisor.log`) and never holds anything up.
 
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
-| `enabled` | `true` | `SWARM_WEB` | restart | Start the board in the last tmux window at `swarm up`. Under the `bare` driver it runs as a detached process instead. |
+| `enabled` | `true` | `SWARM_WEB` | restart | Serve the board. Under tmux the dashboard serves it; with no dashboard (the `bare` driver, or `[tui] autostart = false`) `swarm up` starts it as a detached process. |
 | `host` | `"0.0.0.0"` | `SWARM_WEB_HOST` | restart | The bind address. The default is every interface, so the board answers on the Tailscale IP that `swarm status` prints (or the LAN address when Tailscale is absent). |
 | `port` | `8765` | `SWARM_WEB_PORT` | restart | The TCP port. |
 

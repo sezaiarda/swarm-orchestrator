@@ -138,6 +138,9 @@ def book_line(b: Book, fc: Forecast, now: float, width: int = 76) -> str:
     if b.behind:
         doing.append(f"{b.behind} wait on you")
     tail = f"{b.left:>3} left · {', '.join(doing) or 'blocked'} · {span(b.finish, fc, now)}"
+    if NAME_W + len(count) + len(tail) + 8 > width:
+        # A narrow column keeps the finish, which is what the line is for.
+        tail = f"{b.left:>3} left · {span(b.finish, fc, now)}"
     room = max(4, width - NAME_W - len(count) - len(tail) - 4)
     return (f"{b.name[:NAME_W]:<{NAME_W}} {count} {bar(b.done, max(1, b.total), min(12, room))}"
             f"  {tail}")

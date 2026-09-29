@@ -130,6 +130,9 @@ class Dash:
         self._state: dict | None = None
         #: The open run's usage summary (legacy period when no run is open).
         self.usage: dict | None = None
+        #: Each usage window's points per busy worker-hour, as the forecast burns
+        #: them (:func:`eta.engine.burn_of`) — the usage box's projection.
+        self.burn: dict[str, float] = {}
         #: Closed runs' stored summaries, newest first — the runs tab.
         self.past_runs: list[dict] = []
         #: Recent Overseer passes, newest first — the feed and the needs-you strip.
@@ -265,12 +268,30 @@ class Dash:
         if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
             self._usage_at = now
             self.usage = self._run_usage(now)
+            try:
+                self.burn = eta_mod.burn_of(self.tail.events, int(self.cfg.max_workers or 1),
+                                            self._samples.samples, now)
+            except Exception:  # noqa: BLE001 - a projection must never take the dash down
+                self.burn = {}
             changed.add("usage")
         self._ask_eta(now)
         if self.eta.version != self._eta_seen:
             self._eta_seen = self.eta.version
             changed.add("eta")
         return changed
+
+    @property
+    def samples(self) -> list:
+        """``limits.jsonl`` as :class:`usage.Sample` rows, oldest first."""
+        return self._samples.samples
+
+    @property
+    def usage_state(self) -> tuple[dict, dict]:
+        """``(usage_hold, usage_override)`` from the state: which windows a cap
+        holds right now, and which the owner chose to run through."""
+        st = self._state if isinstance(self._state, dict) else {}
+        hold, over = st.get("usage_hold"), st.get("usage_override")
+        return (hold if isinstance(hold, dict) else {}, over if isinstance(over, dict) else {})
 
     @property
     def forecast(self):

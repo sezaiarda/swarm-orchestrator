@@ -15,10 +15,14 @@ them, newest first. Selecting a row opens that phase's History detail, or the
 pass/job record for rows that have no phase. The data is
 :mod:`~swarm_orchestrator.tui.timeline`; this module only paints it.
 
-``needs you`` sits above everything when it is on screen at all, with how long
-each thing has waited and how many phases sit behind it. The toast and the
-``n`` drawer still exist; the strip is what makes a waiting question impossible
-to miss on the screen the owner actually leaves open.
+The screen is a grid. The work is on the left — phase books, working now and
+phases done, the feed — and the run's surroundings on the right, each in a box of its own:
+**usage** with its chart (:mod:`.usagebox`), **alerts & notifications**
+(:mod:`.alerts`: what needs you, what is wrong now, every ping sent or held) and
+the kept **shells**. ``needs you`` leads the alerts box, with how long each thing
+has waited and how many phases sit behind it; when the terminal is too narrow for
+two columns the side boxes move under the feed and ``needs you`` returns as a
+strip at the top, so a waiting question is never below the fold.
 
 Two structural rules hold the rest together:
 
@@ -40,7 +44,6 @@ before it is painted, or a stray bracket eats the line.
 
 from __future__ import annotations
 
-import math
 import time
 
 from rich.markup import escape
@@ -49,11 +52,11 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
-from ..drain import line as drain_line
-from ..pauseat import line as pause_line
+from . import alerts as alerts_mod
 from . import books as books_mod
 from . import probes
 from . import timeline as tl
+from . import usagebox
 from .campaign import active, overall, summarise
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
 from .data import (
@@ -63,13 +66,11 @@ from .data import (
     fmt_clock,
     fmt_coarse,
     fmt_duration,
-    open_drops,
     fmt_stamp,
-    held_merge,
+    kept_rows,
+    open_drops,
     phase_eta,
-    usage_outlook,
 )
-from .shell import STALE_BAD_S, STALE_WARN_S
 from .theme import (
     BAD,
     BLOCKED,
@@ -196,8 +197,9 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     own sake, and this screen only spends borders on things that move. The
     books themselves are the panel under it (:func:`book_rows`); this is the
     whole ledger in one line, what the forecast was made on, and what waits on
-    the owner. ``compact`` (a short terminal) drops the basis and puts the
-    usage windows on one line, so the feed still fits on an 80x24 screen.
+    the owner. ``compact`` (a short terminal) drops the basis, so the feed still
+    fits on an 80x24 screen. Usage is not here: it has a box of its own
+    (:mod:`.usagebox`).
     """
     snap = dash.snapshot
     busy = {s.phase for s in snap.slots if s.busy and s.phase}
@@ -256,22 +258,6 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     if waiting:
         lines.append(PAD + paint(escape(clip(waiting, inner)), YOU))
     lines.append(PAD + " · ".join(counts))
-    # Only once a worker's status line has reported: a run launched before the
-    # meters tap existed would otherwise carry a permanent "not reported" line.
-    if getattr(dash, "meters", None):
-        finish_in = None
-        if fc is not None and fc.overall is not None and math.isfinite(fc.overall.p85):
-            finish_in = max(0.0, fc.overall.p85 - now)
-        outlook = usage_outlook(getattr(dash, "limits", None),
-                                getattr(dash, "usage", None), finish_in)
-        if compact and outlook:
-            # One line: the verdicts, most severe colour, cut to fit.
-            worst = next((st for st in (BAD, WARN) if any(o[1] == st for o in outlook)),
-                         outlook[0][1])
-            lines.append(PAD + paint(clip(" · ".join(t for t, _ in outlook), inner), worst))
-        else:
-            for text, state in outlook:
-                lines.append(PAD + paint(clip(text, inner), state))
     return rows(*lines)
 
 
@@ -290,6 +276,8 @@ def book_rows(dash, width: int = 76, selected: str | None = None,
     out = []
     for b in books:
         text = books_mod.book_line(b, fc, now, width - 2)
+        if len(text) > width - 2:  # cut, never re-spaced: the columns must stay aligned
+            text = text[: max(1, width - 3)] + "…"
         tone = INFO if b.running else (READY if b.ready else MUTED)
         mark = "▸ " if b.name == selected else "  "
         out.append((mark + paint(escape(text), tone), None, b.name))
@@ -705,6 +693,56 @@ def job_detail(item) -> str:
     return "\n".join(lines)
 
 
+def note_detail(note) -> str:
+    """One ping in full, as the alerts tab shows it."""
+    try:
+        from .tables import notification_detail
+    except Exception:  # noqa: BLE001 - home must not go down with the tables module
+        return escape(getattr(note, "text", "") or "")
+    return notification_detail(note)
+
+
+# -- the grid -------------------------------------------------------------
+#: At this many columns (inside home's padding) and up, home is two columns: the
+#: work on the left, usage / alerts / shells on the right. Below it they stack.
+GRID_COLS = 110
+#: The right column's share of the width, and its bounds.
+SIDE_SHARE = 0.4
+SIDE_MIN, SIDE_MAX = 46, 86
+#: Under this many rows the left column has no room for both working now and a
+#: stacked phases-done chart, and lists fewer phase books.
+TALL_ROWS = 46
+MID_BOOKS = 6
+
+
+def grid_layout(width: int, height: int) -> dict:
+    """How home is cut at ``width`` columns (inside its padding) and ``height`` rows.
+
+    Pure, so every size is testable without booting the app: whether the grid
+    stands in two columns (``single`` when not), the main and side columns'
+    widths, whether working now and phases done stack (``narrow``), whether the
+    phases-done chart shows at all, how many phase books are listed, and how
+    many rows the usage charts get (0 = none).
+    """
+    short = 0 < height < SHORT_ROWS
+    single = width < GRID_COLS
+    side = width if single else max(SIDE_MIN, min(SIDE_MAX, round(width * SIDE_SHARE)))
+    main = width if single else width - side - 1
+    narrow = main + 4 < NARROW_COLS  # NARROW_COLS counts home's padding and gutter
+    tall = height <= 0 or height >= TALL_ROWS
+    return {
+        "short": short,
+        "single": single,
+        "side": side,
+        "side_inner": side - 4,
+        "main": main,
+        "narrow": narrow,
+        "chart": not short and (single or not narrow or tall),
+        "books": SHORT_BOOKS if short else (None if tall else MID_BOOKS),
+        "usage_chart": 0 if short else (5 if tall else 3),
+    }
+
+
 # -- footer ---------------------------------------------------------------
 def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None) -> str:
     """Health in one line: ``all clear``, or only what is not.
@@ -719,35 +757,8 @@ def footer_line(dash, width: int = 76, disk: str = "", now: float | None = None)
     """
     now = now if now is not None else time.time()
     snap = dash.snapshot
-    parts: list[tuple[str, str]] = []
-
-    if not snap.ok:
-        parts.append(("no run yet", MUTED))
-    elif snap.drain and snap.supervisor_alive:
-        parts.append((escape(drain_line(snap.drain)), WARN))
-    elif snap.paused:
-        parts.append(("paused, no new workers — `swarm resume`", WARN))
-    elif snap.usage_hold:
-        parts.append((snap.usage_hold, WARN))
-    elif not snap.supervisor_alive and not snap.finished:
-        parts.append(("swarm not running — `swarm up`", BAD))
-    if snap.integ_blocked:
-        parts.append((f"merging stopped: {snap.integ_blocked}, "
-                      f"{held_merge(snap.integ_blocked_kind)}", BAD))
-    dropped = open_drops(dash.notifications or [], getattr(dash, "pings_acked_at", 0.0))
-    if dropped:
-        parts.append((f"{len(dropped)} ping(s) never reached your phone (4, then x clears)", BAD))
-
-    busy = any(s.busy for s in snap.slots)
+    parts = alerts_mod.problems(dash, now)
     age = None if snap.last_event_at is None else max(0.0, now - snap.last_event_at)
-    if busy and age is not None and age > STALE_BAD_S:
-        parts.append((f"nothing has happened for {fmt_duration(age)}", BAD))
-    elif busy and age is not None and age > STALE_WARN_S:
-        parts.append((f"quiet for {fmt_duration(age)}", WARN))
-    # Not a problem, but a hold the owner set for later: said until it happens.
-    if snap.ok and snap.pause_at:
-        parts.append((pause_line(snap.pause_at, now), WARN))
-
     if not parts:
         parts.append(("all clear", OK))
 
@@ -826,36 +837,60 @@ class Row(Static):
         self.post_message(self.Clicked(self))
 
 
-class Home(Vertical):
-    """The default tab: headline, what needs you, what is running, what happened.
+class AckPings(Message):
+    """``x`` on home: the owner has seen the pings that never arrived.
 
-    Holds one cursor over everything selectable — what waits on the owner, every
-    busy slot, then the feed — so ``enter`` (and the global actions) act on a
-    chosen row rather than on whatever happens to be first. The cursor is keyed,
-    not indexed, so a new feed row arriving on top does not slide it onto a
-    different entry; it clamps itself when its row goes away.
+    The same message the alerts tab posts; the app acknowledges them."""
+
+
+class Home(Vertical):
+    """The default tab: headline, then a grid of what is running and what wants you.
+
+    Left, the work: phase books, working now (and phases done), the feed. Right,
+    the run's surroundings: usage with its chart, alerts & notifications, the
+    kept shells. Under :data:`GRID_COLS` the right column moves under the feed,
+    and ``needs you`` comes back as a strip at the top, where it cannot be missed.
+
+    Holds one cursor over everything selectable — what waits on the owner, the
+    phase books, every busy slot, the feed, then the pings — so ``enter`` (and
+    the global actions) act on a chosen row rather than on whatever happens to be
+    first. The cursor is keyed, not indexed, so a new feed row arriving on top
+    does not slide it onto a different entry; it clamps itself when its row goes
+    away.
     """
 
     DEFAULT_CSS = """
     Home { height: 1fr; overflow-y: auto; padding: 0 1; scrollbar-gutter: stable; }
     Home > #headline { margin: 0 0 1 0; }
+    Home Panel { width: 1fr; }
+    #grid { height: 1fr; min-height: 16; }
+    #main { width: 1fr; height: 1fr; }
+    #side { width: 60; height: 1fr; margin-left: 1; }
     #p-books { margin-bottom: 1; }
     #book-rows { height: auto; }
-    Home.-short #p-books { margin-bottom: 0; }
-    Home.-short #p-chart { display: none; }
-    Home.-short #p-work { margin-right: 0; }
-    Home.-short > #headline, Home.-short #p-needs { margin-bottom: 0; }
-    Home.-short #p-feed { min-height: 6; margin-top: 0; }
-    Home > Horizontal { height: auto; }
-    Home Panel { width: 1fr; }
-    Home #p-work { margin-right: 1; }
-    Home.-narrow > #home-row { layout: vertical; }
+    #home-row { height: auto; }
+    #p-work { margin-right: 1; }
+    Home.-narrow #home-row { layout: vertical; }
     Home.-narrow #p-work { margin-right: 0; }
+    Home.-nochart #p-chart { display: none; }
+    Home.-nochart #p-work { margin-right: 0; }
     #p-needs { display: none; margin-bottom: 1; }
     #p-needs.-on { display: block; }
-    #p-feed { height: 1fr; min-height: 10; margin-top: 1; }
-    #work-rows, #need-rows { height: auto; }
+    #p-feed { height: 1fr; min-height: 8; margin-top: 1; }
+    #work-rows, #need-rows, #alert-need-rows { height: auto; }
     #feed-rows { height: 1fr; }
+    #p-usage { height: auto; margin-bottom: 1; }
+    #p-alerts { height: 1fr; min-height: 6; }
+    #alert-rows { height: 1fr; }
+    #p-shells { height: auto; margin-top: 1; }
+    Home.-short #p-books { margin-bottom: 0; }
+    Home.-short > #headline, Home.-short #p-needs { margin-bottom: 0; }
+    Home.-short #p-feed { min-height: 6; margin-top: 0; }
+    Home.-single #grid { layout: vertical; height: auto; }
+    Home.-single #main { height: auto; }
+    Home.-single #side { width: 1fr; height: auto; margin-left: 0; margin-top: 1; }
+    Home.-single #p-alerts { height: auto; }
+    Home.-single #alert-rows { height: auto; max-height: 12; }
     Home > #footer { margin-top: 1; }
     """
 
@@ -863,6 +898,7 @@ class Home(Vertical):
         Binding("j,down", "cursor(1)", "next", show=False),
         Binding("k,up", "cursor(-1)", "prev", show=False),
         Binding("enter", "open", "open", show=False),
+        Binding("x", "ack_drops", "clear not-delivered", show=False),
     ]
 
     can_focus = True
@@ -880,7 +916,7 @@ class Home(Vertical):
             self.slot = slot
 
     class OpenText(Message):
-        """Show a composed record — an Overseer pass, an ad-hoc operator job.
+        """Show a composed record — an Overseer pass, an ad-hoc operator job, a ping.
 
         Those have no History row to jump to, so home composes the text and the
         app decides where it appears.
@@ -900,26 +936,41 @@ class Home(Vertical):
         self._dash = None
         self._chart_key = None
         self._chart: list[str] = []
+        self._usage_key = None
+        self._usage: list[str] = []
         self._disk_key = None
         self._disk_text = ""
         self._disk_at = 0.0
         self._feed_key = None
         self._feed: list = []
         self._needs: list = []
+        self._notes: list = []
+        self._single = False
 
     def compose(self):
         yield Body(id="headline")
         with Panel("needs you", id="p-needs", state="you"):
             yield Vertical(id="need-rows")
-        with Panel("phase books", id="p-books"):
-            yield Vertical(id="book-rows")
-        with Horizontal(id="home-row"):
-            with Panel("working now", id="p-work"):
-                yield Vertical(id="work-rows")
-            with Panel("phases done", id="p-chart"):
-                yield Body(id="b-chart")
-        with Panel("feed", id="p-feed"):
-            yield VerticalScroll(id="feed-rows")
+        with Horizontal(id="grid"):
+            with Vertical(id="main"):
+                with Panel("phase books", id="p-books"):
+                    yield Vertical(id="book-rows")
+                with Horizontal(id="home-row"):
+                    with Panel("working now", id="p-work"):
+                        yield Vertical(id="work-rows")
+                    with Panel("phases done", id="p-chart"):
+                        yield Body(id="b-chart")
+                with Panel("feed", id="p-feed"):
+                    yield VerticalScroll(id="feed-rows")
+            with Vertical(id="side"):
+                with Panel("usage", id="p-usage"):
+                    yield Body(id="b-usage")
+                with Panel("alerts & notifications", id="p-alerts"):
+                    yield Vertical(id="alert-need-rows")
+                    yield Body(id="b-problems")
+                    yield VerticalScroll(id="alert-rows")
+                with Panel("shells", id="p-shells"):
+                    yield Body(id="b-shells")
         yield Body(id="footer")
 
     # -- selection --------------------------------------------------------
@@ -941,6 +992,9 @@ class Home(Vertical):
         if got:
             self._open(*got)
 
+    def action_ack_drops(self) -> None:
+        self.post_message(AckPings())
+
     def _open(self, kind: str, key, phase: str | None, item) -> None:
         """Open a row: a phase's History (or its live worker), or a record."""
         dash = self._dash
@@ -949,6 +1003,9 @@ class Home(Vertical):
             return
         if kind == "book":
             self.post_message(self.OpenText(f"phase book {key}", book_detail(dash, key)))
+            return
+        if kind == "note":
+            self.post_message(self.OpenText("notification", note_detail(item)))
             return
         ref = getattr(item, "ref", "")
         is_pass = (kind == "feed" and item.kind == tl.OVERSEER) or (
@@ -993,22 +1050,31 @@ class Home(Vertical):
             self.update(self._dash)
 
     # -- refresh ----------------------------------------------------------
+    def layout_for(self, width: int, height: int) -> dict:
+        """:func:`grid_layout` — a method so a test can pin it."""
+        return grid_layout(width, height)
+
     def update(self, dash) -> None:
         """Repaint. Never raises — a dead section is not a dead cockpit."""
         self._dash = dash
-        # Stack by the space home really has (a docked drawer takes 44 of it);
-        # paint to the width inside the padding *and* the scrollbar gutter, which
+        # Paint to the width inside the padding *and* the scrollbar gutter, which
         # is reserved (``scrollbar-gutter: stable``) so the width cannot change
         # under lines already cut to it when the content first overflows.
-        narrow = (self.region.width or 120) < NARROW_COLS
-        short = 0 < self.app.size.height < SHORT_ROWS
-        self.set_class(narrow, "-narrow")
+        full = max(40, self.scrollable_content_region.width or 100)
+        app_h = self.app.size.height
+        cut = self.layout_for(full, app_h)
+        short, single = cut["short"], cut["single"]
+        self._single = single
+        self.set_class(cut["narrow"], "-narrow")
         self.set_class(short, "-short")
-        width = self.scrollable_content_region.width or 100
-        # A Panel spends 2 columns on its border and 2 on its padding.
-        full = max(40, width)
-        inner = full - 4
-        half = max(24, (full if narrow else (full - 1) // 2) - 4)
+        self.set_class(single, "-single")
+        self.set_class(not cut["chart"], "-nochart")
+        self._side_width(None if single else cut["side"])
+        main_inner = cut["main"] - 4  # a Panel spends 2 columns on its border, 2 on padding
+        side_inner = cut["side_inner"]
+        half = max(24, (main_inner if cut["narrow"] or not cut["chart"]
+                        else (cut["main"] - 1) // 2 - 4))
+        now = time.time()
 
         try:
             self._retarget(dash)
@@ -1016,23 +1082,29 @@ class Home(Vertical):
             self._targets = []
         kind, key = (self._target() or ("", None))[:2]
 
-        needs = self._build(lambda: need_rows(self._needs, inner, key if kind == "need" else None))
-        self._rows("#need-rows", [(t, None, k) for t, k, _ in needs], "need")
+        # What waits on the owner: a strip at the top when the side column is
+        # below the fold, else pinned at the top of alerts & notifications.
+        needs = self._build(lambda: need_rows(self._needs, full - 4, key if kind == "need" else None))
+        side_needs = self._build(lambda: [
+            (alerts_mod.need_line(n, side_inner, now, kind == "need" and key == n.key), None, n.key)
+            for n in self._needs[:MAX_NEEDS]])
+        self._rows("#need-rows", [(t, None, k) for t, _, k in needs] if single else [], "need")
+        self._rows("#alert-need-rows", [] if single else side_needs, "need")
         panel = self._panel("#p-needs")
         if panel is not None:
-            panel.set_class(bool(self._needs), "-on")
+            panel.set_class(single and bool(self._needs), "-on")
             extra = len(self._needs) - MAX_NEEDS
             panel.set_title(f"needs you ({len(self._needs)})",
                             f"+{extra} more · n lists them" if extra > 0 else "enter opens")
 
-        limit = SHORT_BOOKS if short else None
-        books = self._build(lambda: book_rows(dash, inner, key if kind == "book" else None, limit))
+        books = self._build(lambda: book_rows(dash, main_inner, key if kind == "book" else None,
+                                              cut["books"]))
         self._rows("#book-rows", books, "book")
         panel = self._panel("#p-books")
         if panel is not None:
             fc = getattr(dash, "forecast", None)
             total = len(fc.books) if fc is not None else 0
-            extra = total - SHORT_BOOKS if short else 0
+            extra = total - cut["books"] if cut["books"] else 0
             panel.set_title(f"phase books ({total})" if total else "phase books",
                             f"+{extra} more · enter opens" if extra > 0 else
                             "soonest first · enter opens" if total else "")
@@ -1046,28 +1118,123 @@ class Home(Vertical):
         chart = self._panel("#p-chart")
         if chart is not None:
             chart.set_title("phases done" if plot else "what's next")
-        body = (self._chart_rows(dash, half, height) if plot
-                else self._build_lines(lambda: next_lines(dash, half, max(3, height))))
-        self._set("#b-chart", "\n".join(body))
+        body = []
+        if cut["chart"]:
+            body = (self._chart_rows(dash, half, height) if plot
+                    else self._build_lines(lambda: next_lines(dash, half, max(3, height))))
+            self._set("#b-chart", "\n".join(body))
         # Side by side, the two cards are one row: give them one height, or the
         # row reads as two things that happen to be adjacent.
-        self._pair_height(None if narrow or short else max(work_lines, len(body)) + 2)
+        self._pair_height(None if cut["narrow"] or short or not cut["chart"]
+                          else max(work_lines, len(body)) + 2)
 
         if self._feed:
-            feed = self._build(lambda: feed_rows(self._feed, inner - 2,
+            feed = self._build(lambda: feed_rows(self._feed, main_inner - 2,
                                                  key if kind == "feed" else None))
             self._rows("#feed-rows", [(t, None, k) for t, k, _ in feed], "feed")
         else:
-            lines = self._build_lines(lambda: empty_feed_lines(dash, inner))
+            lines = self._build_lines(lambda: empty_feed_lines(dash, main_inner))
             self._rows("#feed-rows", [("\n".join(lines), None, None)], "feed")
         feed_panel = self._panel("#p-feed")
         if feed_panel is not None:
             feed_panel.set_title("feed", "newest first · enter opens" if self._feed else "")
+            # Stacked, the feed cannot take "the rest of the screen": the side
+            # boxes come after it. It keeps what the screen has under the top.
+            feed_panel.styles.height = max(8, app_h - 18) if single else "1fr"
+
+        self._paint_usage(dash, side_inner, cut["usage_chart"], now)
+        self._paint_alerts(dash, side_inner, kind, key, now)
+        self._paint_shells(dash, side_inner)
 
         self._set("#headline", self._build_text(lambda: headline(dash, full, short)))
         self._set("#footer", self._build_text(
             lambda: footer_line(dash, full, self._disk_line(dash, full // 2))
         ))
+
+    def _paint_usage(self, dash, width: int, chart_rows: int, now: float) -> None:
+        """The usage box, rebuilt when a reading, the run or the forecast moved, or a minute passed."""
+        fc = getattr(dash, "forecast", None)
+        busy = sum(1 for s in dash.snapshot.slots if s.busy)
+        key = (len(getattr(dash, "samples", None) or ()), id(getattr(dash, "usage", None)),
+               id(fc), busy, width, chart_rows, int(now // 60))
+        if key != self._usage_key:
+            self._usage_key = key
+            self._usage = self._build_lines(lambda: usagebox.box_lines(dash, width, now,
+                                                                        chart_rows))
+        self._set("#b-usage", "\n".join(self._usage))
+        panel = self._panel("#p-usage")
+        if panel is not None:
+            panel.set_title("usage", self._build_text(lambda: usagebox.subtitle(dash, now)))
+
+    def _paint_alerts(self, dash, width: int, kind: str, key, now: float) -> None:
+        """Alerts & notifications: needs you, what is wrong now, then every ping."""
+        problems = self._build_lines(lambda: [
+            alerts_mod.problem_line(text, state, width)
+            for text, state in alerts_mod.problems(dash, now)] + self._doctor_lines(width, now))
+        if self._single and self._needs:
+            problems.insert(0, paint(f" {GLYPH[YOU]} {len(self._needs)} thing(s) need you — "
+                                     "listed at the top", YOU))
+        self._set("#b-problems", "\n".join(problems))
+        try:
+            box = self.query_one("#b-problems", Body)
+            if box.display != bool(problems):
+                box.display = bool(problems)
+        except Exception:  # noqa: BLE001 - not mounted yet
+            pass
+        acked = getattr(dash, "pings_acked_at", 0.0)
+        # The ping list scrolls: its scrollbar takes two columns of the box.
+        room = width - 2
+        notes = self._build(lambda: [
+            (alerts_mod.note_line(n, room, now, acked, kind == "note" and key == k), None, k)
+            for k, n in self._notes])
+        if not self._notes:
+            notes = [(paint(" no pings yet — they are logged here as they are sent or held",
+                            MUTED), None, None)]
+        self._rows("#alert-rows", notes, "note")
+        panel = self._panel("#p-alerts")
+        if panel is not None:
+            dropped = open_drops(dash.notifications or [], getattr(dash, "pings_acked_at", 0.0))
+            bad = any(state == BAD for _, state in alerts_mod.problems(dash, now))
+            panel.set_class(bool(self._needs) and not self._single, "-you")
+            panel.set_class(bad and not (self._needs and not self._single), "-bad")
+            count = f" · {len(self._needs)} need you" if self._needs else ""
+            hint = "x clears not-delivered · " if dropped else ""
+            panel.set_title(f"alerts & notifications{count}",
+                            f"newest first · {hint}4 for all")
+
+    def _doctor_lines(self, width: int, now: float) -> list[str]:
+        """Failing and warning checks from the last `swarm doctor` run, if any ran."""
+        try:
+            from .doctor import Doctor
+
+            doc = self.app.query_one(Doctor)
+        except Exception:  # noqa: BLE001 - no doctor tab: nothing to add
+            return []
+        checks = getattr(doc, "_doc_checks", None) or []
+        ran = getattr(doc, "_doc_ran_at", None)
+        return [alerts_mod.doctor_line(c, ran, width, now) for c in checks
+                if str(c.get("status", "")).lower() in ("warn", "fail")]
+
+    def _paint_shells(self, dash, width: int) -> None:
+        rows = self._build_lines(lambda: kept_rows(getattr(dash, "kept", None) or []))
+        rows = [r for r in rows if isinstance(r, dict)]
+        self._set("#b-shells", "\n".join(self._build_lines(
+            lambda: alerts_mod.shell_lines(rows, width))))
+        panel = self._panel("#p-shells")
+        if panel is not None:
+            alive = sum(1 for r in rows if r.get("alive"))
+            panel.set_title(f"shells ({alive} running)" if rows else "shells",
+                            "0 for details · x there stops one" if rows else "")
+
+    def _side_width(self, cols: int | None) -> None:
+        if cols == getattr(self, "_side_cols", None):
+            return
+        self._side_cols = cols
+        try:
+            side = self.query_one("#side")
+        except Exception:  # noqa: BLE001 - not mounted yet
+            return
+        side.styles.width = cols if cols is not None else "1fr"
 
     def _retarget(self, dash) -> None:
         """Everything selectable, in the order the eye reads it.
@@ -1084,14 +1251,17 @@ class Home(Vertical):
             self._feed_key = fkey
             self._feed = tl.build_feed(*sources)
         self._needs = tl.needs_you(dash)
+        self._notes = alerts_mod.recent_notes(getattr(dash, "notifications", None) or [])
         fc = getattr(dash, "forecast", None)
-        short = 0 < self.app.size.height < SHORT_ROWS
+        full = max(40, self.scrollable_content_region.width or 100)
+        limit = self.layout_for(full, self.app.size.height)["books"]
         books = list(fc.books) if fc is not None else []
         self._targets = (
             [("need", n.key, n.phase, n) for n in self._needs[:MAX_NEEDS]]
-            + [("book", b.name, None, b) for b in (books[:SHORT_BOOKS] if short else books)]
+            + [("book", b.name, None, b) for b in (books[:limit] if limit else books)]
             + [("work", s.id, s.phase, None) for s in snap.slots if s.busy and s.phase]
             + [("feed", feed_key(f), f.phase, f) for f in self._feed[:FEED_ROWS]]
+            + [("note", k, n.phase, n) for k, n in self._notes]
         )
         if self._cursor_key is not None:
             for index, target in enumerate(self._targets):

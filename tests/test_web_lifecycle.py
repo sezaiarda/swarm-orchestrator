@@ -138,7 +138,8 @@ def test_the_command_is_this_interpreter_and_this_project(tmp_path, monkeypatch)
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not available")
-def test_tmux_up_puts_the_board_in_the_last_window(monkeypatch, tmp_path):
+def test_tmux_up_opens_no_web_window(monkeypatch, tmp_path):
+    """The board is served by the dashboard now, not from a window of its own."""
     project = tmp_path / "project"
     shutil.copytree(DEMO, project)
     port = _free_port()
@@ -152,14 +153,24 @@ def test_tmux_up_puts_the_board_in_the_last_window(monkeypatch, tmp_path):
         session_mod.setup(cfg)
         names = [n for n in tmux.run(["list-windows", "-t", cfg.session, "-F",
                                       "#{window_name}"]).stdout.split("\n") if n]
-        # Every index the owner knows stays put; the board comes last.
-        assert names[:4] == ["dash", "overseer", "operator", "workers"]
-        assert names[-1] == "web"
-        assert "web" in state_mod.read(cfg).windows
-        assert _wait(lambda: _listening(port)), "the web window never served"
+        # Every index the owner knows stays put, and nothing comes after them.
+        assert names == ["dash", "overseer", "operator", "workers"]
+        assert "web" not in state_mod.read(cfg).windows
+        time.sleep(0.5)
+        assert not _listening(port), "setup started a board on its own"
     finally:
         session_mod.teardown(cfg)
-    assert _wait(lambda: not _listening(port)), "the board outlived its session"
+
+
+def test_up_leaves_the_board_to_the_dashboard_only_when_it_opens_one(tmp_path, monkeypatch):
+    from swarm_orchestrator import cli
+
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    cfg = load(project_dir=str(tmp_path))
+    for driver, autostart, hosted in (("tmux", True, True), ("tmux", False, False),
+                                      ("bare", True, False)):
+        cfg.driver, cfg.tui_autostart = driver, autostart
+        assert cli.web_hosted(cfg) is hosted, (driver, autostart)
 
 
 def test_probe_tells_ours_taken_and_closed_apart(tmp_path, monkeypatch):

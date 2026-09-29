@@ -1225,7 +1225,7 @@ def _check_web(cfg: Config, st: State) -> Check:
             "web.board",
             WARN,
             f"the run is up but nothing answers on :{cfg.web_port}",
-            "swarm web   # or check the `web` tmux window / <state>/logs/web.log",
+            "the dashboard serves it (its status bar says why not), or run `swarm web`",
         )
     return Check("web.board", OK, f"not running — `swarm up` starts it on :{cfg.web_port}")
 

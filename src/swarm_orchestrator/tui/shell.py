@@ -19,7 +19,7 @@ from textual.widgets import Static
 
 from . import campaign as camp
 from .data import fmt_ago, fmt_duration
-from .theme import ACCENT, BAD, COLOR, INFO, MUTED, OK, WARN, paint
+from .theme import ACCENT, BAD, COLOR, MUTED, OK, WARN, paint
 
 # A run is "quiet" long before it is broken. These are the thresholds at which
 # silence stops being normal -- a supervisor that has died leaves its slots
@@ -46,7 +46,9 @@ class StatusBar(Static):
         snap = getattr(dash, "snapshot", None)
         if snap is None or not getattr(snap, "ok", False):
             self.set_classes("")
-            self.update(paint("  no run yet — `swarm up` to start", MUTED))
+            board = self._board()
+            self.update(paint("  no run yet — `swarm up` to start", MUTED)
+                        + (f"  {board}" if board else ""))
             return
 
         parts: list[str] = []
@@ -108,8 +110,22 @@ class StatusBar(Static):
             )
             state = state or "-attention"
 
+        # 6. Where the web board is — last, so it is the first thing a narrow
+        # terminal loses. It is served from this process (tui.webboard).
+        board = self._board()
+        if board:
+            parts.append(board)
+
         self.set_classes(state)
         self.update("  ".join(parts))
+
+    def _board(self) -> str:
+        """Where the web board is, painted; "" when the dashboard serves none."""
+        board = getattr(self.app, "web_board", None)
+        if board is None:
+            return ""
+        text, tone = board.line()
+        return f"[{COLOR[tone]}]{text}[/]" if text else ""
 
 
 class TabBar(Horizontal):

@@ -6,13 +6,13 @@ type into the phone*. So this module owns the command line the board is started
 with, the pid file it leaves, the listening probe, and the address the owner is
 given: the machine's Tailscale IP, or its LAN addresses when Tailscale is absent.
 
-Under the tmux driver the board runs in its own ``web`` window (created by
-:func:`session.setup`), so it dies with the session like every other window.
-Under the headless ``bare`` driver there is no session to die with, so ``up``
-starts it as a detached process. Either way the board writes its pid to
-``<state>/web.pid`` — but only when started with ``--pidfile``, which only
-``up`` passes: a ``swarm web`` run by hand against someone's live state dir
-writes nothing into it.
+Under the tmux driver the dashboard serves the board from its own process
+(:mod:`swarm_orchestrator.tui.webboard`), so it lives and dies with the
+dashboard pane. With no dashboard (the headless ``bare`` driver, or
+``[tui] autostart`` off) ``up`` starts it as a detached process, which writes
+its pid to ``<state>/web.pid`` — only when started with ``--pidfile``, which
+only ``up`` passes: a ``swarm web`` run by hand against someone's live state
+dir writes nothing into it.
 """
 
 from __future__ import annotations

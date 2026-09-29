@@ -191,14 +191,21 @@ def fit(inputs: Inputs) -> Fitted:
 
 def burn(inputs: Inputs) -> dict[str, float]:
     """Each usage window's percentage points per busy worker-hour, lately."""
-    start = inputs.now - BURN_WINDOW_S
-    events = [e for e in inputs.events if e.ts is not None and start <= e.ts <= inputs.now]
-    busy = data_mod.occupancy_series(events, inputs.workers).points
-    seat_h = sum(v * (b - a) for (a, v), (b, _) in zip(busy, busy[1:] + [(inputs.now, 0.0)]))
+    return burn_of(inputs.events, inputs.workers, inputs.usage, inputs.now)
+
+
+def burn_of(events, workers: int, usage, now: float) -> dict[str, float]:
+    """:func:`burn` from its parts: the log's events, the worker count and the
+    ``limits.jsonl`` samples. The dashboard's usage box projects the caps with it,
+    so it and the forecast burn at the same rate."""
+    start = now - BURN_WINDOW_S
+    events = [e for e in events if e.ts is not None and start <= e.ts <= now]
+    busy = data_mod.occupancy_series(events, workers).points
+    seat_h = sum(v * (b - a) for (a, v), (b, _) in zip(busy, busy[1:] + [(now, 0.0)]))
     seat_h /= 3600.0
     out = {}
-    for window, pace in (("week", usage_mod.week_pace(inputs.usage, start, inputs.now)),
-                         ("five_hour", usage_mod.five_pace(inputs.usage, start, inputs.now))):
+    for window, pace in (("week", usage_mod.week_pace(usage, start, now)),
+                         ("five_hour", usage_mod.five_pace(usage, start, now))):
         if pace.per_h is not None and seat_h >= 1.0:
             out[window] = pace.used / seat_h
     return out

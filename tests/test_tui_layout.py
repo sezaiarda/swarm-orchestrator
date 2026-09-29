@@ -111,7 +111,12 @@ def test_home_puts_needs_you_work_and_the_feed_on_screen(seeded, size, monkeypat
         home = app.query_one("#tab-home")
         home.update(app.dash)
         await pilot.pause()
-        got["needs"] = _on_screen(app, home.query_one("#p-needs"))
+        # Stacked, needs you is a strip at the top; in the grid it leads the
+        # alerts & notifications box.
+        strip = home.query_one("#p-needs")
+        pinned = [r for r in home.query("#alert-need-rows Row") if r.display]
+        got["needs"] = (_on_screen(app, strip) if size[0] < 110
+                        else bool(pinned) and all(_on_screen(app, r) for r in pinned))
         got["work"] = _on_screen(app, home.query_one("#p-work"))
         got["feed"] = _on_screen(app, home.query_one("#p-feed"))
         got["feed_rows"] = [r._swarm_text for r in home.query("#feed-rows Row") if r.display]
@@ -123,8 +128,12 @@ def test_home_puts_needs_you_work_and_the_feed_on_screen(seeded, size, monkeypat
     text = "\n".join(got["feed_rows"])
     assert "ship without the graph" in text and "kept the v1 schema" in text
     assert "Built the base" in text
-    assert got["narrow"] is (size[0] < 100)
-    assert got["chart"] is (size[1] >= 36)  # short screens give the room to the feed
+    # Working now and phases done stack when their column is under 100: the
+    # whole screen below 100, the grid's left column at 140.
+    assert got["narrow"] is (size[0] < 100 or size[0] >= 110)
+    # Short screens give the room to the feed; at 140x40 the grid's left column
+    # is too narrow to stack a chart under working now and still show the feed.
+    assert got["chart"] is {(80, 24): False, (100, 30): False, (140, 40): False}[size]
 
 
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")

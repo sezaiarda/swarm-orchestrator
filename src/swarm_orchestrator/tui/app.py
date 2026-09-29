@@ -127,7 +127,7 @@ class HelpScreen(ModalScreen[None]):
   [{COLOR[OK]}]1[/] home      [{COLOR[OK]}]2[/] workers   [{COLOR[OK]}]3[/] history   [{COLOR[OK]}]4[/] alerts
   [{COLOR[OK]}]5[/] disk      [{COLOR[OK]}]6[/] settings  [{COLOR[OK]}]7[/] commands  [{COLOR[OK]}]8[/] doctor
   [{COLOR[OK]}]9[/] runs      [{COLOR[OK]}]0[/] shells
-  [{COLOR[MUTED]}]tab / shift+tab cycle[/]
+  [{COLOR[MUTED]}]tab / shift+tab cycle · the strip at the top shows them too[/]
 
 [b]anywhere[/b]
   [{COLOR[OK]}]n[/] needs-you drawer   [{COLOR[OK]}]c[/] command centre   [{COLOR[OK]}]d[/] run the doctor
@@ -136,6 +136,7 @@ class HelpScreen(ModalScreen[None]):
   [{COLOR[OK]}]D[/] drain: stop once the running work is done, then maybe run a command
 
 [b]on their own tab[/b]
+  [{COLOR[OK]}]x[/] home: clear the "never reached your phone" warning (the log is kept)
   [{COLOR[OK]}]/[/] commands: filter   [{COLOR[OK]}]esc[/] clear it
   [{COLOR[OK]}]F[/] alerts: all / failed / delivered
   [{COLOR[OK]}]x[/] alerts: clear the "never reached your phone" warning (the log is kept)
@@ -203,17 +204,20 @@ class SwarmApp(App):
     .hidden { display: none; }
     """
 
+    # The tab keys stay out of the footer: the tab strip at the top already shows
+    # every tab with its number, and the owner did not want them twice. The
+    # footer keeps the keys shown nowhere else; `?` lists every one.
     BINDINGS = [
-        Binding("1", "tab('home')", "home"),
-        Binding("2", "tab('workers')", "workers"),
-        Binding("3", "tab('history')", "history"),
-        Binding("4", "tab('alerts')", "alerts"),
-        Binding("5", "tab('disk')", "disk"),
-        Binding("6", "tab('settings')", "settings"),
-        Binding("7", "tab('commands')", "commands"),
-        Binding("8", "tab('doctor')", "doctor"),
-        Binding("9", "tab('runs')", "runs"),
-        Binding("0", "tab('shells')", "shells"),
+        Binding("1", "tab('home')", "home", show=False),
+        Binding("2", "tab('workers')", "workers", show=False),
+        Binding("3", "tab('history')", "history", show=False),
+        Binding("4", "tab('alerts')", "alerts", show=False),
+        Binding("5", "tab('disk')", "disk", show=False),
+        Binding("6", "tab('settings')", "settings", show=False),
+        Binding("7", "tab('commands')", "commands", show=False),
+        Binding("8", "tab('doctor')", "doctor", show=False),
+        Binding("9", "tab('runs')", "runs", show=False),
+        Binding("0", "tab('shells')", "shells", show=False),
         Binding("R", "reset_run", "reset run", show=False),
         Binding("D", "drain", "drain, then stop", show=False),
         Binding("c", "tab('commands')", "commands", show=False),
@@ -224,11 +228,18 @@ class SwarmApp(App):
         Binding("q", "quit", "quit"),
     ]
 
-    def __init__(self, cfg) -> None:
+    def __init__(self, cfg, board: bool | None = None) -> None:
         super().__init__()
         self.cfg = cfg
         self.dash = Dash(cfg)
         self._busy_last = False
+        #: The web board, served from this process (:mod:`.webboard`); ``None``
+        #: when ``[web] enabled`` is off, or ``board=False``.
+        self.web_board = None
+        if (getattr(cfg, "web_enabled", False) if board is None else board):
+            from .webboard import WebBoard
+
+            self.web_board = WebBoard(cfg)
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="statusbar")
@@ -266,6 +277,9 @@ class SwarmApp(App):
         self.set_interval(TICK_S, self._tick)
         self.set_interval(PROBE_S, self._probe)
         self._probe()
+        if self.web_board is not None:
+            self.set_interval(PROBE_S, self._board_tick)
+            self._board_tick()
 
     # -- refresh ----------------------------------------------------------
     def _tick(self) -> None:
@@ -288,6 +302,26 @@ class SwarmApp(App):
         except Exception:  # noqa: BLE001 - a probe must never take the app down
             return
         self.call_from_thread(self.refresh_all)
+
+    @work(thread=True, exclusive=True, group="board")
+    def _board_tick(self) -> None:
+        """Serve the web board if nothing else does (a probe, maybe a bind: a thread)."""
+        board = self.web_board
+        if board is None:
+            return
+        before = (board.state, board.url, board.detail)
+        try:
+            board.ensure()
+        except Exception as exc:  # noqa: BLE001 - the board must never take the cockpit down
+            self.log(f"web board: {exc}")
+            return
+        if (board.state, board.url, board.detail) != before:
+            self.call_from_thread(self.refresh_all)
+
+    def stop_board(self) -> None:
+        """Stop serving the web board; it goes with the dashboard."""
+        if self.web_board is not None:
+            self.web_board.stop()
 
     def refresh_all(self) -> None:
         """Repaint the status bar and the one tab that is actually on screen.
@@ -434,8 +468,8 @@ class SwarmApp(App):
             "ends the kept process and everything in its process group, and drops its record")
 
     def on_ack_pings(self, event) -> None:
-        """``x`` on the alerts tab: ``swarm notify --ack``, in-process (one small
-        file). Nothing to confirm: it sends nothing and the ping log is kept."""
+        """``x`` on home or the alerts tab: ``swarm notify --ack``, in-process (one
+        small file). Nothing to confirm: it sends nothing and the ping log is kept."""
         event.stop()
         from .. import telegram
 
@@ -505,12 +539,17 @@ def reset_run(cfg) -> dict:
 
 
 def main(cfg) -> int:
-    """Run the dashboard. Returns a process exit code."""
+    """Run the dashboard, and the web board with it. Returns a process exit code."""
+    app = None
     try:
-        SwarmApp(cfg).run()
+        app = SwarmApp(cfg)
+        app.run()
     except Exception as exc:  # noqa: BLE001
         import sys
 
         print(f"swarm tui: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if app is not None:
+            app.stop_board()
     return 0

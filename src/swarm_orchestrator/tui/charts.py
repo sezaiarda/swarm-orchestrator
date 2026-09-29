@@ -288,3 +288,61 @@ def axis_time(ts: float | None, span: float) -> str:
     if span <= 600:
         return moment.strftime("%H:%M:%S")
     return moment.strftime("%H:%M")
+
+
+def level_chart(values, width: int, height: int, *, top: float = 100.0,
+                marks=()) -> list[str]:
+    """A series on a fixed ``0..top`` scale, with reference levels drawn across it.
+
+    :func:`area` scales to the series' own maximum, which is right for a count and
+    wrong for a usage percentage: 30% would fill the chart as fully as 95%, and a
+    cap at 90% would have no row to sit on. Here the scale is fixed, and each
+    ``(level, char)`` in ``marks`` is drawn with ``char`` through the empty cells
+    of the row holding that level, with the level in the scale column, so the line
+    the swarm stops at is on the chart the value climbs towards. ``None`` values
+    (no reading yet) are left blank.
+    """
+    if width <= 0 or height <= 0 or top <= 0:
+        return []
+    marks = sorted(((float(lvl), ch) for lvl, ch in marks if 0 < float(lvl) <= top),
+                   key=lambda m: m[0])
+    labels = [_num(top), "0"] + [_num(lvl) for lvl, _ in marks]
+    pad = max(len(t) for t in labels)
+    plot = width - pad - 1
+    if plot < 1:
+        pad, plot = 0, width
+    raw = list(values)
+    if not raw:
+        return []
+    cells = _samples([-1.0 if v is None else v for v in raw], plot)
+
+    def band(row: int) -> tuple[float, float]:
+        level = height - 1 - row
+        return level * top / height, (level + 1) * top / height
+
+    rows = []
+    for row in range(height):
+        lo, hi = band(row)
+        # Two levels in one row: the lower one shows, it is the one reached first.
+        mark = next((m for m in marks if lo <= m[0] < hi or (m[0] == top and row == 0)), None)
+        level = height - 1 - row
+        line = []
+        for value in cells:
+            if value < 0:
+                line.append(mark[1] if mark else " ")
+                continue
+            fill = value / top * height - level
+            if fill >= 1.0:
+                line.append(_BLOCKS[-1])
+            elif fill > 0.0:
+                line.append(_BLOCKS[min(len(_BLOCKS) - 1, int(fill * len(_BLOCKS)))])
+            elif mark:
+                line.append(mark[1])
+            else:
+                line.append(_ZERO if level == 0 else " ")
+        if pad:
+            label = (_num(mark[0]) if mark else _num(top) if row == 0
+                     else "0" if row == height - 1 else "")
+            line.insert(0, f"{label:>{pad}}{'┤' if label else '│'}")
+        rows.append(_fit("".join(line), width))
+    return rows

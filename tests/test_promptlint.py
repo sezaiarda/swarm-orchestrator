@@ -21,7 +21,7 @@ def rules(text: str) -> list[tuple[int, str, str]]:
 
 # -- the shipped prompts ----------------------------------------------------
 @pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md",
-                                  "big_picture.md"])
+                                  "big_picture.md", "owner_guide.md"])
 def test_every_shipped_prompt_lints_clean(name):
     text = (REPO / "prompts" / name).read_text(encoding="utf-8")
     assert promptlint.lint(text, known_commands=KNOWN) == []
@@ -153,7 +153,8 @@ def test_shipped_prompts_message_the_owner_only_through_swarm_notify(name):
     assert "~/.claude" not in text
 
 
-@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md",
+                                  "owner_guide.md"])
 def test_no_shipped_prompt_tells_a_session_to_use_another_sender(name):
     """Every prompt says `swarm notify` is the door even when a brief names
     another script; a `notify.sh` may appear only inside that prohibition."""

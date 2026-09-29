@@ -131,6 +131,7 @@ class HelpScreen(ModalScreen[None]):
 
 [b]anywhere[/b]
   [{COLOR[OK]}]n[/] needs-you drawer   [{COLOR[OK]}]c[/] command centre   [{COLOR[OK]}]d[/] run the doctor
+  [{COLOR[OK]}]g[/] guide me: a chat in its own window that walks you through your to-dos
   [{COLOR[OK]}]j k[/] / arrows move    [{COLOR[OK]}]enter[/] or click opens what is selected
   [{COLOR[OK]}]R[/] reset the run: ETA and usage count from now (asks first)
   [{COLOR[OK]}]D[/] drain: stop once the running work is done, then maybe run a command
@@ -223,6 +224,7 @@ class SwarmApp(App):
         Binding("c", "tab('commands')", "commands", show=False),
         Binding("d", "doctor", "doctor", show=False),
         Binding("n", "toggle_drawer", "needs you"),
+        Binding("g", "guide", "guide me"),
         Binding("r", "rescan", "rescan", show=False),
         Binding("question_mark", "help", "help"),
         Binding("q", "quit", "quit"),
@@ -233,6 +235,7 @@ class SwarmApp(App):
         self.cfg = cfg
         self.dash = Dash(cfg)
         self._busy_last = False
+        self._guide_n: int | None = None
         #: The web board, served from this process (:mod:`.webboard`); ``None``
         #: when ``[web] enabled`` is off, or ``board=False``.
         self.web_board = None
@@ -336,6 +339,7 @@ class SwarmApp(App):
         # query_one there raised NoMatches out of the timer: nothing to paint.
         if not self.query("#tabs"):
             return
+        self._guide_hint()
         try:
             self.query_one(StatusBar).update_from(self.dash)
         except Exception as exc:  # noqa: BLE001
@@ -346,6 +350,16 @@ class SwarmApp(App):
             for drawer in self.query(Drawer):
                 self._repaint(drawer)
         self._repaint(self.active_tab)
+
+    def _guide_hint(self) -> None:
+        """``g guide me (N)`` in the footer, N = the owner's to-dos (:mod:`todo`)."""
+        n = len(getattr(self.dash, "todos", None) or [])
+        if n == self._guide_n:
+            return
+        self._guide_n = n
+        self._bindings.key_to_bindings["g"] = [
+            Binding("g", "guide", f"guide me ({n})" if n else "guide me")]
+        self.refresh_bindings()
 
     def _repaint(self, node) -> None:
         update = getattr(node, "update", None)
@@ -481,6 +495,36 @@ class SwarmApp(App):
         self.notify("acknowledged — only pings that fail from now on will be counted")
         self.dash.poll()
         self.refresh_all()
+
+    def action_guide(self) -> None:
+        """``g``: open the owner's guide in its own tmux window, or go back to it."""
+        self._open_guide()
+
+    @work(thread=True, exclusive=True, group="guide")
+    def _open_guide(self) -> None:
+        """Off the UI thread: the new session takes its first line only once it has
+        booted. Opening the window moves the tmux client there straight away."""
+        from .. import guide as guide_mod
+
+        try:
+            what, win = guide_mod.open_window(self.cfg)
+            if what == guide_mod.FOCUSED:
+                return
+            ok = guide_mod.deliver(self.cfg, win)
+        except Exception as exc:  # noqa: BLE001 - say it, never crash the cockpit
+            self.call_from_thread(self.notify, f"guide: {exc}", severity="error")
+            return
+        if not ok:
+            self.call_from_thread(self.notify, "the guide opened, but its session did not"
+                                  " take its first line — see the guide window",
+                                  severity="warning")
+
+    def get_system_commands(self, screen):
+        from textual.app import SystemCommand
+
+        yield from super().get_system_commands(screen)
+        yield SystemCommand("Guide me", "open a chat that walks you through your to-dos (g)",
+                            self.action_guide)
 
     def action_doctor(self) -> None:
         """Run the health checks and show them, from whichever tab you were on."""

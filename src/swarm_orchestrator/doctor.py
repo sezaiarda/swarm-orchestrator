@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -83,6 +84,8 @@ _DISK_WARN_BYTES = 40 * 1024**3
 _GROWTH_WARN_BYTES_PER_H = 5 * 1024**3
 _DU_TIMEOUT_S = 20.0
 _GIT_TIMEOUT_S = 30.0
+#: Where an external-repo row keeps its own worktree, one per phase.
+_LANE_ROOT = Path.home() / ".cache" / "swarm-lanes"
 _TMUX_TIMEOUT_S = 10.0
 _SAMPLE_NAME = ".doctor-disk.json"
 #: A tmpfs ``/tmp`` fuller than this is RAM the box does not have spare.
@@ -255,6 +258,56 @@ def _worktree_activity(cfg: Config, phase: str, worktree: str) -> int:
         )
         total += ahead or 0
     return total if known else -1
+
+
+def _lane_activity(cfg: Config, phase: str, row_dirs: dict[str, list[str]], since: float) -> int:
+    """Work an external-repo row wrote outside its mirror.
+
+    Such a row never touches its umbrella mirror: it builds in its own worktree
+    at ``~/.cache/swarm-lanes/<phase>`` on ``lane/<phase>`` and lands that branch
+    in the repo itself, then removes the worktree. Its work is the worktree's
+    dirty files, the branch's commits ahead of the repo's checked-out branch, and,
+    once landed, the commits since launch whose message cites the phase — so the
+    row's own ``swarm doctor`` proof after landing still sees it. ``0`` for a row
+    whose ``dir:`` names no ``[lanes] external`` repo.
+    """
+    total = 0
+    lane = _LANE_ROOT / phase
+    for name in ledger_mod.home(phase, row_dirs):
+        path = cfg.lanes_external.get(name)
+        if path is None:
+            continue
+        repo = Path(path).expanduser()
+        if lane.is_dir():
+            total += _git_lines(lane, "status", "--porcelain") or 0
+        total += _git_lines(repo, "log", "--oneline", f"HEAD..lane/{phase}") or 0
+        total += _cited_commits(repo, phase, since)
+    return total
+
+
+def _cited_commits(repo: Path, phase: str, since: float) -> int:
+    """Commits on ``repo``'s checked-out branch since ``since`` that cite ``phase``
+    as a whole id (``lane-W1`` is not cited by ``lane-W10``)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "log", f"--since=@{int(since)}", "--format=%B%x00", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if out.returncode != 0:
+        return 0
+    cite = re.compile(rf"(?<![\w-]){re.escape(phase)}(?![\w-])")
+    return sum(1 for body in out.stdout.split("\0") if cite.search(body))
+
+
+def _row_dirs(cfg: Config) -> dict[str, list[str]]:
+    try:
+        return ledger_mod.dirs((cfg.project_dir / cfg.ledger).read_text(encoding="utf-8"))
+    except OSError:
+        return {}
 
 
 def _log_ts(cfg: Config, prefix: str) -> float | None:
@@ -569,11 +622,15 @@ def _check_activity(cfg: Config, st: State) -> Check:
     supervisor logged a clean ``LAUNCH`` anyway: correct env, correct worktree,
     correct pane title, claude running, empty prompt, and time gone. Nothing
     else in the tool can see this.
+
+    A row whose ``dir:`` is an external repo writes nowhere in its mirror, so
+    its lane worktree and branch count too (``_lane_activity``).
     """
     busy = [s for s in st.busy_slots() if s.phase and s.worktree]
     if not busy:
         return Check("slots.activity", OK, "no busy slots with worktrees")
     now = time.time()
+    row_dirs = _row_dirs(cfg)
     idle: list[str] = []
     for slot in busy:
         started = _log_ts(cfg, f"LAUNCH {slot.phase} ")
@@ -585,7 +642,10 @@ def _check_activity(cfg: Config, st: State) -> Check:
         age = now - started
         if age < _IDLE_GRACE_S:
             continue
-        if _worktree_activity(cfg, slot.phase or "", slot.worktree or "") == 0:
+        work = _worktree_activity(cfg, slot.phase or "", slot.worktree or "")
+        if work == 0:
+            work = _lane_activity(cfg, slot.phase or "", row_dirs, started)
+        if work == 0:
             idle.append(f"{slot.phase} ({_human_age(age)}, no commits, no dirty files)")
     if idle:
         first = busy[0].phase

@@ -265,6 +265,64 @@ def test_a_worktree_git_cannot_read_is_not_reported(cfg, tmp_path):
     assert activity(cfg, plain, launched_ago=30 * 60).status == OK
 
 
+# -- an external-repo row works outside its mirror ------------
+def git(path: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def lane(cfg, tmp_path, monkeypatch) -> tuple[Path, Path]:
+    """P1's ``dir:`` is the external repo ``tool``; returns (repo, lane worktree)."""
+    (cfg.project_dir / cfg.ledger).write_text(
+        "- [ ] `P1` · dir:`tool` · needs:`P0` · **an external row**\n", encoding="utf-8"
+    )
+    repo = tmp_path / "tool"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    cfg.lanes_external = {"tool": str(repo)}
+    monkeypatch.setattr(doctor, "_LANE_ROOT", tmp_path / "lanes")
+    wt = tmp_path / "lanes" / "P1"
+    git(repo, "worktree", "add", "-q", "-b", "lane/P1", str(wt))
+    return repo, wt
+
+
+def test_an_external_row_with_a_fresh_lane_commit_is_fine(cfg, tmp_path, lane):
+    git(lane[1], "commit", "-q", "--allow-empty", "-m", "lanes: the work (P1)")
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == OK
+
+
+def test_an_external_row_with_dirty_lane_files_is_fine(cfg, tmp_path, lane):
+    (lane[1] / "doctor.py").write_text("x = 1\n")
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == OK
+
+
+def test_an_external_row_with_no_lane_activity_is_still_a_lost_prime(cfg, tmp_path, lane):
+    check = activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60)
+    assert check.status == FAIL and "P1 (30m, no commits, no dirty files)" in check.detail
+
+
+def test_a_landed_external_row_counts_its_cited_commit(cfg, tmp_path, lane):
+    """After the worker ff-merges ``lane/P1`` and removes its worktree, its own
+    ``swarm doctor`` proof must still see the work."""
+    repo, wt = lane
+    git(wt, "commit", "-q", "--allow-empty", "-m", "lanes: the work (P1)")
+    git(repo, "merge", "-q", "--ff-only", "lane/P1")
+    git(repo, "worktree", "remove", str(wt))
+    git(repo, "branch", "-q", "-d", "lane/P1")
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == OK
+
+
+def test_a_longer_id_is_not_a_citation(cfg, tmp_path, lane):
+    git(lane[0], "commit", "-q", "--allow-empty", "-m", "lanes: other work (P10)")
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == FAIL
+
+
+def test_a_row_naming_no_external_repo_ignores_the_lane(cfg, tmp_path, lane):
+    git(lane[1], "commit", "-q", "--allow-empty", "-m", "lanes: the work (P1)")
+    cfg.lanes_external = {}
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == FAIL
+
+
 # -- integration hold -------------------------------------------------------
 def held(cfg, *entries) -> Check:
     log(cfg, *entries)

@@ -36,7 +36,7 @@ keeps the campaigns that ran longest, the ones that matter here, in the fit.
 **Too little history** (fewer than :data:`MIN_EVENTS` finished campaigns, or so
 many still open that the estimate never reaches 85%): the caller's default. The
 backtest passes 1, no calibration, so it never learns from what it scores; at
-runtime it is :data:`DEFAULT_K`, the offline fit.
+runtime it is :data:`DEFAULT_K`.
 
 **At runtime** the history is this machine's own forecasts: every
 :data:`LOG_EVERY_S` a running swarm's forecast appends its per-campaign P50,
@@ -64,9 +64,11 @@ MIN_EVENTS = 5
 #: A forecast whose P85 sits this close to its median has no spread to scale;
 #: its score is measured against this much instead (P85 = 1.2 × the median).
 SPREAD_FLOOR = math.log(1.2)
-#: The stretch fitted offline: the runtime's default until its own log has
-#: :data:`MIN_EVENTS` finished.
-DEFAULT_K = 2.75
+#: The runtime's default until its own log has :data:`MIN_EVENTS` finished: no
+#: stretch. A stretch fitted offline is dominated by a few multi-day stops, and
+#: applied live it pushes P85s days past their medians; the live log's own fit
+#: replaces this once enough campaigns have finished.
+DEFAULT_K = 1.0
 #: The runtime's record of its own forecasts, in the state dir.
 LOG_NAME = "eta-forecasts.jsonl"
 #: One logged forecast per this long: four a day, so a week gives a fit.

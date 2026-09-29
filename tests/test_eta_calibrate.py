@@ -70,7 +70,7 @@ def test_every_range_a_forecast_shows_is_stretched_but_a_floor_is_not():
     assert forecast.Forecast.from_json(got.to_json()) == got
     assert books.basis_line(got, NOW).endswith(
         "upper band stretched k=2.00 (from 7 finished campaigns)")
-    default = calibrate.apply(fc, calibrate.Calibration(calibrate.DEFAULT_K, 0))
+    default = calibrate.apply(fc, calibrate.Calibration(2.75, 0))
     assert "the backtest's, too little history here yet" in books.basis_line(default, NOW)
     assert "upper band" not in books.basis_line(fc, NOW)
     floor = forecast.Forecast(made_at=NOW, runs=0, overall=rng, books=(book,))
@@ -201,7 +201,7 @@ def test_with_no_history_the_engine_uses_the_default_and_starts_its_record(cfg):
     logged = calibrate.load(calibrate.log_path(cfg))
     assert len(logged) == 1 and logged[0]["books"]["a"][2] == ["a-W1", "a-W2"]
     raw = json.loads(calibrate.log_path(cfg).read_text())["books"]["a"]
-    assert raw[1] < a.finish.p85  # the record keeps what the replays said, not the stretch
+    assert raw[1] <= a.finish.p85  # the record keeps what the replays said, never a stretch
 
 
 def test_a_paused_swarms_forecast_is_not_logged(cfg):

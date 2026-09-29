@@ -7,6 +7,8 @@ dependency and a board is not a reason to grow one. The endpoints, all GET:
 ``/api/board``        the whole board (gzip + ETag; a phone refetches only on change)
 ``/api/phase/<id>``   one card's detail sheet
 ``/api/search?q=``    ids of rows whose full ledger text matches (the phone holds titles only)
+``/api/graph``        the phase graph, laid out: ``?mode=open|all&book=<name>`` (gzip + ETag)
+``/api/usage``        both usage windows over time, their caps, projection and runs (gzip + ETag)
 ``/events``           Server-Sent Events: the board's version whenever it moves,
                       and a comment every :data:`HEARTBEAT_S` so a phone's
                       connection (and any proxy on the way) stays open
@@ -37,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from . import graph as graph_mod
 from . import lifecycle
 from .feed import Feed
 
@@ -50,6 +53,8 @@ MAX_STREAMS = 64
 #: What a phase id may look like on the wire (the ledger's own shape, plus the
 #: ``overseer:<pass>`` ids of non-phase cards).
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._/:-]{0,120}$")
+#: A phase book (campaign) name: an id's prefix.
+_BOOK_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 _SECURITY = {
     "X-Content-Type-Options": "nosniff",
@@ -130,6 +135,16 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/search":
                 query = parse_qs(urlsplit(self.path).query).get("q", [""])[0][:200]
                 self._json(200, {"q": query, "ids": self.server.feed.search(query)})
+            elif path == "/api/graph":
+                qs = parse_qs(urlsplit(self.path).query)
+                mode = qs.get("mode", ["open"])[0]
+                book = qs.get("book", [""])[0][:80]
+                if mode not in graph_mod.MODES or (book and not _BOOK_RE.match(book)):
+                    self._json(400, {"error": "bad view"})
+                else:
+                    self._cached(*self.server.feed.graph(mode, book))
+            elif path == "/api/usage":
+                self._cached(*self.server.feed.usage())
             elif path == "/events":
                 self._events()
             elif path == "/healthz":
@@ -140,7 +155,10 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _board(self) -> None:
-        version, body, gz, etag = self.server.feed.current()
+        _, body, gz, etag = self.server.feed.current()
+        self._cached(body, gz, etag)
+
+    def _cached(self, body: bytes, gz: bytes, etag: str) -> None:
         if self.headers.get("If-None-Match") == etag:
             self.send_response(304)
             self.send_header("ETag", etag)

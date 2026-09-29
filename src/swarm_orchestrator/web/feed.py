@@ -39,7 +39,7 @@ from .. import recap as recap_mod
 from ..tui.dash import Dash
 from ..tui.data import read_state
 from . import board as board_mod
-from . import campaigns, detail, rows as rows_mod
+from . import campaigns, detail, graph as graph_mod, rows as rows_mod, usagechart
 from .redact import deep
 
 #: Seconds between polls of the run's files. The owner's "live" is a second.
@@ -79,6 +79,10 @@ class Feed:
         self._turns: dict[str, dict] = {}
         self._built_at = 0.0
         self._details: dict[str, bytes] = {}
+        #: Served views other than the board, by key: ``(stamp, body, gz, etag)``.
+        self._views: dict[tuple, tuple] = {}
+        self._views_lock = threading.Lock()
+        self.layouts = graph_mod.Layouts()
 
     # -- change detection ---------------------------------------------------
     def _moved(self, key: str, path: Path) -> bool:
@@ -206,6 +210,46 @@ class Feed:
             if self.version == version:
                 self._details[pid] = body
         return body
+
+    def _view(self, key: tuple, stamp: tuple, make) -> tuple[bytes, bytes, str]:
+        """A cached JSON view: rebuilt only when ``stamp`` moves, then gzipped once."""
+        with self._views_lock:
+            hit = self._views.get(key)
+            if hit is not None and hit[0] == stamp:
+                return hit[1], hit[2], hit[3]
+            body = json.dumps(deep(make()), separators=(",", ":"), default=str).encode()
+            etag = f'"{hashlib.sha1(body).hexdigest()[:16]}"'
+            got = (stamp, body, gzip.compress(body, compresslevel=6), etag)
+            self._views[key] = got
+            if len(self._views) > 32:
+                self._views.pop(next(iter(self._views)))
+            return got[1], got[2], got[3]
+
+    def graph(self, mode: str = graph_mod.OPEN, book: str = "") -> tuple[bytes, bytes, str]:
+        """``/api/graph``: one view of the phase graph, for this board version.
+
+        The layout underneath is cached by shape (:class:`graph.Layouts`), so a
+        new version that only re-colours rows costs a dict walk, not a layout.
+        """
+        with self._lock:
+            board, version = self.board, self.version
+        order = list(self._rows) + [p for p in (self.dash.graph or {}) if p not in self._rows]
+        return self._view(("graph", mode, book), (version,), lambda: graph_mod.view(
+            board, self.dash.graph or {}, order, forecast=self.dash.forecast, mode=mode,
+            book=book, layouts=self.layouts))
+
+    def usage(self, now: float | None = None) -> tuple[bytes, bytes, str]:
+        """``/api/usage``: both windows, their projection and the runs table.
+
+        Rebuilt when the board moves or a reading lands, and at most once a
+        minute otherwise (the chart's left edge follows the clock).
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            board, version = self.board, self.version
+        stamp = (version, len(self.dash.samples), int(now // 60))
+        return self._view(("usage",), stamp,
+                          lambda: usagechart.payload(self.cfg, self.dash, board, now))
 
     def search(self, query: str, limit: int = 500) -> list[str]:
         """Ids of rows whose id or full ledger text holds every word of ``query``.

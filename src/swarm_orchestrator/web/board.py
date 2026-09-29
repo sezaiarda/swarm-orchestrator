@@ -44,6 +44,7 @@ from ..tui.campaign import campaign_of
 from ..tui.data import (
     LOST, five_outlook, held_merge, kept_rows, limit_outlook, run_word, typical_durations,
 )
+from . import usagechart
 from .rows import clip
 
 NEEDS_YOU = "needs_you"
@@ -131,6 +132,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         cards[pid] = card
     _building_extras(cards, busy, dash, turns or {})
     _done_times(cards, dash)
+    _row_etas(cards, getattr(dash, "forecast", None))
     extra_cards = _job_cards(jobs, graph, parked) + _pass_cards(passes, parked)
 
     columns = []
@@ -140,10 +142,11 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         columns.append({"key": key, "title": title, "hint": hint,
                         "cards": _order(key, mine, queue, graph)})
 
+    header = _header(cfg, dash, cards, extra_cards, passes, now)
     return {
         "generated_at": now,
         "project": getattr(cfg, "project_dir", None) and cfg.project_dir.name,
-        "header": _header(cfg, dash, cards, extra_cards, passes, now),
+        "header": header,
         "columns": columns,
         "campaigns": _campaigns(cards, metas, getattr(dash, "forecast", None), now),
         "activity": _activity(dash, passes),
@@ -163,6 +166,16 @@ def _kept(dash, now: float) -> list[dict]:
     """``swarm keep`` records, read-only — the processes left running on purpose."""
     return [{k: row[k] for k in _KEPT_KEYS}
             for row in kept_rows(getattr(dash, "kept", None) or [], now)]
+
+
+def _row_etas(cards: dict, fc) -> None:
+    """Each open row's own finish range, ``[p50, p85]``, from the forecast."""
+    for book in getattr(fc, "books", None) or ():
+        for row in book.rows:
+            card, r = cards.get(row.id), row.finish
+            if card is None or r is None or r.p50 == float("inf"):
+                continue
+            card["eta"] = [round(r.p50), round(r.p85) if r.p85 != float("inf") else None]
 
 
 def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:
@@ -459,8 +472,12 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
     run = getattr(dash, "run", None) or None
     usage = getattr(dash, "usage", None) or {}
     last = passes[0] if passes else None
+    counted = [c for c in cards.values() if c["col"] != EXCLUDED]
     return {
         "counts": cols,
+        "progress": {"done": sum(1 for c in counted if c["col"] in (DONE, OPERATOR)),
+                     "total": len(counted)},
+        "next_cap": _next_cap(cfg, dash, eta.get("p50"), now),
         "needs_you": cols.get(NEEDS_YOU, 0),
         "slots": {"busy": sum(1 for s in snap.slots if s.busy), "total": workers},
         "paused": bool(snap.paused),
@@ -482,6 +499,19 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         if last else None,
         "big_picture": bigpic.web_view(cfg, bigpic.load(cfg)),
     }
+
+
+def _next_cap(cfg, dash, done_at: float | None, now: float) -> dict | None:
+    """The first usage cap the run reaches (:func:`usagechart.next_cap`)."""
+    try:
+        wins = usagechart.windows(
+            cfg, getattr(dash, "samples", None) or [], burn=getattr(dash, "burn", None) or {},
+            busy=sum(1 for s in dash.snapshot.slots if s.busy),
+            run_usage=getattr(dash, "usage", None), hold=getattr(dash, "usage_state", ({}, {}))[0],
+            override=getattr(dash, "usage_state", ({}, {}))[1], now=now)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return usagechart.next_cap(wins, done_at)
 
 
 def _usage(limits, usage: dict, finish_in: float | None, now: float) -> dict:
@@ -528,4 +558,10 @@ def _activity(dash, passes: list) -> dict:
                          "recap": clip(run.summary, 500), "note": clip(run.note, 500)})
         if len(finished) >= 30:
             break
-    return {"passes": out_passes, "finished": finished}
+    pings = []
+    for n in reversed(getattr(dash, "notifications", None) or []):
+        pings.append({"ts": n.ts, "kind": n.kind, "phase": n.phase, "text": clip(n.text, 600),
+                      "delivered": n.delivered, "suppressed": clip(n.suppressed, 200)})
+        if len(pings) >= 40:
+            break
+    return {"passes": out_passes, "finished": finished, "pings": pings}

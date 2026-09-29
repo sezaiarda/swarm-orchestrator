@@ -20,22 +20,21 @@ record of finishes), never on a repaint.
 
 from __future__ import annotations
 
-import dataclasses
 import fcntl
 import hashlib
 import json
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .. import ledger as ledger_mod
 from .. import logutil
 from .. import pace as pace_mod
 from .. import usage as usage_mod
+from ..tui import data as data_mod
 from ..tui.campaign import campaign_of
-from ..tui.data import occupancy_series
 from . import forecast as forecast_mod
 from . import hazards as hazards_mod
 from . import holds as holds_mod
@@ -118,11 +117,9 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
 def from_files(cfg, st, now: float | None = None) -> Inputs:
     """:class:`Inputs` read from disk, for a caller with no dashboard: the log,
     the done sentinels, the ledger's git history and the usage readings."""
-    from ..tui import data as data_mod
-
     events = data_mod.parse_events(logutil.read_all(cfg.supervisor_log))
     history = data_mod.build_history(
-        events, data_mod.load_sentinels(cfg.done_dir), state=dataclasses.asdict(st),
+        events, data_mod.load_sentinels(cfg.done_dir), state=asdict(st),
         ticked=data_mod.load_ticked(cfg))
     usage = usage_mod.load_samples(Path(cfg.state_dir) / usage_mod.METERS_DIR
                                    / usage_mod.LIMITS_LOG)
@@ -182,7 +179,7 @@ def burn(inputs: Inputs) -> dict[str, float]:
     """Each usage window's percentage points per busy worker-hour, lately."""
     start = inputs.now - BURN_WINDOW_S
     events = [e for e in inputs.events if e.ts is not None and start <= e.ts <= inputs.now]
-    busy = occupancy_series(events, inputs.workers).points
+    busy = data_mod.occupancy_series(events, inputs.workers).points
     seat_h = sum(v * (b - a) for (a, v), (b, _) in zip(busy, busy[1:] + [(inputs.now, 0.0)]))
     seat_h /= 3600.0
     out = {}

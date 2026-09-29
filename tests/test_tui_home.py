@@ -305,7 +305,7 @@ def test_worker_rows_carry_their_phase_and_slot():
 def test_worker_rows_free_slot_has_no_phase_to_open():
     free = [(slot(1, None, busy=False), "idle", "", None, None)]
     text, phase, key = home.worker_rows(FakeDash(data.Snapshot(ok=True), free), 44)[0]
-    assert phase is None and key is None
+    assert phase is None and key == 1  # a row, but nothing to open
     assert "free" in plain(text)
 
 
@@ -329,14 +329,15 @@ def test_worker_rows_mark_the_selected_slot():
     assert plain(out[1][0]).startswith("▸")
 
 
-def test_worker_rows_fold_the_free_slots_into_one_line():
-    """Four rows of "free" said one thing four times and pushed the feed down."""
+def test_worker_rows_show_every_free_slot_on_its_own_row():
+    """Seeing every worker is the point: a free slot is a row, never folded away."""
     rows_ = [(slot(i, None, busy=False), "idle", "", None, None) for i in range(4)]
     rows_.insert(1, (slot(9, "P1"), "busy", "", None, None))
     out = home.worker_rows(FakeDash(data.Snapshot(ok=True), rows_), 60)
-    assert len(out) == 2
-    assert out[0][1] == "P1"
-    assert "0 1 2 3" in plain(out[1][0]) and "free" in plain(out[1][0])
+    assert len(out) == 5
+    assert [r[2] for r in out] == [0, 9, 1, 2, 3]
+    assert out[1][1] == "P1" and out[0][1] is None
+    assert all("free" in plain(r[0]) for r in out if r[1] is None)
 
 
 def test_worker_rows_repaint_a_blocked_slot_as_waiting():

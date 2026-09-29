@@ -109,6 +109,9 @@ FEED_ROWS = 40
 #: Things waiting on the owner listed on home before the rest become "+n more".
 MAX_NEEDS = 4
 
+#: Book rows one wheel notch moves.
+WHEEL_ROWS = 2
+
 #: Below this many columns the two-up row stacks instead of squeezing. A 40-cell
 #: panel cannot hold a phase name, an elapsed and a meter without lying.
 NARROW_COLS = 100
@@ -264,18 +267,27 @@ def basis_text(dash, now: float | None = None) -> str:
     return f"forecast basis: {books_mod.basis_line(fc, time.time() if now is None else now)}"
 
 
-#: Phase books listed on a short terminal before the rest become "+n more".
+#: Phase-book rows the box shows before it scrolls, on a short terminal.
 SHORT_BOOKS = 4
+#: ... and on a tall one; a mid-size one lists :data:`MID_BOOKS`. The box has a
+#: fixed height so working now, above it, is never pushed off the screen.
+TALL_BOOKS = 10
+#: The rows a slot beyond the usual four costs the box.
+BASE_SLOTS = 4
+MIN_BOOKS = 3
 
 
 def book_rows(dash, width: int = 76, selected: str | None = None,
-              limit: int | None = None) -> list[tuple]:
-    """``(text, None, name)`` per open phase book, soonest finish first."""
+              limit: int | None = None, top: int = 0) -> list[tuple]:
+    """``(text, None, name)`` per open phase book, soonest finish first.
+
+    ``limit`` rows from index ``top``: the box shows a window and scrolls.
+    """
     fc = getattr(dash, "forecast", None)
     if fc is None:
         return [(PAD + paint("working out when each phase book finishes…", MUTED), None, None)]
     now = time.time()
-    books = list(fc.books)[:limit] if limit else list(fc.books)
+    books = list(fc.books)[top:top + limit] if limit else list(fc.books)
     out = []
     for b in books:
         text = books_mod.book_line(b, fc, now, width - 2)
@@ -378,13 +390,13 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
     phase_w = max(8, min(20, width - 22 - ETA_W))
     meters = getattr(dash, "meters", None) or {}
     out = []
-    # Free slots share one line: four rows of "free" said one thing four times
-    # and pushed the feed down the screen to say it.
-    free = [str(row[0].id) for row in slots if not row[0].busy or not row[0].phase]
     for row in slots:
         slot, status, waiting_for, ctx = row[0], row[1], row[2], row[3]
         mark = "▸ " if selected is not None and selected == slot.id else "  "
         if not slot.busy or not slot.phase:
+            # Every slot is always on screen, busy or free: seeing them all is
+            # the point of this box.
+            out.append((mark + paint(f"{slot.id:<2}  {GLYPH[IDLE]} free", IDLE), None, slot.id))
             continue
         if slot.phase in blocked:
             status = "waiting"
@@ -412,9 +424,6 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         if note:
             line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}", MUTED)
         out.append((line, slot.phase, slot.id))
-    if free:
-        label = "all free" if len(free) == len(slots) else "free"
-        out.append((f"  {' '.join(free)}  " + paint(f"{GLYPH[IDLE]} {label}", IDLE), None, None))
     return out
 
 
@@ -716,17 +725,18 @@ SIDE_MIN, SIDE_MAX = 46, 86
 #: Under this many rows the left column has no room for both working now and a
 #: stacked phases-done chart, and lists fewer phase books.
 TALL_ROWS = 46
-MID_BOOKS = 6
+MID_BOOKS = 5
 
 
-def grid_layout(width: int, height: int) -> dict:
+def grid_layout(width: int, height: int, slots: int = BASE_SLOTS) -> dict:
     """How home is cut at ``width`` columns (inside its padding) and ``height`` rows.
 
     Pure, so every size is testable without booting the app: whether the grid
     stands in two columns (``single`` when not), the main and side columns'
     widths, whether working now and phases done stack (``narrow``), whether the
-    phases-done chart shows at all, how many phase books are listed, and how
-    many rows the usage charts get (0 = none).
+    phases-done chart shows at all, how many phase-book rows the (scrolling) box
+    shows — fewer as ``slots`` grows past four, since working now shows every
+    slot — and how many rows the usage charts get (0 = none).
     """
     short = 0 < height < SHORT_ROWS
     single = width < GRID_COLS
@@ -742,7 +752,8 @@ def grid_layout(width: int, height: int) -> dict:
         "main": main,
         "narrow": narrow,
         "chart": not short and (single or not narrow or tall),
-        "books": SHORT_BOOKS if short else (None if tall else MID_BOOKS),
+        "books": max(MIN_BOOKS, (SHORT_BOOKS if short else TALL_BOOKS if tall else MID_BOOKS)
+                     - max(0, slots - BASE_SLOTS)),
         "usage_chart": 0 if short else (5 if tall else 3),
     }
 
@@ -847,16 +858,38 @@ class AckPings(Message):
     The same message the alerts tab posts; the app acknowledges them."""
 
 
+class BookPanel(Panel):
+    """The phase-books box: a wheel over it scrolls its rows, not the whole tab."""
+
+    class Scrolled(Message):
+        """The wheel turned ``delta`` rows (positive: down)."""
+
+        def __init__(self, delta: int) -> None:
+            super().__init__()
+            self.delta = delta
+
+    def on_mouse_scroll_down(self, event) -> None:
+        event.stop()
+        event.prevent_default()
+        self.post_message(self.Scrolled(WHEEL_ROWS))
+
+    def on_mouse_scroll_up(self, event) -> None:
+        event.stop()
+        event.prevent_default()
+        self.post_message(self.Scrolled(-WHEEL_ROWS))
+
+
 class Home(Vertical):
     """The default tab: headline, then a grid of what is running and what wants you.
 
-    Left, the work: phase books, working now (and phases done), the feed. Right,
+    Left, the work: working now (every slot, always fully visible, beside phases
+    done), the phase books (a fixed-height scrolling box), the feed. Right,
     the run's surroundings: usage with its chart, alerts & notifications, the
     kept shells. Under :data:`GRID_COLS` the right column moves under the feed,
     and ``needs you`` comes back as a strip at the top, where it cannot be missed.
 
     Holds one cursor over everything selectable — what waits on the owner, the
-    phase books, every busy slot, the feed, then the pings — so ``enter`` (and
+    every busy slot, the phase books, the feed, then the pings — so ``enter`` (and
     the global actions) act on a chosen row rather than on whatever happens to be
     first. The cursor is keyed, not indexed, so a new feed row arriving on top
     does not slide it onto a different entry; it clamps itself when its row goes
@@ -870,7 +903,7 @@ class Home(Vertical):
     #grid { height: 1fr; min-height: 16; }
     #main { width: 1fr; height: 1fr; }
     #side { width: 60; height: 1fr; margin-left: 1; }
-    #p-books { margin-bottom: 1; }
+    #p-books { margin-top: 1; }
     #book-rows { height: auto; }
     #home-row { height: auto; }
     #p-work { margin-right: 1; }
@@ -887,7 +920,7 @@ class Home(Vertical):
     #p-alerts { height: 1fr; min-height: 6; }
     #alert-rows { height: 1fr; }
     #p-shells { height: auto; margin-top: 1; }
-    Home.-short #p-books { margin-bottom: 0; }
+    Home.-short #p-books { margin-top: 0; }
     Home.-short > #headline, Home.-short #p-needs { margin-bottom: 0; }
     Home.-short #p-feed { min-height: 6; margin-top: 0; }
     Home.-single #grid { layout: vertical; height: auto; }
@@ -950,6 +983,8 @@ class Home(Vertical):
         self._needs: list = []
         self._notes: list = []
         self._single = False
+        self._book_top = 0
+        self._book_vis = 0
 
     def compose(self):
         yield Body(id="headline")
@@ -957,13 +992,13 @@ class Home(Vertical):
             yield Vertical(id="need-rows")
         with Horizontal(id="grid"):
             with Vertical(id="main"):
-                with Panel("phase books", id="p-books"):
-                    yield Vertical(id="book-rows")
                 with Horizontal(id="home-row"):
                     with Panel("working now", id="p-work"):
                         yield Vertical(id="work-rows")
                     with Panel("phases done", id="p-chart"):
                         yield Body(id="b-chart")
+                with BookPanel("phase books", id="p-books"):
+                    yield Vertical(id="book-rows")
                 with Panel("feed", id="p-feed"):
                     yield VerticalScroll(id="feed-rows")
             with Vertical(id="side"):
@@ -1035,6 +1070,7 @@ class Home(Vertical):
             return
         self._cursor = max(0, min(len(self._targets) - 1, self._cursor + delta))
         self._cursor_key = self._targets[self._cursor][:2]
+        self._follow_cursor()
         if self._dash is not None:
             self.update(self._dash)  # a cursor that lags a tick reads as broken
 
@@ -1056,7 +1092,41 @@ class Home(Vertical):
     # -- refresh ----------------------------------------------------------
     def layout_for(self, width: int, height: int) -> dict:
         """:func:`grid_layout` — a method so a test can pin it."""
-        return grid_layout(width, height)
+        return grid_layout(width, height, self._slot_count())
+
+    def _slot_count(self) -> int:
+        try:
+            return max(BASE_SLOTS, len(self._dash.snapshot.slots))
+        except Exception:  # noqa: BLE001 - no snapshot yet
+            return BASE_SLOTS
+
+    def _book_names(self) -> list[str]:
+        return [t[1] for t in self._targets if t[0] == "book"]
+
+    def _clamp_books(self, total: int) -> None:
+        self._book_top = max(0, min(self._book_top, total - self._book_vis))
+
+    def _follow_cursor(self) -> None:
+        """Scroll the book window so the cursor's book is inside it."""
+        got = self._target()
+        if not got or got[0] != "book" or self._book_vis <= 0:
+            return
+        index = self._book_names().index(got[1])
+        if index < self._book_top:
+            self._book_top = index
+        elif index >= self._book_top + self._book_vis:
+            self._book_top = index - self._book_vis + 1
+
+    def on_book_panel_scrolled(self, event: BookPanel.Scrolled) -> None:
+        event.stop()
+        self.scroll_books(event.delta)
+
+    def scroll_books(self, delta: int) -> None:
+        """Scroll the phase-books window by ``delta`` rows; the cursor stays put."""
+        self._book_top += delta
+        self._clamp_books(len(self._book_names()))
+        if self._dash is not None:
+            self.update(self._dash)
 
     def update(self, dash) -> None:
         """Repaint. Never raises — a dead section is not a dead cockpit."""
@@ -1101,18 +1171,23 @@ class Home(Vertical):
             panel.set_title(f"needs you ({len(self._needs)})",
                             f"+{extra} more · n lists them" if extra > 0 else "enter opens")
 
+        fc = getattr(dash, "forecast", None)
+        total = len(fc.books) if fc is not None else 0
+        self._book_vis = cut["books"]
+        self._clamp_books(total)
+        top = self._book_top
         books = self._build(lambda: book_rows(dash, main_inner, key if kind == "book" else None,
-                                              cut["books"]))
+                                              cut["books"], top))
         self._rows("#book-rows", books, "book")
         panel = self._panel("#p-books")
         if panel is not None:
-            fc = getattr(dash, "forecast", None)
-            total = len(fc.books) if fc is not None else 0
-            extra = total - cut["books"] if cut["books"] else 0
+            below = max(0, total - top - cut["books"])
+            hint = " · ".join(([f"↑ {top} above"] if top else [])
+                              + ([f"↓ {below} more"] if below else []))
             name = f"phase books ({total})" if total else "phase books"
             done = f"{name} · {finish_text(dash, now)}" if fc is not None else name
             panel.set_title(done if len(done) <= main_inner - 4 else name,
-                            f"+{extra} more · enter opens" if extra > 0 else
+                            f"{hint} · enter opens" if hint else
                             "soonest first · enter opens" if total else "")
 
         work = self._build(lambda: worker_rows(dash, half, key if kind == "work" else None))
@@ -1266,12 +1341,11 @@ class Home(Vertical):
         self._notes = alerts_mod.recent_notes(getattr(dash, "notifications", None) or [])
         fc = getattr(dash, "forecast", None)
         full = max(40, self.scrollable_content_region.width or 100)
-        limit = self.layout_for(full, self.app.size.height)["books"]
         books = list(fc.books) if fc is not None else []
         self._targets = (
             [("need", n.key, n.phase, n) for n in self._needs[:MAX_NEEDS]]
-            + [("book", b.name, None, b) for b in (books[:limit] if limit else books)]
             + [("work", s.id, s.phase, None) for s in snap.slots if s.busy and s.phase]
+            + [("book", b.name, None, b) for b in books]
             + [("feed", feed_key(f), f.phase, f) for f in self._feed[:FEED_ROWS]]
             + [("note", k, n.phase, n) for k, n in self._notes]
         )

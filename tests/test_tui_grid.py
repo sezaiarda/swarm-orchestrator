@@ -70,7 +70,7 @@ def week_samples(pcts, start=NOW - 5 * H, step=H, five=20.0):
 def test_the_owners_size_is_two_columns_with_everything_shown():
     cut = home.grid_layout(205, 50)
     assert not cut["single"] and not cut["narrow"] and cut["chart"]
-    assert cut["books"] is None and cut["usage_chart"] == 5
+    assert cut["books"] == home.TALL_BOOKS and cut["usage_chart"] == 5
     assert cut["main"] + 1 + cut["side"] == 205
     assert 76 <= cut["side"] <= home.SIDE_MAX
 

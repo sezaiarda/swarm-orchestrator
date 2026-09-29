@@ -124,6 +124,7 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self) -> None:  # noqa: N802 - http.server naming
+        self.server.feed.touch()
         path = urlsplit(self.path).path
         try:
             if path in ("/", "/index.html"):
@@ -196,6 +197,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             while not srv.feed.stopping.is_set():
                 now = srv.feed.wait(seen, HEARTBEAT_S)
+                srv.feed.touch()  # an open stream is a client waiting for news
                 if now != seen:
                     seen = now
                     self.wfile.write(_event(seen))
@@ -233,13 +235,14 @@ def bind(host: str, port: int, feed: Feed, page: bytes,
 
 
 def make_server(cfg, host: str, port: int, explicit_config: str | None = None,
-                poll_s: float | None = None, bind_wait_s: float = BIND_WAIT_S) -> BoardServer:
+                poll_s: float | None = None, bind_wait_s: float = BIND_WAIT_S,
+                dash=None) -> BoardServer:
     """A bound server with its feed built and its watcher thread running.
 
     Split from :func:`serve` so tests — and the dashboard, which runs the board
     in-process (:mod:`swarm_orchestrator.tui.webboard`) — can run one on a thread.
     """
-    feed = Feed(cfg, explicit_config)
+    feed = Feed(cfg, explicit_config, dash=dash)
     feed.refresh(force=True)
     srv = bind(host, port, feed, PAGE.read_bytes(), bind_wait_s)
     kwargs = {} if poll_s is None else {"poll_s": poll_s}

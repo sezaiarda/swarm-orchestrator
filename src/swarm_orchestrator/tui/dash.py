@@ -7,6 +7,7 @@ was rebuilt; this part was already right and is unchanged.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -98,6 +99,8 @@ class Dash:
 
     def __init__(self, cfg) -> None:
         self.cfg = cfg
+        self._banked: set[str] = set()
+        self._banked_lock = threading.Lock()
         self.tail = LogTail(cfg.supervisor_log)
         self.snapshot = Snapshot()
         self.notifications: list = []
@@ -208,7 +211,25 @@ class Dash:
         return True
 
     def poll(self) -> set[str]:
-        """Re-read whatever moved. Returns the changed source names."""
+        """Re-read whatever moved. Returns the changed source names.
+
+        Every change is also banked for :meth:`take_changes`, so a second reader
+        of this dash (the web board hosted by the TUI) learns what the TUI's own
+        polls found without polling itself.
+        """
+        changed = self._poll()
+        if changed:
+            with self._banked_lock:
+                self._banked |= changed
+        return changed
+
+    def take_changes(self) -> set[str]:
+        """The sources that changed since the last call, for a reader that never polls."""
+        with self._banked_lock:
+            out, self._banked = self._banked, set()
+        return out
+
+    def _poll(self) -> set[str]:
         changed: set[str] = set()
         if self._changed("state", self.cfg.state_path):
             changed.add("state")

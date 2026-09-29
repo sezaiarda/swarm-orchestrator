@@ -265,6 +265,7 @@ select.pick{background:var(--bg2);border:1px solid var(--ln);border-radius:9px;p
 .chart .lim{stroke:var(--ln2);stroke-width:1.3}
 .chart .nowl{stroke:var(--tx2);stroke-width:1;stroke-dasharray:2 3}
 .chart .rst{stroke:var(--mu2);stroke-width:1;stroke-dasharray:1 3}
+.chart .old{opacity:.35;filter:grayscale(1)}
 .chart .brk{stroke:var(--wait);stroke-width:1.2;stroke-dasharray:3 3}
 .chart .lab-cap{fill:var(--owner)}.chart .lab-stop{fill:var(--failed)}.chart .lab-hit{fill:var(--gold);font-weight:600}
 .chart .lab-brk{fill:var(--wait)}
@@ -818,12 +819,13 @@ function chart(svg, w) {
   }
   for (const r of w.resets) if (r >= t0) h += `<line class="rst" x1="${X(r)}" x2="${X(r)}" y1="${T}" y2="${H - B}"/>`;
   for (const k of w.breaks) if (k >= t0) h += `<line class="brk" x1="${X(k)}" x2="${X(k)}" y1="${T}" y2="${H - B}"><title>Account switch at ${esc(when(k))}: the reading jumped, so the line breaks here</title></line>`;
-  for (const seg of w.segments) {
+  w.segments.forEach((seg, si) => {
+    const old = si < w.segments.length - 1;
     const pts = seg.filter(q => q[0] >= t0 - 60);
-    if (!pts.length) continue;
+    if (!pts.length) return;
     const line = pts.map(q => `${X(q[0]).toFixed(1)},${Y(q[1]).toFixed(1)}`).join(" ");
-    h += `<polygon class="area" points="${X(pts[0][0]).toFixed(1)},${Y(0)} ${line} ${X(pts[pts.length - 1][0]).toFixed(1)},${Y(0)}"/><polyline class="ln" points="${line}"/>`;
-  }
+    h += `<polygon class="area${old ? " old" : ""}" points="${X(pts[0][0]).toFixed(1)},${Y(0)} ${line} ${X(pts[pts.length - 1][0]).toFixed(1)},${Y(0)}"/><polyline class="ln${old ? " old" : ""}" points="${line}"/>`;
+  });
   h += `<line class="nowl" x1="${X(nowT)}" x2="${X(nowT)}" y1="${T}" y2="${H - B}"/><text x="${X(nowT)}" y="${T - 3}" text-anchor="middle">now</text>`;
   if (w.resets_at && w.resets_at > nowT && w.resets_at < t1) h += `<line class="rst" x1="${X(w.resets_at)}" x2="${X(w.resets_at)}" y1="${T}" y2="${H - B}" style="stroke:var(--tx2)"/><text x="${X(w.resets_at) - 4}" y="${H - B - 6}" text-anchor="end">resets</text>`;
   if (p.to && w.pct != null && w.read_at) {

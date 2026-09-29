@@ -42,8 +42,13 @@ from . import board as board_mod
 from . import campaigns, detail, graph as graph_mod, rows as rows_mod, usagechart
 from .redact import deep
 
-#: Seconds between polls of the run's files. The owner's "live" is a second.
-POLL_S = 1.0
+#: Seconds between polls of the run's files when the board owns its dash
+#: (``swarm web``). Hosted by the TUI it polls nothing: the TUI's dash does.
+POLL_S = 2.5
+#: Hosted, a pass reads only what the TUI's dash banked, so it can be quick.
+SHARED_POLL_S = 1.0
+#: A standalone board stops polling this long after a client last asked for anything.
+IDLE_S = 60.0
 #: Floor between rebuilds driven only by meters/turns (context %, last activity).
 SLOW_S = 15.0
 #: A rebuild at least this often regardless — the supervisor dying changes no
@@ -58,10 +63,14 @@ _FAST = {"state", "log", "notifications", "done", "recaps", "notes", "operator",
 class Feed:
     """The current board, its version, and a condition clients wait on."""
 
-    def __init__(self, cfg, explicit_config: str | None = None) -> None:
+    def __init__(self, cfg, explicit_config: str | None = None, dash: Dash | None = None) -> None:
         self.cfg = cfg
         self._explicit = explicit_config
-        self.dash = Dash(cfg)
+        #: Hosted by the TUI: ``dash`` is the TUI's own, polled by it, only read here.
+        self.shared = dash is not None
+        self.dash = dash if dash is not None else Dash(cfg)
+        self._wake = threading.Event()
+        self._touched = time.monotonic()
         self.version = 0
         self.board: dict = {}
         self.body = b"{}"
@@ -110,7 +119,8 @@ class Feed:
         if new.state_dir != self.cfg.state_dir:
             return
         self.cfg = new
-        self.dash.cfg = new
+        if not self.shared:
+            self.dash.cfg = new
 
     def _load_ledger(self) -> None:
         path = Path(self.cfg.project_dir) / self.cfg.ledger
@@ -145,7 +155,7 @@ class Feed:
         if self._moved("config", Path(self.cfg.project_dir) / ".swarm.toml") and self._built_at:
             self._reload_config()
             fast = True
-        changed = self.dash.poll()
+        changed = self.dash.take_changes() if self.shared else self.dash.poll()
         fast |= bool(changed & _FAST)
         if "state" in changed or self._state is None:
             self._state = read_state(self.cfg)
@@ -276,9 +286,29 @@ class Feed:
                                 timeout=timeout)
         return self.version
 
-    def run(self, poll_s: float = POLL_S) -> None:
-        """The watcher loop: poll until :attr:`stopping` is set. Never raises."""
+    def touch(self) -> None:
+        """A client asked for something: keep polling (and wake a sleeping feed)."""
+        self._touched = time.monotonic()
+        self._wake.set()
+
+    def idle(self) -> bool:
+        """Whether a standalone feed has gone quiet: nobody asked for :data:`IDLE_S`."""
+        return not self.shared and time.monotonic() - self._touched > IDLE_S
+
+    def run(self, poll_s: float | None = None) -> None:
+        """The watcher loop: poll until :attr:`stopping` is set. Never raises.
+
+        Standalone, it sleeps once idle and wakes on the next :meth:`touch`;
+        hosted, each pass only reads what the TUI's dash banked.
+        """
+        if poll_s is None:
+            poll_s = SHARED_POLL_S if self.shared else POLL_S
         while not self.stopping.is_set():
+            if self.idle():
+                self._wake.wait()
+                self._wake.clear()
+                if self.stopping.is_set():
+                    break
             try:
                 self.refresh()
             except Exception as exc:  # noqa: BLE001 - a bad read must not kill the board
@@ -287,5 +317,6 @@ class Feed:
 
     def stop(self) -> None:
         self.stopping.set()
+        self._wake.set()
         with self._cond:
             self._cond.notify_all()

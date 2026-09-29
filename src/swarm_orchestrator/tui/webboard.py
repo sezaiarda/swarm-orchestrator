@@ -34,8 +34,10 @@ FAILED = "failed"
 class WebBoard:
     """One in-process board: :meth:`ensure` it is up, :meth:`stop` it on exit."""
 
-    def __init__(self, cfg, make=None, probe=None, urls=None) -> None:
+    def __init__(self, cfg, make=None, probe=None, urls=None, dash=None) -> None:
         self.cfg = cfg
+        #: The dashboard's own :class:`Dash`, which the board reads instead of building one.
+        self.dash = dash
         self.state = OFF
         self.detail = ""
         self.url = ""
@@ -76,7 +78,8 @@ class WebBoard:
                 self.detail = f"port :{self.cfg.web_port} is held by {who or 'another program'}"
                 return self.state
             try:
-                srv = self._make(self.cfg, self.cfg.web_host, int(self.cfg.web_port))
+                extra = {} if self.dash is None else {"dash": self.dash}
+                srv = self._make(self.cfg, self.cfg.web_host, int(self.cfg.web_port), **extra)
             except OSError as exc:
                 self.state, self.detail = FAILED, f"cannot listen on :{self.cfg.web_port}: {exc}"
                 return self.state

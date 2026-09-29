@@ -85,3 +85,34 @@ def test_windows_and_the_next_cap():
     assert nxt["hits"]["window"] == "week" and nxt["before_done"] is True
     held = usagechart.next_cap([{**week, "held": True}], None)
     assert held["held"] == ["Weekly"]
+
+
+def test_the_web_breaks_where_the_tui_does():
+    from swarm_orchestrator import usage
+    from swarm_orchestrator.tui import usagebox
+
+    samples = [_week(0, 88, 50 * H), _week(H, 90, 50 * H), _week(2 * H, 31, 90 * H),
+               _week(3 * H, 32, 90 * H)]
+    segs, _, breaks = usagechart.segments(samples, "week", 0.0, 4 * H)
+    assert breaks == usage.switch_times(samples)
+    # The last segment is the TUI's series from the switch on; the old one is cut off.
+    assert [tuple(p) for p in segs[-1]] == [(2 * H, 31), (3 * H, 32)]
+    assert [p[1] for p in usagebox.series(samples, "week", 0.0, 4 * H)] == [88, 90, 31, 32]
+
+
+def test_burn_and_projection_start_from_the_current_account():
+    samples = [_week(0, 88, 50 * H), _week(H, 90, 50 * H), _week(2 * H, 31, 90 * H),
+               _week(3 * H, 32, 90 * H)]
+    assert usagechart._reading(samples, "week", 4 * H) == (3 * H, 32, 90 * H)
+    cfg = SimpleNamespace(usage_enabled=False, usage_rules=[])
+    (_, week) = usagechart.windows(cfg, samples, burn={"week": 1.0}, busy=1, run_usage=None,
+                                   hold=None, override=None, now=4 * H)
+    assert week["pct"] == 32 and week["projection"]["rate_h"] == 1.0
+    assert week["breaks"] == [2 * H]
+
+
+def test_a_lagging_reading_of_the_other_account_is_ignored():
+    # One reading under another account's reset, contradicted by the next: ignored.
+    samples = [_week(0, 40, 50 * H), _week(H, 5, 90 * H), _week(2 * H, 41, 50 * H)]
+    segs, _, breaks = usagechart.segments(samples, "week", 0.0, 3 * H)
+    assert breaks == [] and [[p[1] for p in s] for s in segs] == [[40, 41]]

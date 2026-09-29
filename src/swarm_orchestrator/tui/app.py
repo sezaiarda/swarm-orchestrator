@@ -250,7 +250,7 @@ class SwarmApp(App):
         if (getattr(cfg, "web_enabled", False) if board is None else board):
             from .webboard import WebBoard
 
-            self.web_board = WebBoard(cfg)
+            self.web_board = WebBoard(cfg, dash=self.dash)
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="statusbar")

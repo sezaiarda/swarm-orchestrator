@@ -17,7 +17,7 @@ from textual import events
 from swarm_orchestrator.config import load as load_config
 from swarm_orchestrator.eta.forecast import Book, Forecast, Range
 
-SIZES = [(209, 50), (120, 40)]
+SIZES = [(209, 50), (179, 51), (120, 40)]  # 179x51: the owner's own terminal
 SLOTS = 6  # more than the usual four: none may be cut off
 BOOKS = 20
 
@@ -79,23 +79,44 @@ def _books(home):
 
 
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
-def test_every_slot_is_fully_on_screen(busy, size, monkeypatch, capfd):
+def test_four_workers_are_fully_on_screen_and_the_rest_scroll(busy, size, monkeypatch, capfd):
+    """At most 4 workers show on the tui home; past that the box scrolls."""
     async def steps(app, pilot, home, got):
         panel = home.query_one("#p-work")
-        rows = [r for r in home.query("#work-rows Row") if r.display]
+
+        def shown():
+            return [r for r in home.query("#work-rows Row") if r.display]
+
+        rows = shown()
         got["ids"] = [r.row_key for r in rows]
+        got["one_line"] = all(r._swarm_text.split("\n")[0].count("\n") == 0 for r in rows)
         got["inside"] = all(r.region.height > 0 and r.region.bottom <= app.size.height
                             for r in rows)
         got["panel_bottom"] = panel.region.bottom
         got["books_top"] = home.query_one("#p-books").region.y
-        got["text"] = [r._swarm_text for r in rows]
+        got["hint"] = str(panel.border_subtitle)
+        home.scroll_workers(5)
+        await pilot.pause()
+        got["scrolled"] = [r.row_key for r in shown()]
+        got["hint_after"] = str(panel.border_subtitle)
 
     got = _boot(busy, size, steps, monkeypatch, capfd)
-    assert got["ids"] == list(range(SLOTS))  # busy and free, none folded away
+    assert got["ids"] == [0, 1, 2, 3]  # four, in full, no scrolling needed
     assert got["inside"]
     assert got["panel_bottom"] <= got["books_top"]  # working now leads the column
-    assert sum("b0" in t for t in got["text"]) == SLOTS - 1
-    assert "free" in got["text"][-1]
+    assert "↓ 2 more" in got["hint"]
+    assert got["scrolled"] == [2, 3, 4, 5]  # the window stops at the last slot
+    assert "↑ 2 above" in got["hint_after"] and "more" not in got["hint_after"]
+
+
+def test_a_worker_line_never_wraps_at_the_owners_width():
+    """At 179 columns working now once shared its row with the chart and every
+    worker wrapped to three lines, so the fourth fell off the box."""
+    from swarm_orchestrator.tui.home import WORK_COLS, grid_layout
+    cut = grid_layout(179 - 4, 51, 4)
+    assert cut["narrow"]  # the chart stacks under working now
+    assert grid_layout(400, 60, 4)["narrow"] is False  # wide enough: side by side
+    assert (grid_layout(400, 60, 4)["main"] - 1) // 2 - 4 >= WORK_COLS
 
 
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")

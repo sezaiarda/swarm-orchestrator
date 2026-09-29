@@ -115,6 +115,8 @@ WHEEL_ROWS = 2
 #: Below this many columns the two-up row stacks instead of squeezing. A 40-cell
 #: panel cannot hold a phase name, an elapsed and a meter without lying.
 NARROW_COLS = 100
+#: The narrowest working-now box that still shows a 20-column phase name.
+WORK_COLS = 56
 
 #: A terminal shorter than this drops the chart panel and compacts the headline:
 #: at 80x24 and 100x30 the chart pushed the feed — the part most worth
@@ -274,6 +276,8 @@ SHORT_BOOKS = 4
 TALL_BOOKS = 10
 #: The rows a slot beyond the usual four costs the box.
 BASE_SLOTS = 4
+#: Working now shows this many slots; past it the box scrolls like the books.
+WORK_VIS = 4
 MIN_BOOKS = 3
 
 
@@ -387,7 +391,10 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         return [(paint(snap.reason or "no workers yet — `swarm up` starts them", MUTED), None, None)]
 
     blocked = {b.phase: b for b in snap.blockers}
-    phase_w = max(8, min(20, width - 22 - ETA_W))
+    # The first line is 25 columns plus the eta cell around the phase name
+    # (mark, id, elapsed, gauge, tokens): the name takes what is left, so a
+    # worker is never wrapped onto a line of its own.
+    phase_w = max(8, min(20, width - 25 - ETA_W - 2))
     meters = getattr(dash, "meters", None) or {}
     out = []
     for row in slots:
@@ -742,7 +749,9 @@ def grid_layout(width: int, height: int, slots: int = BASE_SLOTS) -> dict:
     single = width < GRID_COLS
     side = width if single else max(SIDE_MIN, min(SIDE_MAX, round(width * SIDE_SHARE)))
     main = width if single else width - side - 1
-    narrow = main + 4 < NARROW_COLS  # NARROW_COLS counts home's padding and gutter
+    # Side by side, working now gets half the main column; below WORK_COLS that
+    # squeezes the phase names, so it takes the whole width and the chart stacks.
+    narrow = main + 4 < NARROW_COLS or (main - 1) // 2 - 4 < WORK_COLS
     tall = height <= 0 or height >= TALL_ROWS
     return {
         "short": short,
@@ -753,7 +762,7 @@ def grid_layout(width: int, height: int, slots: int = BASE_SLOTS) -> dict:
         "narrow": narrow,
         "chart": not short and (single or not narrow or tall),
         "books": max(MIN_BOOKS, (SHORT_BOOKS if short else TALL_BOOKS if tall else MID_BOOKS)
-                     - max(0, slots - BASE_SLOTS)),
+                     - max(0, min(slots, WORK_VIS) - BASE_SLOTS)),
         "usage_chart": 0 if short else (5 if tall else 3),
     }
 
@@ -864,19 +873,20 @@ class BookPanel(Panel):
     class Scrolled(Message):
         """The wheel turned ``delta`` rows (positive: down)."""
 
-        def __init__(self, delta: int) -> None:
+        def __init__(self, delta: int, panel: str | None = None) -> None:
             super().__init__()
             self.delta = delta
+            self.panel = panel
 
     def on_mouse_scroll_down(self, event) -> None:
         event.stop()
         event.prevent_default()
-        self.post_message(self.Scrolled(WHEEL_ROWS))
+        self.post_message(self.Scrolled(WHEEL_ROWS, self.id))
 
     def on_mouse_scroll_up(self, event) -> None:
         event.stop()
         event.prevent_default()
-        self.post_message(self.Scrolled(-WHEEL_ROWS))
+        self.post_message(self.Scrolled(-WHEEL_ROWS, self.id))
 
 
 class Home(Vertical):
@@ -985,6 +995,7 @@ class Home(Vertical):
         self._single = False
         self._book_top = 0
         self._book_vis = 0
+        self._work_top = 0
 
     def compose(self):
         yield Body(id="headline")
@@ -993,7 +1004,7 @@ class Home(Vertical):
         with Horizontal(id="grid"):
             with Vertical(id="main"):
                 with Horizontal(id="home-row"):
-                    with Panel("working now", id="p-work"):
+                    with BookPanel("working now", id="p-work"):
                         yield Vertical(id="work-rows")
                     with Panel("phases done", id="p-chart"):
                         yield Body(id="b-chart")
@@ -1109,6 +1120,15 @@ class Home(Vertical):
     def _follow_cursor(self) -> None:
         """Scroll the book window so the cursor's book is inside it."""
         got = self._target()
+        if got and got[0] == "work":
+            ids = [t[1] for t in self._targets if t[0] == "work"]
+            if got[1] in ids:
+                index = ids.index(got[1])
+                if index < self._work_top:
+                    self._work_top = index
+                elif index >= self._work_top + WORK_VIS:
+                    self._work_top = index - WORK_VIS + 1
+            return
         if not got or got[0] != "book" or self._book_vis <= 0:
             return
         index = self._book_names().index(got[1])
@@ -1119,7 +1139,16 @@ class Home(Vertical):
 
     def on_book_panel_scrolled(self, event: BookPanel.Scrolled) -> None:
         event.stop()
-        self.scroll_books(event.delta)
+        if event.panel == "p-work":
+            self.scroll_workers(event.delta)
+        else:
+            self.scroll_books(event.delta)
+
+    def scroll_workers(self, delta: int) -> None:
+        """Scroll working now by ``delta`` slots (only past :data:`WORK_VIS` of them)."""
+        self._work_top += delta
+        if self._dash is not None:
+            self.update(self._dash)
 
     def scroll_books(self, delta: int) -> None:
         """Scroll the phase-books window by ``delta`` rows; the cursor stays put."""
@@ -1190,8 +1219,17 @@ class Home(Vertical):
                             f"{hint} · enter opens" if hint else
                             "soonest first · enter opens" if total else "")
 
-        work = self._build(lambda: worker_rows(dash, half, key if kind == "work" else None))
+        every = self._build(lambda: worker_rows(dash, half, key if kind == "work" else None))
+        self._work_top = max(0, min(self._work_top, len(every) - WORK_VIS))
+        wtop = self._work_top
+        work = every[wtop:wtop + WORK_VIS]
         self._rows("#work-rows", work, "work")
+        work_panel = self._panel("#p-work")
+        if work_panel is not None:
+            below = max(0, len(every) - wtop - WORK_VIS)
+            hint = " · ".join(([f"↑ {wtop} above"] if wtop else [])
+                              + ([f"↓ {below} more"] if below else []))
+            work_panel.set_title("working now", hint)
 
         work_lines = sum(text.count("\n") + 1 for text, _, _ in work)
         height = max(4, work_lines - 1)

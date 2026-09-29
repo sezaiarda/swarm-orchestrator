@@ -165,3 +165,29 @@ def test_many_clients_share_one_board(srv):
     for _ in range(10):
         assert _get(srv, "/api/board")[0] == 200
     assert srv.feed.version == v
+
+
+def test_graph_endpoint_shape_etag_and_gzip(srv):
+    code, headers, body = _get(srv, "/api/graph?mode=all")
+    assert code == 200 and headers["Content-Type"].startswith("application/json")
+    g = json.loads(body)
+    assert g["mode"] == "all" and {n["id"] for n in g["nodes"]} >= {"al-W0", "be-W9"}
+    assert all({"id", "s", "x", "y"} <= set(n) for n in g["nodes"])
+    assert _get(srv, "/api/graph?mode=all", {"If-None-Match": headers["ETag"]})[0] == 304
+    _, gzh, gzb = _get(srv, "/api/graph?mode=all", {"Accept-Encoding": "gzip"})
+    assert gzh.get("Content-Encoding") == "gzip" and json.loads(gzip.decompress(gzb))["nodes"]
+    booked = json.loads(_get(srv, "/api/graph?book=be")[2])
+    assert booked["book"] == "be" and all(n["c"] == "be" or n.get("k") for n in booked["nodes"])
+
+
+def test_graph_endpoint_refuses_a_bad_view(srv):
+    assert _get(srv, "/api/graph?mode=everything")[0] == 400
+    assert _get(srv, "/api/graph?book=../../etc")[0] == 400
+
+
+def test_usage_endpoint(srv):
+    code, headers, body = _get(srv, "/api/usage")
+    assert code == 200
+    u = json.loads(body)
+    assert [w["key"] for w in u["windows"]] == ["five", "week"] and "runs" in u
+    assert _get(srv, "/api/usage", {"If-None-Match": headers["ETag"]})[0] == 304

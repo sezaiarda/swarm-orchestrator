@@ -55,7 +55,7 @@ through it every day.
   you a short digest.
 - Cap concurrent heavy builds swarm-wide, so parallel workers cannot run the host
   out of memory.
-- Show everything live: a terminal dashboard in window 0, a read-only Kanban board
+- Show everything live: a terminal dashboard in window 0, a read-only web board
   for your phone over Tailscale, `swarm status`, `swarm doctor`, `swarm why <phase>`,
   and `swarm report`.
 - Measure every run: phases per hour, 5-hour and weekly subscription usage per
@@ -448,14 +448,18 @@ ten tabs, switched with `1`–`9` and `0`, are:
 
 ### Web board (`swarm web`)
 
-- **Is:** a read-only Kanban board for a phone, in the last tmux window.
+- **Is:** a read-only board for a phone or a laptop, in the last tmux window.
   `swarm status` prints its address: the machine's Tailscale IP (the LAN
   address only when Tailscale is absent).
-- **Columns:** Needs you, Blocked, Ready, Building, Merging / held, Operator,
-  Done, Failed, Excluded.
-- **Views:** campaign swimlanes, an activity view of Overseer passes and
-  finishes, a detail sheet per card (`#phase=<id>`), and live updates over
-  Server-Sent Events.
+- **Tabs:** Overview (when every phase is done, P50 and P85, what runs now, the
+  next usage cap), Phase books (every campaign with its finish range, and a
+  status board), Graph (the `needs:` graph laid out left to right: what blocks
+  what, the critical path, pan and zoom), Usage (both windows over time with
+  their caps and a projection, and the runs), Activity (finishes,
+  notifications, Overseer passes). A row's full sheet opens from anywhere
+  (`#<tab>&phase=<id>`).
+- **Light:** it polls only while the page is visible, and an unchanged answer is
+  a 304.
 - **Safety:** GET only, no URL maps to a file, and credential-shaped strings are
   redacted. It listens on every interface **with no token**, by design. See
   [docs/components.md](docs/components.md#the-web-board-swarm-web) for the WSL

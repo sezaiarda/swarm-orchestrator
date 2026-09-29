@@ -4,170 +4,430 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0d1117">
-<title>swarm board</title>
+<meta name="theme-color" content="#121722">
+<title>swarm</title>
 <style>
-/* Palette: the TUI's (tui/theme.py) so the phone and the terminal read alike. */
-:root{--bg:#0d1117;--sf:#161b22;--sf2:#1c2330;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;
---ok:#3fb950;--warn:#d29922;--bad:#f85149;--info:#58a6ff;--acc:#bc8cff;--r:10px;
---you:#f0883e;--ready:#56d4dd;--blocked:#a8906a;--op:#db61a2;
---mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+/* Tokens. Night ink, not black; gold marks the finish line
+   and the critical path, and nothing else. Status hues are the graph's legend. */
+:root{
+  --bg:#121722;--bg2:#0f141d;--sf:#182030;--sf2:#1e283a;--sf3:#253047;--ln:#263049;--ln2:#33405c;
+  --tx:#e8ecf4;--tx2:#c3cad8;--mu:#8e99b0;--mu2:#667189;
+  --gold:#e6c07b;--gold2:rgba(230,192,123,.16);
+  --run:#5aa9ff;--ready:#3dd6b0;--blocked:#7c879e;--wait:#b592ff;--owner:#f2a541;--done:#4fae78;--failed:#f2667a;
+  --up:#ff9468;--down:#3dd6b0;
+  --r1:6px;--r2:10px;--r3:14px;
+  --sans:system-ui,-apple-system,"Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  --disp:ui-rounded,"SF Pro Rounded","Segoe UI Variable Display",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  --hdr:56px;
+}
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%}
-button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:left}
-:focus-visible{outline:2px solid var(--info);outline-offset:2px;border-radius:6px}
-code,.mono{font-family:var(--mono);font-size:.88em}
-.mu{color:var(--mu)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.info{color:var(--info)}.acc{color:var(--acc)}
-header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--bd);padding:8px 12px calc(6px);padding-top:max(8px,env(safe-area-inset-top))}
-.top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.top h1{font-size:16px;margin:0;font-weight:650}
-.pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--bd);border-radius:999px;padding:1px 9px;font-size:12.5px;white-space:nowrap;background:var(--sf)}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--mu);display:inline-block;flex:none}
-.needs{border-color:var(--you);color:var(--you);font-weight:600}
-.needs[hidden]{display:none}
-.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:4px 14px;margin-top:6px;font-size:12.5px}
-.meter{display:flex;align-items:center;gap:6px;min-width:0}
-.meter b{font-weight:600;white-space:nowrap}
-.bar{flex:1;height:6px;border-radius:3px;background:var(--sf2);overflow:hidden;min-width:40px}
-.bar i{display:block;height:100%;background:var(--info)}
-.sub{color:var(--mu);overflow-wrap:anywhere}
-nav{display:flex;gap:6px;padding:8px 12px 0;align-items:center;flex-wrap:wrap}
-.tab{padding:6px 12px;border-radius:8px;border:1px solid transparent;color:var(--mu);font-weight:600}
-.tab[aria-selected=true]{color:var(--tx);background:var(--sf);border-color:var(--bd)}
-.search{flex:1;min-width:140px;background:var(--sf);border:1px solid var(--bd);color:var(--tx);border-radius:8px;padding:6px 10px;font:inherit}
-.chips{display:flex;gap:6px;overflow-x:auto;padding:8px 12px;scrollbar-width:none}
-.chips::-webkit-scrollbar{display:none}
-.chip{border:1px solid var(--bd);border-radius:999px;padding:3px 10px;font-size:13px;white-space:nowrap;background:var(--sf)}
-.chip[aria-pressed=true]{border-color:var(--acc);color:var(--acc)}
-.chip small{color:var(--mu);margin-left:4px}
-main{padding:0 0 40px}
-/* Board: columns scroll sideways; on a phone one column per swipe. */
-.board{display:flex;gap:10px;overflow-x:auto;padding:4px 12px 16px;scroll-snap-type:x mandatory;align-items:flex-start;overscroll-behavior-x:contain}
-.col{flex:0 0 min(86vw,320px);scroll-snap-align:start;background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);display:flex;flex-direction:column;max-height:calc(100vh - 190px);max-height:calc(100dvh - 190px)}
-.col.shut,.col.none{flex-basis:auto;min-width:150px}
-.colh{display:flex;align-items:center;gap:8px;padding:9px 11px;border-bottom:1px solid var(--bd);width:100%}
-.colh h2{font-size:14px;margin:0;font-weight:650}
-.colh .n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--mu);font-size:13px}
-.colh .hint{display:block;font-size:11.5px;color:var(--mu);font-weight:400}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 var(--sans);-webkit-text-size-adjust:100%;font-variant-numeric:tabular-nums}
+body{min-height:100vh;min-height:100dvh}
+button,select,input{font:inherit;color:inherit}
+button{background:none;border:0;padding:0;cursor:pointer;text-align:left}
+:focus-visible{outline:2px solid var(--run);outline-offset:2px;border-radius:6px}
+h1,h2,h3,h4,p{margin:0}
+.id{font-family:var(--mono);font-size:.92em;font-weight:600;letter-spacing:-.01em}
+.mu{color:var(--mu)}.mu2{color:var(--mu2)}
+.nowrap{white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;background:var(--mu2)}
+.s-running{--c:var(--run)}.s-ready{--c:var(--ready)}.s-blocked{--c:var(--blocked)}.s-waiting{--c:var(--wait)}
+.s-owner{--c:var(--owner)}.s-done{--c:var(--done)}.s-failed{--c:var(--failed)}
+.dot[class*=" s-"],.dot[class^="s-"]{background:var(--c)}
+
+/* Header ------------------------------------------------------------------ */
+.top{position:sticky;top:0;z-index:30;height:calc(var(--hdr) + env(safe-area-inset-top));padding:env(safe-area-inset-top) 20px 0;display:flex;align-items:center;gap:18px;background:rgba(18,23,34,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--ln)}
+.brand{display:flex;align-items:baseline;gap:8px;min-width:0}
+.brand b{font:650 17px/1 var(--disp);letter-spacing:-.01em}
+.brand span{color:var(--mu);font-size:13px}
+.tabs{display:flex;gap:2px;height:100%;align-items:stretch;margin-left:10px}
+.tab{display:flex;align-items:center;gap:8px;padding:0 14px;color:var(--mu);font-weight:550;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab svg{width:17px;height:17px;flex:none}
+.tab:hover{color:var(--tx2)}
+.tab[aria-selected=true]{color:var(--tx);border-bottom-color:var(--gold)}
+.status{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:13px;color:var(--mu);white-space:nowrap}
+.state{display:inline-flex;align-items:center;gap:7px;padding:4px 11px 4px 9px;border-radius:999px;background:var(--sf);border:1px solid var(--ln);color:var(--tx2)}
+.state .dot{background:var(--c,var(--mu2))}
+.state.live .dot{box-shadow:0 0 0 0 var(--c);animation:beat 2.4s ease-out infinite}
+@keyframes beat{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--c) 60%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.stale{color:var(--owner)}
+
+/* Page frame -------------------------------------------------------------- */
+main{padding:28px 28px 64px;max-width:1360px;margin:0 auto}
+main.full{max-width:none;padding:0}
+.sec-h{display:flex;align-items:baseline;gap:12px;margin:0 0 14px}
+.sec-h h2{font:650 17px/1.3 var(--disp);letter-spacing:-.01em}
+.sec-h .aside{margin-left:auto;color:var(--mu);font-size:13px}
+.linkish{color:var(--run);font-weight:550;font-size:13px}
+.linkish:hover{text-decoration:underline}
+.panel{background:var(--sf);border:1px solid var(--ln);border-radius:var(--r3);padding:20px 22px}
+.empty{color:var(--mu);padding:14px 0}
+
+/* Overview ----------------------------------------------------------------- */
+.ov{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:20px}
+.hero{grid-column:1/-1;position:relative;padding:26px 28px 24px;background:linear-gradient(180deg,var(--sf2),var(--sf));border:1px solid var(--ln);border-radius:var(--r3)}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:34px;align-items:end}
+.hero .lead{color:var(--tx2);font-size:15px;display:flex;align-items:center;gap:8px}
+.when{font:680 clamp(34px,4.4vw,54px)/1.02 var(--disp);letter-spacing:-.025em;margin:10px 0 6px;color:var(--gold)}
+.when small{font-size:.5em;font-weight:600;color:var(--tx2);letter-spacing:-.01em;margin-left:4px}
+.likely{color:var(--tx2);font-size:15px}
+.likely b{color:var(--tx);font-weight:600}
+.info-btn{width:22px;height:22px;border-radius:50%;border:1px solid var(--ln2);color:var(--mu);display:inline-grid;place-items:center;font:600 12px/1 var(--sans)}
+.info-btn[aria-expanded=true]{border-color:var(--gold);color:var(--gold)}
+.basis{margin-top:14px;padding:12px 14px;border-radius:var(--r2);background:var(--bg2);border:1px solid var(--ln);color:var(--tx2);font-size:13px;max-width:70ch}
+.basis p+p{margin-top:6px}
+.band{width:100%;height:78px;display:block;overflow:visible}
+.prog{margin-top:22px}
+.prog-top{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.prog-top b{font:650 20px/1 var(--disp)}
+.prog-top .aside{margin-left:auto;color:var(--mu);font-size:13px}
+.stack{display:flex;height:10px;border-radius:999px;overflow:hidden;background:var(--sf3);gap:2px}
+.stack i{display:block;height:100%;background:var(--c)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font-size:13px;color:var(--mu)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.legend b{color:var(--tx2);font-weight:600}
+.ask{grid-column:1/-1;border-color:color-mix(in srgb,var(--owner) 45%,var(--ln));background:color-mix(in srgb,var(--owner) 7%,var(--sf))}
+.ask-item{display:block;width:100%;padding:10px 0;border-top:1px solid var(--ln)}
+.ask-item:first-of-type{border-top:0}
+.ask-item p{color:var(--tx2);margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.runs-list{display:flex;flex-direction:column}
+.run{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 16px;padding:14px 0;border-top:1px solid var(--ln);width:100%}
+.run:first-child{border-top:0;padding-top:2px}
+.run:hover .id{color:var(--run)}
+.run .t{color:var(--tx2);grid-column:1/-1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.run .doing{grid-column:1/-1;color:var(--mu);font-size:13px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.run .el{font:600 15px/1.3 var(--disp);text-align:right}
+.run .el small{display:block;font:400 12px/1.3 var(--sans);color:var(--mu)}
+.book-tag{color:var(--mu);font-size:13px;margin-left:8px}
+.ctx{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mu)}
+.ctx i{display:block;width:44px;height:4px;border-radius:2px;background:var(--sf3);position:relative;overflow:hidden}
+.ctx i::after{content:"";position:absolute;inset:0;width:var(--w);background:var(--c,var(--ready))}
+.cap-next{font-size:15px;color:var(--tx2);line-height:1.45}
+.cap-next b{color:var(--tx);font-weight:600}
+.cap-next.warn b{color:var(--owner)}.cap-next.bad b{color:var(--failed)}
+.meters{display:flex;flex-direction:column;gap:16px;margin-top:18px}
+.meter-h{display:flex;align-items:baseline;gap:10px;margin-bottom:7px}
+.meter-h b{font:650 22px/1 var(--disp)}
+.meter-h .lab{color:var(--tx2);font-weight:550}
+.meter-h .aside{margin-left:auto;color:var(--mu);font-size:13px}
+.gauge{position:relative;height:8px;border-radius:999px;background:var(--sf3)}
+.gauge>i{position:absolute;left:0;top:0;bottom:0;border-radius:999px;background:var(--c,var(--run))}
+.gauge>u{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--owner);border-radius:1px}
+.gauge>u.stop{background:var(--failed)}
+.blist{display:flex;flex-direction:column}
+.brow{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(90px,1fr) 70px minmax(120px,.9fr);gap:16px;align-items:center;padding:11px 0;border-top:1px solid var(--ln);width:100%}
+.brow:first-child{border-top:0}
+.brow:hover .bname{color:var(--run)}
+.bname{font-weight:600;font-family:var(--mono);font-size:13.5px}
+.bwhat{color:var(--mu);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini{height:6px;border-radius:999px;background:var(--sf3);overflow:hidden;display:flex}
+.mini i{display:block;height:100%;background:var(--c)}
+.frac{text-align:right;color:var(--tx2);font-size:13px}
+.eta{text-align:right;font-size:13px;color:var(--tx2)}
+.eta small{display:block;color:var(--mu);font-size:12px}
+
+/* Books tab ------------------------------------------------------------------ */
+.bar-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+.seg{display:inline-flex;background:var(--bg2);border:1px solid var(--ln);border-radius:9px;padding:3px}
+.seg button{padding:5px 13px;border-radius:6px;color:var(--mu);font-weight:550;font-size:13px;white-space:nowrap}
+.seg button[aria-pressed=true]{background:var(--sf3);color:var(--tx)}
+.search{min-width:0;flex:1 1 220px;max-width:360px;background:var(--bg2);border:1px solid var(--ln);border-radius:9px;padding:7px 12px;color:var(--tx)}
+.search::placeholder{color:var(--mu2)}
+select.pick{background:var(--bg2);border:1px solid var(--ln);border-radius:9px;padding:7px 10px;color:var(--tx);max-width:220px}
+.btable{background:var(--sf);border:1px solid var(--ln);border-radius:var(--r3);overflow:hidden}
+.bth,.btr{display:grid;grid-template-columns:minmax(0,2.2fr) minmax(150px,1.1fr) minmax(210px,1.2fr) minmax(150px,.9fr);gap:20px;align-items:center;padding:14px 22px}
+.bth{font-size:12.5px;color:var(--mu);border-bottom:1px solid var(--ln);padding-top:11px;padding-bottom:11px;background:var(--bg2)}
+.btr{border-top:1px solid var(--ln);width:100%}
+.btr:first-of-type{border-top:0}
+.btr:hover{background:var(--sf2)}
+.btr .bname{font-size:14px}
+.btr .bwhat{margin-top:2px;white-space:normal;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}
+.bprog .mini{height:7px}
+.bprog div+div{margin-top:6px;font-size:12.5px;color:var(--mu)}
+.counts{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--mu)}
+.counts span{display:inline-flex;align-items:center;gap:6px}
+.counts b{color:var(--tx2);font-weight:600}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid var(--ln2);color:var(--tx2);white-space:nowrap}
+.pill.on{border-color:color-mix(in srgb,var(--run) 55%,var(--ln));color:var(--run)}
+.bdone{opacity:.62}
+
+/* Kanban board ----------------------------------------------------------------- */
+.kan{display:flex;gap:14px;overflow-x:auto;padding-bottom:12px;align-items:flex-start;scroll-snap-type:x proximity}
+.col{flex:0 0 300px;background:var(--sf);border:1px solid var(--ln);border-radius:var(--r3);display:flex;flex-direction:column;max-height:calc(100dvh - 200px);scroll-snap-align:start}
+.col.shut{flex-basis:200px}
+.colh{display:flex;align-items:center;gap:9px;padding:13px 15px;width:100%}
+.colh h3{font-size:14px;font-weight:600}
+.colh .n{margin-left:auto;color:var(--mu);font-size:13px}
 .col.shut .cards{display:none}
-.cards{overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
-.card{display:block;width:100%;background:var(--bg);border:1px solid var(--bd);border-left:3px solid var(--mu);border-radius:8px;padding:8px 10px}
-.card:hover{border-color:#484f58}
-.card .h{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
-.card .id{font-family:var(--mono);font-size:13px;font-weight:650}
-.card .c{font-size:11.5px;color:var(--mu)}
-.card .t{margin:3px 0 0;font-size:13.5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.card .m{margin-top:4px;font-size:12.5px;color:var(--mu)}
-.card .q{margin-top:5px;font-size:13px;color:var(--tx);border-left:2px solid var(--you);padding-left:7px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.ctx{display:inline-block;width:46px;height:5px;border-radius:3px;background:var(--sf2);vertical-align:middle;overflow:hidden}
-.ctx i{display:block;height:100%}
-.more{margin:4px 8px 10px;padding:6px;border:1px dashed var(--bd);border-radius:8px;color:var(--mu);text-align:center;width:calc(100% - 16px)}
-.empty{color:var(--mu);font-size:13px;padding:6px 4px}
-/* Tone of a column / card edge. */
-.t-needs_you{border-left-color:var(--you)}.t-blocked{border-left-color:var(--blocked)}.t-ready{border-left-color:var(--ready)}
-.t-building{border-left-color:var(--info)}.t-merging{border-left-color:var(--warn)}.t-operator{border-left-color:var(--op)}
-.t-done{border-left-color:var(--ok)}.t-failed{border-left-color:var(--bad)}.t-excluded{border-left-color:#484f58}
-.d-needs_you{background:var(--you)}.d-blocked{background:var(--blocked)}.d-ready{background:var(--ready)}.d-building{background:var(--info)}
-.d-merging{background:var(--warn)}.d-operator{background:var(--op)}.d-done{background:var(--ok)}.d-failed{background:var(--bad)}.d-excluded{background:#484f58}
-/* Campaigns: one lane per campaign. */
-.lanes{padding:4px 12px;display:flex;flex-direction:column;gap:12px;max-width:1100px}
-.lane{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:10px 12px}
-.lane h2{margin:0;font-size:15px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-.lane .what{margin:3px 0 6px;color:var(--tx)}
-.lane .about{margin:0 0 6px;color:var(--mu);font-size:13px}
-.prog{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--mu)}
-.prog .bar{height:8px}.prog .bar i{background:var(--ok)}
-.grp{margin-top:9px}
-.grp h3{font-size:12.5px;margin:0 0 5px;color:var(--mu);font-weight:600;display:flex;gap:6px;align-items:center}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:7px}
-.lane details summary{cursor:pointer;color:var(--mu);font-size:12.5px;margin-top:8px}
-/* Activity. */
-.feed{padding:4px 12px;display:flex;flex-direction:column;gap:10px;max-width:900px}
-.item{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:10px 12px}
-.item h3{margin:0 0 3px;font-size:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
-.item p{margin:4px 0;font-size:13.5px}
-.item details{margin-top:4px}.item summary{cursor:pointer;color:var(--mu);font-size:13px}
-.pre{white-space:pre-wrap;word-break:break-word;font-size:13px}
-h2.sec{font-size:13px;color:var(--mu);margin:14px 0 2px;text-transform:uppercase;letter-spacing:.04em}
-/* The detail sheet: bottom sheet on a phone, side panel on a desk. */
-.scrim{position:fixed;inset:0;background:rgba(1,4,9,.6);z-index:20}
-.sheet{position:fixed;z-index:21;left:0;right:0;bottom:0;max-height:88vh;max-height:88dvh;background:var(--sf);border:1px solid var(--bd);border-radius:14px 14px 0 0;display:flex;flex-direction:column;box-shadow:0 -8px 30px rgba(0,0,0,.5);padding-bottom:env(safe-area-inset-bottom)}
-@media (min-width:900px){.sheet{left:auto;top:0;bottom:0;width:min(560px,46vw);max-height:none;border-radius:0;border-width:0 0 0 1px}}
-.sheet .bar-h{display:flex;align-items:flex-start;gap:8px;padding:12px 14px;border-bottom:1px solid var(--bd)}
-.sheet .bar-h h2{margin:0;font-size:16px;font-family:var(--mono)}
-.x{margin-left:auto;border:1px solid var(--bd);border-radius:8px;padding:4px 10px;background:var(--bg)}
-.body{overflow-y:auto;padding:4px 14px 20px;-webkit-overflow-scrolling:touch}
-.body section{margin-top:12px}
-.body h3{font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mu);margin:0 0 5px}
-.md{white-space:pre-wrap;word-break:break-word;font-size:13.5px;background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:9px 10px;max-height:50vh;overflow:auto}
-.md code{background:var(--sf2);padding:0 3px;border-radius:4px}
-ul.refs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
-ul.refs button{display:flex;gap:8px;align-items:baseline;width:100%;padding:4px 6px;border-radius:6px}
-ul.refs button:hover{background:var(--sf2)}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:13.5px}
-.kv dt{color:var(--mu)}.kv dd{margin:0;word-break:break-all}
-.note{border-left:2px solid var(--bd);padding:2px 0 2px 8px;margin:4px 0;font-size:13.5px}
-.note.owner_decision{border-color:var(--you)}.note.risk{border-color:var(--bad)}.note.assumption{border-color:var(--warn)}.note.decision{border-color:var(--info)}
-.conn{position:fixed;right:10px;bottom:10px;z-index:6;font-size:12px}
-@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
-@media (min-width:900px){.col{flex-basis:300px}.board{scroll-snap-type:none}}
-/* A phone has no height to spare for a pinned header: it scrolls away. */
-@media (max-width:699px){header{position:static}}
+.cards{overflow-y:auto;padding:0 10px 10px;display:flex;flex-direction:column;gap:8px}
+.card{display:block;width:100%;background:var(--bg2);border:1px solid var(--ln);border-radius:var(--r2);padding:10px 12px;border-left:3px solid var(--c,var(--ln2))}
+.card:hover{border-color:var(--ln2);border-left-color:var(--c,var(--ln2))}
+.card .h{display:flex;gap:8px;align-items:baseline}
+.card .h .book-tag{margin-left:auto}
+.card .t{margin-top:3px;color:var(--tx2);font-size:13px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card .m{margin-top:5px;font-size:12.5px;color:var(--mu)}
+.more{margin:2px 0 4px;padding:7px;border:1px dashed var(--ln2);border-radius:var(--r2);color:var(--mu);text-align:center;width:100%;font-size:13px}
+
+/* Rows list (book sheet) ------------------------------------------------------ */
+.rows{display:flex;flex-direction:column}
+.rowi{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px 12px;align-items:baseline;padding:11px 4px;border-top:1px solid var(--ln);width:100%}
+.rowi:first-child{border-top:0}
+.rowi:hover{background:var(--sf2)}
+.rowi .dot{transform:translateY(-1px)}
+.rowi .t{grid-column:2/-1;color:var(--tx2);font-size:13px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.rowi .why{grid-column:2/-1;color:var(--mu);font-size:12.5px}
+.rowi .eta{font-size:12.5px}
+.grp-h{display:flex;align-items:center;gap:8px;margin:18px 0 4px;color:var(--tx2);font-weight:600;font-size:13px}
+.grp-h:first-child{margin-top:4px}
+.grp-h .mu{font-weight:400}
+
+/* Graph --------------------------------------------------------------------- */
+.gwrap{position:relative;height:calc(100dvh - var(--hdr) - env(safe-area-inset-top));display:flex;flex-direction:column}
+.gbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--ln);background:var(--bg)}
+.gbar .search{max-width:260px}
+.gbar .aside{color:var(--mu2);font-size:12px;white-space:nowrap}
+.gbody{position:relative;flex:1;min-height:0;display:flex}
+.gcanvas{position:relative;flex:1;min-width:0;overflow:hidden;touch-action:none;background:radial-gradient(circle at 1px 1px,#1c2435 1px,transparent 1.2px) 0 0/22px 22px,var(--bg2);cursor:grab}
+.gcanvas.drag{cursor:grabbing}
+#gsvg{position:absolute;inset:0;width:100%;height:100%;display:block;user-select:none;-webkit-user-select:none}
+#gsvg .e{fill:none;stroke:#3a4661;stroke-width:1.3}
+#gsvg .e.cp{stroke:var(--gold);stroke-width:2.6}
+#gsvg .n rect.b{fill:var(--sf);stroke:var(--ln2);stroke-width:1}
+#gsvg .n rect.k{fill:var(--c)}
+#gsvg .n .i{font:600 13px var(--mono);fill:var(--tx)}
+#gsvg .n .tt{font:12px var(--sans);fill:var(--mu)}
+#gsvg .n{cursor:pointer}
+#gsvg .n.ctxn{opacity:.5}
+#gsvg .n.s-done .i{fill:var(--tx2)}
+#gsvg .n.cp rect.b{stroke:var(--gold);stroke-width:2}
+#gsvg .n.s-running rect.b{stroke:color-mix(in srgb,var(--run) 70%,transparent);stroke-width:1.6}
+#gsvg.focus .e{opacity:.07}
+#gsvg.focus .n{opacity:.16}
+#gsvg.focus .e.hu,#gsvg.focus .e.hd{opacity:1;stroke-width:2.4}
+#gsvg.focus .e.hu{stroke:var(--up)}#gsvg.focus .e.hd{stroke:var(--down)}
+#gsvg.focus .n.hu,#gsvg.focus .n.hd,#gsvg.focus .n.sel{opacity:1}
+#gsvg.focus .n.hu rect.b{stroke:var(--up);stroke-width:1.6}
+#gsvg.focus .n.hd rect.b{stroke:var(--down);stroke-width:1.6}
+#gsvg .n.sel rect.b{stroke:var(--tx);stroke-width:2.4}
+#gsvg.find .n{opacity:.18}#gsvg.find .e{opacity:.1}
+#gsvg.find .n.hit{opacity:1}
+#gsvg.find .n.hit rect.b{stroke:var(--gold);stroke-width:2.4}
+.zoom{position:absolute;right:16px;bottom:16px;display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--ln);border-radius:10px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+.zoom button{width:38px;height:36px;display:grid;place-items:center;color:var(--tx2);font-size:18px;border-top:1px solid var(--ln)}
+.zoom button:first-child{border-top:0}
+.zoom button:hover{background:var(--sf2)}
+.zoom svg{width:17px;height:17px}
+.mm{position:absolute;left:16px;bottom:16px;background:rgba(15,20,29,.92);border:1px solid var(--ln);border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.35);cursor:pointer}
+.mm canvas{display:block;border-radius:10px}
+.glegend{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:12.5px;color:var(--mu);margin-left:auto}
+.glegend span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.glegend .cpk{width:16px;height:3px;border-radius:2px;background:var(--gold)}
+.gside{width:360px;flex:none;border-left:1px solid var(--ln);background:var(--sf);overflow-y:auto;padding:20px 20px 28px}
+.gside[hidden]{display:none}
+.gside .x{float:right}
+.side-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.side-h .id{font-size:16px}
+.side-t{margin:10px 0 16px;color:var(--tx);font-size:15px;line-height:1.45}
+.kv{display:grid;grid-template-columns:92px minmax(0,1fr);gap:7px 12px;font-size:13px;margin-bottom:16px}
+.kv dt{color:var(--mu)}.kv dd{margin:0;color:var(--tx2);overflow-wrap:anywhere}
+.side-sec{margin-top:18px}
+.side-sec h4{font-size:13px;color:var(--mu);font-weight:550;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.side-sec h4 i{width:14px;height:3px;border-radius:2px;background:var(--c)}
+.refs{list-style:none;margin:0;padding:0}
+.refs button{display:flex;gap:9px;align-items:center;width:100%;padding:5px 6px;border-radius:6px;font-size:13px}
+.refs button:hover{background:var(--sf2)}
+.refs .id{flex:none;white-space:nowrap}
+.refs .tt{color:var(--mu);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:8px 14px;border-radius:9px;border:1px solid var(--ln2);background:var(--sf2);color:var(--tx);font-weight:550;font-size:13px}
+.btn:hover{background:var(--sf3)}
+.x{width:32px;height:32px;border-radius:8px;display:inline-grid;place-items:center;color:var(--mu);border:1px solid var(--ln)}
+.x:hover{color:var(--tx);background:var(--sf2)}
+
+/* Usage ----------------------------------------------------------------------- */
+.uwin{margin-bottom:20px}
+.uhead{display:flex;align-items:flex-end;gap:28px;flex-wrap:wrap;margin-bottom:14px}
+.uhead .big{font:680 40px/1 var(--disp);letter-spacing:-.02em}
+.uhead .big small{font-size:.45em;color:var(--mu);font-weight:600;margin-left:2px}
+.uhead h2{font:650 17px/1.2 var(--disp);margin-bottom:6px;color:var(--tx2)}
+.facts{display:flex;gap:26px;flex-wrap:wrap}
+.fact{font-size:13px;color:var(--mu)}
+.fact b{display:block;color:var(--tx);font:600 15px/1.35 var(--sans)}
+.fact.hit b{color:var(--owner)}.fact.safe b{color:var(--done)}
+.chart{width:100%;display:block;overflow:visible}
+.chart text{font:11.5px var(--sans);fill:var(--mu)}
+.chart .grid{stroke:#232c40;stroke-width:1}
+.chart .ln{fill:none;stroke:var(--run);stroke-width:2;stroke-linejoin:round}
+.chart .area{fill:rgba(90,169,255,.1)}
+.chart .proj{fill:none;stroke:var(--gold);stroke-width:2;stroke-dasharray:6 5}
+.chart .capl{stroke:var(--owner);stroke-width:1.3;stroke-dasharray:5 4}
+.chart .capl.stop{stroke:var(--failed);stroke-dasharray:none}
+.chart .lim{stroke:var(--ln2);stroke-width:1.3}
+.chart .nowl{stroke:var(--tx2);stroke-width:1;stroke-dasharray:2 3}
+.chart .rst{stroke:var(--mu2);stroke-width:1;stroke-dasharray:1 3}
+.chart .brk{stroke:var(--wait);stroke-width:1.2;stroke-dasharray:3 3}
+.chart .lab-cap{fill:var(--owner)}.chart .lab-stop{fill:var(--failed)}.chart .lab-hit{fill:var(--gold);font-weight:600}
+.chart .lab-brk{fill:var(--wait)}
+.chart .hitdot{fill:var(--gold);stroke:var(--bg);stroke-width:2}
+.chart .hover-l{stroke:var(--tx2);stroke-width:1}
+.tip{position:absolute;pointer-events:none;background:var(--sf3);border:1px solid var(--ln2);border-radius:8px;padding:5px 9px;font-size:12.5px;white-space:nowrap;transform:translate(-50%,-120%);box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.ukey{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--mu);margin-top:10px}
+.ukey span{display:inline-flex;align-items:center;gap:7px}
+.ukey i{display:inline-block;width:18px;height:0;border-top:2px solid var(--c)}
+.ukey i.d{border-top-style:dashed}
+table.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-weight:550;color:var(--mu);padding:9px 12px;border-bottom:1px solid var(--ln);white-space:nowrap}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--ln);color:var(--tx2);white-space:nowrap}
+.tbl tr:last-child td{border-bottom:0}
+.tbl td.r,.tbl th.r{text-align:right}
+.tscroll{overflow-x:auto}
+
+/* Activity --------------------------------------------------------------------- */
+.feed{max-width:880px;margin:0 auto}
+.act{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:20px;align-items:start}
+.act>.panel{max-height:calc(100dvh - var(--hdr) - 60px);overflow-y:auto;overscroll-behavior:contain}
+.fitem{display:grid;grid-template-columns:76px minmax(0,1fr);gap:4px 16px;padding:14px 0;border-top:1px solid var(--ln)}
+.fitem:first-child{border-top:0}
+.fitem .when-c{color:var(--mu);font-size:12.5px;padding-top:2px}
+.fitem .h{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.fitem p{color:var(--tx2);margin-top:4px;overflow-wrap:anywhere}
+.fitem details{margin-top:6px}
+.fitem summary{cursor:pointer;color:var(--mu);font-size:13px}
+.tag{font-size:12px;padding:1px 8px;border-radius:999px;background:var(--sf2);color:var(--mu);border:1px solid var(--ln)}
+.tag.ok{color:var(--done);border-color:color-mix(in srgb,var(--done) 40%,var(--ln))}
+.tag.bad{color:var(--failed);border-color:color-mix(in srgb,var(--failed) 40%,var(--ln))}
+.tag.warn{color:var(--owner);border-color:color-mix(in srgb,var(--owner) 40%,var(--ln))}
+.pre{white-space:pre-wrap;word-break:break-word;font-size:13px;color:var(--tx2)}
+
+/* Sheet ------------------------------------------------------------------------ */
+.scrim{position:fixed;inset:0;background:rgba(6,9,14,.6);z-index:40}
+.sheet{position:fixed;z-index:41;top:0;right:0;bottom:0;width:min(600px,100vw);background:var(--sf);border-left:1px solid var(--ln);display:flex;flex-direction:column;box-shadow:-18px 0 40px rgba(0,0,0,.35);animation:slide .18s ease-out}
+@keyframes slide{from{transform:translateX(24px);opacity:.4}to{transform:none;opacity:1}}
+.sheet-h{display:flex;align-items:flex-start;gap:12px;padding:18px 22px 14px;border-bottom:1px solid var(--ln);padding-top:calc(18px + env(safe-area-inset-top))}
+.sheet-h h2{font:650 18px/1.3 var(--disp)}
+.sheet-h .sub{color:var(--tx2);margin-top:4px}
+.sheet-h .x{margin-left:auto;flex:none}
+.sheet-b{overflow-y:auto;padding:6px 22px 32px;-webkit-overflow-scrolling:touch;padding-bottom:calc(32px + env(safe-area-inset-bottom))}
+.sheet-b section{margin-top:20px}
+.sheet-b h3{font-size:13px;color:var(--mu);font-weight:550;margin-bottom:8px}
+.md{white-space:pre-wrap;word-break:break-word;font-size:13px;background:var(--bg2);border:1px solid var(--ln);border-radius:var(--r2);padding:12px 14px;max-height:52vh;overflow:auto;color:var(--tx2)}
+.md code,.pre code{background:var(--sf3);padding:0 4px;border-radius:4px;font-family:var(--mono);font-size:.92em}
+.note{border-left:2px solid var(--ln2);padding:3px 0 3px 10px;margin:6px 0;font-size:13px;color:var(--tx2)}
+.note.owner_decision{border-color:var(--owner)}.note.risk{border-color:var(--failed)}.note.assumption{border-color:var(--wait)}.note.decision{border-color:var(--run)}
+
+/* Mobile ----------------------------------------------------------------------- */
+.btabs{display:none}
+@media (max-width:1100px){
+  .ov{grid-template-columns:minmax(0,1fr)}
+  .hero-grid{grid-template-columns:minmax(0,1fr);gap:18px}
+  .bth,.btr{grid-template-columns:minmax(0,1.6fr) minmax(130px,1fr) minmax(130px,.9fr)}
+  .bth .c3{display:none}
+  .btr .c3{grid-column:1/-1;grid-row:2}
+}
+@media (max-width:760px){
+  :root{--hdr:52px}
+  .top{padding:env(safe-area-inset-top) 16px 0;gap:10px}
+  .tabs{display:none}
+  .status .slots,.status .upd{display:none}
+  main{padding:18px 14px calc(88px + env(safe-area-inset-bottom))}
+  .panel{padding:16px}
+  .hero{padding:20px 18px}
+  .when{font-size:38px}
+  .btabs{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(18,23,34,.96);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid var(--ln);padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+  .btabs .tab{flex:1;flex-direction:column;gap:3px;padding:4px 0;font-size:11px;border:0;margin:0;align-items:center;justify-content:center}
+  .btabs .tab svg{width:21px;height:21px}
+  .btabs .tab[aria-selected=true]{color:var(--gold)}
+  .brow{grid-template-columns:minmax(0,1fr) 64px;gap:4px 12px}
+  .brow .mini{grid-column:1/-1;grid-row:2}
+  .brow .eta{grid-column:1/-1;text-align:left;grid-row:3}
+  .brow .eta small{display:inline;margin-left:6px}
+  .bth{display:none}
+  .btr{grid-template-columns:minmax(0,1fr);gap:8px;padding:14px 16px}
+  .btr .c3{grid-row:auto}
+  .btr .eta{text-align:left}.btr .eta small{display:inline;margin-left:6px}
+  .gwrap{height:calc(100dvh - var(--hdr) - env(safe-area-inset-top) - 64px - env(safe-area-inset-bottom))}
+  .gbar{padding:8px 10px;gap:8px}
+  .gbar .search{flex:1 1 80px;max-width:none;padding:6px 10px}
+  .gbar .seg button{padding:5px 10px}
+  .gbar select.pick{max-width:112px;padding:6px 8px}
+  .gbar .aside{display:none}
+  .gside{position:absolute;left:0;right:0;bottom:0;width:auto;max-height:52%;border-left:0;border-top:1px solid var(--ln);border-radius:16px 16px 0 0;box-shadow:0 -12px 30px rgba(0,0,0,.45);z-index:5}
+  .mm{display:none}
+  .glegend{order:5;flex-basis:100%;margin-left:0;flex-wrap:nowrap;overflow-x:auto;font-size:11.5px;gap:12px;scrollbar-width:none}
+  .zoom{right:12px;bottom:12px}
+  .uhead .big{font-size:34px}
+  .tbl th,.tbl td{padding:9px 6px}
+  .tbl td:nth-child(2){white-space:normal}
+  .facts{gap:16px}
+  .fitem{grid-template-columns:minmax(0,1fr)}
+  .sheet{width:100vw;border-left:0}
+  .kan{scroll-snap-type:x mandatory}
+  .col{flex-basis:84vw}
+}
+@media (max-width:760px){.hm{display:none!important}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
-<header>
-  <div class="top">
-    <h1 id="proj">swarm</h1>
-    <span class="pill" id="runstate"><span class="dot"></span><span>connecting…</span></span>
-    <button class="pill needs" id="needs" hidden></button>
-    <span class="pill" id="slots"></span>
+<header class="top">
+  <div class="brand"><b id="proj">swarm</b><span>swarm</span></div>
+  <nav class="tabs" role="tablist" aria-label="Views" id="tabs"></nav>
+  <div class="status">
+    <span class="slots" id="slots"></span>
+    <span class="upd" id="upd"></span>
+    <span class="state" id="state"><span class="dot"></span><span>connecting</span></span>
   </div>
-  <div class="strip" id="strip"></div>
 </header>
-<nav role="tablist" aria-label="Views">
-  <button class="tab" role="tab" id="tab-board" aria-selected="true" data-view="board">Board</button>
-  <button class="tab" role="tab" id="tab-camps" aria-selected="false" data-view="camps">Campaigns</button>
-  <button class="tab" role="tab" id="tab-act" aria-selected="false" data-view="act">Activity</button>
-  <input class="search" id="q" type="search" placeholder="Search id or text" aria-label="Search phases by id or text" autocomplete="off">
-</nav>
-<div class="chips" id="chips" role="toolbar" aria-label="Filter by campaign"></div>
 <main id="main" tabindex="-1"></main>
+<nav class="btabs" id="btabs" aria-label="Views"></nav>
 <div id="sheetroot"></div>
-<div class="conn pill" id="conn" hidden></div>
 <script>
 "use strict";
-// State ----------------------------------------------------------------------
-const S = {board: null, version: -1, view: "board", camp: "", q: "", hits: null,
-  skew: 0, shut: JSON.parse(localStorage.getItem("swarm.shut") || '{"done":true,"excluded":true}'),
-  showAll: {}, allChips: false, open: null, pushed: false};
+// ---------------------------------------------------------------------------
+// State, helpers
+// ---------------------------------------------------------------------------
+const TABS = [
+  ["overview", "Overview", '<path d="M3 12h4l3-8 4 16 3-8h4"/>'],
+  ["books", "Phase books", '<path d="M4 5h6a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4zM20 5h-6a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h6z"/>'],
+  ["graph", "Graph", '<circle cx="5" cy="6" r="2.2"/><circle cx="5" cy="18" r="2.2"/><circle cx="19" cy="12" r="2.2"/><path d="M7.2 6.5c5 .5 5 5 9.6 5.3M7.2 17.5c5-.5 5-5 9.6-5.3"/>'],
+  ["usage", "Usage", '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'],
+  ["activity", "Activity", '<path d="M4 6h16M4 12h10M4 18h13"/>'],
+];
+const S = {tab: "overview", board: null, graph: null, usage: null, et: {}, skew: 0,
+  lastOk: 0, books: {mode: "open", view: "books", q: ""}, act: "finished",
+  g: {mode: "open", book: "", q: "", hits: null, sel: null, vb: null, key: ""},
+  shut: {done: true, excluded: true}, showAll: {}, infoOpen: false, sheet: null};
 const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const now = () => Date.now() / 1000 + S.skew;
-const TONE = {needs_you: "warn", blocked: "mu", ready: "acc", building: "info", merging: "warn", operator: "acc", done: "ok", failed: "bad", excluded: "mu"};
-const COLNAME = {};
-// A blocked row's root, in words.
-const ROOTKIND = {unknown: "not in the ledger", excluded: "yours to do", failed: "failed", parked: "waiting on you", building: "being built", ready: "ready to start", blocked: "blocked"};
-const rootText = (c) => `waits on <b class="mono">${esc(c.root)}</b> <span class="mu">(${esc(ROOTKIND[c.root_kind] || c.root_kind)}; holds up ${c.root_blocks})</span>`;
-
+const STATUS = {running: ["Running", "#5aa9ff"], ready: ["Ready", "#3dd6b0"], blocked: ["Blocked", "#7c879e"],
+  waiting: ["Waiting for a date", "#b592ff"], owner: ["Yours", "#f2a541"], failed: ["Failed", "#f2667a"], done: ["Done", "#4fae78"]};
+const COL2S = {building: "running", merging: "running", operator: "done", done: "done", needs_you: "owner", excluded: "owner", failed: "failed", ready: "ready", blocked: "blocked"};
+function cstatus(c) {
+  if (!c) return "blocked";
+  if (c.col === "blocked" && !c.unmet && String(c.sub || "").startsWith("waits until")) return "waiting";
+  return COL2S[c.col] || "blocked";
+}
 function dur(s) {
   if (s == null || !isFinite(s)) return "—";
   s = Math.max(0, s);
-  if (s < 90) return Math.round(s) + "s";
-  if (s < 5400) return Math.round(s / 60) + "m";
-  if (s < 172800) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + "h" + (m ? " " + m + "m" : ""); }
-  return (s / 86400).toFixed(1) + "d";
+  if (s < 60) return Math.round(s) + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + "h" + (m ? " " + m + "m" : ""); }
+  const d = Math.floor(s / 86400), h = Math.round((s % 86400) / 3600); return d + "d" + (h ? " " + h + "h" : "");
 }
-const ago = (t) => t ? dur(now() - t) + " ago" : "—";
-function clock(t) {
+const rel = (t) => t == null ? "—" : t >= now() ? "in " + dur(t - now()) : dur(now() - t) + " ago";
+function when(t, withDay) {
   if (!t) return "—";
-  const d = new Date(t * 1000), n = new Date();
-  const hm = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
-  if (d.toDateString() === n.toDateString()) return hm;
-  if (Math.abs(d - n) < 6 * 864e5) return d.toLocaleDateString([], {weekday: "short"}) + " " + hm;
-  return d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + hm;
+  const d = new Date(t * 1000), n = new Date(now() * 1000);
+  const hm = hhmm(t);
+  if (!withDay && d.toDateString() === n.toDateString()) return hm;
+  if (Math.abs(d - n) < 6 * 864e5 && !withDay) return d.toLocaleDateString([], {weekday: "short"}) + " " + hm;
+  return d.toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"}) + ", " + hm;
 }
-// Light markdown: escaped first, then bold / code; links become their text.
+function hhmm(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hourCycle: "h23"}); }
+function day(t) { return t ? new Date(t * 1000).toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"}) : "—"; }
 function md(s) {
   let h = esc(s);
   h = h.replace(/\[([^\]\n]+)\]\([^)\s]*\)/g, "$1");
@@ -175,337 +435,837 @@ function md(s) {
   h = h.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
   return h;
 }
+const repos = (list) => list.map(r => r === "." ? "the project root" : r).join(", ");
+const clipTxt = (s, n) => (s = String(s || "")).length > n ? s.slice(0, n - 1).trimEnd() + "…" : s;
+const icon = (p, cls = "") => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="${cls}" aria-hidden="true">${p}</svg>`;
+const dotS = (s) => `<span class="dot s-${esc(s)}" title="${esc((STATUS[s] || [s])[0])}"></span>`;
+function allCards() { const out = {}; if (S.board) for (const col of S.board.columns) for (const c of col.cards) out[c.id] = c; return out; }
 
-// Data -------------------------------------------------------------------------
-let etag = null;
-async function load() {
+// ---------------------------------------------------------------------------
+// Data: poll only while the page is visible; ETags make a quiet poll a 304.
+// ---------------------------------------------------------------------------
+async function get(url, key) {
+  const r = await fetch(url, {headers: S.et[key] ? {"If-None-Match": S.et[key]} : {}, cache: "no-store"});
+  if (r.status === 304) return null;
+  if (!r.ok) throw new Error(r.status);
+  S.et[key] = r.headers.get("ETag");
+  return r.json();
+}
+let CARDS = {};
+async function pollBoard() {
   try {
-    const r = await fetch("/api/board", {headers: etag ? {"If-None-Match": etag} : {}, cache: "no-store"});
-    if (r.status === 304) return;
-    if (!r.ok) throw new Error(r.status);
-    etag = r.headers.get("ETag");
-    const b = await r.json();
-    S.skew = (b.generated_at || Date.now() / 1000) - Date.now() / 1000;
-    S.board = b; S.version = b.version;
-    b.columns.forEach(c => COLNAME[c.key] = c.title);
-    render(true);
-    if (S.open) openDetail(S.open, true);
-  } catch (e) { conn("board unavailable — retrying"); }
-}
-let es = null, backoff = 1000;
-function connect() {
-  if (es) es.close();
-  es = new EventSource("/events");
-  es.addEventListener("board", (ev) => {
-    backoff = 1000; conn("");
-    try { if (JSON.parse(ev.data).version !== S.version) load(); } catch (e) { load(); }
-  });
-  es.onopen = () => { backoff = 1000; conn(""); };
-  es.onerror = () => {
-    conn("reconnecting…");
-    if (es.readyState === EventSource.CLOSED) {
-      setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 30000);
+    const b = await get("/api/board", "board");
+    S.lastOk = Date.now();
+    if (b) {
+      S.skew = (b.generated_at || Date.now() / 1000) - Date.now() / 1000;
+      S.board = b; CARDS = allCards();
+      render(true);
     }
-  };
+    status();
+  } catch (e) { status(true); }
 }
-function conn(msg) { const c = $("#conn"); c.hidden = !msg; c.textContent = msg; }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { load(); if (!es || es.readyState === 2) connect(); } });
-
-// Filters ----------------------------------------------------------------------
-function visible(card) {
-  if (S.camp && card.c !== S.camp) return false;
-  if (!S.q) return true;
-  const q = S.q.toLowerCase();
-  if ((card.id + " " + (card.t || "") + " " + card.c + " " + (card.q || "")).toLowerCase().includes(q)) return true;
-  return !!(S.hits && S.hits.has(card.id));
+async function pollGraph() {
+  if (S.tab !== "graph") return;
+  const g = S.g, url = `/api/graph?mode=${g.mode}${g.book ? "&book=" + encodeURIComponent(g.book) : ""}`;
+  const key = "graph:" + g.mode + ":" + g.book;
+  try { const d = await get(url, key); if (d) { S.graph = d; drawGraph(); } else if (!S.graph || S.graph.mode !== g.mode || S.graph.book !== g.book) { S.et[key] = null; const d2 = await get(url, key); if (d2) { S.graph = d2; drawGraph(); } } } catch (e) {}
 }
-let qTimer = null;
-$("#q").addEventListener("input", (e) => {
-  S.q = e.target.value.trim(); S.hits = null; render();
-  clearTimeout(qTimer);
-  if (S.q.length >= 3) qTimer = setTimeout(async () => {
-    const want = S.q;
-    try {
-      const r = await fetch("/api/search?q=" + encodeURIComponent(want));
-      const j = await r.json();
-      if (want === S.q) { S.hits = new Set(j.ids); render(); }
-    } catch (e) {}
-  }, 250);
-});
-document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => setView(t.dataset.view)));
-function setView(v) {
-  S.view = v;
-  document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", t.dataset.view === v));
-  render(); window.scrollTo(0, 0);
+async function pollUsage() {
+  if (S.tab !== "usage" && S.tab !== "overview") return;
+  try { const u = await get("/api/usage", "usage"); if (u) { S.usage = u; render(true); } } catch (e) {}
 }
-$("#needs").addEventListener("click", () => {
-  S.camp = ""; S.q = ""; $("#q").value = ""; setView("board");
-  const col = document.querySelector('[data-col="needs_you"]');
-  if (col) col.scrollIntoView({inline: "start", block: "nearest"});
-});
-
-// Render -----------------------------------------------------------------------
-function render(live) {
+const EVERY = {board: 5000, graph: 12000, usage: 30000};
+const timers = {};
+function loop(name, fn) {
+  clearTimeout(timers[name]);
+  const tick = async () => { if (!document.hidden) await fn(); timers[name] = setTimeout(tick, EVERY[name]); };
+  tick();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { pollBoard(); pollGraph(); pollUsage(); } });
+function status(failed) {
   const b = S.board; if (!b) return;
-  header(b); chips(b);
-  const main = $("#main");
-  // Keep the reader where they were across a live update.
-  const keep = {y: window.scrollY, x: ($(".board") || {}).scrollLeft, cols: {}, focus: document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.id : null};
-  document.querySelectorAll(".col").forEach(c => keep.cols[c.dataset.col] = $(".cards", c).scrollTop);
-  main.innerHTML = S.view === "board" ? boardView(b) : S.view === "camps" ? campsView(b) : activityView(b);
-  const bd = $(".board");
-  if (live && bd) bd.scrollLeft = keep.x || 0;
-  document.querySelectorAll(".col").forEach(c => { if (keep.cols[c.dataset.col] != null) $(".cards", c).scrollTop = keep.cols[c.dataset.col]; });
-  if (live) window.scrollTo(0, keep.y);
-  if (keep.focus) { const el = main.querySelector(`[data-id="${CSS.escape(keep.focus)}"]`); if (el) el.focus({preventScroll: true}); }
-}
-function header(b) {
-  const h = b.header;
-  document.title = (h.needs_you ? `(${h.needs_you}) ` : "") + (b.project || "swarm") + " board";
+  const h = b.header, st = $("#state");
+  let c = "var(--done)", txt = "Running", live = true;
+  if (!h.running) { c = "var(--mu2)"; txt = h.state ? "Stopped" : "Stopped"; live = false; }
+  else if (h.finished) { txt = "Finished"; live = false; }
+  else if (h.drain) { c = "var(--owner)"; txt = "Draining"; }
+  else if (h.paused) { c = "var(--owner)"; txt = "Paused"; live = false; }
+  else if (h.usage_hold) { c = "var(--owner)"; txt = "Held by usage cap"; live = false; }
+  if (failed || Date.now() - S.lastOk > 20000) { c = "var(--failed)"; txt = "Board unreachable"; live = false; }
+  st.className = "state" + (live ? " live" : ""); st.style.setProperty("--c", c);
+  st.innerHTML = `<span class="dot"></span><span>${esc(txt)}</span>`;
+  st.title = h.drain || h.usage_hold || h.state || "";
+  $("#slots").textContent = `${h.slots.busy} of ${h.slots.total} workers busy`;
+  $("#upd").textContent = "updated " + rel(b.generated_at);
   $("#proj").textContent = b.project || "swarm";
-  const rs = $("#runstate");
-  let tone = "ok", txt = "running";
-  if (!h.running) { tone = "mu"; txt = h.state || "stopped"; }
-  else if (h.finished) { tone = "ok"; txt = "finished"; }
-  else if (h.drain) { tone = "warn"; txt = h.drain; }
-  else if (h.paused) { tone = "warn"; txt = "paused"; }
-  else if (h.usage_hold) { tone = "warn"; txt = "paused by usage cap"; }
-  rs.innerHTML = `<span class="dot" style="background:var(--${tone === "mu" ? "mu" : tone})"></span><span>${esc(txt)}</span>`;
-  const nb = $("#needs"); nb.hidden = !h.needs_you; nb.textContent = `${h.needs_you} need${h.needs_you === 1 ? "s" : ""} you`;
-  $("#slots").textContent = `${h.slots.busy}/${h.slots.total} slots`;
-  const u = h.usage || {}, parts = [];
-  if (h.usage_hold) parts.push(`<div class="meter"><b>usage cap</b><span class="sub warn">${esc(h.usage_hold)}</span></div>`);
-  for (const [k, label] of [["five", "5-hour"], ["week", "week"]]) {
-    const w = u[k] || {};
-    const pct = w.pct == null ? null : Math.max(0, Math.min(100, w.pct));
-    const col = pct == null ? "var(--mu)" : pct >= 90 ? "var(--bad)" : pct >= 70 ? "var(--warn)" : "var(--info)";
-    const rate = w.per_h != null ? ` · ${w.per_h.toFixed(1)}%/h` : "";
-    const run = w.runway_h != null ? ` · full in ${dur(w.runway_h * 3600)}` : "";
-    const reset = w.resets_at ? ` · resets ${clock(w.resets_at)}` : "";
-    parts.push(`<div class="meter" title="${esc(w.text || "")}"><b>${label} ${pct == null ? "—" : Math.round(pct) + "%"}</b><span class="bar" role="img" aria-label="${label} usage ${pct == null ? "unknown" : Math.round(pct) + " percent"}"><i style="width:${pct || 0}%;background:${col}"></i></span></div><div class="sub ${esc(w.tone === "bad" ? "bad" : w.tone === "warn" ? "warn" : "")}">${esc((rate + run + reset).replace(/^ · /, "") || w.text || "")}</div>`);
+  document.title = (h.needs_you ? `(${h.needs_you}) ` : "") + (b.project || "swarm");
+}
+
+// ---------------------------------------------------------------------------
+// Navigation: #tab, with an optional &phase=<id> or &book=<name> sheet.
+// ---------------------------------------------------------------------------
+function navHtml(bottom) {
+  return TABS.map(([k, label, p]) => `<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab === k}">${icon(p)}<span>${bottom && k === "books" ? "Books" : label}</span></button>`).join("");
+}
+function paintNav() { $("#tabs").innerHTML = navHtml(false); $("#btabs").innerHTML = navHtml(true); }
+function parseHash() {
+  const parts = location.hash.replace(/^#/, "").split("&");
+  const tab = TABS.some(t => t[0] === parts[0]) ? parts[0] : "overview";
+  let sheet = null;
+  for (const p of parts.slice(1)) {
+    const m = /^(phase|book)=(.+)$/.exec(p);
+    if (m) sheet = {kind: m[1], id: decodeURIComponent(m[2])};
   }
-  const e = h.eta || {};
-  parts.push(`<div class="meter" title="${esc(e.basis || "")}"><b>ETA</b><span class="sub">${esc(e.text || "—")}${e.basis ? " · " + esc(e.basis) : ""}</span></div>`);
-  if (e.waiting) parts.push(`<div class="meter"><b>waiting on you</b><span class="sub">${esc(e.waiting.replace(/^waiting on you: /, ""))}</span></div>`);
-  const r = h.run;
-  parts.push(`<div class="meter"><b>run</b><span class="sub">${r ? esc((r.id || "") + " · " + dur((r.hours || 0) * 3600) + " · " + (r.finished || 0) + " done" + (r.usd != null ? " · $" + r.usd.toFixed(0) : "")) : "no run open"}</span></div>`);
-  const p = h.last_pass;
-  parts.push(`<div class="meter"><b>Overseer</b><span class="sub">${p ? esc(p.status + " · " + ago(p.ended_at || p.started_at)) : "no pass yet"}</span></div>`);
-  const bp = h.big_picture;
-  if (bp) parts.push(`<div class="meter"><b>Big picture</b><span class="sub">${esc(bp.text + (bp.at ? " · " + ago(bp.at) : ""))}</span></div>`);
-  $("#strip").innerHTML = parts.join("");
+  return {tab, sheet};
 }
-function chips(b) {
-  const open = b.campaigns.filter(c => c.open || c.active || (c.counts && c.counts.operator));
-  const list = S.allChips ? b.campaigns : open.slice(0, 16);
-  const html = [`<button class="chip" aria-pressed="${!S.camp}" data-camp="">All</button>`];
-  for (const c of list) html.push(`<button class="chip" aria-pressed="${S.camp === c.name}" data-camp="${esc(c.name)}" title="${esc(c.what + (c.eta ? " · " + c.eta.text : ""))}">${esc(c.name)}<small>${c.done}/${c.total}</small></button>`);
-  if (S.camp && !list.some(c => c.name === S.camp)) html.push(`<button class="chip" aria-pressed="true" data-camp="${esc(S.camp)}">${esc(S.camp)}</button>`);
-  html.push(`<button class="chip" data-more="1">${S.allChips ? "fewer" : "all " + b.campaigns.length + " campaigns"}</button>`);
-  const el = $("#chips"); el.innerHTML = html.join("");
+function go(tab, sheet) {
+  const h = "#" + tab + (sheet ? `&${sheet.kind}=${encodeURIComponent(sheet.id)}` : "");
+  if (location.hash !== h) location.hash = h; else route();
 }
-$("#chips").addEventListener("click", (e) => {
-  const t = e.target.closest("button"); if (!t) return;
-  if (t.dataset.more) { S.allChips = !S.allChips; chips(S.board); return; }
-  S.camp = S.camp === t.dataset.camp ? "" : t.dataset.camp; render();
+function route() {
+  const {tab, sheet} = parseHash();
+  const changed = tab !== S.tab;
+  S.tab = tab; paintNav();
+  if (changed || !$("#main").dataset.tab || $("#main").dataset.tab !== tab) { render(false); window.scrollTo(0, 0); }
+  if (tab === "graph") pollGraph();
+  if (tab === "usage" || tab === "overview") pollUsage();
+  if (sheet) openSheet(sheet); else closeSheet();
+}
+window.addEventListener("hashchange", route);
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-tab]");
+  if (t) { go(t.dataset.tab); return; }
+  const p = e.target.closest("[data-phase]");
+  if (p && !p.closest("#gsvg")) { e.preventDefault(); go(S.tab, {kind: "phase", id: p.dataset.phase}); return; }
+  const bk = e.target.closest("[data-book]");
+  if (bk) { e.preventDefault(); go(S.tab === "overview" ? "books" : S.tab, {kind: "book", id: bk.dataset.book}); }
 });
 
-function meta(c) {
-  const bits = [];
-  switch (c.col) {
-    case "building": {
-      bits.push(`slot ${c.slot}`);
-      if (c.since) bits.push(`<span data-since="${c.since}">${dur(now() - c.since)}</span>` + (c.typical ? ` / ~${dur(c.typical)}` : ""));
-      if (c.ctx != null) { const col = c.ctx >= 60 ? "var(--bad)" : c.ctx >= 30 ? "var(--warn)" : "var(--ok)"; bits.push(`context <span class="ctx"><i style="width:${Math.min(100, c.ctx)}%;background:${col}"></i></span> ${Math.round(c.ctx)}%`); }
-      if (c.last) bits.push(`active <span data-ago="${c.last}">${ago(c.last)}</span>`);
-      break;
-    }
-    case "blocked":
-      if (c.root) bits.push(rootText(c));
-      else if (c.sub) bits.push(esc(c.sub));
-      if (c.needs) bits.push(`needs ${c.needs.map(esc).join(", ")}${c.unmet > c.needs.length ? "…" : ""}`);
-      break;
-    case "done": case "failed":
-      bits.push(esc(c.sub || c.st || c.col)); if (c.at) bits.push(clock(c.at)); break;
-    default:
-      if (c.sub) bits.push(esc(c.sub));
-      if (c.since) bits.push(`<span data-ago="${c.since}">${ago(c.since)}</span>`);
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+function render(live) {
+  const m = $("#main");
+  if (!S.board) { m.innerHTML = '<p class="empty">Loading the board…</p>'; return; }
+  status();
+  if (S.tab === "graph") {
+    if (m.dataset.tab !== "graph") { m.className = "full"; m.innerHTML = graphShell(); m.dataset.tab = "graph"; bindGraph(); if (S.graph) drawGraph(); }
+    else graphMeta();
+    return;
   }
-  if (c.r && c.col !== "done") bits.push(`<span class="mono">${c.r.map(r => esc(r === "." ? "(root)" : r)).join(" ")}</span>`);
-  return bits.join(" · ");
+  m.className = ""; m.dataset.tab = S.tab;
+  const keep = {y: window.scrollY, focus: document.activeElement && document.activeElement.id};
+  const kx = $(".kan") ? $(".kan").scrollLeft : 0;
+  m.innerHTML = S.tab === "books" ? booksView() : S.tab === "usage" ? usageView() : S.tab === "activity" ? activityView() : overviewView();
+  if (S.tab === "usage") drawCharts();
+  if (S.tab === "overview") drawBand();
+  if (S.tab === "activity" && !live) window.scrollTo(0, 0);
+  if (live) { window.scrollTo(0, keep.y); if ($(".kan")) $(".kan").scrollLeft = kx; }
+  if (keep.focus) { const el = document.getElementById(keep.focus); if (el) { el.focus({preventScroll: true}); if (el.setSelectionRange && el.value) el.setSelectionRange(el.value.length, el.value.length); } }
+  if (S.sheet && live) refreshSheet();
 }
-function card(c) {
-  const doing = c.doing ? `<div class="m" style="color:var(--tx)">${esc(c.doing)}</div>` : "";
-  const q = c.q ? `<div class="q">${esc(c.q)}</div>` : "";
-  return `<button class="card t-${c.col}" data-id="${esc(c.id)}" aria-label="${esc(c.id + ": " + (c.t || ""))}">
-<span class="h"><span class="id">${esc(c.id)}</span><span class="c">${esc(c.c)}</span></span>
-${c.t ? `<span class="t">${esc(c.t)}</span>` : ""}${q}<span class="m" style="display:block">${meta(c)}</span>${doing}</button>`;
+
+// Overview --------------------------------------------------------------------
+function counts() {
+  const out = {running: 0, ready: 0, blocked: 0, waiting: 0, owner: 0, failed: 0, done: 0};
+  for (const c of Object.values(CARDS)) { if (c.kind) continue; if (c.col === "excluded") { out.owner++; continue; } out[cstatus(c)]++; }
+  return out;
 }
-const LIMIT = 60;
-function boardView(b) {
-  let out = '<div class="board">';
-  for (const col of b.columns) {
-    const cs = col.cards.filter(visible), shut = !!S.shut[col.key] && !S.q;
-    const lim = S.showAll[col.key] ? cs.length : LIMIT;
-    // An empty column shrinks to its header: on a phone a whole swipe of
-    // "nothing here" is a swipe wasted.
-    out += `<section class="col${shut ? " shut" : ""}${cs.length ? "" : " none"}" data-col="${col.key}" aria-label="${esc(col.title)}">
-<button class="colh" data-toggle="${col.key}" aria-expanded="${!shut}"><span class="dot d-${col.key}"></span><h2>${esc(col.title)}<span class="hint">${esc(col.hint)}</span></h2><span class="n">${cs.length}</span></button>
-<div class="cards">${cs.slice(0, lim).map(card).join("") || '<div class="empty">nothing here</div>'}
-${cs.length > lim ? `<button class="more" data-all="${col.key}">show ${cs.length - lim} more</button>` : ""}</div></section>`;
+function overviewView() {
+  const b = S.board, h = b.header, e = h.eta || {}, n = counts();
+  const total = Object.values(n).reduce((a, x) => a + x, 0);
+  const pct = total ? Math.round(100 * n.done / total) : 0;
+  const left = total - n.done;
+  let whenTxt, likely;
+  if (e.p50 == null) { whenTxt = left ? "Not in sight" : "Everything is built"; likely = left ? "Nothing can be timed: the open rows all wait on you." : ""; }
+  else {
+    const floor = e.floor;
+    whenTxt = `${esc(day(e.p50))} <small>${esc(hhmm(e.p50))}</small>`;
+    likely = floor
+      ? `At the earliest, ${esc(rel(e.p50))}. The full forecast is still simulating.`
+      : `Likely by <b>${esc(when(e.p85, true))}</b> (P85), ${esc(rel(e.p50))} at the median.`;
+  }
+  const seg = ["done", "running", "ready", "waiting", "blocked", "owner", "failed"].filter(k => n[k]);
+  const stack = seg.map(k => `<i class="s-${k}" style="width:${(100 * n[k] / Math.max(1, total)).toFixed(2)}%" title="${esc(STATUS[k][0])}: ${n[k]}"></i>`).join("");
+  const legend = seg.map(k => `<span>${dotS(k)}${esc(STATUS[k][0])} <b>${n[k]}</b></span>`).join("");
+  const basis = S.infoOpen ? `<div class="basis" id="basis"><p>${esc(e.basis || "No forecast yet.")}</p>${e.critical && e.critical.length ? `<p>The chain that sets the finish: ${e.critical.map(p => `<span class="id">${esc(p)}</span>`).join(", ")}.</p>` : ""}<p class="mu">P50 is the median of the simulated futures; P85 is the date 85 in 100 of them finish by.</p></div>` : "";
+  let out = `<div class="ov">
+<section class="hero" aria-label="When everything is done">
+ <div class="hero-grid">
+  <div>
+   <p class="lead">All phases done <button class="info-btn" id="info" aria-expanded="${S.infoOpen}" aria-controls="basis" title="How this is worked out">i</button></p>
+   <h1 class="when">${whenTxt}</h1>
+   <p class="likely">${likely}</p>
+  </div>
+  <svg class="band" id="band" aria-hidden="true"></svg>
+ </div>
+ ${basis}
+ <div class="prog">
+  <div class="prog-top"><b>${pct}%</b><span class="mu">${n.done} of ${total} phases built</span><span class="aside">${left} to go</span></div>
+  <div class="stack" role="img" aria-label="${n.done} of ${total} phases built">${stack}</div>
+  <div class="legend">${legend}</div>
+ </div>
+</section>`;
+  const asks = b.columns.find(c => c.key === "needs_you");
+  if (asks && asks.cards.length) {
+    out += `<section class="panel ask"><div class="sec-h"><h2>${asks.cards.length} ${asks.cards.length === 1 ? "question waits" : "questions wait"} for you</h2></div>${asks.cards.slice(0, 6).map(c => `<button class="ask-item" data-phase="${esc(c.id)}"><span class="id">${esc(c.id)}</span> <span class="mu">${esc(c.sub || "")}</span>${c.q ? `<p>${esc(c.q)}</p>` : ""}</button>`).join("")}</section>`;
+  }
+  const running = b.columns.filter(c => c.key === "building" || c.key === "merging").flatMap(c => c.cards);
+  out += `<section class="panel"><div class="sec-h"><h2>Running now</h2><span class="aside">${h.slots.busy} of ${h.slots.total} workers busy</span></div>`;
+  out += running.length ? `<div class="runs-list">${running.map(runItem).join("")}</div>` : `<p class="empty">No worker is building right now.</p>`;
+  out += `</section>`;
+  out += `<section class="panel"><div class="sec-h"><h2>Usage</h2><button class="linkish" data-tab="usage">See the charts</button></div>${capSentence(h.next_cap, e)}<div class="meters">${meters()}</div></section>`;
+  const books = openBooks().slice(0, 8);
+  out += `<section class="panel" style="grid-column:1/-1"><div class="sec-h"><h2>Phase books in progress</h2><span class="aside hm">${openBooks().length} of ${b.campaigns.length} still open, soonest first</span><button class="linkish" data-tab="books">All phase books</button></div><div class="blist">${books.map(bookRow).join("") || '<p class="empty">Every phase book is finished.</p>'}</div></section>`;
+  return out + "</div>";
+}
+const runCount = (c) => ((c.counts || {}).building || 0) + ((c.counts || {}).merging || 0);
+// Books still owed work, soonest finish first; untimed ones last.
+function openBooks() {
+  return S.board.campaigns.filter(c => c.open || runCount(c)).map((c, i) => [c, i])
+    .sort((a, b) => ((a[0].eta && a[0].eta.p50) || 9e12) - ((b[0].eta && b[0].eta.p50) || 9e12) || a[1] - b[1]).map(x => x[0]);
+}
+function runItem(c) {
+  const el = c.since ? now() - c.since : null;
+  const ctx = c.ctx != null ? `<span class="ctx" style="--w:${Math.min(100, c.ctx)}%;--c:${c.ctx >= 60 ? "var(--failed)" : c.ctx >= 30 ? "var(--owner)" : "var(--ready)"}">context <i></i> ${Math.round(c.ctx)}%</span>` : "";
+  return `<button class="run" data-phase="${esc(c.id)}"><span><span class="id">${esc(c.id)}</span><span class="book-tag">${esc(c.c)}</span></span>
+<span class="el"><span data-since="${c.since || ""}">${c.col === "merging" ? "merging" : dur(el)}</span><small>${c.typical ? "typical " + dur(c.typical) : c.sub ? esc(c.sub) : ""}</small></span>
+${c.t ? `<span class="t">${esc(c.t)}</span>` : ""}${c.doing ? `<span class="doing">${esc(c.doing)}</span>` : ""}${ctx ? `<span style="grid-column:1/-1">${ctx}</span>` : ""}</button>`;
+}
+function capSentence(nc, e) {
+  if (!nc) return `<p class="cap-next">No usage readings yet.</p>`;
+  if (nc.held) return `<p class="cap-next bad"><b>Held by the ${esc(nc.held.join(" and "))} cap</b>${nc.until ? ` until ${esc(when(nc.until))}` : ""}. No new workers start until then.</p>`;
+  if (!nc.hits) {
+    return nc.why === "nothing burns"
+      ? `<p class="cap-next"><b>No cap in sight.</b> Nothing is running, so nothing burns.</p>`
+      : `<p class="cap-next"><b>No cap before the resets.</b> At the current burn both windows reset before they reach a cap.</p>`;
+  }
+  const hit = nc.hits, before = nc.before_done;
+  const tone = before ? (hit.at - now() < 3 * 3600 ? "bad" : "warn") : "";
+  return `<p class="cap-next ${tone}"><b>${esc(hit.label)} cap (${hit.pct}%) around ${esc(when(hit.at))}</b>, ${esc(rel(hit.at))}. ${before ? "That is before the work is done, so the swarm will pause until it resets." : "That is after the work is done."}</p>`;
+}
+function meters() {
+  const u = S.board.header.usage || {};
+  const rules = S.usage ? Object.fromEntries(S.usage.windows.map(w => [w.key, w.rules])) : {};
+  return [["five", "5-hour"], ["week", "Weekly"]].map(([k, lab]) => {
+    const w = u[k] || {}, pct = w.pct == null ? null : Math.max(0, Math.min(100, w.pct));
+    const c = pct == null ? "var(--mu2)" : pct >= 90 ? "var(--failed)" : pct >= 70 ? "var(--owner)" : "var(--run)";
+    const ticks = (rules[k] || []).map(r => `<u class="${r.action === "down" ? "stop" : ""}" style="left:${r.at}%" title="${esc(r.action === "down" ? "stops" : "pauses")} at ${r.at}%"></u>`).join("");
+    const uw = S.usage && S.usage.windows.find(x => x.key === k), pj = uw && uw.projection;
+    let ahead = "";
+    if (pj && pj.hits) ahead = `reaches ${pj.hits.pct}% around ${esc(when(pj.hits.at))}, before it resets`;
+    else if (pj && pj.rate_h && pj.to) ahead = `at this burn, about ${Math.round(pj.to[1])}% when it resets`;
+    return `<div><div class="meter-h"><b>${pct == null ? "—" : Math.round(pct) + "%"}</b><span class="lab">${lab}</span><span class="aside">${w.resets_at ? "resets " + esc(when(w.resets_at)) : ""}</span></div><div class="gauge" style="--c:${c}"><i style="width:${pct || 0}%"></i>${ticks}</div>${ahead ? `<p class="mu" style="font-size:13px;margin-top:7px">${ahead}</p>` : ""}</div>`;
+  }).join("");
+}
+function bookRow(c) {
+  const t = c.total || 1, cn = c.counts || {};
+  const done = (cn.done || 0) + (cn.operator || 0), run = (cn.building || 0) + (cn.merging || 0);
+  const e = c.eta;
+  const eta = e && e.p50 ? `${esc(when(e.p50))}<small>P85 ${esc(when(e.p85))}</small>` : e ? `<span class="mu">${esc(e.behind ? "waits on you" : "not timed")}</span>` : `<span class="mu">—</span>`;
+  return `<button class="brow" data-book="${esc(c.name)}"><span style="min-width:0"><span class="bname">${esc(c.name)}</span>${c.what ? `<span class="bwhat" style="display:block">${esc(c.what)}</span>` : ""}</span>
+<span class="mini" title="${done} of ${c.total} built"><i class="s-done" style="width:${100 * done / t}%"></i><i class="s-running" style="width:${100 * run / t}%"></i></span>
+<span class="frac">${done}/${c.total}</span><span class="eta">${eta}</span></button>`;
+}
+function drawBand() {
+  const svg = $("#band"); if (!svg) return;
+  const e = S.board.header.eta || {};
+  const W = svg.clientWidth || 600, H = 78;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (e.p50 == null) { svg.innerHTML = ""; return; }
+  const t0 = now(), t1 = Math.max(e.p95 || e.p85 || e.p50, t0 + 3600) ;
+  const span = (t1 - t0) * 1.06, x = (t) => 8 + (W - 16) * (t - t0) / span;
+  const y = 36;
+  let h = `<line x1="8" x2="${W - 8}" y1="${y}" y2="${y}" stroke="#2b3550" stroke-width="2"/>`;
+  // Day ticks
+  const d0 = new Date(t0 * 1000); d0.setHours(24, 0, 0, 0);
+  const days = span / 86400, fit = Math.max(1, Math.floor((W - 16) / 58)), stepD = [1, 2, 3, 7, 14, 28].find(s => days / s <= fit) || 28;
+  for (let t = d0 / 1000, i = 0; t < t0 + span; t += 86400, i++) {
+    if (i % stepD) continue;
+    const xx = x(t); h += `<line x1="${xx}" x2="${xx}" y1="${y - 4}" y2="${y + 4}" stroke="#39445f"/><text x="${xx}" y="${y + 22}" text-anchor="middle" fill="#667189" font-size="11">${esc(new Date(t * 1000).toLocaleDateString([], days > 8 ? {month: "short", day: "numeric"} : {weekday: "short"}))}</text>`;
+  }
+  if (!e.floor && e.p85) h += `<rect x="${x(e.p50)}" y="${y - 9}" width="${Math.max(3, x(e.p85) - x(e.p50))}" height="18" rx="9" fill="rgba(230,192,123,.32)" stroke="rgba(230,192,123,.55)"/>`;
+  if (!e.floor && e.p95) h += `<line x1="${x(e.p85)}" x2="${x(e.p95)}" y1="${y}" y2="${y}" stroke="rgba(230,192,123,.45)" stroke-width="2" stroke-dasharray="3 4"/>`;
+  h += `<circle cx="${x(t0)}" cy="${y}" r="5" fill="#e8ecf4"/><text x="${x(t0)}" y="${y - 16}" fill="#c3cad8" font-size="11.5">now</text>`;
+  h += `<circle cx="${x(e.p50)}" cy="${y}" r="6.5" fill="#e6c07b"/><text x="${x(e.p50)}" y="${y - 16}" text-anchor="middle" fill="#e6c07b" font-size="11.5" font-weight="600">${e.floor ? "earliest" : "P50"}</text>`;
+  if (!e.floor && e.p85 && x(e.p85) - x(e.p50) > 26) h += `<circle cx="${x(e.p85)}" cy="${y}" r="4" fill="#e6c07b" opacity=".8"/><text x="${x(e.p85)}" y="${y - 16}" text-anchor="middle" fill="#c9a86c" font-size="11.5">P85</text>`;
+  svg.innerHTML = h;
+}
+
+// Books ------------------------------------------------------------------------
+function booksView() {
+  const b = S.board, o = S.books;
+  let out = `<div class="bar-tools">
+<div class="seg" role="group" aria-label="Layout"><button data-bview="books" aria-pressed="${o.view === "books"}">By book</button><button data-bview="board" aria-pressed="${o.view === "board"}">By status</button></div>
+${o.view === "books" ? `<div class="seg" role="group" aria-label="Which books"><button data-bmode="open" aria-pressed="${o.mode === "open"}">In progress</button><button data-bmode="all" aria-pressed="${o.mode === "all"}">All</button></div>` : ""}
+<input class="search" id="bq" type="search" placeholder="Search books and phases" value="${esc(o.q)}" autocomplete="off" aria-label="Search books and phases"></div>`;
+  const q = o.q.toLowerCase();
+  if (o.view === "board") return out + kanban(q);
+  let list = o.mode === "all" ? b.campaigns : openBooks();
+  if (q) list = list.filter(c => (c.name + " " + c.what).toLowerCase().includes(q) || Object.values(CARDS).some(x => x.c === c.name && (x.id + " " + (x.t || "")).toLowerCase().includes(q)));
+  out += `<div class="btable"><div class="bth"><span>Phase book</span><span>Built</span><span class="c3">Open rows</span><span style="text-align:right">Finish</span></div>`;
+  for (const c of list) {
+    const cn = c.counts || {}, t = c.total || 1;
+    const done = (cn.done || 0) + (cn.operator || 0), run = (cn.building || 0) + (cn.merging || 0);
+    const e = c.eta;
+    const eta = e && e.p50 ? `${esc(when(e.p50))}<small>P85 ${esc(when(e.p85))}</small>` : c.open ? `<span class="mu">${e && e.behind ? "waits on you" : "not timed yet"}</span>` : `<span class="mu">${(cn.excluded || 0) ? "only yours left" : "finished"}</span>`;
+    const bits = [["running", run], ["ready", cn.ready || 0], ["blocked", (cn.blocked || 0)], ["owner", (cn.needs_you || 0) + (cn.excluded || 0)]].filter(x => x[1]);
+    out += `<button class="btr${c.open || run ? "" : " bdone"}" data-book="${esc(c.name)}">
+<span style="min-width:0"><span class="bname">${esc(c.name)}</span> ${c.adr ? `<span class="pill">${esc(c.adr)}</span>` : ""} ${run ? '<span class="pill on">building</span>' : ""}<span class="bwhat">${esc(c.what || "")}</span></span>
+<span class="bprog"><div class="mini"><i class="s-done" style="width:${100 * done / t}%"></i><i class="s-running" style="width:${100 * run / t}%"></i></div><div>${done} of ${c.total} built</div></span>
+<span class="counts c3">${bits.length ? bits.map(([k, v]) => `<span>${dotS(k)}<b>${v}</b> ${esc(STATUS[k][0].toLowerCase())}</span>`).join("") : '<span class="mu2">nothing open</span>'}</span>
+<span class="eta">${eta}</span></button>`;
+  }
+  if (!list.length) out += `<p class="empty" style="padding:18px 22px">No phase book matches “${esc(o.q)}”.</p>`;
+  return out + "</div>";
+}
+const KCOLS = [["needs_you", "Needs you"], ["building", "Building"], ["merging", "Merging"], ["ready", "Ready"], ["blocked", "Blocked"], ["operator", "Operator"], ["failed", "Failed"], ["done", "Done"], ["excluded", "Yours to do"]];
+function kanban(q) {
+  const b = S.board, by = Object.fromEntries(b.columns.map(c => [c.key, c]));
+  let out = '<div class="kan">';
+  for (const [key, title] of KCOLS) {
+    const col = by[key]; if (!col) continue;
+    const cs = col.cards.filter(c => !q || (c.id + " " + (c.t || "") + " " + c.c).toLowerCase().includes(q));
+    if (!cs.length && ["needs_you", "merging", "failed", "operator"].includes(key)) continue;
+    const shut = !!S.shut[key] && !q, lim = S.showAll[key] ? cs.length : 40;
+    out += `<section class="col${shut ? " shut" : ""}"><button class="colh" data-kshut="${key}" aria-expanded="${!shut}">${dotS(COL2S[key])}<h3>${esc(title)}</h3><span class="n">${cs.length}</span></button>
+<div class="cards">${cs.slice(0, lim).map(kcard).join("") || '<p class="empty" style="padding:4px 4px 8px">Nothing here.</p>'}${cs.length > lim ? `<button class="more" data-kall="${key}">Show ${cs.length - lim} more</button>` : ""}</div></section>`;
   }
   return out + "</div>";
 }
-function campsView(b) {
-  const byId = {};
-  b.columns.forEach(col => col.cards.forEach(c => byId[c.id] = c));
-  const lanes = b.campaigns.filter(c => !S.camp || c.name === S.camp);
-  let out = '<div class="lanes">';
-  for (const camp of lanes) {
-    const cards = b.columns.flatMap(col => col.cards.filter(c => c.c === camp.name && visible(c)));
-    if (S.q && !cards.length) continue;
-    const pct = camp.total ? Math.round(100 * camp.done / camp.total) : 0;
-    out += `<article class="lane"><h2><span class="mono">${esc(camp.name)}</span>${camp.adr ? `<span class="pill">${esc(camp.adr)}</span>` : ""}${camp.active ? '<span class="pill info">active</span>' : ""}</h2>
-${camp.what ? `<p class="what">${esc(camp.what)}</p>` : ""}${camp.about ? `<p class="about">${esc(camp.about)}</p>` : ""}
-<div class="prog"><span class="bar" role="img" aria-label="${pct} percent done"><i style="width:${pct}%"></i></span><span>${camp.done}/${camp.total} done${camp.eta ? " · " + esc(camp.eta.text) : ""}</span></div>`;
-    for (const col of b.columns) {
-      const mine = cards.filter(c => c.col === col.key);
-      if (!mine.length) continue;
-      const grid = `<div class="grid">${mine.slice(0, 200).map(card).join("")}</div>`;
-      const head = `<span class="dot d-${col.key}"></span>${esc(col.title)} · ${mine.length}`;
-      out += (col.key === "done" || col.key === "excluded") && !S.q
-        ? `<details class="grp"><summary>${head}</summary>${grid}</details>`
-        : `<div class="grp"><h3>${head}</h3>${grid}</div>`;
-    }
-    out += "</article>";
-  }
-  return out + (lanes.length ? "" : '<p class="empty">no campaign matches</p>') + "</div>";
+function kcard(c) {
+  const s = cstatus(c);
+  let m = "";
+  if (c.col === "building") m = `${c.since ? `<span data-since="${c.since}">${dur(now() - c.since)}</span> in` : ""} slot ${c.slot}`;
+  else if (c.root) m = `waits on <span class="id">${esc(c.root)}</span>`;
+  else if (c.sub) m = esc(c.sub);
+  if (c.eta && c.eta[0]) m += (m ? "<br>" : "") + `done ~${esc(when(c.eta[0]))}`;
+  return `<button class="card s-${s}" data-phase="${esc(c.id)}"><span class="h"><span class="id">${esc(c.id)}</span><span class="book-tag">${esc(c.c)}</span></span>${c.t ? `<span class="t">${esc(c.t)}</span>` : ""}${m ? `<div class="m">${m}</div>` : ""}</button>`;
 }
-function activityView(b) {
-  const a = b.activity || {passes: [], finished: []};
-  let out = '<div class="feed">';
-  const kept = b.kept || [];
-  if (kept.length) {
-    out += '<h2 class="sec">Kept running</h2>';
-    for (const k of kept) {
-      const tone = !k.alive || k.stale ? "warn" : "ok";
-      out += `<article class="item"><h3><span class="${tone}">● ${k.alive ? "alive" : "dead"}</span><span class="mono">${esc(k.name)}</span><span class="mu">${k.alive ? "pid " + esc(k.pid) + " · " : ""}<span data-since="${+k.started_at}">${dur(now() - k.started_at)}</span> · by ${esc(k.by)}</span></h3>
-<p>${esc(k.why)}</p><p class="mu">stop: <code>${esc(k.stop)}</code></p></article>`;
-    }
-  }
-  out += '<h2 class="sec">Overseer passes</h2>';
-  if (!a.passes.length) out += '<p class="empty">no Overseer pass recorded yet</p>';
-  for (const p of a.passes) {
-    const tone = p.status === "done" ? "ok" : p.status === "running" ? "info" : "warn";
-    const sec = (k, t) => p[k] ? `<details${k === "left" && p[k] ? " open" : ""}><summary>${t}</summary><div class="pre">${md(p[k])}</div></details>` : "";
-    out += `<article class="item"><h3><span class="${tone}">● ${esc(p.status)}</span><span class="mono">${esc(p.id)}</span><span class="mu">${clock(p.started_at)}${p.ended_at ? " · took " + dur(p.ended_at - p.started_at) : ""}</span></h3>
-${p.reasons.length ? `<p class="mu">why: ${esc(p.reasons.join(" · "))}</p>` : ""}${p.summary ? `<p>${md(p.summary)}</p>` : ""}
-${p.question ? `<p class="warn">asks: ${esc(p.question)}${p.answer ? ` — answered: ${esc(p.answer)}` : ""}</p>` : ""}
-${sec("saw", "What it saw")}${sec("did", "What it did")}${sec("left", "What it left for you")}</article>`;
-  }
-  out += '<h2 class="sec">Recently finished</h2>';
-  if (!a.finished.length) out += '<p class="empty">nothing has finished yet</p>';
-  for (const f of a.finished) {
-    if (S.camp && f.c !== S.camp) continue;
-    const tone = f.st === "fail" ? "bad" : f.st === "skip" ? "mu" : "ok";
-    out += `<article class="item"><h3><button class="mono" data-id="${esc(f.id)}" style="font-weight:650">${esc(f.id)}</button><span class="${tone}">${esc(f.st || "?")}</span><span class="mu">${clock(f.at)}${f.took ? " · took " + dur(f.took) : ""}</span></h3>
-${f.recap ? `<p>${esc(f.recap)}</p>` : ""}${f.note && f.note !== f.recap ? `<details><summary>completion note</summary><p class="pre">${md(f.note)}</p></details>` : ""}</article>`;
-  }
-  return out + "</div>";
-}
-$("#main").addEventListener("click", (e) => {
-  const t = e.target.closest("button"); if (!t) return;
-  if (t.dataset.toggle) { S.shut[t.dataset.toggle] = !S.shut[t.dataset.toggle]; localStorage.setItem("swarm.shut", JSON.stringify(S.shut)); render(); return; }
-  if (t.dataset.all) { S.showAll[t.dataset.all] = true; render(true); return; }
-  if (t.dataset.id) show(t.dataset.id);
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-bview],[data-bmode],[data-kshut],[data-kall],[data-act],#info");
+  if (!t) return;
+  if (t.id === "info") { S.infoOpen = !S.infoOpen; render(true); return; }
+  if (t.dataset.bview) S.books.view = t.dataset.bview;
+  if (t.dataset.bmode) S.books.mode = t.dataset.bmode;
+  if (t.dataset.kshut) S.shut[t.dataset.kshut] = !S.shut[t.dataset.kshut];
+  if (t.dataset.kall) S.showAll[t.dataset.kall] = true;
+  if (t.dataset.act) S.act = t.dataset.act;
+  render(true);
 });
-// Live clocks without a re-render.
-setInterval(() => {
-  document.querySelectorAll("[data-since]").forEach(el => el.textContent = dur(now() - +el.dataset.since));
-  document.querySelectorAll("[data-ago]").forEach(el => el.textContent = ago(+el.dataset.ago));
-}, 15000);
+document.addEventListener("input", (e) => { if (e.target.id === "bq") { S.books.q = e.target.value; render(true); } });
 
-// Detail sheet (deep link: #phase=<id>) ----------------------------------------
-// A sheet opened from the board pushed a history entry, so Back closes it; one
-// opened from a shared link did not, and Back must not leave the page for it.
-function show(id) { S.pushed = true; location.hash = "phase=" + encodeURIComponent(id); }
-function dismiss() { if (S.pushed && location.hash) history.back(); else closeSheet(); }
-function fromHash() {
-  const m = /^#phase=(.+)$/.exec(location.hash);
-  if (m) openDetail(decodeURIComponent(m[1])); else { S.pushed = false; closeSheet(true); }
+// Usage --------------------------------------------------------------------------
+function usageView() {
+  const u = S.usage;
+  if (!u) return '<p class="empty">Loading usage…</p>';
+  let out = "";
+  for (const w of u.windows) {
+    const p = w.projection || {}, hit = p.hits;
+    const pause = w.rules.filter(r => r.action === "pause").map(r => r.at);
+    let proj;
+    if (w.override) proj = `<div class="fact"><b>Running through it</b>you chose to ignore this cap</div>`;
+    else if (w.held) proj = `<div class="fact hit"><b>Held now</b>no new workers until the reset</div>`;
+    else if (hit) proj = `<div class="fact hit"><b>${hit.pct}% ${esc(when(hit.at))}</b>${esc(rel(hit.at))} at this burn</div>`;
+    else if (p.rate_h) proj = `<div class="fact safe"><b>Resets first</b>reaches ~${Math.round(p.to ? p.to[1] : w.pct)}% by the reset</div>`;
+    else proj = `<div class="fact"><b>Flat</b>nothing is burning</div>`;
+    out += `<section class="panel uwin"><div class="uhead"><div><h2>${esc(w.label)} window</h2><div class="big">${w.pct == null ? "—" : Math.round(w.pct)}<small>%</small></div></div>
+<div class="facts">${proj}<div class="fact"><b>${w.resets_at ? esc(when(w.resets_at)) : "—"}</b>resets ${w.resets_at ? esc(rel(w.resets_at)) : ""}</div>
+<div class="fact"><b>${p.rate_h ? p.rate_h.toFixed(p.rate_h < 1 ? 2 : 1) + "% an hour" : "—"}</b>${w.basis === "burn" ? `burn at ${u.busy} busy worker${u.busy === 1 ? "" : "s"}` : w.basis === "run" ? "this run's pace" : "no burn measured"}</div>
+<div class="fact"><b>${pause.length ? pause.map(x => x + "%").join(", ") : "none"}</b>pauses at</div></div></div>
+<div style="position:relative"><svg class="chart" data-win="${w.key}" role="img" aria-label="${esc(w.label)} usage over time"></svg></div></section>`;
+  }
+  out += `<div class="ukey" style="margin:-6px 0 26px"><span><i style="--c:var(--run)"></i>readings</span><span><i class="d" style="--c:var(--gold)"></i>projection at the current burn</span><span><i class="d" style="--c:var(--owner)"></i>pause</span><span><i style="--c:var(--failed)"></i>stop</span><span><i class="d" style="--c:var(--wait)"></i>account switch (a break, not a drop)</span></div>`;
+  out += `<section class="panel"><div class="sec-h"><h2>Runs</h2><span class="aside">each start of the swarm, newest first</span></div><div class="tscroll"><table class="tbl"><thead><tr><th class="hm">Run</th><th>Started</th><th class="r">Hours</th><th class="r hm">Workers</th><th class="r">Phases</th><th class="r hm">5-hour used</th><th class="r hm">Weekly used</th><th class="r">Cost</th></tr></thead><tbody>`;
+  const shown = u.runs.filter(r => r.open || (r.hours || 0) >= 0.1 || r.phases_finished), hidden = u.runs.length - shown.length;
+  for (const r of shown) {
+    out += `<tr><td class="hm"><span class="id">${esc(r.run_id || "—")}</span></td><td>${esc(when(r.start, true))}${r.open ? ' <span class="pill on">open</span>' : ""}</td><td class="r">${r.hours != null ? r.hours.toFixed(1) : "—"}</td><td class="r hm">${r.max_workers ?? "—"}</td><td class="r">${r.phases_finished ?? 0}${r.phases_failed ? ` <span class="mu hm">(${r.phases_failed} failed)</span>` : ""}</td><td class="r hm">${r.five_used != null ? Math.round(r.five_used) + "%" : "—"}</td><td class="r hm">${r.week_used != null ? Math.round(r.week_used) + "%" : "—"}</td><td class="r">${r.usd != null ? "$" + Math.round(r.usd) : "—"}</td></tr>`;
+  }
+  return out + (shown.length ? "" : '<tr><td colspan="8" class="mu">No runs recorded yet.</td></tr>') + `</tbody></table></div>${hidden ? `<p class="mu" style="font-size:12.5px;margin-top:10px">${hidden} restart${hidden === 1 ? "" : "s"} shorter than six minutes that finished nothing are left out.</p>` : ""}</section>`;
 }
-window.addEventListener("hashchange", fromHash);
+function drawCharts() {
+  if (!S.usage) return;
+  for (const svg of $$("svg.chart")) {
+    const w = S.usage.windows.find(x => x.key === svg.dataset.win); if (!w) continue;
+    chart(svg, w);
+  }
+}
+function chart(svg, w) {
+  const W = svg.parentNode.clientWidth || 800, narrow = W < 520, H = narrow ? 210 : 260;
+  const L = 34, R = narrow ? 12 : 20, T = 14, B = 26;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.height = H + "px";
+  const nowT = S.usage.now || now();
+  const p = w.projection || {};
+  let t1 = nowT + (w.key === "five" ? 5 * 3600 : 2 * 86400);
+  if (w.resets_at) t1 = Math.max(t1, w.resets_at);
+  if (p.to) t1 = Math.max(t1, p.to[0]);
+  const t0 = w.key === "five" ? nowT - 19 * 3600 : nowT - 7 * 86400;
+  t1 = Math.min(t1, nowT + (w.key === "five" ? 6 * 3600 : 7 * 86400)) + (t1 - t0) * 0.02;
+  const X = (t) => L + (W - L - R) * (t - t0) / (t1 - t0), Y = (v) => T + (H - T - B) * (1 - v / 100);
+  let h = "";
+  for (const v of [0, 25, 50, 75, 100]) h += `<line class="${v === 100 ? "lim" : "grid"}" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${v}</text>`;
+  // time ticks
+  const span = t1 - t0, step = w.key === "five" ? (narrow ? 6 : 3) * 3600 : 86400;
+  const first = Math.ceil(t0 / step) * step;
+  for (let t = first; t < t1; t += step) {
+    const d = new Date(t * 1000);
+    const lab = w.key === "five" ? hhmm(t) : d.toLocaleDateString([], narrow ? {weekday: "narrow"} : {weekday: "short", day: "numeric"});
+    h += `<text x="${X(t)}" y="${H - 6}" text-anchor="middle">${esc(lab)}</text>`;
+  }
+  for (const r of w.rules) {
+    const cls = r.action === "down" ? "capl stop" : "capl";
+    h += `<line class="${cls}" x1="${L}" x2="${W - R}" y1="${Y(r.at)}" y2="${Y(r.at)}"/><text class="${r.action === "down" ? "lab-stop" : "lab-cap"}" x="${L + 6}" y="${r.action === "down" ? Y(r.at) - 5 : Y(r.at) + 14}">${r.action === "down" ? "stops" : "pauses"} at ${r.at}%</text>`;
+  }
+  for (const r of w.resets) if (r >= t0) h += `<line class="rst" x1="${X(r)}" x2="${X(r)}" y1="${T}" y2="${H - B}"/>`;
+  for (const k of w.breaks) if (k >= t0) h += `<line class="brk" x1="${X(k)}" x2="${X(k)}" y1="${T}" y2="${H - B}"><title>Account switch at ${esc(when(k))}: the reading jumped, so the line breaks here</title></line>`;
+  for (const seg of w.segments) {
+    const pts = seg.filter(q => q[0] >= t0 - 60);
+    if (!pts.length) continue;
+    const line = pts.map(q => `${X(q[0]).toFixed(1)},${Y(q[1]).toFixed(1)}`).join(" ");
+    h += `<polygon class="area" points="${X(pts[0][0]).toFixed(1)},${Y(0)} ${line} ${X(pts[pts.length - 1][0]).toFixed(1)},${Y(0)}"/><polyline class="ln" points="${line}"/>`;
+  }
+  h += `<line class="nowl" x1="${X(nowT)}" x2="${X(nowT)}" y1="${T}" y2="${H - B}"/><text x="${X(nowT)}" y="${T - 3}" text-anchor="middle">now</text>`;
+  if (w.resets_at && w.resets_at > nowT && w.resets_at < t1) h += `<line class="rst" x1="${X(w.resets_at)}" x2="${X(w.resets_at)}" y1="${T}" y2="${H - B}" style="stroke:var(--tx2)"/><text x="${X(w.resets_at) - 4}" y="${H - B - 6}" text-anchor="end">resets</text>`;
+  if (p.to && w.pct != null && w.read_at) {
+    h += `<line class="proj" x1="${X(w.read_at)}" y1="${Y(w.pct)}" x2="${X(Math.min(p.to[0], t1))}" y2="${Y(p.to[1])}"/>`;
+    if (p.hits) {
+      const hx = X(p.hits.at), hy = Y(p.hits.pct);
+      h += `<circle class="hitdot" cx="${hx}" cy="${hy}" r="5"/><text class="lab-hit" x="${hx}" y="${hy - 10}" text-anchor="${hx > W - 140 ? "end" : "middle"}">${p.hits.pct}% ${esc(when(p.hits.at))}</text>`;
+    }
+  }
+  h += `<line class="hover-l" x1="0" x2="0" y1="${T}" y2="${H - B}" visibility="hidden"/>`;
+  svg.innerHTML = h;
+  // Hover: the reading at a moment.
+  const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; svg.parentNode.appendChild(tip);
+  const pts = w.segments.flat().sort((a, b) => a[0] - b[0]);
+  const hl = $(".hover-l", svg);
+  svg.onpointermove = (ev) => {
+    const r = svg.getBoundingClientRect(), px = (ev.clientX - r.left) * W / r.width;
+    const t = t0 + (px - L) / (W - L - R) * (t1 - t0);
+    if (px < L || px > W - R) { tip.hidden = true; hl.setAttribute("visibility", "hidden"); return; }
+    let txt;
+    if (t > nowT) { txt = p.rate_h && w.pct != null && w.read_at ? `~${Math.min(100, w.pct + p.rate_h * (t - w.read_at) / 3600).toFixed(0)}% projected` : "future"; }
+    else { let v = null; for (const q of pts) { if (q[0] <= t) v = q[1]; else break; } txt = v == null ? "no reading" : `${Math.round(v)}%`; }
+    tip.textContent = `${when(t)} · ${txt}`; tip.hidden = false;
+    tip.style.left = (px * r.width / W) + "px"; tip.style.top = "20px";
+    hl.setAttribute("x1", px); hl.setAttribute("x2", px); hl.setAttribute("visibility", "visible");
+  };
+  svg.onpointerleave = () => { tip.hidden = true; hl.setAttribute("visibility", "hidden"); };
+}
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (S.tab === "usage") drawCharts(); if (S.tab === "overview") drawBand(); if (S.tab === "activity") render(true); if (S.tab === "graph") { fitViewBox(); } }, 120); });
+
+// Activity -----------------------------------------------------------------------
+function activityView() {
+  const a = S.board.activity || {}, kept = S.board.kept || [];
+  const wide = window.matchMedia("(min-width: 1100px)").matches;
+  const side = [["pings", "Notifications"], ["overseer", "Overseer"]];
+  if (kept.length) side.push(["kept", "Kept running"]);
+  const all = wide ? side : [["finished", "Finished"], ...side];
+  if (!all.some(t => t[0] === S.act)) S.act = all[0][0];
+  const seg = `<div class="seg" role="group" aria-label="Activity">${all.map(([k, l]) => `<button data-act="${k}" aria-pressed="${S.act === k}">${l}</button>`).join("")}</div>`;
+  const pane = {finished: finishedHtml, pings: pingsHtml, overseer: overseerHtml, kept: keptHtml};
+  if (!wide) return `<div class="bar-tools">${seg}</div><section class="panel feed">${pane[S.act](a, kept)}</section>`;
+  return `<div class="act"><section class="panel"><div class="sec-h"><h2>Recently finished</h2><span class="aside">${(a.finished || []).length} newest</span></div>${finishedHtml(a)}</section>
+<section class="panel"><div class="bar-tools" style="margin-bottom:6px">${seg}</div>${pane[S.act](a, kept)}</section></div>`;
+}
+const atime = (t) => `<div class="when-c">${esc(when(t))}</div>`;
+function finishedHtml(a) {
+  if (!(a.finished || []).length) return '<p class="empty">Nothing has finished yet.</p>';
+  return (a.finished || []).map(f => {
+    const tone = f.st === "fail" ? "bad" : f.st === "skip" ? "" : "ok";
+    return `<article class="fitem">${atime(f.at)}<div><div class="h"><button class="id" data-phase="${esc(f.id)}">${esc(f.id)}</button><span class="tag ${tone}">${esc(f.st || "?")}</span><span class="mu">${esc(f.c)}${f.took ? ", took " + dur(f.took) : ""}</span></div>${f.recap ? `<p>${esc(f.recap)}</p>` : ""}${f.note && f.note !== f.recap ? `<details><summary>Completion note</summary><div class="pre">${md(f.note)}</div></details>` : ""}</div></article>`;
+  }).join("");
+}
+function pingsHtml(a) {
+  if (!(a.pings || []).length) return '<p class="empty">No notifications yet.</p>';
+  return a.pings.map(n => {
+    const tag = n.delivered ? `<span class="tag ok">sent</span>` : n.suppressed ? `<span class="tag" title="${esc(n.suppressed)}">not sent</span>` : `<span class="tag bad">failed to send</span>`;
+    return `<article class="fitem">${atime(n.ts)}<div><div class="h"><span class="tag">${esc(n.kind)}</span>${n.phase ? `<button class="id" data-phase="${esc(n.phase)}">${esc(n.phase)}</button>` : ""}${tag}</div><p>${esc(n.text)}</p></div></article>`;
+  }).join("");
+}
+function overseerHtml(a) {
+  if (!(a.passes || []).length) return '<p class="empty">The Overseer has not run yet.</p>';
+  return a.passes.map(p => {
+    const tone = p.status === "done" ? "ok" : p.status === "running" ? "" : "warn";
+    const sec = (k, t) => p[k] ? `<details${k === "left" ? " open" : ""}><summary>${t}</summary><div class="pre">${md(p[k])}</div></details>` : "";
+    return `<article class="fitem">${atime(p.started_at)}<div><div class="h"><span class="tag ${tone}">${esc(p.status)}</span><span class="mu">${p.ended_at ? "took " + dur(p.ended_at - p.started_at) : "running"}${p.reasons.length ? ", because " + esc(p.reasons.join("; ")) : ""}</span></div>${p.summary ? `<p>${md(p.summary)}</p>` : ""}${p.question ? `<p style="color:var(--owner)">Asks: ${esc(p.question)}${p.answer ? ` Answered: ${esc(p.answer)}` : ""}</p>` : ""}${sec("saw", "What it saw")}${sec("did", "What it did")}${sec("left", "What it left for you")}</div></article>`;
+  }).join("");
+}
+function keptHtml(a, kept) {
+  return kept.map(k => `<article class="fitem"><div class="when-c">${esc(dur(now() - k.started_at))}</div><div><div class="h"><span class="id">${esc(k.name)}</span><span class="tag ${k.alive && !k.stale ? "ok" : "warn"}">${k.alive ? "alive" : "dead"}</span><span class="mu">${k.alive ? "pid " + esc(k.pid) + ", " : ""}started by ${esc(k.by)}</span></div><p>${esc(k.why)}</p><p class="mu">Stop it with <code>${esc(k.stop)}</code></p></div></article>`).join("");
+}
+
+// ---------------------------------------------------------------------------
+// Graph
+// ---------------------------------------------------------------------------
+function graphShell() {
+  const g = S.g;
+  const books = (S.board.campaigns || []).filter(c => g.mode === "all" || c.open).map(c => c.name).sort();
+  return `<div class="gwrap"><div class="gbar">
+<div class="seg" role="group" aria-label="Which rows"><button data-gmode="open" aria-pressed="${g.mode === "open"}">Open</button><button data-gmode="all" aria-pressed="${g.mode === "all"}">All</button></div>
+<select class="pick" id="gbook" aria-label="Phase book"><option value="">Every book</option>${books.map(n => `<option ${n === g.book ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
+<input class="search" id="gq" type="search" placeholder="Find a phase" value="${esc(g.q)}" autocomplete="off" aria-label="Find a phase">
+<span class="aside" id="gmeta"></span><span class="glegend" id="glegend"></span></div>
+<div class="gbody"><div class="gcanvas" id="gcanvas"><svg id="gsvg" role="img" aria-label="Phase dependency graph"></svg>
+<div class="mm" id="mm" title="Overview: click to move"><canvas id="mmc"></canvas></div>
+<div class="zoom"><button data-z="in" aria-label="Zoom in">${icon('<path d="M12 5v14M5 12h14"/>')}</button><button data-z="out" aria-label="Zoom out">${icon('<path d="M5 12h14"/>')}</button><button data-z="fit" aria-label="Fit everything">${icon('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>')}</button><button data-z="work" aria-label="Go to the work in progress">${icon('<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>')}</button></div></div>
+<aside class="gside" id="gside" hidden></aside></div></div>`;
+}
+let G = null; // the drawn graph: {d, nel, eel, up, down, pos}
+function graphMeta() {
+  const d = S.graph; if (!d || !$("#gmeta")) return;
+  $("#gmeta").textContent = `${d.nodes.length} phases, ${d.edges.length} lines (${d.direct} needs), laid out in ${d.layout_ms} ms`;
+}
+function drawGraph() {
+  const svg = $("#gsvg"); if (!svg || !S.graph) return;
+  const d = S.graph, W = d.nw, H = d.nh;
+  const key = d.mode + "|" + d.book + "|" + d.w + "|" + d.h + "|" + d.nodes.length;
+  const crit = new Set(d.critical || []);
+  const critE = new Set(); for (let i = 1; i < d.critical.length; i++) critE.add(d.critical[i - 1] + "\u0000" + d.critical[i]);
+  let h = "";
+  const id2i = {}; d.nodes.forEach((n, i) => id2i[n.id] = i);
+  for (const [a, b, pts] of d.edges) {
+    const A = d.nodes[a], B = d.nodes[b];
+    const P = [[A.x + W, A.y + H / 2]];
+    for (let i = 0; i < pts.length; i += 2) P.push([pts[i], pts[i + 1]]);
+    P.push([B.x, B.y + H / 2]);
+    let path = `M${P[0][0]},${P[0][1]}`;
+    for (let i = 1; i < P.length; i++) {
+      const [x0, y0] = P[i - 1], [x1, y1] = P[i];
+      if (y0 === y1) path += `L${x1},${y1}`;
+      else { const dx = Math.max(24, Math.abs(x1 - x0) / 2); path += `C${x0 + dx},${y0} ${x1 - dx},${y1} ${x1},${y1}`; }
+    }
+    const cp = critE.has(A.id + "\u0000" + B.id) ? " cp" : "";
+    h += `<path class="e${cp}" d="${path}"/>`;
+  }
+  const chars = Math.floor((W - 26) / 6.5);
+  for (const n of d.nodes) {
+    const cls = `n s-${n.s}${n.k ? " ctxn" : ""}${crit.has(n.id) ? " cp" : ""}`;
+    h += `<g class="${cls}" transform="translate(${n.x},${n.y})"><rect class="b" width="${W}" height="${H}" rx="8"/><rect class="k" x="0" y="0" width="5" height="${H}" rx="2.5" style="--c:${STATUS[n.s][1]}"/><text class="i" x="14" y="19">${esc(clipTxt(n.id, 24))}</text><text class="tt" x="14" y="36">${esc(clipTxt(n.t || n.c, chars))}</text></g>`;
+  }
+  svg.innerHTML = h;
+  svg.classList.remove("focus", "find"); marked = [];
+  const nel = $$("g.n", svg), eel = $$("path.e", svg);
+  const up = d.nodes.map(() => []), down = d.nodes.map(() => []);
+  d.edges.forEach(([a, b], j) => { up[b].push([a, j]); down[a].push([b, j]); });
+  const fresh = !G || G.key !== key;
+  G = {d, nel, eel, up, down, id2i, key, sel: null, selId: null, hov: null};
+  nel.forEach((el, i) => el.dataset.i = i);
+  if (fresh) { S.g.vb = null; homeView(); }
+  else fitViewBox();
+  // Restore a selection across a refresh.
+  if (S.g.sel && id2i[S.g.sel] != null) select(id2i[S.g.sel], false); else select(null);
+  legend(); graphMeta(); applySearch(); minimap();
+}
+function legend() {
+  const d = S.graph, c = d.counts || {};
+  $("#glegend").innerHTML = ["running", "ready", "blocked", "waiting", "owner", "failed", "done"].filter(k => c[k] || (k === "done")).map(k => `<span>${dotS(k)}${esc(STATUS[k][0])}${c[k] ? " " + c[k] : ""}</span>`).join("") + (d.critical && d.critical.length ? `<span><i class="cpk"></i>critical path</span>` : "");
+}
+// Reachability: everything upstream (what blocks it) and downstream (what it unblocks).
+function reach(i, adj) {
+  const nodes = new Set(), edges = new Set(), st = [i];
+  while (st.length) { const v = st.pop(); for (const [w, j] of adj[v]) { edges.add(j); if (!nodes.has(w)) { nodes.add(w); st.push(w); } } }
+  return {nodes, edges};
+}
+let marked = [];
+function highlight(i) {
+  const svg = $("#gsvg");
+  for (const el of marked) el.classList.remove("hu", "hd", "sel");
+  marked = [];
+  if (i == null) { svg.classList.remove("focus"); return null; }
+  const u = reach(i, G.up), dn = reach(i, G.down);
+  const mark = (el, c) => { el.classList.add(c); marked.push(el); };
+  u.nodes.forEach(k => mark(G.nel[k], "hu")); u.edges.forEach(j => mark(G.eel[j], "hu"));
+  dn.nodes.forEach(k => mark(G.nel[k], "hd")); dn.edges.forEach(j => mark(G.eel[j], "hd"));
+  mark(G.nel[i], "sel");
+  svg.classList.add("focus");
+  return {u, dn};
+}
+function select(i, center) {
+  const panel = $("#gside"), was = panel.hidden;
+  if (i == null) { G.sel = null; S.g.sel = null; highlight(null); panel.hidden = true; if (!was) fitViewBox(); return; }
+  G.sel = i; S.g.sel = G.d.nodes[i].id;
+  const r = highlight(i);
+  side(i, r);
+  if (was && !phone()) fitViewBox();
+  if (center || (phone() && was)) centerOn(i);
+}
+function side(i, r) {
+  const d = G.d, n = d.nodes[i], el = $("#gside");
+  const card = CARDS[n.id] || {};
+  const ref = (k) => { const m = d.nodes[k]; return `<li><button data-gsel="${k}">${dotS(m.s)}<span class="id">${esc(m.id)}</span><span class="tt">${esc(m.t)}</span></button></li>`; };
+  const direct = (n.n || []);
+  const needs = direct.map(id => G.id2i[id] != null ? ref(G.id2i[id]) : `<li><button disabled><span class="dot"></span><span class="id">${esc(id)}</span></button></li>`).join("");
+  const unblocks = G.down[i].map(([k]) => k).sort((a, b) => a - b).map(ref).join("");
+  const eta = n.e ? `${esc(when(n.e[0]))}${n.e[1] ? `, P85 ${esc(when(n.e[1]))}` : ""}` : n.s === "done" ? "built" : "not timed";
+  el.hidden = false;
+  el.innerHTML = `<button class="x" data-gclose="1" aria-label="Close">${icon('<path d="M6 6l12 12M18 6L6 18"/>')}</button>
+<div class="side-h"><span class="id">${esc(n.id)}</span><span class="pill">${dotS(n.s)}${esc(STATUS[n.s][0])}</span></div>
+<p class="side-t">${esc(n.t || "")}</p>
+<dl class="kv"><dt>Phase book</dt><dd><button class="linkish" data-book="${esc(n.c)}">${esc(n.c)}</button></dd><dt>Finish</dt><dd>${eta}</dd>${n.r ? `<dt>Repo</dt><dd class="id">${esc(repos(n.r))}</dd>` : ""}${n.w ? `<dt>Status</dt><dd>${esc(n.w)}</dd>` : ""}<dt>Upstream</dt><dd>${r.u.nodes.size} phase${r.u.nodes.size === 1 ? "" : "s"} block it</dd><dt>Downstream</dt><dd>it unblocks ${r.dn.nodes.size}</dd></dl>
+<button class="btn" data-phase="${esc(n.id)}">Open the full row</button>
+<div class="side-sec"><h4 style="--c:var(--up)"><i></i>Needs (${direct.length})</h4><ul class="refs">${needs || '<li class="mu">nothing</li>'}</ul></div>
+<div class="side-sec"><h4 style="--c:var(--down)"><i></i>Unblocks (${G.down[i].length} here)</h4><ul class="refs">${unblocks || '<li class="mu">nothing in this view</li>'}</ul></div>`;
+}
+// View box: pan and zoom without a library.
+function box() { const c = $("#gcanvas"); return {w: c.clientWidth || 800, h: c.clientHeight || 600}; }
+function setVB(vb) {
+  S.g.vb = vb;
+  $("#gsvg").setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  minimapView();
+}
+function fitViewBox() { if (!S.g.vb) return; const b = box(), vb = S.g.vb, k = vb.w / (b.w || 1); setVB({x: vb.x, y: vb.y, w: b.w * k, h: b.h * k}); }
+function fitAll() { const d = S.graph, b = box(), pad = 40; const k = Math.max((d.w + pad * 2) / b.w, (d.h + pad * 2) / b.h); setVB({x: -pad - (b.w * k - d.w - pad * 2) / 2, y: -pad - (b.h * k - d.h - pad * 2) / 2, w: b.w * k, h: b.h * k}); }
+function zoomAt(f, cx, cy) {
+  const vb = S.g.vb, b = box();
+  const k = vb.w / b.w, nk = Math.min(8, Math.max(0.35, k * f));
+  const f2 = nk / k;
+  const px = vb.x + cx * k, py = vb.y + cy * k;
+  setVB({x: px - (px - vb.x) * f2, y: py - (py - vb.y) * f2, w: vb.w * f2, h: vb.h * f2});
+}
+function homeView() {
+  // Start readable (≈1:1.2) at the work in progress: running, then ready rows.
+  const d = S.graph, b = box();
+  if (d.nodes.length <= 12 || (d.w < b.w * 1.4 && d.h < b.h * 1.4)) { fitAll(); return; }
+  const pick = d.nodes.filter(n => n.s === "running" && !n.k);
+  const set = pick.length ? pick : d.nodes.filter(n => n.s === "ready" && !n.k);
+  const k = b.w < 600 ? 1.7 : 1.15;
+  const target = set.length ? set : d.nodes.filter(n => !n.k);
+  const minX = Math.min(...target.map(n => n.x)), minY = Math.min(...target.map(n => n.y)), maxY = Math.max(...target.map(n => n.y)) + d.nh;
+  const cy = Math.min((minY + maxY) / 2, minY + b.h * k * 0.4);
+  setVB({x: Math.max(-40, minX - b.w * k * 0.18), y: cy - b.h * k / 2, w: b.w * k, h: b.h * k});
+}
+const phone = () => window.matchMedia("(max-width: 760px)").matches;
+function centerOn(i) {
+  // On a phone the panel covers the lower half: the row goes in the upper part.
+  const n = S.graph.nodes[i], vb = S.g.vb, fy = phone() && !$("#gside").hidden ? 0.22 : 0.5;
+  setVB({x: n.x + S.graph.nw / 2 - vb.w / 2, y: n.y + S.graph.nh / 2 - vb.h * fy, w: vb.w, h: vb.h});
+}
+function bindGraph() {
+  const c = $("#gcanvas"), svg = $("#gsvg");
+  const ptrs = new Map(); let drag = null, pinch = null;
+  c.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const r = c.getBoundingClientRect();
+    zoomAt(Math.exp(e.deltaY * (e.ctrlKey ? 0.01 : 0.0022)), e.clientX - r.left, e.clientY - r.top);
+  }, {passive: false});
+  c.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".zoom,.mm")) return;
+    c.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if (ptrs.size === 1) drag = {x: e.clientX, y: e.clientY, vb: {...S.g.vb}, moved: 0, target: e.target};
+    else if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch = {d: Math.hypot(a.x - b.x, a.y - b.y)}; drag = null; }
+  });
+  c.addEventListener("pointermove", (e) => {
+    if (!ptrs.has(e.pointerId)) {
+      if (e.pointerType === "mouse" && G && G.sel == null) { const g = e.target.closest && e.target.closest("g.n"); const i = g ? +g.dataset.i : null; if (i !== G.hov) { G.hov = i; highlight(i); } }
+      return;
+    }
+    ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if (pinch && ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()], dd = Math.hypot(a.x - b.x, a.y - b.y), r = c.getBoundingClientRect();
+      zoomAt(pinch.d / dd, (a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top); pinch.d = dd; return;
+    }
+    if (drag) {
+      const k = S.g.vb.w / box().w, dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.moved = Math.max(drag.moved, Math.abs(dx) + Math.abs(dy));
+      if (drag.moved > 4) { c.classList.add("drag"); setVB({...S.g.vb, x: drag.vb.x - dx * k, y: drag.vb.y - dy * k}); }
+    }
+  });
+  const end = (e) => {
+    if (!ptrs.has(e.pointerId)) return;
+    ptrs.delete(e.pointerId);
+    c.classList.remove("drag");
+    if (drag && drag.moved <= 4 && ptrs.size === 0) {
+      const g = drag.target.closest && drag.target.closest("g.n");
+      if (g) select(+g.dataset.i, false); else select(null);
+    }
+    if (ptrs.size < 2) pinch = null;
+    drag = null;
+  };
+  c.addEventListener("pointerup", end); c.addEventListener("pointercancel", end);
+  c.addEventListener("pointerleave", () => { if (G && G.sel == null && G.hov != null) { G.hov = null; highlight(null); } });
+  $(".zoom").addEventListener("click", (e) => {
+    const t = e.target.closest("button"); if (!t) return;
+    const b = box();
+    if (t.dataset.z === "in") zoomAt(1 / 1.35, b.w / 2, b.h / 2);
+    else if (t.dataset.z === "out") zoomAt(1.35, b.w / 2, b.h / 2);
+    else if (t.dataset.z === "fit") fitAll();
+    else homeView();
+  });
+  $("#gbook").addEventListener("change", (e) => { S.g.book = e.target.value; S.g.sel = null; pollGraph(); });
+  $("#gq").addEventListener("input", (e) => { S.g.q = e.target.value; S.g.hits = null; applySearch(); searchServer(); });
+  $("#gq").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nextHit(); } });
+  $("#mm").addEventListener("pointerdown", (e) => { const mv = (ev) => mmJump(ev); mmJump(e); const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); });
+  $(".gbody").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-gsel],[data-gclose],[data-gmode]"); if (!t) return;
+    if (t.dataset.gclose) select(null);
+    else if (t.dataset.gsel) select(+t.dataset.gsel, true);
+  });
+  $(".gbar").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-gmode]"); if (!t) return;
+    S.g.mode = t.dataset.gmode; S.g.sel = null;
+    $("#main").dataset.tab = ""; render(false); pollGraph();
+  });
+}
+let hitIdx = -1;
+function matches() {
+  const q = S.g.q.trim().toLowerCase(); if (!q || !S.graph) return null;
+  const out = [];
+  S.graph.nodes.forEach((n, i) => { if ((n.id + " " + n.t).toLowerCase().includes(q) || (S.g.hits && S.g.hits.has(n.id))) out.push(i); });
+  return out;
+}
+function applySearch() {
+  const svg = $("#gsvg"); if (!svg || !G) return;
+  $$("g.n.hit", svg).forEach(el => el.classList.remove("hit"));
+  const m = matches(); hitIdx = -1;
+  if (!m) { svg.classList.remove("find"); graphMeta(); return; }
+  svg.classList.add("find");
+  m.forEach(i => G.nel[i].classList.add("hit"));
+  $("#gmeta").textContent = m.length ? `${m.length} match${m.length === 1 ? "" : "es"}, press Enter to step through` : "No phase matches";
+}
+function nextHit() { const m = matches(); if (!m || !m.length) return; hitIdx = (hitIdx + 1) % m.length; centerOn(m[hitIdx]); }
+let sTimer;
+function searchServer() {
+  clearTimeout(sTimer); const want = S.g.q.trim();
+  if (want.length < 3) return;
+  sTimer = setTimeout(async () => { try { const r = await fetch("/api/search?q=" + encodeURIComponent(want)); const j = await r.json(); if (S.g.q.trim() === want) { S.g.hits = new Set(j.ids); applySearch(); } } catch (e) {} }, 250);
+}
+// Minimap
+let MM = null;
+function minimap() {
+  const cv = $("#mmc"); if (!cv || !S.graph) return;
+  // Stretched to a fixed box: a ledger 90 columns deep is 20:1, and at true
+  // proportions its overview would be a line.
+  const d = S.graph, w = 240, h = 72, kx = (w - 8) / Math.max(1, d.w), ky = (h - 8) / Math.max(1, d.h), dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr; cv.style.width = w + "px"; cv.style.height = h + "px";
+  const base = document.createElement("canvas"); base.width = cv.width; base.height = cv.height;
+  const ctx = base.getContext("2d"); ctx.scale(dpr, dpr);
+  ctx.translate(4, 4);
+  for (const n of d.nodes) { ctx.globalAlpha = n.k || n.s === "done" ? 0.45 : 1; ctx.fillStyle = STATUS[n.s][1]; ctx.fillRect(n.x * kx, n.y * ky, Math.max(1.5, d.nw * kx), Math.max(1.5, d.nh * ky)); }
+  MM = {cv, base, kx, ky, dpr, w, h};
+  minimapView();
+}
+function minimapView() {
+  if (!MM || !S.g.vb) return;
+  const {cv, base, kx, ky, dpr} = MM, ctx = cv.getContext("2d"), vb = S.g.vb;
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(base, 0, 0);
+  ctx.scale(dpr, dpr); ctx.translate(4, 4); ctx.strokeStyle = "#e6c07b"; ctx.lineWidth = 1.5;
+  ctx.strokeRect(vb.x * kx, vb.y * ky, Math.max(3, vb.w * kx), Math.max(3, vb.h * ky));
+}
+function mmJump(e) {
+  if (!MM) return;
+  const r = MM.cv.getBoundingClientRect(), vb = S.g.vb;
+  const x = (e.clientX - r.left - 4) / MM.kx, y = (e.clientY - r.top - 4) / MM.ky;
+  setVB({x: x - vb.w / 2, y: y - vb.h / 2, w: vb.w, h: vb.h});
+}
+
+// ---------------------------------------------------------------------------
+// Sheets: a phase's full row, or a phase book's rows.
+// ---------------------------------------------------------------------------
 let lastFocus = null;
-async function openDetail(id, refresh) {
-  if (!refresh) lastFocus = document.activeElement;
-  S.open = id;
-  if (!refresh || !$(".sheet")) paintSheet(id, null);
+function openSheet(sh) {
+  if (!S.sheet) lastFocus = document.activeElement;
+  S.sheet = sh;
+  if (sh.kind === "book") paintBook(sh.id);
+  else { paintSheet(sh.id, null); loadPhase(sh.id); }
+}
+function refreshSheet() { if (!S.sheet) return; if (S.sheet.kind === "book") paintBook(S.sheet.id, true); else loadPhase(S.sheet.id, true); }
+async function loadPhase(id, keep) {
   try {
     const r = await fetch("/api/phase/" + encodeURIComponent(id), {cache: "no-store"});
-    const d = r.ok ? await r.json() : {error: r.status === 404 ? "not on the board" : "unavailable"};
-    if (S.open === id) paintSheet(id, d, refresh);
-  } catch (e) { if (S.open === id) paintSheet(id, {error: "unavailable"}, refresh); }
+    const d = r.ok ? await r.json() : {error: r.status === 404 ? "This phase is not on the board." : "The board did not answer. It retries on its own."};
+    if (S.sheet && S.sheet.id === id) paintSheet(id, d, keep);
+  } catch (e) { if (S.sheet && S.sheet.id === id) paintSheet(id, {error: "The board did not answer. It retries on its own."}, keep); }
 }
-function closeSheet(fromNav) {
-  if (!S.open) return;
-  S.open = null; $("#sheetroot").innerHTML = "";
-  if (!fromNav && location.hash) history.replaceState(null, "", location.pathname + location.search);
-  if (lastFocus && lastFocus.focus) lastFocus.focus({preventScroll: true});
+function closeSheet() { if (!S.sheet) return; S.sheet = null; $("#sheetroot").innerHTML = ""; if (lastFocus && lastFocus.focus) lastFocus.focus({preventScroll: true}); }
+function dismiss() { go(S.tab); }
+function frame(title, sub, body, keep) {
+  const root = $("#sheetroot"), prev = $(".sheet-b"), y = keep && prev ? prev.scrollTop : 0;
+  root.innerHTML = `<div class="scrim" data-close="1"></div><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"${keep ? ' style="animation:none"' : ""}>
+<div class="sheet-h"><div style="min-width:0"><h2 id="sheet-title">${title}</h2>${sub ? `<p class="sub">${sub}</p>` : ""}</div><button class="x" data-close="1" aria-label="Close">${icon('<path d="M6 6l12 12M18 6L6 18"/>')}</button></div>
+<div class="sheet-b">${body}</div></div>`;
+  $(".sheet-b").scrollTop = y;
+  if (!keep) $(".sheet .x").focus({preventScroll: true});
 }
+$("#sheetroot").addEventListener("click", (e) => { if (e.target.closest("[data-close]")) dismiss(); });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && S.open) { e.preventDefault(); dismiss(); }
-  if (e.key === "Tab" && S.open) {  // keep focus inside the dialog
-    const f = [...document.querySelectorAll(".sheet button, .sheet summary")]; if (!f.length) return;
-    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
-    else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
-  }
+  if (e.key === "Escape") { if (S.sheet) { e.preventDefault(); dismiss(); } else if (S.tab === "graph" && G && G.sel != null) select(null); }
 });
-function refs(list) {
-  if (!list || !list.length) return '<p class="mu">none</p>';
-  return `<ul class="refs">${list.map(x => `<li><button data-id="${esc(x.id)}"><span class="dot d-${esc(x.col || "blocked")}"></span><span class="mono">${esc(x.id)}</span><span class="mu">${esc(COLNAME[x.col] || x.st || "not on the board")}${x.sub ? " · " + esc(x.sub) : ""}</span></button></li>`).join("")}</ul>`;
-}
-const NOTE = {owner_decision: "Your decisions", decision: "Decisions it made", assumption: "Assumptions", risk: "Risks"};
-function paintSheet(id, d, keepScroll) {
-  const root = $("#sheetroot");
-  const prev = $(".sheet .body"), y = keepScroll && prev ? prev.scrollTop : 0;
-  const c = d && d.card ? d.card : {};
+function paintBook(name, keep) {
+  const c = (S.board.campaigns || []).find(x => x.name === name);
+  const mine = Object.values(CARDS).filter(x => x.c === name && !x.kind);
+  const order = ["running", "ready", "waiting", "blocked", "owner", "failed", "done"];
+  const groups = {}; for (const x of mine) (groups[cstatus(x)] = groups[cstatus(x)] || []).push(x);
   let body = "";
-  if (!d) body = '<p class="mu">loading…</p>';
-  else if (d.error) body = `<p class="bad">${esc(d.error)}</p>`;
+  if (c) {
+    const e = c.eta;
+    body += `${c.about ? `<p class="mu" style="margin-top:14px;max-width:70ch">${esc(c.about)}</p>` : ""}<dl class="kv" style="margin-top:16px"><dt>Built</dt><dd>${(c.counts.done || 0) + (c.counts.operator || 0)} of ${c.total}</dd><dt>Finish</dt><dd>${e && e.p50 ? `${esc(when(e.p50, true))}, P85 ${esc(when(e.p85, true))}` : c.open ? "not timed yet" : "finished"}</dd>${c.adr ? `<dt>Decision</dt><dd>${esc(c.adr)}</dd>` : ""}</dl>
+<button class="btn" data-gbook="${esc(name)}">Show it on the graph</button>`;
+  }
+  for (const s of order) {
+    const list = groups[s]; if (!list) continue;
+    body += `<div class="grp-h">${dotS(s)}${esc(STATUS[s][0])} <span class="mu">${list.length}</span></div><div class="rows">`;
+    for (const x of list) {
+      const why = x.col === "building" ? (x.since ? `building for ${dur(now() - x.since)}` : "building") : x.root ? `waits on ${x.root}${x.needs && x.needs.length > 1 ? ` (needs ${x.needs.join(", ")})` : ""}` : x.sub || "";
+      const eta = x.eta && x.eta[0] ? `~${esc(when(x.eta[0]))}` : s === "done" && x.at ? esc(when(x.at)) : "";
+      body += `<button class="rowi" data-phase="${esc(x.id)}">${dotS(s)}<span class="id">${esc(x.id)}</span><span class="eta mu">${eta}</span>${x.t ? `<span class="t">${esc(x.t)}</span>` : ""}${why && s !== "done" ? `<span class="why">${esc(why)}</span>` : ""}</button>`;
+    }
+    body += "</div>";
+  }
+  frame(`<span class="id">${esc(name)}</span>`, c ? esc(c.what) : "", body || '<p class="empty">No rows.</p>', keep);
+}
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-gbook]"); if (!t) return;
+  S.g.book = t.dataset.gbook; S.g.mode = "open"; S.g.sel = null; $("#main").dataset.tab = ""; go("graph");
+});
+const NOTE = {owner_decision: "Your decisions", decision: "Decisions it made", assumption: "Assumptions", risk: "Risks"};
+function refs(list) {
+  if (!list || !list.length) return '<p class="mu">None.</p>';
+  return `<ul class="refs">${list.map(x => { const s = x.col ? cstatus({col: x.col, sub: x.sub}) : "blocked"; return `<li><button data-phase="${esc(x.id)}">${dotS(s)}<span class="id">${esc(x.id)}</span><span class="tt">${esc(x.t || x.sub || "")}</span></button></li>`; }).join("")}</ul>`;
+}
+function paintSheet(id, d, keep) {
+  const c = d && d.card ? d.card : CARDS[id] || {};
+  let body = "";
+  if (!d) body = '<p class="empty">Loading…</p>';
+  else if (d.error) body = `<p class="empty" style="color:var(--failed)">${esc(d.error)}</p>`;
   else {
     const sec = (t, h) => h ? `<section><h3>${t}</h3>${h}</section>` : "";
-    const camp = d.campaign ? `<p><span class="mu">campaign</span> <span class="mono">${esc(d.campaign.name)}</span>${d.campaign.adr ? " · " + esc(d.campaign.adr) : ""}${d.campaign.what ? ` — ${esc(d.campaign.what)}` : ""}</p>` : "";
-    body += camp;
-    body += `<p><span class="pill"><span class="dot d-${esc(c.col)}"></span>${esc(COLNAME[c.col] || c.col || "")}</span> ${esc(c.sub || "")}${c.root ? " · " + rootText(c) : ""}</p>`;
+    const s = cstatus(c);
+    body += `<dl class="kv" style="margin-top:16px"><dt>Status</dt><dd>${dotS(s)} ${esc(STATUS[s][0])}${c.sub ? ", " + esc(c.sub) : ""}${c.root ? `, waits on <span class="id">${esc(c.root)}</span> (it holds up ${c.root_blocks})` : ""}</dd>`;
+    if (d.campaign) body += `<dt>Phase book</dt><dd><button class="linkish" data-book="${esc(d.campaign.name)}">${esc(d.campaign.name)}</button>${d.campaign.what ? ", " + esc(d.campaign.what) : ""}</dd>`;
+    if (c.eta && c.eta[0]) body += `<dt>Finish</dt><dd>${esc(when(c.eta[0]))}${c.eta[1] ? `, P85 ${esc(when(c.eta[1]))}` : ""}</dd>`;
+    if (d.row && d.row.dirs && d.row.dirs.length) body += `<dt>Repo</dt><dd class="id">${esc(repos(d.row.dirs))}</dd>`;
+    body += `</dl>`;
     if (d.question) body += sec("Waiting on you", `<div class="md">${md(d.question)}</div>`);
     if (d.build) {
       const bl = d.build;
-      body += sec("Building now", `<dl class="kv"><dt>slot</dt><dd>${bl.slot}</dd><dt>elapsed</dt><dd>${dur(bl.since ? now() - bl.since : bl.elapsed)}</dd>${bl.branch ? `<dt>branch</dt><dd class="mono">${esc(bl.branch)}</dd>` : ""}${bl.worktree ? `<dt>worktree</dt><dd class="mono">${esc(bl.worktree)}</dd>` : ""}${c.ctx != null ? `<dt>context</dt><dd>${Math.round(c.ctx)}%</dd>` : ""}</dl>${bl.last_turn ? `<p class="mu">last turn ${ago(bl.last_turn.ts)}</p><div class="md">${md(bl.last_turn.text)}</div>` : ""}`);
+      body += sec("Building now", `<dl class="kv"><dt>Slot</dt><dd>${bl.slot}</dd><dt>Elapsed</dt><dd>${dur(bl.since ? now() - bl.since : bl.elapsed)}</dd>${bl.branch ? `<dt>Branch</dt><dd class="id">${esc(bl.branch)}</dd>` : ""}${c.ctx != null ? `<dt>Context</dt><dd>${Math.round(c.ctx)}%</dd>` : ""}</dl>${bl.last_turn ? `<p class="mu" style="margin-bottom:6px">Its last words, ${esc(rel(bl.last_turn.ts))}</p><div class="md">${md(bl.last_turn.text)}</div>` : ""}`);
     }
-    if (d.row && d.row.text) body += sec("The ledger row", `${d.row.section && d.row.section.length ? `<p class="mu">${md(d.row.section.join(" › "))}${d.row.line ? " · line " + d.row.line : ""}</p>` : ""}<div class="md">${md(d.row.text)}</div>`);
-    if (d.recap) body += sec("Recap", `<p>${md(d.recap.summary)}</p>`);
-    if (d.completion && d.completion.note) body += sec(`Completion note (${esc(d.completion.status)}, ${clock(d.completion.ts)})`, `<div class="md">${md(d.completion.note)}</div>`);
-    if (d.notes) for (const [k, list] of Object.entries(d.notes)) body += sec(NOTE[k] || k, list.map(n => `<div class="note ${esc(k)}">${md(n.text)} <span class="mu">${clock(n.ts)}</span></div>`).join(""));
     if (d.needs) body += sec(`Needs (${d.needs.length})`, refs(d.needs));
-    if (d.blocks) body += sec(`Blocks (${d.blocks.length} direct, ${d.blocks_total} in all)`, refs(d.blocks));
-    if (d.jobs && d.jobs.length) body += sec("Operator jobs", d.jobs.map(j => `<div class="note"><b class="mono">${esc(j.id)}</b> · ${esc(j.state)}${j.when ? " · " + esc(j.when) : ""}${j.attempts ? " · " + j.attempts + " attempt(s)" : ""}<div class="pre">${md(j.note)}</div>${j.question ? `<p class="warn">asks: ${esc(j.question)}${j.answer ? " — answered: " + esc(j.answer) : ""}</p>` : ""}${j.outcome ? `<p class="ok">did: ${md(j.outcome)}</p>` : ""}${j.error ? `<p class="bad">${esc(j.error)}</p>` : ""}</div>`).join(""));
-    if (d.runs && d.runs.length) body += sec("Runs", `<ul class="refs">${d.runs.map(r => `<li class="mu">${clock(r.started || r.ended)} · ${esc(r.status || "running")}${r.took ? " · took " + dur(r.took) : ""}${r.slot != null ? " · slot " + esc(r.slot) : ""}${r.parked ? " · parked" : ""}</li>`).join("")}</ul>`);
-    if (d.attempts && d.attempts.length) body += sec("Attempts", d.attempts.map(a => `<div class="note"><span class="${a.status === "fail" ? "bad" : "ok"}">${esc(a.status)}</span> <span class="mu">${clock(a.ts)}</span><div class="pre">${md(a.note)}</div></div>`).join(""));
-    if (d.excluded_why) body += sec("Why it is excluded", `<p>${md(d.excluded_why)}</p>`);
+    if (d.blocks) body += sec(`Unblocks (${d.blocks.length} directly, ${d.blocks_total} in all)`, refs(d.blocks));
+    if (d.row && d.row.text) body += sec("The ledger row", `${d.row.section && d.row.section.length ? `<p class="mu" style="margin-bottom:6px">${md(d.row.section.join(" › "))}${d.row.line ? ", line " + d.row.line : ""}</p>` : ""}<div class="md">${md(d.row.text)}</div>`);
+    if (d.recap) body += sec("Recap", `<p class="pre">${md(d.recap.summary)}</p>`);
+    if (d.completion && d.completion.note) body += sec(`Completion note (${esc(d.completion.status)}, ${esc(when(d.completion.ts))})`, `<div class="md">${md(d.completion.note)}</div>`);
+    if (d.notes) for (const [k, list] of Object.entries(d.notes)) body += sec(NOTE[k] || k, list.map(n => `<div class="note ${esc(k)}">${md(n.text)}</div>`).join(""));
+    if (d.jobs && d.jobs.length) body += sec("Operator jobs", d.jobs.map(j => `<div class="note"><span class="id">${esc(j.id)}</span> <span class="mu">${esc(j.state)}${j.when ? ", " + esc(j.when) : ""}</span><div class="pre">${md(j.note)}</div>${j.question ? `<p style="color:var(--owner)">Asks: ${esc(j.question)}${j.answer ? " Answered: " + esc(j.answer) : ""}</p>` : ""}${j.outcome ? `<p style="color:var(--done)">Did: ${md(j.outcome)}</p>` : ""}${j.error ? `<p style="color:var(--failed)">${esc(j.error)}</p>` : ""}</div>`).join(""));
+    if (d.runs && d.runs.length) body += sec("Runs", `<table class="tbl"><tbody>${d.runs.map(r => `<tr><td>${esc(when(r.started || r.ended, true))}</td><td>${esc(r.status || "running")}</td><td class="r">${r.took ? dur(r.took) : ""}</td></tr>`).join("")}</tbody></table>`);
+    if (d.attempts && d.attempts.length) body += sec("Attempts", d.attempts.map(a => `<div class="note"><span class="tag ${a.status === "fail" ? "bad" : "ok"}">${esc(a.status)}</span> <span class="mu">${esc(when(a.ts, true))}</span><div class="pre">${md(a.note)}</div></div>`).join(""));
+    if (d.excluded_why) body += sec("Why it is yours to do", `<p>${md(d.excluded_why)}</p>`);
   }
-  root.innerHTML = `<div class="scrim" data-close="1"></div><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
-<div class="bar-h"><div><h2 id="sheet-title">${esc(id)}</h2>${c.t ? `<div style="font-size:14px;margin-top:2px">${esc(c.t)}</div>` : ""}</div><button class="x" data-close="1" aria-label="Close details">Close</button></div>
-<div class="body">${body}</div></div>`;
-  const b2 = $(".sheet .body"); if (b2) b2.scrollTop = y;
-  if (!keepScroll) { const x = $(".sheet .x"); if (x) x.focus({preventScroll: true}); }
+  frame(`<span class="id">${esc(id)}</span>`, c.t ? esc(c.t) : "", body, keep);
 }
-$("#sheetroot").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-close],button[data-id]"); if (!t) return;
-  if (t.dataset.close) { dismiss(); return; }
-  if (t.dataset.id) show(t.dataset.id);
-});
 
-load().then(() => { connect(); fromHash(); });
+// Live clocks without a re-render.
+setInterval(() => {
+  $$("[data-since]").forEach(el => { if (+el.dataset.since) el.textContent = dur(now() - +el.dataset.since); });
+  if (S.board) $("#upd").textContent = "updated " + rel(S.board.generated_at);
+}, 10000);
+
+// Old deep links (#phase=<id>) still open the row.
+if (/^#phase=/.test(location.hash)) location.replace("#overview&" + location.hash.slice(1));
+paintNav();
+pollBoard().then(() => { route(); loop("board", pollBoard); loop("usage", pollUsage); loop("graph", pollGraph); });
 </script>
 </body>
 </html>

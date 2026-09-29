@@ -793,7 +793,7 @@ columns hide as it narrows.
 
 ## The web board (`swarm web`)
 
-A read-only Kanban board for a phone or a browser. Under tmux the dashboard
+A read-only board for a phone or a browser. Under tmux the dashboard
 serves it from its own process and stops it when it exits; it first checks the
 port, so a board already answering there (a `swarm web` run by hand) is left
 alone and named in the status bar, and it takes over once that one stops. With no
@@ -803,22 +803,38 @@ previous one is still closing waits up to 5 s for the port instead of failing. `
 `swarm doctor` print its address: the machine's Tailscale IP (`tailscale ip -4`),
 or its LAN addresses when Tailscale is not running.
 
-**Columns:** Needs you, Blocked, Ready, Building, Merging / held, Operator, Done,
-Failed, Excluded. Rows ticked in the ledger count as done, owner-run ones included.
+**Tabs:**
 
-**Views:**
+- **Overview:** when every phase is done (the forecast's P50, P85 behind it, the
+  method behind an info toggle), progress by status, what each worker is
+  building, the next usage cap against that finish, and the phase books still
+  open, soonest first.
+- **Phase books:** every campaign ("phase book", a phase-id prefix) with its
+  progress, open rows by status and finish range; one opens to its rows, each
+  with what holds it and its own finish. *By status* is the status board:
+  Needs you, Building, Merging, Ready, Blocked, Operator, Failed, Done, Yours to
+  do. Rows ticked in the ledger count as done, owner-run ones included.
+- **Graph:** phases as boxes and `needs:` as lines, laid out left to right in
+  Python (`web/layout.py`: longest-path layers, barycenter ordering, drawn as
+  the transitive reduction) and drawn as SVG. By default the open rows and the
+  done rows they need; *All* shows every row, and a phase book narrows it.
+  Colours are by status, the critical path to "all done" is gold, and a hover
+  or click lights up everything upstream and downstream with a side panel. The
+  layout is cached by shape, so a status change only re-colours it.
+- **Usage:** the 5-hour and weekly windows over time with their pause and stop
+  lines, resets, and a projection at the forecast's burn to the cap each will
+  reach (or its reset). A sudden big jump in a reading, which is another
+  account's counter, breaks the line rather than drawing a drop. Below it, the
+  runs.
+- **Activity:** recent finishes with their recaps, notifications, Overseer
+  passes, and what `swarm keep` left running.
+- **Row sheet:** the ledger row, recap, notes, dependencies, operator jobs and
+  attempts. Deep links use `#<tab>&phase=<id>` (the old `#phase=<id>` still works).
 
-- **Campaigns:** swimlanes by phase-id prefix, each described from a ledger
-  heading or the ADR most of its rows cite.
-- **Activity:** recent Overseer passes (what each saw, did and left for you)
-  and recent finishes with their recaps.
-- **Card sheet:** the ledger row, recap, notes, dependencies, operator jobs and
-  attempts. Deep links use `#phase=<id>`.
-- **Header:** usage meters, the ETA and what waits on you (the dashboard's
-  forecast, word for word), and the last Overseer pass. Each campaign lane says
-  when it finishes.
-
-Updates arrive live over Server-Sent Events.
+Endpoints: `/api/board`, `/api/graph?mode=open|all&book=<name>`, `/api/usage`,
+`/api/phase/<id>`, `/api/search?q=`, all gzip + ETag. The page polls them only
+while it is visible, only the tab on screen asks for its data, and an unchanged
+answer is a 304. (`/events`, Server-Sent Events, is still served.)
 
 It is plain `http.server`, GET and HEAD only, and no URL path ever maps to a file.
 Every payload is scrubbed of credential-shaped strings. It listens on every

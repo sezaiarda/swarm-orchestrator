@@ -14,8 +14,9 @@ the web board and ``swarm status`` share one answer instead of each simulating
 its own: whoever computes first writes it under a lock, and the others, waiting
 on that lock, read it.
 
-The model is refitted only when a phase finishes (:func:`fit` is keyed on the
-record of finishes), never on a repaint.
+The model, and the upper band's calibration (:mod:`.calibrate`), are refitted
+only when a phase finishes (:func:`fit` is keyed on the record of finishes),
+never on a repaint.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from .. import pace as pace_mod
 from .. import usage as usage_mod
 from ..tui import data as data_mod
 from ..tui.campaign import campaign_of
+from . import calibrate as calibrate_mod
 from . import forecast as forecast_mod
 from . import hazards as hazards_mod
 from . import holds as holds_mod
@@ -53,7 +55,7 @@ IDLE_RECOMPUTE_S = 1800.0
 BURN_WINDOW_S = 7 * 86400.0
 CACHE_NAME = "eta.json"
 #: Bumped when a forecast's meaning changes, so an older cache is not read.
-VERSION = 1
+VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,8 @@ class Inputs:
     park_after: float = 900.0
     #: The ``[usage].rules`` in force (none when caps are switched off).
     rules: tuple = ()
+    #: This machine's logged forecasts (:func:`calibrate.load`), oldest first.
+    forecasts: tuple = ()
 
 
 def gather(cfg, state, *, events, history, ledger_history, usage, text: str | None = None,
@@ -111,6 +115,7 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
         park_after=float(getattr(cfg, "park_after", 900) or 0),
         rules=tuple(getattr(cfg, "usage_rules", ()) or ()) if getattr(cfg, "usage_enabled",
                                                                       False) else (),
+        forecasts=tuple(calibrate_mod.load(calibrate_mod.log_path(cfg))),
     )
 
 
@@ -148,10 +153,15 @@ class Fitted:
     availability: holds_mod.Availability
     #: window -> percentage points per busy worker-hour.
     burn: dict[str, float]
+    #: How far the upper band is stretched (:mod:`.calibrate`).
+    calibration: calibrate_mod.Calibration = calibrate_mod.Calibration()
 
 
 def fit_key(inputs: Inputs) -> str:
-    """What the fit depends on: the attempts that ended, and the ledger's ticks."""
+    """What the fit depends on: the attempts that ended, and the ledger's ticks.
+
+    Not the calibration's log: a forecast it has just logged has no outcome yet,
+    and its outcomes arrive as ticks, which refit it here."""
     ended = [a.end for a in record_mod.attempts(inputs.history, inputs.events)
              if a.end is not None]
     ticks = inputs.ledger_history.ticks
@@ -172,6 +182,10 @@ def fit(inputs: Inputs) -> Fitted:
         hazards=hazards_mod.fit(rec, inputs.now, campaign_of),
         availability=holds_mod.availability(ticks, workers, inputs.now, durations.mean_s),
         burn=burn(inputs),
+        calibration=calibrate_mod.fit(
+            calibrate_mod.pairs_from_log(list(inputs.forecasts), inputs.ledger_history.ticks,
+                                         inputs.now),
+            default=calibrate_mod.DEFAULT_K),
     )
 
 
@@ -217,15 +231,19 @@ def key(inputs: Inputs, fit_id: str) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def compute(inputs: Inputs, fitted: Fitted | None = None, runs: int = RUNS
-            ) -> forecast_mod.Forecast:
-    """The simulated forecast."""
+def compute(inputs: Inputs, fitted: Fitted | None = None, runs: int = RUNS,
+            log: Path | None = None) -> forecast_mod.Forecast:
+    """The simulated forecast, its upper band calibrated. With ``log``, a running
+    swarm's forecast is also added to the calibration's record there."""
     fitted = fitted or fit(inputs)
     plan = plan_of(inputs)
     holds = holds_of(inputs, fitted)
     opts = sim_mod.Options(runs=runs)
     futures = sim_mod.simulate(plan, fitted.durations, fitted.hazards, holds, opts)
-    return forecast_mod.summarise(plan, holds, futures, inputs.now, opts)
+    if log is not None and not holds.stopped:
+        calibrate_mod.record(log, inputs.now, calibrate_mod.known(plan, futures))
+    fc = forecast_mod.summarise(plan, holds, futures, inputs.now, opts)
+    return calibrate_mod.apply(fc, fitted.calibration)
 
 
 def floor(inputs: Inputs, fitted: Fitted | None = None) -> forecast_mod.Forecast:
@@ -289,7 +307,7 @@ def shared(cfg, inputs: Inputs, fitted: Fitted, fit_id: str, runs: int
             fcntl.flock(lock, fcntl.LOCK_EX)
         got = read_cache(cfg, want, not_before)
         if got is None:
-            got = compute(inputs, fitted, runs)
+            got = compute(inputs, fitted, runs, calibrate_mod.log_path(cfg))
             write_cache(cfg, want, got)
         return got
     finally:

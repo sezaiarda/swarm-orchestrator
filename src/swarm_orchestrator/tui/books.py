@@ -92,6 +92,10 @@ def basis_line(fc: Forecast, now: float) -> str:
         parts.append(f"held by the cap until {fmt_when(fc.held_until, now)}")
     if fc.pause_at:
         parts.append(f"pauses {fmt_when(fc.pause_at, now)}")
+    if fc.stretch > 1.0:
+        whence = (f"from {fc.calibrated_on} finished campaigns" if fc.calibrated_on
+                  else "the backtest's, too little history here yet")
+        parts.append(f"upper band stretched k={fc.stretch:.2f} ({whence})")
     return " · ".join(parts)
 
 

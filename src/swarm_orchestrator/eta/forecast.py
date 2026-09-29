@@ -97,6 +97,10 @@ class Forecast:
     caps: tuple[tuple[str, float, float], ...] = ()
     #: Share of its hours the swarm was simulated working (its measured availability).
     working: float = 1.0
+    #: How far the upper band was stretched past the replays (:mod:`.calibrate`;
+    #: 1 = as simulated), and the finished campaigns that measured it (0 = the default).
+    stretch: float = 1.0
+    calibrated_on: int = 0
 
     @property
     def floor(self) -> bool:

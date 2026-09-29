@@ -261,9 +261,12 @@ class Dash:
         now = time.time()
         if self._poll_kept(now):
             changed.add("keep")
-        #: The big-picture pass in a few words, for the headline.
-        self.big_picture = ""
-        self._bigpic = bigpic.Memory()
+        if self._changed("bigpic", bigpic.memory_path(self.cfg)):
+            self._bigpic = bigpic.load(self.cfg)
+        text = bigpic.short_text(self._bigpic, now)
+        if text != self.big_picture:
+            self.big_picture = text
+            changed.add("bigpic")
         grew = self._samples.poll()
         if grew or changed & {"run", "log"} or now - self._usage_at >= USAGE_EVERY_S:
             self._usage_at = now

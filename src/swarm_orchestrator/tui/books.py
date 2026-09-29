@@ -15,7 +15,7 @@ import math
 from ..eta.forecast import Book, Forecast, Range
 from ..eta.plan import OWNER_RUN
 from .campaign import campaign_of
-from .data import bar, fmt_when, fmt_when_range
+from .data import bar, fmt_range, fmt_when, fmt_when_range
 
 #: The book name column, and the waiting-on-you line's rows before "+n more".
 NAME_W = 10
@@ -53,17 +53,26 @@ def phrase(r: Range | None, fc: Forecast, now: float) -> str:
 
 
 def overall_line(fc: Forecast, now: float) -> str:
-    """The headline: how many rows are left and when the last one lands."""
+    """The headline: how many rows the swarm can do, when the last one lands,
+    and how many more wait on the owner (they are not in the time)."""
     left = sum(b.left - b.behind for b in fc.books)
-    if fc.overall is None:
-        return "nothing the swarm can do is left" if not fc.stopped else "paused"
-    head = f"{left} row{'' if left == 1 else 's'} left"
-    got = span(fc.overall, fc, now)
-    if fc.stopped:
-        return f"{head} · {fc.stopped} · resume now and it is done ~{got}"
-    if fc.floor:
-        return f"{head} · done {got} (simulating…)"
-    return f"{head} · done ~{got}"
+    held = sum(b.behind for b in fc.books)
+    yours = f" · {held} more wait on you" if held else ""
+    r = fc.overall
+    if r is None:
+        return f"nothing the swarm can do by itself is left{yours}"
+    if fc.stopped and not math.isfinite(r.p50):
+        tail = fc.stopped
+    elif fc.stopped:
+        # Work, not a clock: "done Tue" goes staler by the hour it stays paused.
+        work = fmt_range(r.p50 - fc.made_at,
+                         r.p85 - fc.made_at if math.isfinite(r.p85) else None)
+        tail = f"{fc.stopped} · {work} of work once it runs again"
+    elif fc.floor:
+        tail = f"done {span(r, fc, now)} (simulating…)"
+    else:
+        tail = f"done ~{span(r, fc, now)}"
+    return f"{left} row{'' if left == 1 else 's'} left · {tail}{yours}"
 
 
 def basis_line(fc: Forecast, now: float) -> str:

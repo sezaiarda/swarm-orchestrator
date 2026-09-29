@@ -219,7 +219,9 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
 
     now = time.time()
     fc = getattr(dash, "forecast", None)
-    left = books_mod.overall_line(fc, now) if fc is not None else "working out when…"
+    failed = getattr(getattr(dash, "eta", None), "error", "")
+    left = (books_mod.overall_line(fc, now) if fc is not None
+            else f"no forecast: {failed}" if failed else "working out when…")
     fill = OK if cur.complete else (INFO if cur.running or cur.ready else MUTED)
     second = (
         f"{PAD}{paint(bar(cur.built, max(1, cur.live_total), max(10, inner - len(left) - 2)), fill)}"

@@ -285,8 +285,9 @@ class Dash:
         if not isinstance(state, dict):
             return
         busy = any(s.busy for s in self.snapshot.slots)
+        every = eta_mod.RECOMPUTE_S if busy else eta_mod.IDLE_RECOMPUTE_S
         stamp = (self._rebuilds, len(self._samples.samples), self._deferred_day,
-                 int(now // eta_mod.RECOMPUTE_S) if busy else 0)
+                 busy, int(now // every))
         cfg, events, history = self.cfg, self.tail.events, self.history
         ledger_history, samples = self.ledger_history, self._samples.samples
 

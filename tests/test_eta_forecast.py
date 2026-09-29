@@ -186,7 +186,8 @@ def test_a_floor_a_pause_and_a_row_past_the_pause_say_so():
     assert "(simulating…)" in books.overall_line(floor, NOW)
     assert books.basis_line(floor, NOW).startswith("a floor")
     paused = forecast.Forecast(**(fc.__dict__ | {"stopped": holds.PAUSED}))
-    assert "paused · resume now and it is done ~" in books.overall_line(paused, NOW)
+    assert books.overall_line(paused, NOW) == (
+        "5 rows left · paused · ~35h of work once it runs again · 2 more wait on you")
     past = forecast.Forecast(**(fc.__dict__ | {"pause_at": NOW + H}))
     assert books.when(math.inf, past, NOW) == "after the scheduled pause"
     assert books.when(math.inf, fc, NOW) == "not in sight"
@@ -254,3 +255,14 @@ def test_a_broken_forecast_never_breaks_status(cfg, capsys, monkeypatch):
     monkeypatch.setattr(engine, "from_files", SimpleNamespace)  # raises on the state arg
     assert cli.cmd_status(cfg) == 0
     assert "eta: unavailable (TypeError" in capsys.readouterr().out
+
+
+def test_a_forecast_that_fails_says_why_instead_of_hanging(cfg):
+    eng = engine.Engine(cfg, runs=10)
+
+    def broken():
+        raise ValueError("the ledger moved under it")
+
+    eng.request(("x",), broken)
+    assert eng.wait(30) and eng.result is None
+    assert eng.error == "ValueError: the ledger moved under it"

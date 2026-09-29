@@ -226,15 +226,18 @@ def test_headline_says_it_is_working_it_out_before_the_first_forecast():
     graph = {f"dash-W{i}": set() for i in range(1, 9)}
     dash = FakeDash(data.Snapshot(ok=True, slots=[slot(0, "dash-W1")]), graph=graph)
     assert "working out when" in plain(home.headline(dash, 76))
+    dash.eta = SimpleNamespace(error="ValueError: bad row")
+    assert "no forecast: ValueError: bad row" in plain(home.headline(dash, 100))
 
 
-def test_a_paused_swarm_is_forecast_as_if_resumed_and_a_held_one_says_until_when():
-    """"done ~16:28" for a swarm the owner paused is a lie; "if you resume now" is not."""
+def test_a_paused_swarm_says_its_work_and_a_held_one_says_until_when():
+    """"done ~16:28" for a swarm the owner paused is a lie, and one that goes staler by
+    the hour it stays paused; the work left, once it runs again, is neither."""
     graph = {f"dash-W{i}": set() for i in range(1, 5)}
     snap = data.Snapshot(ok=True, slots=[slot(0, None, busy=False)])
     paused = plain(home.headline(FakeDash(snap, graph=graph, forecast=forecast(stopped="paused")),
                                  160))
-    assert "paused · resume now and it is done ~" in paused
+    assert "paused · ~2–4h of work once it runs again" in paused
     held = plain(home.headline(FakeDash(snap, graph=graph,
                                         forecast=forecast(held_until=NOW + 40 * H)), 200))
     assert "held by the cap until" in held

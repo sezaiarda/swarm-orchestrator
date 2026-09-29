@@ -7,10 +7,12 @@ simulation takes seconds. So the forecast is computed on a thread of its own
 
 It is recomputed only when something it depends on moved — the ledger, the
 state, the config, a pause or a cap — plus every :data:`RECOMPUTE_S` while rows
-run, since a running row's remaining time changes as it ages. The result is
-kept in ``<state>/cache/eta.json`` under the key of what it was made from, so
-the TUI, the web board and ``swarm status`` share one answer instead of each
-simulating its own: whoever computes first writes it, the others read it.
+run, since a running row's remaining time changes as it ages, and every
+:data:`IDLE_RECOMPUTE_S` when none does. The result is kept in
+``<state>/cache/eta.json`` under the key of what it was made from, so the TUI,
+the web board and ``swarm status`` share one answer instead of each simulating
+its own: whoever computes first writes it under a lock, and the others, waiting
+on that lock, read it.
 
 The model is refitted only when a phase finishes (:func:`fit` is keyed on the
 record of finishes), never on a repaint.
@@ -19,6 +21,7 @@ record of finishes), never on a repaint.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import json
 import os
@@ -43,8 +46,10 @@ from . import sim as sim_mod
 
 #: Replays per forecast. P85 from 500 is good to about 1.6 percentile points.
 RUNS = 500
-#: A forecast is remade at least this often while it has rows running.
+#: A forecast is remade at least this often while it has rows running…
 RECOMPUTE_S = 300.0
+#: …and this often when none is: its clock still moves.
+IDLE_RECOMPUTE_S = 1800.0
 #: The usage burn per busy worker-hour is measured over this long a stretch.
 BURN_WINDOW_S = 7 * 86400.0
 CACHE_NAME = "eta.json"
@@ -262,22 +267,42 @@ def write_cache(cfg, want: str, fc: forecast_mod.Forecast) -> None:
         pass
 
 
-def fresh_after(inputs: Inputs) -> float:
-    """How old a forecast may be and still stand: one :data:`RECOMPUTE_S` while
-    rows run (they age), forever when nothing does."""
+def recompute_s(inputs: Inputs) -> float:
+    """How long a forecast stands: :data:`RECOMPUTE_S` while rows run (they
+    age), :data:`IDLE_RECOMPUTE_S` when none does."""
     running = any(s.phase for s in inputs.state.busy_slots())
-    return inputs.now - RECOMPUTE_S if running else 0.0
+    return RECOMPUTE_S if running else IDLE_RECOMPUTE_S
+
+
+def shared(cfg, inputs: Inputs, fitted: Fitted, fit_id: str, runs: int
+           ) -> forecast_mod.Forecast:
+    """The cached forecast for ``inputs`` if it still stands, else one simulated
+    and cached now. The lock makes a second asker wait for the first one's
+    answer instead of simulating the same thing beside it."""
+    want = key(inputs, fit_id)
+    not_before = inputs.now - recompute_s(inputs)
+    path = cache_path(cfg)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = open(path.with_suffix(".lock"), "a")  # noqa: SIM115 - held to the end
+    except OSError:
+        lock = None
+    try:
+        if lock is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        got = read_cache(cfg, want, not_before)
+        if got is None:
+            got = compute(inputs, fitted, runs)
+            write_cache(cfg, want, got)
+        return got
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 def current(cfg, inputs: Inputs, runs: int = RUNS) -> forecast_mod.Forecast:
     """The forecast now, from the cache when it still stands, else simulated here."""
-    fitted = fit(inputs)
-    want = key(inputs, fit_key(inputs))
-    got = read_cache(cfg, want, fresh_after(inputs))
-    if got is None:
-        got = compute(inputs, fitted, runs)
-        write_cache(cfg, want, got)
-    return got
+    return shared(cfg, inputs, fit(inputs), fit_key(inputs), runs)
 
 
 # -- the background worker -------------------------------------------------------------
@@ -285,8 +310,8 @@ class Engine:
     """Makes forecasts on a thread of its own; views read :attr:`result`.
 
     :meth:`request` is what a repaint may call: it compares a stamp the caller
-    already has (what moved, and the :data:`RECOMPUTE_S` bucket while rows run)
-    and only when that changed hands the worker thread a way to read its
+    already has (what moved, and the :func:`recompute_s` bucket) and only when
+    that changed hands the worker thread a way to read its
     :class:`Inputs`. Gathering them runs on that thread too. The newest request
     wins; one in flight is finished first.
     """
@@ -296,6 +321,8 @@ class Engine:
         self.runs = runs
         #: The latest forecast, or ``None`` before the first one.
         self.result: forecast_mod.Forecast | None = None
+        #: Why the last attempt made none ("" when it did).
+        self.error = ""
         #: Bumped each time :attr:`result` is replaced.
         self.version = 0
         self._lock = threading.Lock()
@@ -330,8 +357,9 @@ class Engine:
                 return
             try:
                 self._forecast(make())
-            except Exception:  # noqa: BLE001 - a bad forecast must never take a view down
-                pass
+                self.error = ""
+            except Exception as exc:  # noqa: BLE001 - a bad forecast must never take a view down
+                self.error = f"{type(exc).__name__}: {exc}"
 
     def _publish(self, fc: forecast_mod.Forecast) -> None:
         self.result = fc
@@ -342,13 +370,6 @@ class Engine:
         if self._fit is None or self._fit[0] != fid:
             self._fit = (fid, fit(inputs))
         fitted = self._fit[1]
-        want = key(inputs, fid)
-        got = read_cache(self.cfg, want, fresh_after(inputs))
-        if got is not None:
-            self._publish(got)
-            return
         if self.result is None:
             self._publish(floor(inputs, fitted))
-        got = compute(inputs, fitted, self.runs)
-        write_cache(self.cfg, want, got)
-        self._publish(got)
+        self._publish(shared(self.cfg, inputs, fitted, fid, self.runs))

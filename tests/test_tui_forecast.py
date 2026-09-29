@@ -1,4 +1,4 @@
-"""Forecasts: finish clock, per-phase ETA, and whether the weekly limit lets the run finish."""
+"""Forecast wording: finish clock, per-phase ETA, and whether the weekly limit lets the run finish."""
 
 from __future__ import annotations
 
@@ -6,17 +6,12 @@ import json
 from datetime import datetime
 
 from swarm_orchestrator import meters
-from swarm_orchestrator.pace import Pace
 from swarm_orchestrator.tui.data import (
-    TOO_FEW,
-    Forecast,
     Limits,
     PhaseRun,
-    eta,
     fmt_range,
     fmt_when,
     fmt_when_range,
-    forecast,
     limit_outlook,
     load_limits,
     load_meters,
@@ -33,26 +28,6 @@ def runs(*hours: float) -> list[PhaseRun]:
 
 
 # -- run and phase ETA -----------------------------------------------------------
-def test_forecast_is_the_recent_pace_as_a_range_scaled_to_the_workers_now():
-    p = Pace(phases=20, hours=12.0, per_hour=19 / 12.0, workers=2.0)
-    fc = forecast(p, remaining=4, workers=1, running=0, ready=2)
-    # 4 phases at 1.58/h is 2.5 h; at half the workers, up to twice that.
-    assert (round(fc.soonest), round(fc.latest)) == (round(4 / (19 / 12) * H), round(8 / (19 / 12) * H))
-    assert fc.label == "" and eta(p, 4, 1, ready=2) == "~3–5h left"
-    same = forecast(p, remaining=4, workers=2, running=1)
-    assert same.soonest == same.latest  # measured at the concurrency it runs at: one figure
-    # More workers than phases left do not help: one phase at two workers is one phase.
-    one = forecast(p, remaining=1, workers=2, running=1)
-    assert one.latest == 2 * one.soonest
-
-
-def test_forecast_refuses_rather_than_guesses():
-    p = Pace(phases=20, hours=12.0, per_hour=1.5, workers=1.0)
-    assert forecast(None, 3, 1, running=1) == Forecast(label=TOO_FEW)
-    assert forecast(p, 3, 1) == Forecast(label="stalled")
-    assert forecast(p, 0, 1) == Forecast(0.0, 0.0, "done")
-
-
 def test_a_forecast_is_said_at_the_resolution_it_is_good_to():
     assert fmt_range(40 * 60) == "~40m"
     assert fmt_range(22 * 60, 43 * 60) == "~20–45m"

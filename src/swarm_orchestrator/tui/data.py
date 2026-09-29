@@ -379,11 +379,22 @@ def load_ticked(cfg) -> set[str]:
         return set()
 
 
+def load_deferred(cfg, now: float | None = None) -> dict[str, str]:
+    """Open rows whose ``after:`` date is still ahead, as the launcher reads them
+    (today in UTC); none when the ledger is missing/unreadable."""
+    today = time.strftime("%Y-%m-%d", time.gmtime(time.time() if now is None else now))
+    try:
+        return ledger_mod.load_deferred(Path(cfg.project_dir) / cfg.ledger, today)
+    except Exception:  # noqa: BLE001 - a broken ledger must not blank the dashboard
+        return {}
+
+
 def phase_progress(
     graph: dict[str, set[str]],
     done: dict[str, str],
     busy_phases: set[str],
     excluded: set[str],
+    deferred: set[str] | frozenset[str] = frozenset(),
 ) -> Progress:
     """Count the phase graph into done/running/ready/blocked buckets.
 
@@ -393,11 +404,12 @@ def phase_progress(
     owner-run row the ledger ticks is both excluded and done, and counting it
     twice shrank ``blocked``. ``ready``/``next_up`` reuse
     :func:`swarm_orchestrator.ledger.ready` so the dashboard can never disagree
-    with what the master will actually launch.
+    with what the master will actually launch — which is why a row waiting for
+    its ``after:`` date (``deferred``) is not ready but blocked, as it is there.
     """
     if not graph:
         return Progress(done=len(done), running=len(busy_phases))
-    ready = ledger_mod.ready(graph, done, busy_phases, excluded)
+    ready = ledger_mod.ready(graph, done, busy_phases, set(excluded) | set(deferred))
     running = {p for p in busy_phases if p in graph}
     # Done the way every other count says it (:mod:`.campaign`): a status that
     # releases dependents. A ``fail`` was attempted, not done.
@@ -429,6 +441,7 @@ def build_snapshot(
     started_at: float | None = None,
     operator: list | None = None,
     ticked: set[str] | None = None,
+    deferred: dict[str, str] | None = None,
 ) -> Snapshot:
     """Join state + ledger + log-derived timings into one render-ready snapshot.
 
@@ -597,6 +610,7 @@ def build_snapshot(
             landed,
             in_flight,
             set(getattr(cfg, "exclude", []) or []),
+            set(deferred or ()),
         ),
         windows=dict(state.get("windows") or {}),
         layout=_as_str(state.get("layout")),
@@ -1252,21 +1266,6 @@ ETA_MIN_SAMPLES = 3
 ETA_WINDOW = 20
 
 
-def eta(pace: pace_mod.Pace | None, remaining: int, workers: int,
-        running: int = 0, ready: int = 0) -> str:
-    """How long the rest of the run will take, or why that cannot be said.
-
-    Returns the string the headline prints. It refuses rather than guesses: too
-    few recent finishes is not a pace, and a run with nothing running and
-    nothing ready is not slow, it is stalled — an ETA there would be a lie with
-    a clock on it.
-    """
-    fc = forecast(pace, remaining, workers, running=running, ready=ready)
-    if fc.soonest is None or remaining <= 0:
-        return fc.label
-    return f"{fmt_range(fc.soonest, fc.latest)} left"
-
-
 def typical_durations(runs: list[PhaseRun]) -> list[float]:
     """The recent completed phase durations every forecast is made from."""
     return [
@@ -1300,52 +1299,6 @@ def eta_runs_of(dash) -> list[PhaseRun]:
     """What a view should hand the ETA functions: the run's sample if the dash has one."""
     got = getattr(dash, "eta_runs", None)
     return list(got) if got is not None else list(getattr(dash, "history", None) or [])
-
-
-#: What the headline says when there is no pace to time the rest on.
-TOO_FEW = "too few recent finishes to time"
-
-
-@dataclass(frozen=True)
-class Forecast:
-    """How long the rest will take — a range in seconds — or why that cannot be said."""
-
-    soonest: float | None = None
-    latest: float | None = None
-    label: str = ""
-
-
-def forecast(pace: pace_mod.Pace | None, remaining: int, workers: int,
-             running: int = 0, ready: int = 0) -> Forecast:
-    """The rest at the swarm's recent pace (:func:`pace.outlook`), or why not.
-
-    It used to be the median phase's length times the number of waves. A phase's
-    own length is only part of what it costs the swarm: the merge, the grace
-    before a slot is reused, the operator hand-off and the build queue all sit
-    between two finishes, and "~45m left" for four phases the swarm has never
-    finished faster than one every half hour was the result. The time between
-    finishes, as the ledger recorded it, carries all of that.
-    """
-    if remaining <= 0:
-        return Forecast(0.0, 0.0, "done")
-    if running <= 0 and ready <= 0:
-        return Forecast(label="stalled")
-    if pace is None:
-        return Forecast(label=TOO_FEW)
-    soonest, latest = pace_mod.outlook(pace, remaining, workers)
-    return Forecast(soonest, latest)
-
-
-def pace_basis(pace: pace_mod.Pace | None, workers: int) -> str:
-    """What a forecast was timed on, in words: the headline's small print."""
-    if pace is None:
-        return ""
-    done = f"last {pace.phases} finishes in {fmt_range(pace.hours * 3600).lstrip('~')}"
-    if pace.workers is None:
-        return f"rough pace: {done}, worker count unknown"
-    then = round(pace.workers, 1)
-    now_txt = "" if then == workers else f", {workers} now"
-    return f"pace: {done} at {then:g} worker{'' if then == 1 else 's'}{now_txt}"
 
 
 def finish_times(landed: dict[str, str], ticked: set[str], history: pace_mod.History,

@@ -22,7 +22,8 @@ a person would want to be told:
    ledger (an owner-run row the owner ticked too); the card says which.
 6. **Excluded** — in ``[tasks].exclude`` (owner-run rows), and not done.
 7. **Failed** — recorded ``fail``.
-8. **Blocked** — a dependency has not landed; the card names the root.
+8. **Blocked** — a dependency has not landed; the card names the root. A row
+   whose ``after:`` date is still ahead is blocked too, and says until when.
 9. **Ready** — nothing stands in its way.
 
 Dependency satisfaction is the launcher's own (:data:`statuses.SATISFIES_DEPS`
@@ -38,10 +39,10 @@ from statistics import median
 from .. import bigpic, ledger, opqueue, statuses
 from ..drain import line as drain_line
 from ..overseer import starvation_map
+from ..tui import books as books_mod
 from ..tui.campaign import campaign_of
 from ..tui.data import (
-    LOST, five_outlook, fmt_range, forecast, held_merge, kept_rows, limit_outlook, pace_basis,
-    run_word, typical_durations,
+    LOST, five_outlook, held_merge, kept_rows, limit_outlook, run_word, typical_durations,
 )
 from .rows import clip
 
@@ -102,6 +103,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
     owed = {str(rec.get("phase")): (repo, rec)
             for repo, rec in (state.get("push_owed") or {}).items() if isinstance(rec, dict)}
     questions = {b.phase: b for b in snap.blockers}
+    dated = dict(getattr(dash, "deferred", None) or {})
     jobs: dict[str, list] = {}
     for item in snap.operator or []:
         jobs.setdefault(opqueue.owning_phase(item.phase), []).append(item)
@@ -123,7 +125,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         if row is not None and row.dirs:
             card["r"] = row.dirs
         col, extra = _place(pid, graph, view, satisfied, excluded, waiting, parked, busy,
-                            queue, snap, owed, jobs, questions, roots_of)
+                            queue, snap, owed, jobs, questions, roots_of, dated)
         card["col"] = col
         card.update({k: v for k, v in extra.items() if v not in (None, "", [], {})})
         cards[pid] = card
@@ -143,7 +145,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         "project": getattr(cfg, "project_dir", None) and cfg.project_dir.name,
         "header": _header(cfg, dash, cards, extra_cards, passes, now),
         "columns": columns,
-        "campaigns": _campaigns(cards, metas),
+        "campaigns": _campaigns(cards, metas, getattr(dash, "forecast", None), now),
         "activity": _activity(dash, passes),
         # Landed rows stall nothing, so a cycle through one is history, not an issue.
         "issues": ledger.validate(graph, satisfied)[:20],
@@ -181,7 +183,7 @@ def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:
 
 
 def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, snap,
-           owed, jobs, questions, roots_of) -> tuple[str, dict]:
+           owed, jobs, questions, roots_of, dated=None) -> tuple[str, dict]:
     """``(column, card extras)`` for one ledger phase — the rules in the module doc.
 
     ``done`` is the launcher's view (:func:`ledger.with_ticked`), so a ticked row
@@ -255,6 +257,8 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
         else:
             extra["sub"] = "dependency cycle: the ledger needs fixing"
         return BLOCKED, extra
+    if pid in (dated or {}):
+        return BLOCKED, {"sub": f"waits until {dated[pid]}"}
     return READY, {}
 
 
@@ -367,8 +371,10 @@ def _order(key: str, cards: list[dict], queue: list[str], graph: dict) -> list[d
     return sorted(cards, key=lambda c: (pos.get(c["id"], 1 << 30), c["id"]))
 
 
-def _campaigns(cards: dict, metas: dict) -> list[dict]:
-    """Campaign header cards: what it is, its progress, its phases by column."""
+def _campaigns(cards: dict, metas: dict, fc=None, now: float = 0.0) -> list[dict]:
+    """Campaign header cards: what it is, its progress, its phases by column,
+    and when the forecast ``fc`` says it finishes."""
+    books = {b.name: b for b in (fc.books if fc is not None else ())}
     groups: dict[str, dict] = {}
     for order, (pid, card) in enumerate(cards.items()):
         name = card["c"]
@@ -401,6 +407,7 @@ def _campaigns(cards: dict, metas: dict) -> list[dict]:
             "counts": counts,
             "active": active,
             "open": open_,
+            "eta": _book_eta(books.get(name), fc, now),
             "rank": (0 if active else 1 if counts.get(READY) else 2 if open_ else 3,
                      g["open_at"], g["first"]),
         })
@@ -410,6 +417,22 @@ def _campaigns(cards: dict, metas: dict) -> list[dict]:
     return out
 
 
+def _book_eta(book, fc, now: float) -> dict | None:
+    """One campaign's finish, as the TUI's phase-book list says it."""
+    if book is None:
+        return None
+    r = book.finish
+    return {"text": books_mod.phrase(r, fc, now), "left": book.left, "behind": book.behind,
+            "running": book.running, "ready": book.ready, "grows": book.grows,
+            "p50": _at(r.p50) if r else None, "p85": _at(r.p85) if r else None,
+            "p95": _at(r.p95) if r else None}
+
+
+def _at(ts: float) -> float | None:
+    """A finish time for JSON: ``None`` where there is none in sight."""
+    return ts if ts != float("inf") else None
+
+
 def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> dict:
     snap = dash.snapshot
     cols: dict[str, int] = {}
@@ -417,19 +440,22 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         cols[c["col"]] = cols.get(c["col"], 0) + 1
     workers = len(snap.slots) or int(getattr(cfg, "max_workers", 0) or 0)
     remaining = sum(1 for c in cards.values() if c["col"] in OPEN)
-    pace = getattr(dash, "pace", None)
-    fc = forecast(pace, remaining, workers,
-                  running=cols.get(BUILDING, 0), ready=cols.get(READY, 0))
-    seconds = fc.latest
-    # Seconds, not a clock time: the client adds them to ``generated_at`` (or to
-    # when a usage cap lifts), so a quiet board does not change (and wake every
-    # phone) just because time passed. The range and its basis are the TUI's.
-    eta = {"remaining": remaining, "label": fc.label, "seconds": fc.soonest,
-           "seconds_hi": fc.latest,
-           "span": fmt_range(fc.soonest, fc.latest) if fc.soonest else "",
-           "basis": pace_basis(pace, workers),
-           "starts_at": snap.hold_until if snap.hold_until > now else None,
-           "paused": bool(snap.paused)}
+    # The forecast is the TUI's, word for word (:mod:`swarm_orchestrator.eta`):
+    # clock times, not seconds from now, so it only changes when it is remade.
+    fc = getattr(dash, "forecast", None)
+    seconds = None
+    eta = {"remaining": remaining, "text": "working out when…", "basis": "", "waiting": "",
+           "critical": [], "floor": True, "p50": None, "p85": None, "p95": None}
+    if fc is not None:
+        r = fc.overall
+        eta.update(text=books_mod.overall_line(fc, now), basis=books_mod.basis_line(fc, now),
+                   waiting=books_mod.waiting_line(fc), critical=list(fc.critical),
+                   floor=fc.floor, p50=_at(r.p50) if r else None,
+                   p85=_at(r.p85) if r else None, p95=_at(r.p95) if r else None)
+        if eta["p85"] is not None:
+            # From when it was made, not from now: a quiet board must not change
+            # (and wake every phone) just because time passed.
+            seconds = max(0.0, eta["p85"] - fc.made_at)
     run = getattr(dash, "run", None) or None
     usage = getattr(dash, "usage", None) or {}
     last = passes[0] if passes else None

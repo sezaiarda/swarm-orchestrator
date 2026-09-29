@@ -12,8 +12,9 @@ Three properties get the most coverage:
 * **the headline counts live work, not history** — the ledger holds every phase
   the project ever had, most of them ancient ``skip`` entries, and averaging
   those in produces a number that cannot move;
-* **the ETA refuses rather than guesses** — a fabricated "2h left" from two data
-  points is worse than no number at all, and a stalled run must say so;
+* **the headline says what the forecast says** — every open phase book in one
+  line, what it was made on, and what waits on the owner; before the first
+  forecast lands it says it is working it out rather than inventing a time;
 * **nothing raises** — every builder is handed a swarm that never started, an
   empty ``Dash``, and garbage, because a panel that raises takes the cockpit
   with it.
@@ -27,7 +28,8 @@ from types import SimpleNamespace
 import pytest
 from textual.content import Content
 
-from swarm_orchestrator import pace as pace_mod
+from swarm_orchestrator.eta.forecast import Book, Forecast, Range, RowView
+from swarm_orchestrator.eta.plan import OWNER_RUN, Stuck
 from swarm_orchestrator.tui import data, home
 from swarm_orchestrator.tui import timeline as tl
 from swarm_orchestrator.tui.theme import BAD, COLOR, YOU
@@ -66,7 +68,8 @@ class FakeDash:
         self.contexts = kw.get("contexts", {})
         self.tail = SimpleNamespace(events=kw.get("events", []))
         self.finished = kw.get("finished", {})
-        self.pace = kw.get("pace")
+        self.forecast = kw.get("forecast")
+        self.deferred = kw.get("deferred", {})
         self.ticked = kw.get("ticked")
         self.cfg = kw.get(
             "cfg", SimpleNamespace(exclude=[], state_dir=None, project_dir=".", max_workers=4)
@@ -134,32 +137,22 @@ def test_set_text_skips_an_unchanged_assignment():
     assert spy.writes == 2
 
 
-# -- the ETA --------------------------------------------------------------
-def pace(per_hour=2.0, workers=2.0, phases=20, hours=9.5):
-    return pace_mod.Pace(phases=phases, hours=hours, per_hour=per_hour, workers=workers)
+# -- the forecast -----------------------------------------------------------
+H = 3600.0
 
 
-def test_eta_refuses_to_guess_from_too_little_data():
-    """Too few recent finishes is not a pace, and a made-up hour is worse than none."""
-    assert data.eta(None, 10, 4, running=2, ready=3) == data.TOO_FEW
-
-
-def test_eta_says_stalled_rather_than_inventing_a_clock():
-    """Nothing running and nothing ready is not slow — it is stuck."""
-    assert data.eta(pace(), 10, 4, running=0, ready=0) == "stalled"
-
-
-def test_eta_scales_the_pace_to_the_workers_there_are_now():
-    """Two phases an hour at two workers is one to two an hour at one: a range, not a point."""
-    assert data.eta(pace(), 4, 1, running=1, ready=3) == "~2–4h left"
-    assert data.eta(pace(), 4, 2, running=1, ready=3) == "~2h left"
-    # A pace of unknown concurrency is not scaled at all; the basis says it is rough.
-    assert data.eta(pace(workers=None), 4, 1, running=1) == "~2h left"
-    assert data.pace_basis(pace(workers=None), 1).startswith("rough pace")
-
-
-def test_eta_is_done_when_nothing_is_left():
-    assert data.eta(pace(), 0, 4, running=1, ready=1) == "done"
+def forecast(**kw) -> Forecast:
+    """A forecast the way the engine hands one over: two books, one behind the owner."""
+    books = kw.pop("books", (
+        Book("dash", 1, 8, 1, 2, finish=Range(NOW + 2 * H, NOW + 4 * H, NOW + 6 * H),
+             rows=(RowView("dash-W2", "running", "", Range(NOW + H, NOW + 2 * H, NOW + 3 * H)),)),
+        Book("rec", 0, 3, 0, 0, behind=3),
+    ))
+    base = dict(made_at=NOW, runs=500, workers=4, overall=Range(NOW + 2 * H, NOW + 4 * H,
+                                                                 NOW + 6 * H),
+                books=books, stuck=(Stuck("ivory-W0", OWNER_RUN, ("ivory-W1", "ivory-W2", "ivory-W3")),),
+                caps=(("week", 90.0, 80.0),), working=0.4)
+    return Forecast(**(base | kw))
 
 
 def test_fmt_coarse_never_claims_a_second():
@@ -218,42 +211,33 @@ def test_headline_says_when_the_big_picture_was_refreshed():
     assert "big picture 2.0h ago" in plain(home.headline(dash, 76))
 
 
-def test_headline_carries_an_eta_and_what_it_was_timed_on():
+def test_headline_carries_the_forecast_and_what_it_was_made_on():
     graph = {f"dash-W{i}": set() for i in range(1, 9)}
-    dash = FakeDash(
-        data.Snapshot(ok=True, done={"dash-W1": "ok"}, slots=[slot(0, "dash-W2")]),
-        graph=graph,
-        pace=pace(),
-    )
-    text = plain(home.headline(dash, 100))
-    assert "~4–7h left · done ~" in text  # 7 left at 2/h, scaled from 2 workers to 1
-    assert "pace: last 20 finishes in 10h" in text
-    assert "at 2 workers, 1 now" in text
-    assert "(from history)" not in text
+    dash = FakeDash(data.Snapshot(ok=True, done={"dash-W1": "ok"}, slots=[slot(0, "dash-W2")]),
+                    graph=graph, forecast=forecast())
+    text = plain(home.headline(dash, 160))
+    assert "7 rows left · done ~" in text
+    assert "simulated 500× · 4 workers · working 40% of the time" in text
+    assert "weekly cap pauses at 90% (80% now)" in text
+    assert "waiting on you: ivory-W0 holds 3 rows (ivory)" in text
 
 
-def test_headline_says_when_there_is_too_little_to_time():
+def test_headline_says_it_is_working_it_out_before_the_first_forecast():
     graph = {f"dash-W{i}": set() for i in range(1, 9)}
     dash = FakeDash(data.Snapshot(ok=True, slots=[slot(0, "dash-W1")]), graph=graph)
-    assert data.TOO_FEW in plain(home.headline(dash, 76))
+    assert "working out when" in plain(home.headline(dash, 76))
 
 
-def test_a_held_swarm_finishes_after_the_cap_lifts_and_a_paused_one_has_no_clock():
-    """"done ~16:28" while a weekly cap holds every worker until Wednesday is a lie."""
+def test_a_paused_swarm_is_forecast_as_if_resumed_and_a_held_one_says_until_when():
+    """"done ~16:28" for a swarm the owner paused is a lie; "if you resume now" is not."""
     graph = {f"dash-W{i}": set() for i in range(1, 5)}
-    lifts = NOW + 40 * 3600
-    snap = data.Snapshot(ok=True, slots=[slot(0, None, busy=False)], hold_until=lifts)
-    fc = data.forecast(pace(), 2, 1, ready=2)
-    left, basis = home.finish_text(fc, snap, pace(), 1, now=NOW)
-    assert left.startswith("~1–2h of work · done ~")
-    assert data.fmt_when_range(lifts + 3600, lifts + 7200, NOW) in left
-    assert "the cap lifts" in basis
-    paused = data.Snapshot(ok=True, paused=True)
-    assert home.finish_text(fc, paused, pace(), 1, now=NOW)[0] == "~1–2h of work · paused"
-    live = data.Snapshot(ok=True, slots=[slot(0, None, busy=False)],
-                         hold_until=time.time() + 40 * 3600)
-    full = plain(home.headline(FakeDash(live, graph=graph, pace=pace()), 100))
-    assert "of work · done ~" in full and "the cap lifts" in full
+    snap = data.Snapshot(ok=True, slots=[slot(0, None, busy=False)])
+    paused = plain(home.headline(FakeDash(snap, graph=graph, forecast=forecast(stopped="paused")),
+                                 160))
+    assert "paused · resume now and it is done ~" in paused
+    held = plain(home.headline(FakeDash(snap, graph=graph,
+                                        forecast=forecast(held_until=NOW + 40 * H)), 200))
+    assert "held by the cap until" in held
 
 
 def test_headline_says_how_many_done_rows_the_ledger_still_shows_open():
@@ -265,12 +249,21 @@ def test_headline_says_how_many_done_rows_the_ledger_still_shows_open():
     assert "4 / 6 phases" in text and "2 done but still open in the ledger" in text
 
 
-def test_headline_says_stalled_when_nothing_can_move():
-    """Every remaining phase depends on the one that failed: no ETA exists."""
+def test_headline_counts_a_failed_row_and_what_waits_behind_it():
+    """Every remaining phase depends on the one that failed: the forecast leaves it out."""
     graph = {"dash-W1": set(), "dash-W2": {"dash-W1"}}
     dash = FakeDash(data.Snapshot(ok=True, done={"dash-W1": "fail"}), graph=graph)
     text = plain(home.headline(dash, 76))
-    assert "stalled" in text and "1 failed" in text
+    assert "1 failed" in text and "1 blocked" in text
+
+
+def test_headline_counts_a_row_waiting_for_its_date_apart_from_ready():
+    """perf-F36 had `after:2026-10-01` and was counted ready: the launcher never runs it early."""
+    graph = {"perf-F35": set(), "perf-F36": set()}
+    snap = data.Snapshot(ok=True, slots=[slot(0, "perf-F35")])
+    text = plain(home.headline(FakeDash(snap, graph=graph, deferred={"perf-F36": "2026-10-01"}),
+                               100))
+    assert "1 running" in text and "1 waiting for a date" in text and "ready" not in text
 
 
 def test_headline_before_the_run_starts():

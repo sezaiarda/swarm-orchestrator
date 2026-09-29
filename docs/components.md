@@ -706,22 +706,36 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
   everything the campaign schedules, the same count as the web board and
   `swarm status`. An excluded row counts once it is done and is out of the count
   until then. The headline says how many done rows the ledger still shows `[ ]`;
-- the ETA: the rest of the campaign at the swarm's recent pace, a range. The pace
-  is the last 20 finishes of the past week, timed by the commit that ticked each
-  row (`git log` over the ledger, cached by `HEAD` in `<state>/cache/`), less the
-  paused, held and down time this machine's log recorded. It is scaled from the
-  worker count `.swarm.toml` had then to the one it has now; the headline says
-  what it was timed on, and says "too few recent finishes" rather than guess.
-  The chart of phases done reads the same history, so it runs to today;
+- the ETA, from the forecast engine (`swarm_orchestrator.eta`): 500 seeded
+  replays of the swarm working through the open ledger with the supervisor's own
+  pick (`ledger.ready`, in ledger order), each row's work time drawn from a
+  log-normal fitted to this machine's supervisor log and pooled by kind, repo and
+  campaign, `after:` dates, a scheduled pause, the usage caps projected at the
+  run's burn (the account's own 100% included), follow-up rows at each
+  campaign's recent rate, and the share of its capacity the swarm has delivered
+  over the last three days (the ledger's ticks on any machine, `git log` cached
+  by `HEAD` in `<state>/cache/`). Each campaign ("phase book") gets P50–P85
+  (P95 in its detail) for its last row in the shared schedule. Owner-run rows,
+  workers waiting on an answer, failed rows and everything behind them are left
+  out and listed as "waiting on you". It is computed on a thread of its own,
+  remade when the ledger, state, config or caps move and every 5 minutes while
+  rows run, and cached in `<state>/cache/eta.json` so the dashboard, the web
+  board and `swarm status` share one answer. Until the first replay lands, a
+  floor is shown (the longest chain, or the work over the workers). The method
+  and its backtest are in `docs/research/eta-engine-literature.md` and
+  `docs/research/eta-history/`. The chart of phases done reads the same git
+  history, so it runs to today;
 - the time since the last event, which turns amber after 30 minutes and red after
   2 hours while a slot is busy;
 - how many phases wait on you.
 
 `n` opens the **needs-you** drawer. `1`–`9` and `0` switch between the tabs:
 
-1. **home:** campaign headline, ETA, usage outlook, needs you, working now, a
-   chart of phases done, and a feed of finishes, decisions, answers, operator
-   outcomes and Overseer passes.
+1. **home:** the overall ETA with what it was made on and what waits on you,
+   usage outlook, needs you, the phase books (every campaign with rows left,
+   soonest finish first; `enter` opens one: its rows, what holds each, and P95),
+   working now, a chart of phases done, and a feed of finishes, decisions,
+   answers, operator outcomes and Overseer passes.
 2. **workers:** one row per slot. A busy slot whose pane died shows `gone`.
 3. **history:** every phase run, with what it did.
 4. **alerts:** the notification log. `F` cycles all, failed and delivered.
@@ -763,7 +777,9 @@ Failed, Excluded. Rows ticked in the ledger count as done, owner-run ones includ
   and recent finishes with their recaps.
 - **Card sheet:** the ledger row, recap, notes, dependencies, operator jobs and
   attempts. Deep links use `#phase=<id>`.
-- **Header:** usage meters, ETA, and the last Overseer pass.
+- **Header:** usage meters, the ETA and what waits on you (the dashboard's
+  forecast, word for word), and the last Overseer pass. Each campaign lane says
+  when it finishes.
 
 Updates arrive live over Server-Sent Events.
 

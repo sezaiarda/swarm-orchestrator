@@ -392,8 +392,9 @@ flowchart TD
   same.
 - **Runs:** a run lasts from `swarm up` to `swarm down`. `swarm reset` (or `R` in
   the dashboard) starts a new run without restarting anything, so usage counts
-  from now. The ETA does not reset: it is timed on the swarm's recent pace, read
-  from the ledger's git history, so phases built on another machine count too.
+  from now. The ETA does not reset: it is a simulation of the open ledger fitted
+  to past work times and to what the swarm lately delivered, read from the
+  ledger's git history, so phases built on another machine count too.
 - **`swarm usage`:** each run's hours, phases, average 5-hour and weekly %/h,
   windows spanned, and $/h. The figures are account-wide, so other Claude sessions
   on the same account count too.
@@ -430,7 +431,8 @@ A Textual app in window 0. It has a status bar (live, paused or down; slots;
 campaign progress; time since the last event) and a needs-you drawer (`n`). Its
 ten tabs, switched with `1`–`9` and `0`, are:
 
-- **home:** ETA, usage outlook, working now, and a feed;
+- **home:** ETA, usage outlook, every campaign's finish (the phase books),
+  working now, and a feed;
 - **workers**;
 - **history**;
 - **alerts:** Telegram sends, and the messages held back (`·`);

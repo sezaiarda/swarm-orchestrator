@@ -1921,21 +1921,36 @@ def _phase_standing(cfg: Config, st) -> dict:
     path = cfg.project_dir / cfg.ledger
     graph = ledger_mod.load(path)
     ticked = ledger_mod.load_ticked(path)
+    dated = ledger_mod.load_deferred(path, time.strftime("%Y-%m-%d", time.gmtime()))
     busy = {s.phase for s in st.busy_slots() if s.phase}
     landed = ledger_mod.with_ticked(st.done, ticked, busy | set(st.parked) | set(st.waiting))
-    t = campaign.overall(campaign.summarise(graph, landed, busy, set(cfg.exclude or []), ticked))
+    t = campaign.overall(campaign.summarise(graph, landed, busy, set(cfg.exclude or []), ticked,
+                                            dated))
     return {"done": t.built, "total": t.live_total, "held": t.held, "running": len(t.running),
-            "ready": len(t.ready), "blocked": t.blocked, "failed": t.failed,
+            "ready": len(t.ready), "blocked": t.blocked, "dated": t.dated, "failed": t.failed,
             "excluded": t.excluded}
 
 
 def _standing_line(n: dict) -> str:
     held = (f" ({n['held']} of them done by the swarm, still open in the ledger)"
             if n["held"] else "")
-    rest = " · ".join(f"{n[k]} {k}" for k in ("running", "ready", "blocked", "failed") if n[k])
+    words = {"dated": "waiting for a date"}
+    rest = " · ".join(f"{n[k]} {words.get(k, k)}"
+                      for k in ("running", "ready", "blocked", "dated", "failed") if n.get(k))
     excluded = f" · {n['excluded']} yours to do, not counted" if n["excluded"] else ""
     return (f"phases: {n['done']} of {n['total']} done{held}"
             f"{' · ' + rest if rest else ''}{excluded}")
+
+
+def _forecast(cfg: Config, st):
+    """``(forecast, "")`` — the dashboard's own, from its cache when it still
+    stands — or ``(None, why)``: a status line must never fail on a forecast."""
+    from .eta import engine as eta_engine
+
+    try:
+        return eta_engine.current(cfg, eta_engine.from_files(cfg, st)), ""
+    except Exception as exc:  # noqa: BLE001 - status reports; it does not crash
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> int:
@@ -1964,6 +1979,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["big_picture"] = bigpic_mod.status_text(cfg, bigpic_mod.load(cfg))
         data["owner_rows"] = [{"row": r, "blocks": n}
                               for r, n in owner_mod.current_owner_rows(cfg, st)]
+        fc, why = _forecast(cfg, st)
+        data["eta"] = fc.to_json() if fc is not None else {"unavailable": why}
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
@@ -1994,6 +2011,13 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         lines.append(f"push owed: {line}")
     lines.extend(caps.summary_for(cfg, st.usage_hold))
     lines.append(_standing_line(_phase_standing(cfg, st)))
+    fc, why = _forecast(cfg, st)
+    if fc is not None:
+        from .tui import books
+
+        lines.extend(books.status_lines(fc, time.time()))
+    else:
+        lines.append(f"eta: unavailable ({why})")
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
     lines.append(web_lifecycle.status_line(cfg))
     lines.append(tgbot.status_line(cfg))

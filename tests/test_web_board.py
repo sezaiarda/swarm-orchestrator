@@ -182,9 +182,9 @@ def test_header_counts_and_slots(feed):
     assert h["slots"] == {"busy": 2, "total": 3}
     assert h["eta"]["remaining"] == sum(
         1 for p, col in EXPECTED.items() if col in board_mod.OPEN)
-    # The same forecast as the TUI's: a range, what it was timed on, and when the
-    # clock may start; never the retired "(from history)".
-    assert {"seconds", "seconds_hi", "span", "basis", "starts_at", "paused"} <= set(h["eta"])
+    # The same forecast as the TUI's, in its words: the line, what it was made
+    # on, what waits on the owner, and the range as clock times.
+    assert {"text", "basis", "waiting", "critical", "p50", "p85", "p95"} <= set(h["eta"])
     assert "from_history" not in h["eta"]
     assert set(h["usage"]) == {"five", "week"}
     assert h["big_picture"] == {"text": "off · no pass yet", "at": 0.0}  # the suite turns it off
@@ -196,6 +196,9 @@ def test_ledger_ordering_and_done_newest_first(feed):
 
 
 def test_an_unchanged_rebuild_does_not_bump_the_version(feed):
+    # A forecast landing is a change; once it has, a rebuild is not.
+    assert feed.dash.eta.wait(30)
+    feed.refresh(force=True)
     v = feed.version
     assert feed.refresh(force=True) is False
     assert feed.version == v

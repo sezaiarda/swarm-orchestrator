@@ -40,6 +40,7 @@ before it is painted, or a stray bracket eats the line.
 
 from __future__ import annotations
 
+import math
 import time
 
 from rich.markup import escape
@@ -50,9 +51,10 @@ from textual.widgets import Static
 
 from ..drain import line as drain_line
 from ..pauseat import line as pause_line
+from . import books as books_mod
 from . import probes
 from . import timeline as tl
-from .campaign import active, summarise
+from .campaign import active, overall, summarise
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
 from .data import (
     CONTEXT_BUDGET,
@@ -62,12 +64,7 @@ from .data import (
     fmt_coarse,
     fmt_duration,
     open_drops,
-    fmt_range,
     fmt_stamp,
-    fmt_when,
-    fmt_when_range,
-    forecast,
-    pace_basis,
     held_merge,
     phase_eta,
     usage_outlook,
@@ -193,11 +190,13 @@ def set_text(widget, text: str) -> None:
 
 # -- headline -------------------------------------------------------------
 def headline(dash, width: int = 76, compact: bool = False) -> str:
-    """The page title: what is being built, how far along, how long left.
+    """The page title: how far along every open phase book is, and when it lands.
 
     Unbordered on purpose. A box around the title of the page is a box for its
-    own sake, and this screen only spends borders on things that move.
-    ``compact`` (a short terminal) drops the campaign's description and puts the
+    own sake, and this screen only spends borders on things that move. The
+    books themselves are the panel under it (:func:`book_rows`); this is the
+    whole ledger in one line, what the forecast was made on, and what waits on
+    the owner. ``compact`` (a short terminal) drops the basis and puts the
     usage windows on one line, so the feed still fits on an 80x24 screen.
     """
     snap = dash.snapshot
@@ -205,31 +204,26 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     camps = [
         c for c in summarise(dash.graph or {}, snap.landed, busy, excluded,
-                             getattr(dash, "ticked", None))
+                             getattr(dash, "ticked", None), getattr(dash, "deferred", None))
         if c.live_total > c.skipped  # a campaign of nothing but skips is noise
     ]
     if not camps:
         return PAD + paint("no phases scheduled — check the ledger", MUTED)
-
-    cur = active(camps) or camps[0]
+    books = [c for c in camps if not c.complete] or camps
+    cur = overall(books)
     inner = max(30, width - len(PAD))
+    title = f"phase books ({len(books)} open)" if len(books) > 1 else books[0].name
     count = f"{cur.built} / {cur.live_total} phases · {cur.pct:.0f}%"
-    gap = max(2, inner - len(cur.name) - len(count))
-    first = f"{PAD}[b]{escape(cur.name)}[/b]{' ' * gap}{paint(count, MUTED)}"
-    # What the campaign *is*, in the ledger's own words — a name like `look`
-    # says nothing to someone who did not write the ledger.
-    what = (getattr(dash, "campaign_what", None) or {}).get(cur.name, "")
+    gap = max(2, inner - len(title) - len(count))
+    first = f"{PAD}[b]{escape(title)}[/b]{' ' * gap}{paint(count, MUTED)}"
 
-    workers = len(snap.slots) or int(getattr(dash.cfg, "max_workers", 0) or 0)
-    pace = getattr(dash, "pace", None)
-    fc = forecast(pace, cur.live_total - cur.built, workers,
-                  running=len(cur.running), ready=len(cur.ready))
-    finish_in = fc.latest
-    left, basis = finish_text(fc, snap, pace, workers)
+    now = time.time()
+    fc = getattr(dash, "forecast", None)
+    left = books_mod.overall_line(fc, now) if fc is not None else "working out when…"
     fill = OK if cur.complete else (INFO if cur.running or cur.ready else MUTED)
     second = (
         f"{PAD}{paint(bar(cur.built, max(1, cur.live_total), max(10, inner - len(left) - 2)), fill)}"
-        f"  {paint(left, WARN if left == 'stalled' else MUTED)}"
+        f"  {paint(left, MUTED)}"
     )
 
     counts = []
@@ -239,6 +233,8 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
         counts.append(paint(f"{len(cur.ready)} ready", READY))
     if cur.blocked:
         counts.append(paint(f"{cur.blocked} blocked", BLOCKED))
+    if cur.dated:
+        counts.append(paint(f"{cur.dated} waiting for a date", BLOCKED))
     if cur.failed:
         counts.append(paint(f"{cur.failed} failed", BAD))
     if not counts:
@@ -251,16 +247,19 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
         counts.append(paint(f"{cur.held} done but still open in the ledger", MUTED))
     if getattr(dash, "big_picture", ""):
         counts.append(paint(escape(dash.big_picture), MUTED))
-    lines = [first]
-    if what and not compact:
-        lines.append(PAD + paint(escape(clip(what, inner)), MUTED))
-    lines.append(second)
-    if basis and not compact:
-        lines.append(PAD + paint(clip(basis, inner), MUTED))
+    lines = [first, second]
+    if fc is not None and not compact:
+        lines.append(PAD + paint(clip(books_mod.basis_line(fc, now), inner), MUTED))
+    waiting = books_mod.waiting_line(fc) if fc is not None else ""
+    if waiting:
+        lines.append(PAD + paint(escape(clip(waiting, inner)), YOU))
     lines.append(PAD + " · ".join(counts))
     # Only once a worker's status line has reported: a run launched before the
     # meters tap existed would otherwise carry a permanent "not reported" line.
     if getattr(dash, "meters", None):
+        finish_in = None
+        if fc is not None and fc.overall is not None and math.isfinite(fc.overall.p85):
+            finish_in = max(0.0, fc.overall.p85 - now)
         outlook = usage_outlook(getattr(dash, "limits", None),
                                 getattr(dash, "usage", None), finish_in)
         if compact and outlook:
@@ -274,31 +273,40 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     return rows(*lines)
 
 
-def finish_text(fc, snap, pace, workers: int, now: float | None = None) -> tuple[str, str]:
-    """``(time left, what it was timed on)`` for the headline.
-
-    The clock starts when the swarm can next work: a usage cap that holds it
-    until Wednesday does not let it finish this afternoon, and a paused swarm
-    finishes whenever the owner resumes it, which no clock can say.
-    """
-    if fc.soonest is None or fc.latest <= 0:
-        return fc.label, ""
-    now = time.time() if now is None else now
-    span = fmt_range(fc.soonest, fc.latest)
-    basis = pace_basis(pace, workers)
-    if snap.paused:
-        return f"{span} of work · paused", basis
-    start = now
-    if snap.hold_until > now:
-        start = snap.hold_until
-        basis = f"{basis} · the cap lifts {fmt_when(start, now)}" if basis else ""
-        left = f"{span} of work"
-    else:
-        left = f"{span} left"
-    return f"{left} · done ~{fmt_when_range(start + fc.soonest, start + fc.latest, now)}", basis
+#: Phase books listed on a short terminal before the rest become "+n more".
+SHORT_BOOKS = 4
 
 
-# -- working now ----------------------------------------------------------
+def book_rows(dash, width: int = 76, selected: str | None = None,
+              limit: int | None = None) -> list[tuple]:
+    """``(text, None, name)`` per open phase book, soonest finish first."""
+    fc = getattr(dash, "forecast", None)
+    if fc is None:
+        return [(PAD + paint("working out when each phase book finishes…", MUTED), None, None)]
+    now = time.time()
+    books = list(fc.books)[:limit] if limit else list(fc.books)
+    out = []
+    for b in books:
+        text = books_mod.book_line(b, fc, now, width - 2)
+        tone = INFO if b.running else (READY if b.ready else MUTED)
+        mark = "▸ " if b.name == selected else "  "
+        out.append((mark + paint(escape(text), tone), None, b.name))
+    if not out:
+        out.append((PAD + paint("every phase book is done", OK), None, None))
+    return out
+
+
+def book_detail(dash, name: str) -> str:
+    """The detail of one phase book, for :class:`Home.OpenText`."""
+    fc = getattr(dash, "forecast", None)
+    book = next((b for b in (fc.books if fc else ()) if b.name == name), None)
+    if book is None:
+        return f"{name}: no forecast yet"
+    what = (getattr(dash, "campaign_what", None) or {}).get(name, "")
+    body = books_mod.detail(book, fc, time.time())
+    return f"{what}\n\n{body}" if what else body
+
+
 #: Cells for a row's ETA: ``~1h 20m`` or ``+1h 20m``.
 ETA_W = 8
 
@@ -460,11 +468,12 @@ def next_lines(dash, width: int = 44, limit: int = 6) -> list[str]:
     snap = dash.snapshot
     busy = {s.phase for s in snap.slots if s.busy and s.phase}
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
+    dated = getattr(dash, "deferred", None) or {}
     graph = dash.graph or {}
-    camps = summarise(graph, snap.landed, busy, excluded)
+    camps = summarise(graph, snap.landed, busy, excluded, deferred=dated)
     cur = active(camps)
     waiting = {b.phase for b in snap.blockers}
-    items = tl.upcoming(graph, snap.landed, busy, excluded, waiting,
+    items = tl.upcoming(graph, snap.landed, busy, excluded | set(dated), waiting,
                         prefer=cur.name if cur else None, limit=limit)
     if not items:
         return [paint("nothing left to run — the ledger is built", OK if graph else MUTED)]
@@ -828,6 +837,9 @@ class Home(Vertical):
     DEFAULT_CSS = """
     Home { height: 1fr; overflow-y: auto; padding: 0 1; scrollbar-gutter: stable; }
     Home > #headline { margin: 0 0 1 0; }
+    #p-books { margin-bottom: 1; }
+    #book-rows { height: auto; }
+    Home.-short #p-books { margin-bottom: 0; }
     Home.-short #p-chart { display: none; }
     Home.-short #p-work { margin-right: 0; }
     Home.-short > #headline, Home.-short #p-needs { margin-bottom: 0; }
@@ -897,6 +909,8 @@ class Home(Vertical):
         yield Body(id="headline")
         with Panel("needs you", id="p-needs", state="you"):
             yield Vertical(id="need-rows")
+        with Panel("phase books", id="p-books"):
+            yield Vertical(id="book-rows")
         with Horizontal(id="home-row"):
             with Panel("working now", id="p-work"):
                 yield Vertical(id="work-rows")
@@ -930,6 +944,9 @@ class Home(Vertical):
         dash = self._dash
         if kind == "work":
             self.post_message(self.OpenPhase(phase, key))
+            return
+        if kind == "book":
+            self.post_message(self.OpenText(f"phase book {key}", book_detail(dash, key)))
             return
         ref = getattr(item, "ref", "")
         is_pass = (kind == "feed" and item.kind == tl.OVERSEER) or (
@@ -1006,6 +1023,18 @@ class Home(Vertical):
             panel.set_title(f"needs you ({len(self._needs)})",
                             f"+{extra} more · n lists them" if extra > 0 else "enter opens")
 
+        limit = SHORT_BOOKS if short else None
+        books = self._build(lambda: book_rows(dash, inner, key if kind == "book" else None, limit))
+        self._rows("#book-rows", books, "book")
+        panel = self._panel("#p-books")
+        if panel is not None:
+            fc = getattr(dash, "forecast", None)
+            total = len(fc.books) if fc is not None else 0
+            extra = total - SHORT_BOOKS if short else 0
+            panel.set_title(f"phase books ({total})" if total else "phase books",
+                            f"+{extra} more · enter opens" if extra > 0 else
+                            "soonest first · enter opens" if total else "")
+
         work = self._build(lambda: worker_rows(dash, half, key if kind == "work" else None))
         self._rows("#work-rows", work, "work")
 
@@ -1053,8 +1082,12 @@ class Home(Vertical):
             self._feed_key = fkey
             self._feed = tl.build_feed(*sources)
         self._needs = tl.needs_you(dash)
+        fc = getattr(dash, "forecast", None)
+        short = 0 < self.app.size.height < SHORT_ROWS
+        books = list(fc.books) if fc is not None else []
         self._targets = (
             [("need", n.key, n.phase, n) for n in self._needs[:MAX_NEEDS]]
+            + [("book", b.name, None, b) for b in (books[:SHORT_BOOKS] if short else books)]
             + [("work", s.id, s.phase, None) for s in snap.slots if s.busy and s.phase]
             + [("feed", feed_key(f), f.phase, f) for f in self._feed[:FEED_ROWS]]
         )

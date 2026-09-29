@@ -16,6 +16,7 @@ from .. import runs as runs_mod
 from .. import state as state_mod
 from .. import telegram
 from .. import usage as usage_mod
+from ..eta import engine as eta_mod
 from ..meters import LIMITS_LOG, METERS_DIR
 from . import probes
 from .data import (
@@ -36,7 +37,6 @@ from .data import (
     fmt_clock,
     fmt_duration,
     fmt_stamp,
-    idle_spans,
     integration_holds,
     launch_times,
     live_meters,
@@ -52,6 +52,7 @@ from .data import (
     phase_durations,
     question_index,
     read_state,
+    load_deferred,
     load_graph,
     load_kept,
     load_ticked,
@@ -115,11 +116,18 @@ class Dash:
         #: The project's git history of ticks and worker counts (:mod:`pace`).
         self.ledger_history = pace_mod.History()
         #: Every done phase -> when it finished, wherever it was built; the
-        #: chart and the pace read this, never this machine's log alone.
+        #: chart reads this, never this machine's log alone.
         self.finished: dict[str, float] = {}
         self.bulk: set[str] = set()
-        #: The swarm's recent throughput, or ``None`` when too little is recent.
-        self.pace: pace_mod.Pace | None = None
+        #: Open rows whose ``after:`` date is still ahead, and the UTC day it was read.
+        self.deferred: dict[str, str] = {}
+        self._deferred_day = ""
+        #: The forecast worker (:mod:`swarm_orchestrator.eta`); views read
+        #: :attr:`forecast`, never wait on it.
+        self.eta = eta_mod.Engine(cfg)
+        self._eta_seen = 0
+        self._rebuilds = 0
+        self._state: dict | None = None
         #: The open run's usage summary (legacy period when no run is open).
         self.usage: dict | None = None
         #: Closed runs' stored summaries, newest first — the runs tab.
@@ -230,6 +238,11 @@ class Dash:
             self.ticked = load_ticked(self.cfg)
             self.campaign_what = campaign_lines(self.cfg)
             changed.add("ledger")
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if ledger_moved or today != self._deferred_day:
+            self._deferred_day = today
+            self.deferred = load_deferred(self.cfg)
+            changed.add("ledger")
         # A tick or a worker-count change lands as a commit; git is asked only
         # when one of the two files moved, and answers from a cache keyed on HEAD.
         if self._changed("config", self.config_path) | ledger_moved:
@@ -253,7 +266,36 @@ class Dash:
             self._usage_at = now
             self.usage = self._run_usage(now)
             changed.add("usage")
+        self._ask_eta(now)
+        if self.eta.version != self._eta_seen:
+            self._eta_seen = self.eta.version
+            changed.add("eta")
         return changed
+
+    @property
+    def forecast(self):
+        """The latest :class:`~swarm_orchestrator.eta.forecast.Forecast`, or
+        ``None`` before the first one has been made."""
+        return self.eta.result
+
+    def _ask_eta(self, now: float) -> None:
+        """Hand the forecast worker what moved; it gathers and simulates on its
+        own thread, so this is a tuple comparison on the render path."""
+        state = self._state
+        if not isinstance(state, dict):
+            return
+        busy = any(s.busy for s in self.snapshot.slots)
+        stamp = (self._rebuilds, len(self._samples.samples), self._deferred_day,
+                 int(now // eta_mod.RECOMPUTE_S) if busy else 0)
+        cfg, events, history = self.cfg, self.tail.events, self.history
+        ledger_history, samples = self.ledger_history, self._samples.samples
+
+        def make():
+            return eta_mod.gather(cfg, state_mod.State.from_dict(state), events=events,
+                                  history=history, ledger_history=ledger_history,
+                                  usage=samples, now=time.time())
+
+        self.eta.request(stamp, make)
 
     def _poll_kept(self, now: float) -> bool:
         """Re-read the kept records when their dir moved, or a death may have gone unseen.
@@ -307,6 +349,8 @@ class Dash:
     def _rebuild(self) -> None:
         events = self.tail.events
         state = read_state(self.cfg)
+        self._state = state if isinstance(state, dict) else None
+        self._rebuilds += 1
         st = state if isinstance(state, dict) else {}
         # A pass parked on the owner is alive too, in a window of its own.
         parked = {ident for kind, ident in map(state_mod.waiter, st.get("parked") or [])
@@ -322,6 +366,7 @@ class Dash:
             started_at=run_started_at(events),
             operator=self.operator,
             ticked=self.ticked,
+            deferred=self.deferred,
         )
         self.history = build_history(
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes,
@@ -330,9 +375,6 @@ class Dash:
         self.eta_runs, _ = eta_sample(self.history, self.epoch)
         self.finished, self.bulk = finish_times(
             self.snapshot.landed, self.ticked, self.ledger_history, self.history)
-        now = time.time()
-        self.pace = pace_mod.measure(self.finished, self.bulk, idle_spans(events, now),
-                                     self.ledger_history.workers, now)
 
     def probe(self, now: float | None = None) -> None:
         """Refresh the live probes. Runs on a worker thread — never on the UI.

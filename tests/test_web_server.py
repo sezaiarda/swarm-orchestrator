@@ -101,6 +101,16 @@ def test_search_endpoint(srv):
     assert code == 200 and json.loads(body)["ids"] == ["al-W2"]
 
 
+def _settled(srv) -> None:
+    """Let the first forecast land and the feed take it in: a forecast landing is
+    a real change, and after it nothing in this fixture moves."""
+    assert srv.feed.dash.eta.wait(30)
+    v = -1
+    while v != srv.feed.version:
+        v = srv.feed.version
+        time.sleep(0.3)
+
+
 def _read_event(resp, deadline: float) -> dict | None:
     """The next ``event: board`` payload off an SSE stream, or None at the deadline."""
     event = None
@@ -117,6 +127,7 @@ def _read_event(resp, deadline: float) -> dict | None:
 
 
 def test_sse_pushes_a_new_version_when_state_changes(srv):
+    _settled(srv)
     conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
     conn.request("GET", "/events")
     resp = conn.getresponse()
@@ -149,6 +160,7 @@ def test_sse_sends_heartbeats(srv, monkeypatch):
 
 def test_many_clients_share_one_board(srv):
     """Ten clients cost one build: the version does not move per request."""
+    _settled(srv)
     v = srv.feed.version
     for _ in range(10):
         assert _get(srv, "/api/board")[0] == 200

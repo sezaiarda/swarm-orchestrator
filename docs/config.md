@@ -137,6 +137,15 @@ launch and released when it merges, is discarded or skipped, or is freed. `swarm
 `lanes`, and `swarm why <row>` names the phase a waiting row waits for. A row whose touches do not parse
 never launches and is listed under `ledger_issues`.
 
+Landing re-tests the combination. When a finished phase changed a repo whose main gained
+anything but `commons` since the phase branched, the integrator takes that repo's landing lock, merges
+main into the phase's own worktree and runs `check` there, detached (`swarm _lane-check`); the queue
+lands other phases meanwhile, and nothing else lands in that repo until this one does. Green, it lands
+the tree that was tested. Red, a timeout or a text conflict holds the queue and opens the resolver on the
+worktree, never on your checkout; `swarm resolved <phase>` merges main again and re-checks. Files a phase
+changed outside its lane (its touches, anything added with `swarm widen`, and `commons`) are noted in its
+history and in the next Overseer digest; that never holds a merge.
+
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `enabled` | `false` | `SWARM_LANES` | restart | Schedule by touches. Off, the launcher is exactly the one-row-per-ready-slot launcher, and `state.json` gains no `lanes` key. |

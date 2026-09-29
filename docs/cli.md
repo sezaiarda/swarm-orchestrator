@@ -55,6 +55,7 @@ exact flags.
 | `done <phase> [ok\|operator\|fail\|blocked\|later] ["recap"] [--after YYYY-MM-DD] [--force]` | Signal completion. Writes the sentinel, then pings, routes and pokes as the status says. `blocked` and `later` are handled as `fail`; `blocked` phases that finish close together share one ping; `later` pings nobody and, with `--after`, keeps the row from running before that date. The recap is also queued for the ledger (below). Refused, before anything is written, for a malformed phase id, a phase no worker is running, or (inside a worker) a phase other than the worker's own. A repeat for a phase already recorded is a no-op. |
 | `waiting <who> ["question"]` | Tell the owner you are blocked on them: `<who>` is a worker's phase, an operator job's id, or `overseer`. Pings once, arms the park timer. |
 | `resumed <who> ["answer"]` | The owner answered. Records the answer as an owner decision and cancels the park. |
+| `widen <phase> <touch…>` | Add touches (the [`touches:`](config.md#lanes) grammar) to the lane `<phase>` holds, so the launcher keeps rows that overlap them waiting. Run it before editing outside your declared lane (`$SWARM_TOUCHES`). The lane only grows: it starts from what the phase holds now. Prints `<holder> holds <touch>: your merge will be re-tested against it and may need a resolver` for each phase in flight already holding an overlapping touch. Exit 0 once the touches are recorded, whatever it printed; 2, recording nothing, for a touch that does not parse or a phase not in flight. |
 | `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |
 | `build <cmd…>` | Run a heavy build through the swarm-wide gate. |
 | `notify "message"` | Message the owner through the swarm's own sender, the only way a session should. |
@@ -122,3 +123,5 @@ Sent by the tooling; you rarely type these.
 | `master-idle` | The init pass is finished. |
 | `_supervise` | The supervisor process itself. |
 | `_poke-done <phase> <status>` | The delayed `done` poke a `done_grace_s` child delivers. |
+| `_lane-check <phase> <repo>` | The landing re-test under lanes, started detached by the integrator. Runs `[lanes].check` for `<repo>` (its name, `.` for the project repo; else `check["*"]`, else nothing) in `<phase>`'s own worktree, through the build semaphore, for at most `check_timeout_s` (a timeout is red). Writes `<state>/landing/<phase>.<repo>.log` and pokes `lane-checked <phase> <repo> ok\|fail`. Exit 0 green, 1 red, 2 unknown repo. |
+| `lane-checked <phase> <repo> ok\|fail` | The FIFO event `_lane-check` sends: the supervisor looks at the merge queue again. |

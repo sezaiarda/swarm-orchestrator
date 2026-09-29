@@ -57,6 +57,7 @@ from . import doctor as doctor_mod
 from . import drain as drain_mod
 from . import gc as gc_mod
 from . import gitq
+from . import landing as landing_mod
 from . import launch as launch_mod
 from . import master as master_mod
 from . import operator as operator_mod
@@ -383,6 +384,10 @@ class Supervisor:
             self._on_master_idle()
         elif verb == "resolved":
             self._on_resolved(parts[1] if len(parts) > 1 else "?")
+        elif verb == "lane-checked":
+            # `swarm _lane-check`: the result is on disk; the poke is the wake.
+            self.log.line(f"EVENT {line}")
+            self._pump_integrations()
         elif verb == "resolver-escalated":
             self._on_resolver_escalated(parts[1] if len(parts) > 1 else "?")
         elif verb == "waiting":
@@ -782,12 +787,22 @@ class Supervisor:
         in ``pushes`` and the phase counts as integrated (its merges are on local
         main, which is all the next worker branches from). The debt is settled
         by :mod:`pushowed` — recorded, pinged once, and retried here after every
-        integration for the repos this one did not already push."""
+        integration for the repos this one did not already push.
+
+        With lanes on, a phase whose landing check runs, or whose repo another
+        phase's landing holds, is skipped for this pass (lanes): the next
+        one lands meanwhile, and the check's ``lane-checked`` poke pumps again.
+        With lanes off nothing is ever skipped, so this is head-first as ever."""
+        skipped: set[str] = set()
         while True:
             with state_mod.transaction(self.cfg) as st:
                 if st.integ_blocked is not None or not st.integ_queue:
                     return
-                phase, status = st.integ_head()
+                todo = [p for p in st.integ_queue if p not in skipped]
+                if not todo:
+                    return
+                phase = todo[0]
+                status = st.integ_status.get(phase, "ok")
                 already = phase in st.done
                 has_slot = any(s.busy and s.phase == phase for s in st.slots)
             if already and not has_slot:
@@ -807,8 +822,12 @@ class Supervisor:
             # Before the hold/advance: a repo that merged and failed to push owes
             # it even when a later repo of the same phase then conflicts.
             pushowed.settle(self.cfg, phase, pushes, self.log)
+            if result in gitq.LANE_PENDING:
+                skipped.add(phase)
+                continue
             if result == gitq.MERGED:
                 self._dequeue(phase)
+                skipped.clear()  # a phase waiting on this one's landing may go now
                 if status == operator_mod.INTEG_STATUS:
                     # An operator job's mirror, not a ledger phase: its work is
                     # landed, and there is nothing to record done or free.
@@ -826,17 +845,21 @@ class Supervisor:
                 continue
             # A conflict OR a dirty tree leaves an identifiable repo to clear; a
             # push failure leaves the tree clean (nothing to resolve — retry).
-            repo = (
-                gitq.blocked_repo(self.cfg, phase)
-                if result in (gitq.CONFLICT, gitq.DIRTY)
-                else None
-            )
+            if result in gitq.LANE_HOLDS:
+                hit = landing_mod.blocked(self.cfg, phase)
+                repo = hit[1] if hit else None  # the phase's worktree, not the checkout
+            else:
+                repo = (
+                    gitq.blocked_repo(self.cfg, phase)
+                    if result in (gitq.CONFLICT, gitq.DIRTY)
+                    else None
+                )
             self._hold(phase, result, repo, None)  # head stays queued, queue held
             return
 
     def _dequeue(self, phase: str) -> None:
         with state_mod.transaction(self.cfg) as st:
-            st.integ_pop(phase)
+            st.integ_drop(phase)  # the head, unless lanes landed a later one
 
     def _hold(
         self, phase: str, kind: str, repo: Path | None, detail: str | None
@@ -858,7 +881,9 @@ class Supervisor:
             st.integ_blocked_kind = kind
             st.integ_blocked_repo = str(repo) if repo is not None else None
         held = None
-        if kind == gitq.CONFLICT and repo is not None:
+        if kind in gitq.LANE_HOLDS:
+            msg, held = self._hold_lane(phase, kind)
+        elif kind == gitq.CONFLICT and repo is not None:
             pane = resolver_mod.spawn(self.cfg, phase, repo, self.log)
             if pane is not None:
                 with state_mod.transaction(self.cfg) as st:
@@ -901,16 +926,43 @@ class Supervisor:
             suppressed=held,
         )
 
+    def _hold_lane(self, phase: str, kind: str) -> tuple[str, str | None]:
+        """Open the resolver on the phase's own worktree for a lane hold, and
+        say so. The owner's checkout was never touched: it is clean on main."""
+        brief = landing_mod.resolver_brief(self.cfg, phase)
+        what = ("its catch-up merge conflicts with work that landed beside it"
+                if kind == gitq.LANE_CONFLICT else
+                "its re-test against work that landed beside it failed")
+        pane = None
+        if brief is not None:
+            pane = resolver_mod.spawn(self.cfg, phase, brief[0], self.log, line=brief[1])
+        if pane is not None:
+            with state_mod.transaction(self.cfg) as st:
+                st.windows[f"resolve:{phase}"] = pane
+            held = telegram.hold(self.cfg, "a resolver is on it; it tells you if it cannot fix it")
+            return (f"swarm: {phase} cannot land yet: {what}, so all merging is paused."
+                    f" A resolver is fixing it on the phase's own copy in tmux window"
+                    f" resolve-{phase} and restarts merging when done; it tells you if it"
+                    " cannot. Nothing to do yet"), held
+        where = f" in {brief[0]}" if brief is not None else ""
+        return (f"swarm: {phase} cannot land yet: {what}, so all merging is paused, and"
+                f" the resolver would not start. Fix it on the phase's own copy{where},"
+                f" commit there, then run `swarm resolved {phase}`"), None
+
     # -- resolved: finish a blocked integration, resume the queue ---------
     def _on_resolved(self, phase: str) -> None:
         with state_mod.transaction(self.cfg) as st:
             blocked = st.integ_blocked
             repo_s = st.integ_blocked_repo
+            kind = st.integ_blocked_kind
         if blocked != phase:
             self.log.line(f"RESOLVED-IGNORED expected={blocked} got={phase}")
             return
         repo = Path(repo_s) if repo_s else None
-        if repo is not None and not gitq.resolve_ready(self.cfg, repo):
+        lane_hold = kind in gitq.LANE_HOLDS
+        ready = (landing_mod.resolve_ready(repo) if lane_hold
+                 else gitq.resolve_ready(self.cfg, repo))
+        if repo is not None and not ready:
             # Resolver / owner signalled early (still mid-merge or dirty): stay blocked.
             self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked")
             self.overseer.resolver_escalated(phase)
@@ -924,6 +976,8 @@ class Supervisor:
                 source="supervisor._on_resolved",
             )
             return
+        if lane_hold:
+            landing_mod.retest(self.cfg, phase)  # merge main again, check again
         with state_mod.transaction(self.cfg) as st:
             st.integ_blocked = None
             st.integ_blocked_repo = None
@@ -1184,6 +1238,11 @@ class Supervisor:
             st = state_mod.read(self.cfg)  # slots changed under us
         if st.push_owed:
             pushowed.retry(self.cfg, self.log, min_gap=pushowed.TICK_RETRY_S)
+        if st.landing and st.integ_queue and st.integ_blocked is None:
+            # A landing check that died without a result, or a `lane-checked`
+            # poke no supervisor was there to read: the queue looks again.
+            self._pump_integrations()
+            st = state_mod.read(self.cfg)
         # Reports the checkout could not take earlier, and `later` rows whose
         # date has come.
         self._flush_ledger(dict(st.done))

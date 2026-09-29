@@ -42,6 +42,8 @@ from . import report as report_mod
 from . import why as why_mod
 from . import gitq
 from . import keep as keep_mod
+from . import lanes as lanes_mod
+from . import landing as landing_mod
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import launch as launch_mod
@@ -137,6 +139,9 @@ def _reconcile_orphans(cfg: Config) -> None:
             log.line(f"RECONCILE-ERROR {exc}")
             result = gitq.ReconcileResult()
         held_phases = {h.phase for h in result.held}
+        # A landing under way under lanes is not done either: it goes back on the
+        # queue, and the supervisor lands it when its check reports.
+        held_phases |= set(result.landing)
         if seed or result.integrated:
             with state_mod.transaction(cfg) as s:
                 for phase, status in seed.items():
@@ -154,6 +159,11 @@ def _reconcile_orphans(cfg: Config) -> None:
             print(f"landed operator/overseer mirrors: {', '.join(result.operator_integrated)}")
         for phase, pushes in result.pushes.items():
             pushowed.settle(cfg, phase, pushes, log)  # a failed push is owed, not held
+        if result.landing:
+            with state_mod.transaction(cfg) as s:
+                for phase in result.landing:
+                    s.integ_push(phase, seed.get(phase, "ok"))
+            print(f"landing under way (lanes): {', '.join(result.landing)}")
         if result.held:
             first = result.held[0]
             plan = operator_mod.mirror_plan(cfg)
@@ -1427,6 +1437,40 @@ def cmd_resolved(cfg: Config, phase: str) -> int:
     return 0
 
 
+def cmd_widen(cfg: Config, phase: str, texts: list[str]) -> int:
+    """Add touches to the lane a phase in flight holds.
+
+    A worker runs it before editing outside its declared lane, so the scheduler
+    keeps overlapping rows waiting instead of launching them into its files. It
+    never refuses over an overlap with another phase in flight (that work is
+    already running); it names each holder, whose merge the widened phase will
+    be re-tested against. The snapshot only grows: with none yet, it starts from
+    the lane the phase holds now. With lanes off there is no lane to widen, and
+    nothing is written: a lanes-off run keeps ``state.json`` free of lane keys.
+    """
+    if not cfg.lanes_enabled:
+        print("swarm widen: lanes are off, so there is no lane to widen; nothing recorded")
+        return 0
+    try:
+        known = launch_mod.known_lanes(cfg)
+        touches = [lanes_mod.parse_touch(t, known) for t in texts]
+    except lanes_mod.LaneError as exc:
+        print(f"swarm widen: {exc}", file=sys.stderr)
+        return 2
+    with state_mod.transaction(cfg) as st:
+        held = launch_mod.lane_view(cfg, st).held
+        if phase not in held:
+            print(f"swarm widen: {phase} is not in flight", file=sys.stderr)
+            return 2
+        st.lanes[phase] = sorted({str(t) for t in (*held[phase], *touches)})
+    for holder in sorted(p for p in held if p != phase):
+        pair = lanes_mod.collide(touches, held[holder])
+        if pair is not None:
+            print(f"{holder} holds {pair[1]}: your merge will be re-tested against it"
+                  " and may need a resolver")
+    return 0
+
+
 def cmd_waiting(cfg: Config, who: str, note: str) -> int:
     """Self-report that this session is blocked on the owner: one ping saying
     what is asked and which window to open, then a park deadline
@@ -2084,6 +2128,10 @@ def _build_parser() -> argparse.ArgumentParser:
         func=lambda cfg, a: cmd_master_idle(cfg))
     sub.add_parser("bootstrap", help="ask the supervisor to spawn the init master").set_defaults(
         func=lambda cfg, a: cmd_bootstrap(cfg))
+    lc = sub.add_parser("_lane-check")  # detached by the landing
+    lc.add_argument("phase")
+    lc.add_argument("repo", help="the repo's lane: its name, '.' for the umbrella")
+    lc.set_defaults(func=lambda cfg, a: landing_mod.run_check(cfg, a.phase, a.repo))
     pd = sub.add_parser("_poke-done")
     pd.set_defaults(func=lambda cfg, a: cmd_poke_done(cfg, a.phase, a.status))
     pd.add_argument("phase")
@@ -2092,6 +2140,12 @@ def _build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("resolved", help="signal a merge-conflict resolver finished")
     rp.add_argument("phase")
     rp.set_defaults(func=lambda cfg, a: cmd_resolved(cfg, a.phase))
+
+    wdp = sub.add_parser(
+        "widen", help="add touches to a running phase's lane, before editing outside it")
+    wdp.add_argument("phase")
+    wdp.add_argument("touches", nargs="+", metavar="touch")
+    wdp.set_defaults(func=lambda cfg, a: cmd_widen(cfg, a.phase, a.touches))
 
     wp = sub.add_parser(
         "waiting", help="report this session is blocked on the owner (pings; may park it)"

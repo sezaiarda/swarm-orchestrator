@@ -21,7 +21,9 @@ import fcntl
 import os
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from .config import Config
 
@@ -90,6 +92,22 @@ def run(cfg: Config, argv: list[str]) -> int:
     _acquire(cfg)  # held via the inherited fd; released when the exec'd build dies
     _exec(cfg, argv)
     return 127
+
+
+@contextmanager
+def slot(cfg: Config) -> Iterator[None]:
+    """Hold one build slot for the body, in this process: for a build the swarm
+    runs itself and waits on (a landing's lane check), not one it execs. The fd
+    is not inherited, so a daemon the build leaves behind cannot keep the slot."""
+    if cfg.build_max_concurrent < 1:
+        yield
+        return
+    fd = _acquire(cfg)
+    os.set_inheritable(fd, False)
+    try:
+        yield
+    finally:
+        os.close(fd)
 
 
 def _exec(cfg: Config, argv: list[str]) -> None:

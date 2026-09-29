@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from . import doctor as doctor_mod
+from . import landing as landing_mod
 from . import ledger as ledger_mod
 from . import notes as notes_mod
 from . import opqueue
@@ -300,6 +301,8 @@ def build(
         # was pinged about each and sees them under "Needs you".
         "owner_rows": [{"row": r, "blocks": n} for r, n in mine],
         "starvation": starve,
+        # Lanes: phases that landed with files outside their lane.
+        "undeclared": landing_mod.undeclared_since(cfg, since),
         "resources": resources(cfg),
         "last_pass": last_pass,
     }
@@ -347,6 +350,9 @@ def render(d: dict) -> str:
         + (f"; HELD on {hold['phase']} ({hold['kind']} in {hold['repo']})" if hold else "")
     )
     out.append(f"- push owed: {'; '.join(c['push_owed']) or 'none'}")
+    for u in d.get("undeclared") or []:
+        out.append(f"- lane: {u['phase']} touched outside its declaration:"
+                   f" {' '.join(u['paths'])[:300]}")
     if c["ledger_issues"]:
         out.append(f"- ledger issues: {'; '.join(c['ledger_issues'])}")
     out.append(

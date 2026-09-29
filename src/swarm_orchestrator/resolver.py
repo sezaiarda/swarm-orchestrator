@@ -7,6 +7,11 @@ lives in a sibling). That session resolves the conflict in that repo's working
 tree, commits, then runs ``swarm resolved <phase>`` — which unblocks the
 merge-queue. The bare driver (hermetic tests) has no pane: resolution is faked
 and signalled straight on the FIFO.
+
+Under lanes the target is the phase's own **worktree** instead: a
+catch-up merge of main into the branch conflicted, or the combined tree failed
+the lane check. The owner's checkout stays clean on main, and the instruction
+line comes from :func:`landing.resolver_brief`.
 """
 
 from __future__ import annotations
@@ -47,8 +52,13 @@ def _resolver_env(cfg: Config, phase: str) -> dict[str, str]:
     return env
 
 
-def spawn(cfg: Config, phase: str, repo: Path, log: Log) -> str | None:
-    """Open the resolver pane in ``repo``; return its window id (tmux) or ``None``."""
+def spawn(
+    cfg: Config, phase: str, repo: Path, log: Log, line: str | None = None
+) -> str | None:
+    """Open the resolver pane in ``repo``; return its window id (tmux) or ``None``.
+
+    ``repo`` is a canonical checkout, or under lanes a phase's worktree, with
+    ``line`` the lane-mode instruction that replaces the default one."""
     if cfg.driver != "tmux":
         log.line(f"RESOLVER-SPAWN skipped driver={cfg.driver} {phase}")
         return None
@@ -77,7 +87,7 @@ def spawn(cfg: Config, phase: str, repo: Path, log: Log) -> str | None:
     cmd = cfg.resolver_cmd or f"cd {repo} && exec claude{model}"
     tmux.respawn_pane(pane, cmd, env=_resolver_env(cfg, phase))
     if not cfg.resolver_cmd:
-        _deliver(cfg, pane, phase, repo, log)
+        _deliver(cfg, pane, phase, repo, log, line)
     log.line(f"RESOLVER-SPAWN {phase} repo={repo.name} win={win}")
     return win
 
@@ -96,7 +106,9 @@ def prompt_path(name: str) -> Path:
     return Path(__file__).resolve().parent.parent.parent / "prompts" / name
 
 
-def _deliver(cfg: Config, pane: str, phase: str, repo: Path, log: Log) -> None:
+def _deliver(
+    cfg: Config, pane: str, phase: str, repo: Path, log: Log, lane: str | None = None
+) -> None:
     prompt_file = prompt_path("resolver.md")
     if not prompt_file.is_file():
         log.line(f"RESOLVER-PROMPT-MISSING {prompt_file}")
@@ -104,7 +116,7 @@ def _deliver(cfg: Config, pane: str, phase: str, repo: Path, log: Log) -> None:
     if not launch_mod.await_ready(cfg, pane, log):
         log.line(f"RESOLVER-READY-TIMEOUT {phase}")
         return
-    line = (
+    line = lane or (
         f"Read {prompt_file} and follow it exactly. You are resolving a git merge "
         f"conflict in the repo {repo} while merging swarm/{phase} into "
         f"{cfg.git_main_branch}. Work only in {repo}. When done, run "

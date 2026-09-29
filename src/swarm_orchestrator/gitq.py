@@ -54,6 +54,15 @@ MERGED = "merged"
 CONFLICT = "conflict"
 DIRTY = "dirty"
 PUSH_FAILED = "push_failed"
+# With ``[lanes] enabled`` only (:mod:`landing`): a check runs, or
+# another phase's landing holds a repo -- the queue lands others meanwhile; or a
+# resolver's job on the phase's own worktree, never on the owner's checkout.
+LANE_CHECKING = "lane-checking"
+LANE_WAITING = "lane-waiting"
+LANE_CONFLICT = "lane-conflict"
+LANE_RED = "lane-red"
+LANE_PENDING = (LANE_CHECKING, LANE_WAITING)
+LANE_HOLDS = (LANE_CONFLICT, LANE_RED)
 
 # `swarm done` completion statuses that INTEGRATE (merge into main) rather than
 # roll back. The owner-facing ones land exactly like ``ok``; they differ only in
@@ -519,9 +528,10 @@ def _link_target_cache(cfg: Config, wt: Path, repo: Path, log: Log) -> None:
 
     Trade-off: two phases building the *same* repo concurrently share one mutable
     ``target/``; ``cargo``'s build-dir lock serializes them and their divergent
-    sources thrash each other's fingerprints. In practice the ledger's deps keep
-    same-repo phases from running at once, so this is a net win; cross-repo phases
-    (the common parallel case) use separate caches and don't interact.
+    sources thrash each other's fingerprints. Under lanes two disjoint
+    lanes in one repo do build at once, and share it; ``[lanes] per_repo`` bounds
+    how many, and the cache saved is still worth more than the thrash. Cross-repo
+    phases use separate caches and don't interact.
     """
     if not cfg.build_cache or not (wt / "Cargo.toml").exists():
         return
@@ -1055,7 +1065,14 @@ def integrate(
     ``pushes`` (when given) collects every push this attempted, keyed by repo; a
     failed one there is an owed push, not a hold (see :func:`_integrate_one`).
     It is filled even when a later repo conflicts — the earlier repos' merges are
-    on local main regardless."""
+    on local main regardless.
+
+    With ``[lanes] enabled`` the landing re-tests the phase against siblings that
+    landed in its repos meanwhile (:func:`landing.integrate`)."""
+    if cfg.lanes_enabled:
+        from . import landing  # lazy: landing builds on this module
+
+        return landing.integrate(cfg, phase, log, pushes)
     for repo, main in _repos(cfg):
         result = _integrate_one(cfg, repo, main, phase, log, pushes)
         if result != MERGED:
@@ -1246,8 +1263,8 @@ class Held:
     """A phase whose restart-time integration did NOT complete."""
 
     phase: str
-    kind: str  # MERGED is impossible here: CONFLICT | DIRTY | PUSH_FAILED
-    repo: Path | None  # the repo to clear (None for PUSH_FAILED)
+    kind: str  # MERGED is impossible here: CONFLICT | DIRTY | PUSH_FAILED | LANE_HOLDS
+    repo: Path | None  # the repo to clear (a lane hold's worktree; None for PUSH_FAILED)
 
 
 @dataclass(frozen=True)
@@ -1256,6 +1273,9 @@ class ReconcileResult:
 
     integrated: list[str] = field(default_factory=list)
     held: list[Held] = field(default_factory=list)
+    #: Phases whose landing is under way under lanes (a check runs, or another
+    #: landing holds a repo): queued for the supervisor, neither done nor held.
+    landing: list[str] = field(default_factory=list)
     #: Operator-job mirrors landed here. Kept apart from ``integrated`` because
     #: the caller marks every name there done, and a job is not a ledger phase.
     operator_integrated: list[str] = field(default_factory=list)
@@ -1299,6 +1319,7 @@ def reconcile(
     integrated: list[str] = []
     operator_integrated: list[str] = []
     held: list[Held] = []
+    landing_: list[str] = []
     pushes: dict[str, dict[Path, PushResult]] = {}
     for phase in sorted(_all_swarm_phases(cfg)):
         job = operator.get(phase)
@@ -1318,6 +1339,15 @@ def reconcile(
             if result == MERGED:
                 (operator_integrated if job else integrated).append(phase)
                 log.line(f"RECONCILE-INTEGRATED {phase}")
+            elif result in LANE_PENDING:
+                landing_.append(phase)
+                log.line(f"RECONCILE-LANDING {phase} {result}")
+            elif result in LANE_HOLDS:
+                from . import landing  # lazy: landing builds on this module
+
+                hit = landing.blocked(cfg, phase)
+                held.append(Held(phase=phase, kind=result, repo=hit[1] if hit else None))
+                log.line(f"RECONCILE-HELD {phase} {result}")
             else:
                 repo = blocked_repo(cfg, phase) if result in (CONFLICT, DIRTY) else None
                 held.append(Held(phase=phase, kind=result, repo=repo))
@@ -1329,6 +1359,7 @@ def reconcile(
     return ReconcileResult(
         integrated=integrated,
         held=held,
+        landing=landing_,
         pushes={k: v for k, v in pushes.items() if v},
         operator_integrated=operator_integrated,
     )

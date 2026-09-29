@@ -184,6 +184,12 @@ class State:
     # flight with no entry (an older supervisor dropped the key on a write) has
     # its lane read from the ledger again.
     lanes: dict[str, list[str]] = field(default_factory=dict)
+    # Lanes: each phase whose landing re-tests it against a sibling lane,
+    # ``{phase: {repo: {"stage": ..., ...}}}`` (see :mod:`landing`). An entry is
+    # the phase's hold on that repo's landing lock: nobody else lands there until
+    # it goes. Same compatibility rule as ``lanes``: top-level, written only when
+    # non-empty, released with the lane.
+    landing: dict[str, dict[str, dict]] = field(default_factory=dict)
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -280,8 +286,10 @@ class State:
         self.release_lane(phase)
 
     def release_lane(self, phase: str) -> None:
-        """Drop ``phase``'s lane snapshot: its work is no longer in flight."""
+        """Drop ``phase``'s lane snapshot and any landing it holds: its work is
+        no longer in flight."""
         self.lanes.pop(phase, None)
+        self.landing.pop(phase, None)
 
     def park(self, phase: str) -> None:
         """Move a waiting session off the grid into the parked set.
@@ -415,11 +423,24 @@ class State:
         self.release_lane(phase)
         return True
 
+    def integ_drop(self, phase: str) -> bool:
+        """Drop ``phase`` from wherever it sits in the queue. Under lanes the
+        queue lands a later phase while an earlier one's check runs (lane rule
+        D5), so the one that lands is not always the head."""
+        if phase not in self.integ_queue:
+            return False
+        self.integ_queue.remove(phase)
+        self.integ_status.pop(phase, None)
+        self.release_lane(phase)
+        return True
+
     # -- serialisation ---------------------------------------------------
     def to_dict(self) -> dict:
         d = asdict(self)
         if not d["lanes"]:
             del d["lanes"]  # a run with lanes off writes no new key
+        if not d["landing"]:
+            del d["landing"]
         return d
 
     @classmethod
@@ -460,6 +481,7 @@ class State:
             drain=dict(data.get("drain") or {}),
             pause_at=float(data.get("pause_at") or 0.0),
             lanes={k: list(v) for k, v in (data.get("lanes") or {}).items()},
+            landing={k: dict(v) for k, v in (data.get("landing") or {}).items()},
         )
 
     @classmethod

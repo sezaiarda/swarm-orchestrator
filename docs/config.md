@@ -121,6 +121,44 @@ auto_resolve = { "docs/PHASE-LEDGER.md" = "keyed:^- \\[[ x]\\] `([A-Za-z0-9_.-]+
 auto_resolve_check = { "docs/PHASE-LEDGER.md" = "python3 ci/ledger-gate.py" }
 ```
 
+## `[lanes]`
+
+Rows that touch different files run at the same time, even in one repo. A ledger row declares what it
+edits in a `touches:` field (`- [ ] `x-W3` · dir:`frontend` · needs:`x-W1` · touches:`frontend/src/ui/a.tsx` `frontend/src/api/**` · **title**`).
+A touch is `<repo>/<path>`, `<repo>/<dir>/**` (`<repo>/**` is the whole repo), `./<path>` for the
+project repo itself, or `@<resource>` for something that is not a file. `*` may appear once, in the last
+segment only; `**` only as the whole last segment. A row with no `touches:` owns every repo in its
+`dir:` (or, with no `dir:`, the repo its id prefix names), so it runs alone in that repo.
+
+With lanes on, the launcher walks the ready rows in ledger order. A row whose touches overlap nothing
+in flight launches; one that overlaps waits, and reserves its touches so a later overlapping row cannot
+overtake it while a later disjoint one still launches. A phase's lane is recorded in `state.json` at
+launch and released when it merges, is discarded or skipped, or is freed. `swarm context` shows it as
+`lanes`, and `swarm why <row>` names the phase a waiting row waits for. A row whose touches do not parse
+never launches and is listed under `ledger_issues`.
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `enabled` | `false` | `SWARM_LANES` | restart | Schedule by touches. Off, the launcher is exactly the one-row-per-ready-slot launcher, and `state.json` gains no `lanes` key. |
+| `per_repo` | `2` | | hot | At most this many phases in flight in one repo (the project repo counts as one), however disjoint their touches. Resources do not count. |
+| `commons` | `[]` | | hot | fnmatch globs over `<repo>/<path>` (`./<path>` for the project repo) that any row may edit without declaring them, such as the ledger and every `CHANGELOG.md`. They never count as an overlap. Read at landing. |
+| `resources` | `[]` | | hot | Names a row may touch as `@<name>`. Two rows touching the same resource never run together. |
+| `external` | `{}` | | hot | Name mapped to the path of a repo outside the project that the swarm does not mirror. Its name is a lane a touch may start with. |
+| `check` | `{}` | | hot | Repo name (`.` for the project repo) mapped to the command that re-tests a phase merged with the lanes that landed beside it. `"*"` is the default for a repo not named. Read at landing. |
+| `check_timeout_s` | `2700` | | hot | Seconds a landing check may run before it counts as red. |
+
+Example:
+
+```toml
+[lanes]
+enabled   = true
+per_repo  = 2
+resources = ["live-box"]
+external  = { "swarm-orchestrator" = "~/Projects/swarm-orchestrator" }
+commons   = ["./docs/PHASE-LEDGER.md", "./docs/phases/**", "*/CHANGELOG.md"]
+check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
+```
+
 ## `[build]`
 
 | key | default | env | reload | meaning |

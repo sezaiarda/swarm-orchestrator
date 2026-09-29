@@ -281,7 +281,7 @@ def test_toml_literal_round_trips_through_tomllib(value, expected):
 def test_the_form_is_grouped_in_file_order():
     sections = [name for name, _ in cf.by_section()]
     assert sections == ["[swarm]", "[worker]", "[tasks]", "[telegram]", "[tmux]",
-                        "[build]", "[gc]", "[backup]", "[git]", "[operator]", "[overseer]", "[usage]", "[big_picture]", "[tui]", "[web]", "(cli)"]
+                        "[build]", "[gc]", "[backup]", "[git]", "[lanes]", "[operator]", "[overseer]", "[usage]", "[big_picture]", "[tui]", "[web]", "(cli)"]
 
 
 def test_a_settings_table_name_drops_the_brackets_policy_uses():

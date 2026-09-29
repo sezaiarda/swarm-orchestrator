@@ -12,6 +12,7 @@ what made workers re-run it, clobber their own recaps and re-ping the owner.
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
@@ -24,6 +25,7 @@ from pathlib import Path
 
 from . import blockedping
 from . import gitq
+from . import lanes as lanes_mod
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import meters, opqueue
@@ -185,9 +187,13 @@ def _worker_env(
     cfg: Config, phase: str, worktree: Path | None = None
 ) -> dict[str, str]:
     """Env vars a worker (and its ``swarm done``) need to find this run: the
-    phase marker plus everything :func:`session_env` gives any session."""
-    return {cfg.env_marker: phase,
-            **session_env(cfg, worktree, tmp=phase, session=f"worker:{phase}")}
+    phase marker plus everything :func:`session_env` gives any session, and with
+    lanes on ``SWARM_TOUCHES``, the lane it was launched with, space-separated."""
+    env = {cfg.env_marker: phase,
+           **session_env(cfg, worktree, tmp=phase, session=f"worker:{phase}")}
+    if cfg.lanes_enabled:
+        env["SWARM_TOUCHES"] = " ".join(state_mod.read(cfg).lanes.get(phase, []))
+    return env
 
 
 def tmp_env(cfg: Config, name: str) -> dict[str, str]:
@@ -301,6 +307,84 @@ def _unmet_deps(
     return sorted(d for d in graph[phase] if done.get(d) not in DEP_SATISFYING)
 
 
+def known_lanes(cfg: Config) -> frozenset[str]:
+    """The lanes a touch may start with: every component repo, the
+    project repo ``.``, each ``[lanes] external`` repo and ``@<name>`` for each
+    ``[lanes] resources`` entry. Repos are globbed as a mirror would glob them
+    whatever the isolation: a lane names a repo, not a mirror of it."""
+    repos = gitq.discovered_repos(dataclasses.replace(cfg, git_isolation="worktree"))
+    return frozenset(
+        {p.name for p in repos} | {"."} | set(cfg.lanes_external)
+        | {f"@{r}" for r in cfg.lanes_resources}
+    )
+
+
+@dataclass(frozen=True)
+class LaneView:
+    """The ledger's lanes and the ones in flight, read together."""
+
+    rows: dict[str, frozenset[lanes_mod.Touch]]  # each row's lane; a lane-less row is absent
+    held: dict[str, frozenset[lanes_mod.Touch]]  # each in-flight phase's lane
+    issues: list[str]  # rows whose touches did not parse
+    ledger: frozenset[str]  # every row id, lane-less ones included
+
+
+def _revive(snapshot: list[str] | None) -> frozenset[lanes_mod.Touch] | None:
+    """A snapshot read back. Each touch is checked against its own lane only: a
+    repo that left the config since launch must not free a lane still in use."""
+    if not snapshot:
+        return None
+    try:
+        return frozenset(
+            lanes_mod.parse_touch(t, {t.split("/", 1)[0]}) for t in snapshot
+        )
+    except lanes_mod.LaneError:
+        return None
+
+
+def lane_view(cfg: Config, st: state_mod.State) -> LaneView:
+    """Every row's lane, and the lane each phase in flight holds: a busy slot, a
+    worker waiting on the owner or parked, or finished work waiting to merge.
+    Its snapshot when there is one, else its row's lane now, else its whole home
+    repo — a phase in flight always holds something."""
+    text = _ledger_text(cfg)
+    issues: list[str] = []
+    rows = ledger_mod.lanes(text, known_lanes(cfg), issues)
+    row_dirs = ledger_mod.dirs(text)
+    held = {
+        phase: (_revive(st.lanes.get(phase)) or rows.get(phase)
+                or lanes_mod.legacy(ledger_mod.home(phase, row_dirs)))
+        for phase in {*st.claimed_phases(), *st.integrating()}
+    }
+    return LaneView(rows, held, issues, frozenset(ledger_mod.parse(text)))
+
+
+def _lane_busy(cfg: Config, st: state_mod.State, phase: str) -> str | None:
+    """The lane backstop, under the claiming flock: record ``phase``'s lane, or
+    say why it may not launch (its touches do not parse, or a phase in flight
+    holds an overlapping touch — two launch threads raced past the scheduler)."""
+    view = lane_view(cfg, st)
+    held = {p: lane for p, lane in view.held.items() if p != phase}
+    lane = view.rows.get(phase)
+    if lane is None:
+        if phase in view.ledger:
+            return "lane-invalid"
+        lane = lanes_mod.legacy(ledger_mod.home(phase, {}))
+    for holder in sorted(held):
+        pair = lanes_mod.collide(lane, held[holder])
+        if pair is not None:
+            return f"lane-busy [{holder} {pair[1]}]"
+    st.lanes[phase] = sorted(str(t) for t in lane)
+    return None
+
+
+def _ledger_text(cfg: Config) -> str:
+    try:
+        return (cfg.project_dir / cfg.ledger).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 #: A failed start: the owner hears about it once per phase, not on every retry.
 _LAUNCH_FAIL_KINDS = ("worktree-fail", "spawn-fail")
 
@@ -369,6 +453,16 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
             if not quiet:
                 print(f"LAUNCH-DENIED {phase}: unmet deps [{detail}]")
             return DENIED
+        # Lane backstop, beside the dependency one and under the
+        # same flock: the scheduler already kept overlapping rows apart, but two
+        # launch threads can race past it. On success this records the lane.
+        busy = _lane_busy(cfg, st, phase) if cfg.lanes_enabled else None
+        if busy:
+            st.free_slot_for(phase)
+            log.line(f"LAUNCH-DENIED {phase} {busy}")
+            if not quiet:
+                print(f"LAUNCH-DENIED {phase}: {busy}")
+            return DENIED
         sid, pane = slot.id, slot.pane_id
         if cfg.git_isolation == "worktree":
             slot.branch = f"swarm/{phase}"
@@ -382,6 +476,7 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         except gitq.GitError as exc:
             with state_mod.transaction(cfg) as st:
                 st.free_slot_for(phase)
+                st.release_lane(phase)
             logutil.run_ended(log, phase, "launch-failed")
             telegram.notify(
                 cfg.telegram_notify,
@@ -415,6 +510,7 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
                 pass  # the pane is gone: nothing left running in the worktree
         with state_mod.transaction(cfg) as st:
             st.free_slot_for(phase)
+            st.release_lane(phase)
         logutil.run_ended(log, phase, "launch-failed")
         if worktree is not None:
             # An empty mirror goes; one an earlier attempt left work in stays.

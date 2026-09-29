@@ -21,6 +21,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from . import lanes as lanes_mod
 from . import launch as launch_mod
 from . import ledger as ledger_mod
 from . import resolver, telegram, tmux
@@ -91,7 +92,16 @@ def build_context(cfg: Config, st: State) -> dict:
     done = ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(ledger_path), busy_phases)
     ready = ledger_mod.ready(graph, done, busy_phases, excluded)
     free = st.free_slots()
-    launchable = [] if st.on_hold else ready[: len(free)]
+    lanes: dict = {"enabled": False}
+    issues = ledger_mod.validate(
+        graph, {p for p, status in done.items() if status in ledger_mod.SATISFIES_DEPS}
+    )
+    if cfg.lanes_enabled:
+        picked, lanes = _lanes(cfg, st, ready, list(graph))
+        issues += lanes.pop("issues")
+    else:
+        picked = ready
+    launchable = [] if st.on_hold else picked[: len(free)]
     return {
         "free_slots": [s.id for s in free],
         "busy_slots": {s.id: s.phase for s in st.busy_slots()},
@@ -114,12 +124,36 @@ def build_context(cfg: Config, st: State) -> dict:
         # Repos merged locally but not yet on origin. Informational: nothing a
         # worker builds waits on origin, so these never gate `ready`.
         "push_owed": {k: v.get("phase") for k, v in st.push_owed.items()},
-        # Structural ledger problems (cycles / self-deps / unknown deps) that
-        # would otherwise silently stall the run — surfaced so the master/owner
-        # can see them instead of a phase never becoming ready.
-        "ledger_issues": ledger_mod.validate(
-            graph, {p for p, status in done.items() if status in ledger_mod.SATISFIES_DEPS}
-        ),
+        # Structural ledger problems (cycles / self-deps / unknown deps, and with
+        # lanes on rows whose touches do not parse) that would otherwise silently
+        # stall the run — surfaced so the master/owner can see them instead of a
+        # phase never becoming ready.
+        "ledger_issues": issues,
+        # Lanes: which lane each phase in flight holds, and what each ready row
+        # that is not launchable waits for. Just ``{"enabled": false}`` when off.
+        "lanes": lanes,
+    }
+
+
+def _lanes(cfg: Config, st: State, ready: list[str], order: list[str]) -> tuple[list[str], dict]:
+    """The lane scheduler's picks among ``ready``, and the
+    context's ``lanes`` block: ``picked``, those picks before the free-slot cap
+    (what the supervisor walks), ``held`` by each phase in flight, and ``waits``
+    for each ready row held back, with ``why`` ``running`` (a phase in flight or
+    launching in this pass holds an overlapping touch), ``reserved`` (an earlier
+    ready row waits for it) or ``per_repo`` (the repo is at ``[lanes] per_repo``)."""
+    view = launch_mod.lane_view(cfg, st)
+    picked, waits = lanes_mod.pick(ready, order, view.held, view.rows, cfg.lanes_per_repo)
+    why = {"held": "running", "reserved": "reserved", "per_repo": "per_repo"}
+    return picked, {
+        "enabled": True,
+        "picked": picked,
+        "held": {p: sorted(str(t) for t in lane) for p, lane in sorted(view.held.items())},
+        "waits": {
+            row: {"holder": w.holder, "touch": str(w.touch), "why": why[w.why]}
+            for row, w in waits.items()
+        },
+        "issues": view.issues,
     }
 
 

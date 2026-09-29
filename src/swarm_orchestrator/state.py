@@ -176,6 +176,14 @@ class State:
     # ``swarm up`` like a usage hold, so a moment that passed while the swarm
     # was down pauses it on its first wake.
     pause_at: float = 0.0
+    # Lanes: each in-flight phase's lane (its touches, as written), recorded
+    # at launch under the claiming flock and released when the phase merges, is
+    # discarded, skipped or freed. Top-level and written only when non-empty,
+    # never a ``Slot`` field: an older supervisor's ``Slot(**s)`` would raise on
+    # one, and its ``from_dict`` ignores an unknown top-level key. A phase in
+    # flight with no entry (an older supervisor dropped the key on a write) has
+    # its lane read from the ledger again.
+    lanes: dict[str, list[str]] = field(default_factory=dict)
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -269,6 +277,11 @@ class State:
 
     def mark_done(self, phase: str, status: str) -> None:
         self.done[phase] = status
+        self.release_lane(phase)
+
+    def release_lane(self, phase: str) -> None:
+        """Drop ``phase``'s lane snapshot: its work is no longer in flight."""
+        self.lanes.pop(phase, None)
 
     def park(self, phase: str) -> None:
         """Move a waiting session off the grid into the parked set.
@@ -311,6 +324,7 @@ class State:
         caller can close its ``wait:<phase>`` window)."""
         if status is not None:
             self.mark_done(phase, status)
+        self.release_lane(phase)
         self.free_slot_for(phase)
         return self.clear_pending(phase)
 
@@ -398,11 +412,14 @@ class State:
             return False
         self.integ_queue.pop(0)
         self.integ_status.pop(phase, None)
+        self.release_lane(phase)
         return True
 
     # -- serialisation ---------------------------------------------------
     def to_dict(self) -> dict:
         d = asdict(self)
+        if not d["lanes"]:
+            del d["lanes"]  # a run with lanes off writes no new key
         return d
 
     @classmethod
@@ -442,6 +459,7 @@ class State:
             usage_api_at=float(data.get("usage_api_at") or 0.0),
             drain=dict(data.get("drain") or {}),
             pause_at=float(data.get("pause_at") or 0.0),
+            lanes={k: list(v) for k, v in (data.get("lanes") or {}).items()},
         )
 
     @classmethod

@@ -22,8 +22,10 @@ token are ignored, so a prose markdown ledger simply yields no parsed deps.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
+from . import lanes as lanes_mod
 from . import statuses
 
 # Re-exported so ``ledger.SATISFIES_DEPS`` keeps meaning what it always has; the
@@ -226,6 +228,51 @@ def dirs(text: str) -> dict[str, list[str]]:
                 if got:
                     out[ids[0]] = got
                 break
+    return out
+
+
+def home(phase: str, row_dirs: dict[str, list[str]]) -> list[str]:
+    """The repos a row works in: its ``dir:``, else the repo its id prefix names
+    (``frontend-P3`` → ``frontend``), the ledger header's rule."""
+    return row_dirs.get(phase) or [phase.split("-", 1)[0]]
+
+
+def lanes(
+    text: str, known_lanes: Iterable[str], issues: list[str] | None = None
+) -> dict[str, frozenset[lanes_mod.Touch]]:
+    """Each row's lane: ``{phase: frozenset[Touch]}``.
+
+    A markdown row's ``touches:`` field (scoped to its ``·``-separated field, as
+    ``needs:`` is) names the lane; a row without one owns every repo it works in
+    (:func:`home`). A row whose touches do not parse against ``known_lanes`` is
+    left out — lane-less, so it never launches — and each refusal is appended to
+    ``issues``. A bare-format ledger has no fields, so every row owns its home.
+    """
+    row_dirs = dirs(text)
+    touches: dict[str, list[str] | None] = {}
+    for raw in text.splitlines():
+        m = _CHECKBOX_RE.match(raw)
+        ids = _BACKTICK_RE.findall(m.group(1)) if m else []
+        if not ids or not _PHASE_RE.match(ids[0]) or ids[0] in touches:
+            continue
+        touches[ids[0]] = next(
+            (_BACKTICK_RE.findall(f) for f in m.group(1).split(_FIELD_SEP)
+             if f.strip().strip("*").strip().startswith("touches:")),
+            None,
+        )
+    out: dict[str, frozenset[lanes_mod.Touch]] = {}
+    for phase in parse(text):
+        declared = touches.get(phase)
+        if declared is None:
+            out[phase] = lanes_mod.legacy(home(phase, row_dirs))
+            continue
+        try:
+            if not declared:
+                raise lanes_mod.LaneError("its `touches:` field names nothing")
+            out[phase] = frozenset(lanes_mod.parse_touch(t, known_lanes) for t in declared)
+        except lanes_mod.LaneError as exc:
+            if issues is not None:
+                issues.append(f"{phase}: bad touches: {exc}; it will not launch")
     return out
 
 

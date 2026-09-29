@@ -25,7 +25,7 @@ exact flags.
 | command | what it does |
 |---|---|
 | `status [--all] [--json]` | A drain and what it still waits for, slots, merge queue, waiting and parked sessions, operator queue, owner-run rows only you can do (`owner_rows` in `--json`), owed pushes, the big-picture doc's last refresh, the whole ledger's standing counted as the dashboard counts it (`phases:`; `phases` in `--json`), this machine's done records as counts per status (naming failures), board address, kept processes. `--all` prints the whole done map; `--json` prints the state as JSON. |
-| `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`. |
+| `context` | The JSON snapshot the launcher works from: `ready`, `launchable`, free and busy slots, `waiting`, `parked`, `ledger_issues`, and `lanes` (`{"enabled": false}` unless [`[lanes]`](config.md#lanes) is on; then what each phase in flight holds and what each held-back row waits for). |
 | `doctor [--json]` | Diagnose a stuck or unhealthy swarm. Exit 1 on any FAIL. |
 | `why <phase> [--tree] [--json]` | Why this phase is not running, down to the root blocker. |
 | `report [--decisions] [--phase P] [--json]` | What every phase did, with its recap and timings. |

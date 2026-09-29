@@ -29,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import caps
+from . import master as master_mod
 from . import ledger as ledger_mod
 from . import state as state_mod
 from . import statuses
@@ -234,6 +235,10 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]],
             phase, READY,
             "ready — but the swarm is draining to a stop (`swarm down --cancel`)",
         )
+    if cfg.lanes_enabled:
+        waits = _lane_wait(cfg, phase, st)
+        if waits:
+            return Explanation(phase, READY, f"ready — but {waits}")
     if not st.free_slots():
         return Explanation(
             phase,
@@ -247,6 +252,36 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]],
 
 
 # -- dependency walk ------------------------------------------------------
+def _lane_wait(cfg: Config, phase: str, st: State) -> str | None:
+    """What a ready row waits for under lanes, or ``None`` when its
+    lane is free: the phase holding an overlapping touch and what that phase is
+    doing, the row that reserved it, or a repo at ``[lanes] per_repo``."""
+    ctx = master_mod.build_context(cfg, st)
+    bad = next((i for i in ctx["ledger_issues"] if i.startswith(f"{phase}: bad touches")), None)
+    if bad:
+        return f"it never launches: {bad.split(': ', 1)[1]}"
+    w = ctx["lanes"]["waits"].get(phase)
+    if w is None:
+        return None
+    holder, touch = w["holder"], w["touch"]
+    if w["why"] == "per_repo":
+        repo = touch.split("/", 1)[0]
+        return (f"waits for its repo: `{repo}` already has {cfg.lanes_per_repo} phases in"
+                f" flight (`[lanes] per_repo`), among them `{holder}`")
+    doing = "reserved" if w["why"] == "reserved" else _holder_state(st, holder)
+    return f"waits for its lane: `{touch}` is held by `{holder}` ({doing})"
+
+
+def _holder_state(st: State, holder: str) -> str:
+    if holder in st.waiting:
+        return "waiting on the owner"
+    if holder in st.parked:
+        return "parked"
+    if holder in st.integrating():
+        return "merging"
+    return "running"
+
+
 def _unmet(graph: dict[str, set[str]], done: dict[str, str], phase: str) -> list[str]:
     """Declared deps of ``phase`` whose work has not landed on main.
 

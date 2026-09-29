@@ -1572,7 +1572,10 @@ class Supervisor:
                 1 for p in self._launching if p not in busy
             )
             picks: list[str] = []
-            for phase in ctx["ready"]:
+            # With lanes on, only the lane scheduler's picks: walking `ready`
+            # would launch rows it holds back, leaving the backstop to refuse them.
+            lanes = ctx["lanes"]
+            for phase in lanes["picked"] if lanes["enabled"] else ctx["ready"]:
                 if len(picks) >= budget:
                     break
                 if phase in self._launching:

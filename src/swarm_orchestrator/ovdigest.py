@@ -212,6 +212,22 @@ def in_flight(st: State, launching: set[str] | frozenset[str] = frozenset()) -> 
     return out
 
 
+def lane_blockers(blockers: list[dict], waits: dict[str, dict]) -> list[dict]:
+    """The starvation map's blockers plus, under lanes, one ``lane`` entry per
+    phase whose lane holds ready rows back: each such row counts under its
+    holder, with everything that row itself holds back. Most-blocking first."""
+    behind = {b["phase"]: b["blocks"] for b in blockers}
+    waiting: dict[str, list[str]] = {}
+    for row, w in waits.items():
+        waiting.setdefault(w["holder"], []).append(row)
+    lanes = [
+        {"phase": holder, "kind": "lane", "blocks": sum(1 + behind.get(r, 0) for r in rows),
+         "examples": rows[:5]}
+        for holder, rows in waiting.items()
+    ]
+    return sorted([*blockers, *lanes], key=lambda b: -b["blocks"])
+
+
 # -- assembly ----------------------------------------------------------------
 def build(
     cfg: Config,
@@ -260,6 +276,7 @@ def build(
         st.done, ledger_mod.load_ticked(cfg.project_dir / cfg.ledger), flying
     )
     starve = starvation_map(graph, done, set(cfg.exclude), flying)
+    starve["blockers"] = lane_blockers(starve["blockers"], ctx["lanes"].get("waits") or {})
     mine = ledger_mod.owner_rows(graph, done, set(cfg.exclude), set(flying))
     starve["blockers"] = starve["blockers"][:MAX_BLOCKERS]
     starve["cycle"] = starve["cycle"][:20]

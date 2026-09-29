@@ -487,6 +487,40 @@ class Config:
         why="gitq._auto_resolve reads the check table right after it settles a"
             " conflict, so the next automatic merge runs the new checks")
 
+    # -- [lanes] ----------------------------------------------------------
+    # Lane parallelism: rows that touch different files run at the same time. Off by
+    # default, and off it writes nothing new to state.json, so a supervisor on
+    # the previous release reads what this CLI writes.
+    lanes_enabled: bool = _k(
+        "lanes", "enabled", False, RESTART, env="SWARM_LANES",
+        doc="schedule by each row's touches, not its repo",
+        why="the running supervisor snapshots lanes only for phases it launched"
+            " with them on; switching mid-run leaves phases in flight with no lane")
+    lanes_per_repo: int = _k(
+        "lanes", "per_repo", 2, HOT, minimum=1,
+        doc="phases in flight at once in one repo",
+        why="read by every launch decision")
+    lanes_commons: list[str] = _k(
+        "lanes", "commons", [], HOT,
+        doc="globs any row may edit without declaring them",
+        why="read by every landing")
+    lanes_resources: list[str] = _k(
+        "lanes", "resources", [], HOT,
+        doc="non-file lanes a row may touch as @<name>",
+        why="read by every launch decision")
+    lanes_external: dict[str, str] = _k(
+        "lanes", "external", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc="name -> path of a repo the swarm does not mirror",
+        why="read by every launch decision")
+    lanes_check: dict[str, str] = _k(
+        "lanes", "check", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc='repo -> command a landing re-tests; "*" default',
+        why="read by every landing, so the next one runs the new command")
+    lanes_check_timeout_s: int = _k(
+        "lanes", "check_timeout_s", 2700, HOT, minimum=1,
+        doc="seconds before a landing check counts as red",
+        why="read by every landing check when it starts")
+
     # -- [operator] -------------------------------------------------------
     # Positive opt-in: the only thing between a test suite and an autonomous
     # session holding the owner's authority. Off, the queue is never written.

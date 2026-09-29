@@ -51,6 +51,8 @@ class Row:
     text: str
     title: str
     dirs: list[str] = field(default_factory=list)
+    #: Its ``touches:``, as written: what the row edits.
+    touches: list[str] = field(default_factory=list)
     #: The headings above this row, outermost first (``#`` … ``######``).
     heads: tuple[Heading, ...] = ()
 
@@ -73,12 +75,13 @@ def _title(content: str) -> str:
     A ledger may write every row as ``id · dir · needs · **the problem** detail``;
     the bold run is the sentence the owner filed it under. A ledger without bold
     falls back to the last ``·`` field, which is the prose after the metadata.
+    A ``touches:`` field is left out first: its ``**`` globs are not bold.
     """
-    m = _BOLD_RE.search(content)
+    parts = [p for p in content.split(_FIELD_SEP) if p.strip() and not _is_touches(p)]
+    m = _BOLD_RE.search(_FIELD_SEP.join(parts))
     if m:
         return clip(plain(m.group(1)), TITLE_CHARS)
-    parts = [p for p in content.split(_FIELD_SEP) if p.strip()]
-    tail = [p for p in parts[1:] if not re.match(r"\s*\*?\s*(needs|dir|TAG):", p)]
+    tail = [p for p in parts[1:] if not re.match(r"\s*\*?\s*(needs|dir|touches|TAG):", p)]
     return clip(plain(tail[-1] if tail else ""), TITLE_CHARS)
 
 
@@ -86,6 +89,18 @@ def _dirs(content: str) -> list[str]:
     for part in content.split(_FIELD_SEP):
         if part.strip().startswith("dir:"):
             return [d for d in _BACKTICK_RE.findall(part) if d]
+    return []
+
+
+def _is_touches(part: str) -> bool:
+    return part.strip().strip("*").strip().startswith("touches:")
+
+
+def _touches(content: str) -> list[str]:
+    """The ``touches:`` field's words, found as the scheduler finds them."""
+    for part in content.split(_FIELD_SEP):
+        if _is_touches(part):
+            return [t for t in _BACKTICK_RE.findall(part) if t]
     return []
 
 
@@ -138,6 +153,7 @@ def parse(text: str) -> tuple[dict[str, Row], list[Heading]]:
                 text="\n".join(body)[:MAX_ROW_CHARS],
                 title=_title(cm.group(1)),
                 dirs=_dirs(cm.group(1)),
+                touches=_touches(cm.group(1)),
                 heads=tuple(stack),
             )
         i = j

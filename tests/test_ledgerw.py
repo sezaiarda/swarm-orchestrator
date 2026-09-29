@@ -102,6 +102,80 @@ def test_a_cycle_only_through_a_done_row_is_no_cycle():
                           "b-W4", ["b-W2"])
 
 
+# -- touches: (lane design D1, D7) --------------------------------------------------
+TOUCHES = "touches:`alpha/src/**` `alpha/docs/x.md` `@live-box`"
+LANED = LEDGER.replace("needs:`a-W1` · **the second wave**",
+                       f"needs:`a-W1` · {TOUCHES} · **the second wave** — a long tail of prose")
+KNOWN = frozenset({"alpha", "beta", ".", "@live-box"})
+
+
+def _field(text: str, phase: str) -> str:
+    line = next(ln for ln in text.splitlines() if f"`{phase}`" in ln)
+    return next(f for f in line.split(" · ") if f.startswith("touches:"))
+
+
+def test_touches_is_meta_and_never_a_title():
+    head = ledgerw.split_head(next(ln for ln in LANED.splitlines() if "`a-W2`" in ln))
+    assert TOUCHES in head.meta and TOUCHES not in head.prose
+    assert ledgerw._title_of(head.prose) == "the second wave"
+    assert ledgerw._title_of([TOUCHES]) == ""
+    assert TOUCHES in head.line("t")
+
+
+def test_a_row_with_touches_keeps_the_field_byte_exact_through_every_edit():
+    from swarm_orchestrator import ledgermigrate
+
+    ticked = ledgerw.set_state(LANED, "a-W2", tick=True, status="done (2026-09-29)")
+    later = ledgerw.set_state(LANED, "a-W2", status="later, after 2999-01-01", after="2999-01-01")
+    again = ledgerw.set_state(later, "a-W2", status="failed (2026-09-30)")
+    slim = ledgermigrate.slim_ledger(LANED.replace("a long tail of prose", "x " * 300)).ledger
+    for text in (ticked, later, again, slim):
+        assert _field(text, "a-W2") == TOUCHES
+        assert ledger_mod.parse(text) == ledger_mod.parse(LANED)
+    slim_line = next(ln for ln in slim.splitlines() if "`a-W2`" in ln)
+    assert slim_line.startswith(f"- [ ] `a-W2` · dir:`alpha` · needs:`a-W1` · {TOUCHES} · **the")
+    assert ledgermigrate.diff(ledgermigrate.fingerprint(LANED), ledgermigrate.fingerprint(
+        ledgermigrate.slim_ledger(LANED).ledger)) == []
+
+
+def test_the_board_shows_touches_as_meta_not_as_the_title():
+    from swarm_orchestrator.web import rows as rows_mod
+
+    row = rows_mod.parse(LANED)[0]["a-W2"]
+    assert row.touches == ["alpha/src/**", "alpha/docs/x.md", "@live-box"]
+    assert row.title == "the second wave"
+    bare = "- [ ] `a-W9` · dir:`alpha` · needs:— · touches:`alpha/**`\n"
+    assert rows_mod.parse(bare)[0]["a-W9"].title == ""
+
+
+def test_make_row_writes_touches_after_needs():
+    row = ledgerw.make_row("a-W4", "fourth", ["a-W3"], ["alpha"], ["v2"], ["alpha/src/x.rs", "@live-box"])
+    assert row == ("- [ ] `a-W4` · dir:`alpha` · needs:`a-W3` · touches:`alpha/src/x.rs` `@live-box`"
+                   " · **fourth** · **TAG:`v2`**")
+    assert ledger_mod.lanes(row, KNOWN)["a-W4"]
+
+
+def test_touches_must_stay_inside_the_rows_dirs_and_cover_each():
+    ledgerw.check_touches("a-W4", ["alpha/src/**", "@live-box"], ["alpha"], KNOWN)
+    ledgerw.check_touches("alpha-W4", ["alpha/**"], [], KNOWN)  # no dir: its id prefix's repo
+    with pytest.raises(ledgerw.ReportError, match="outside its dir"):
+        ledgerw.check_touches("a-W4", ["alpha/x", "beta/y"], ["alpha"], KNOWN)
+    with pytest.raises(ledgerw.ReportError, match="dir beta has no touch"):
+        ledgerw.check_touches("a-W4", ["alpha/x"], ["alpha", "beta"], KNOWN)
+    with pytest.raises(ledgerw.ReportError, match="unknown lane"):
+        ledgerw.check_touches("a-W4", ["gamma/x"], ["gamma"], KNOWN)
+    with pytest.raises(ledgerw.ReportError, match="unknown resource"):
+        ledgerw.check_touches("a-W4", ["alpha/x", "@nope"], ["alpha"], KNOWN)
+
+
+def test_carry_needs_is_a_no_op_with_lanes_on():
+    text = LEDGER.replace("`a-W2` · dir:`alpha` · needs:`a-W1`", "`a-W2` · dir:`alpha` · needs:`b-W1`")
+    ticked = ledgerw.set_state(text, "a-W2", tick=True)
+    assert ledgerw.carry_needs(ticked, "a-W2", lanes=True) == (ticked, [])
+    assert ledgerw.carry_needs(ticked, "a-W2", lanes=False) == ledgerw.carry_needs(ticked, "a-W2")
+    assert ledgerw.carry_needs(ticked, "a-W2")[1] == ["a-W3"]
+
+
 # -- history files -------------------------------------------------------------
 def test_history_appends_per_family_and_splits_past_the_limit(tmp_path):
     ledgerw.append_history(tmp_path, "h", 0, "read-W1", ledgerw.entry("d1 · done", "alpha"), "t1")
@@ -124,7 +198,7 @@ def test_history_appends_per_family_and_splits_past_the_limit(tmp_path):
 
 
 # -- end to end on git -------------------------------------------------------------
-def _project(tmp_path: Path, monkeypatch, gate: str = "") -> tuple:
+def _project(tmp_path: Path, monkeypatch, gate: str = "", extra: str = "") -> tuple:
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "master", str(origin)], check=True)
     project = tmp_path / "project"
@@ -134,7 +208,7 @@ def _project(tmp_path: Path, monkeypatch, gate: str = "") -> tuple:
     (project / "docs").mkdir()
     (project / "docs" / "PHASE-LEDGER.md").write_text(LEDGER)
     (project / ".swarm.toml").write_text(
-        f'[tasks]\nledger = "docs/PHASE-LEDGER.md"\nledger_gate = "{gate}"\n')
+        f'[tasks]\nledger = "docs/PHASE-LEDGER.md"\nledger_gate = "{gate}"\n{extra}')
     _git(project, "add", "-A")
     _git(project, "commit", "-qm", "init")
     _git(project, "remote", "add", "origin", str(origin))
@@ -329,3 +403,54 @@ def test_the_web_detail_sheet_shows_the_history_under_the_row(tmp_path):
     text = detail._with_history(cfg, "a-W1", "- [x] `a-W1` · **t**")
     assert text.startswith("- [x] `a-W1`") and "what it did" in text
     assert detail._with_history(cfg, "zz-W1", "row") == "row"
+
+
+LANES = '[lanes]\nexternal = { alpha = "~/alpha", beta = "~/beta" }\nresources = ["live-box"]\n'
+
+
+def test_follow_up_touches_through_the_cli_writes_the_field_and_the_history_line(
+        tmp_path, monkeypatch, capsys):
+    cfg, project, _origin = _project(tmp_path, monkeypatch, extra=LANES)
+    args = ["--project-dir", str(project)]
+    assert cli.main(args + ["follow-up", "b-W1", "b-W2", "--title", "beta grows", "--needs", "b-W1",
+                            "--dir", "beta", "--touches", "beta/src/**,@live-box", "grow"]) == 0
+    assert cli.main(args + ["follow-up", "b-W1", "b-W3", "--title", "x", "--dir", "beta",
+                            "--touches", "alpha/x"]) == 2
+    assert "outside its dir" in capsys.readouterr().err
+    assert cli.main(args + ["follow-up", "b-W1", "b-W3", "--title", "x", "--dir", "alpha,beta",
+                            "--touches", "alpha/x"]) == 2
+    assert "dir beta has no touch" in capsys.readouterr().err
+    # Lanes off: a row may still be filed without touches.
+    assert cli.main(args + ["follow-up", "b-W1", "b-W4", "--title", "y", "--dir", "beta"]) == 0
+    log = Log(cfg.supervisor_log)
+    try:
+        ledgerw.flush(cfg, log, {})
+    finally:
+        log.close()
+    text = (project / "docs" / "PHASE-LEDGER.md").read_text()
+    assert _field(text, "b-W2") == "touches:`beta/src/**` `@live-box`"
+    assert "touches:" not in next(ln for ln in text.splitlines() if "`b-W4`" in ln)
+    hist = ledgerw.history_text(project, cfg.history_dir, "b-W2")
+    assert "grow\n\ntouches: `beta/src/**` `@live-box`" in hist
+
+
+def test_with_lanes_on_a_follow_up_needs_touches_and_a_tick_carries_nothing(tmp_path, monkeypatch):
+    text = LEDGER.replace("`a-W2` · dir:`alpha` · needs:`a-W1`", "`a-W2` · dir:`alpha` · needs:`b-W1`")
+    cfg, project, _origin = _project(tmp_path, monkeypatch, extra=LANES + "enabled = true\n")
+    (project / "docs" / "PHASE-LEDGER.md").write_text(text)
+    _git(project, "commit", "-qam", "a-W2 needs b-W1")
+    assert cfg.lanes_enabled
+    with pytest.raises(ledgerw.ReportError, match="--touches is required"):
+        ledgerw.file_follow_up(cfg, "a-W2", "a-W9", "more", [], ["alpha"], [], "")
+    ledgerw.file_follow_up(cfg, "a-W2", "a-W9", "more", [], ["alpha"], [], "", ["alpha/x"])
+    log = Log(cfg.supervisor_log)
+    try:
+        ledgerw.queue(cfg, "a-W2", {"kind": "outcome", "outcome": "ok", "note": ""})
+        got = ledgerw.flush(cfg, log, {"a-W2": "ok"})
+    finally:
+        log.close()
+    assert got.carry_skipped == ["a-W2"]
+    out = (project / "docs" / "PHASE-LEDGER.md").read_text()
+    assert "a-W2" in ledger_mod.ticked(out)
+    assert ledger_mod.parse(out)["a-W3"] == {"a-W2"}  # b-W1 was not carried
+    assert "CARRY-SKIPPED a-W2 lanes" in cfg.supervisor_log.read_text()

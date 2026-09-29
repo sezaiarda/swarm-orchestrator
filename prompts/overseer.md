@@ -36,7 +36,7 @@ Go through the digest and ask, in this order:
   that failed, a launch the supervisor gave up on, a push owed for a long time.
 - **Is the swarm fed?** Free slots with nothing launchable while backlog remains
   is starvation. The starvation map shows why: usually one long serial chain, a
-  failed root, or rows behind an excluded one.
+  failed root, rows behind an excluded one, or an over-broad `touches:`.
 - **Does a row only the owner can do hold others up?** The digest lists them;
   the owner has been told and sees them under Needs you. For one that is a
   review or pick they make at a keyboard (choose a layout, pick between
@@ -58,18 +58,22 @@ Go through the digest and ask, in this order:
   `swarm resolved <phase>` for a hold you have actually fixed (commit or stash
   what dirtied the tree, finish the merge); `swarm launch <phase>` for a phase the
   supervisor gave up launching once you have fixed why.
-- **Keep the swarm fed — edit the ledger.** Split a long serial chain so its
-  independent parts can run side by side, reorder, loosen a `needs:` that is not
-  real. Write rows exactly the way the ledger header and `CLAUDE.md` say, with
-  `needs:` naming real phase ids. If the project has a ledger gate or check (its
-  `CLAUDE.md` names it), run it and keep it green. **Commit** the edit — in your
-  mirror it only reaches the swarm through the merge when you finish, and
-  anything uncommitted is lost with the mirror. Reshaping `needs:` is the one
-  ledger edit that is yours: file new rows for the risks and decisions the
-  finished phases reported with `swarm follow-up <phase> <new-id> --title "<one
-  line>" --needs <ids> "<what it must deliver>"`, and put notes on a row with
-  `swarm record <phase> note "<text>"`. Never append notes to a row, never tick
-  one by hand, and never write the phase history or lessons files: the swarm
+- **Keep the swarm fed — reshape rows, never hand-edit the ledger.** To change
+  an open row's `needs:` or `touches:`, run `swarm reshape overseer <row>
+  [--needs a,b] [--add-needs a,b] [--drop-needs a,b] [--touches t1,t2] "<why>"`.
+  The swarm applies it on main through the project's ledger gate and notes it in
+  the row's history; a refusal (a cycle, a failing gate) comes back to you, so
+  read it and fix the cause. Never edit the ledger file yourself. Only real
+  dependencies go in `needs:` — never add a `needs:` edge just to keep two rows
+  apart: with lanes on, the scheduler already keeps rows that touch the same files
+  apart. A starving slot has two fixes. Narrow an over-broad `touches:` with
+  `swarm reshape --touches`. Or split the row: file the parts as new rows with
+  `swarm follow-up <phase> <new-id> --title "<one line>" --needs <ids> --touches
+  <t1,t2> "<what it must deliver>"`, so they can run side by side. Loosen a
+  `needs:` that is not real with `--drop-needs`. File new rows for the risks and
+  decisions the finished phases reported the same way, and put notes on a row
+  with `swarm record <phase> note "<text>"`. Never append notes to a row, never
+  tick one by hand, and never write the phase history or lessons files: the swarm
   writes those.
 - **Hand work to the operator:** `swarm operator-add "<brief>" [--phase <id>]` for
   deploys, post-deploy checks, provisioning and cross-repo chores. Write the brief
@@ -94,7 +98,7 @@ Prefer the step you can undo.
 - **Worker questions.** Workers ask the owner their own questions. Never answer
   one for the owner, and never act in its place.
 - **The workers themselves.** Never restrain a worker: do not edit its prompt,
-  limit its tools or narrow its phase. Change the ledger and the environment,
+  limit its tools or narrow its phase. Reshape the rows and change the environment,
   never the worker.
 - **Owner-level calls** — anything that spends money, is a matter of taste or
   product direction, deletes work, drops scope, or reverses something the owner

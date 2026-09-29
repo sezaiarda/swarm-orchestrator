@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Iterator
 
 from . import gitq
+from . import lanes as lanes_mod
 from . import ledger as ledger_mod
 from . import notes as notes_mod
 from . import pushowed
@@ -73,8 +74,10 @@ TITLE_CHARS = 120
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ROW = re.compile(r"^(\s*[-*]\s+\[)([ xX])(\]\s+)(.+)$")
 _FIELD_SEP = ledger_mod._FIELD_SEP
-_META = re.compile(r"^\s*\**\s*(dir:|needs:)|^\s*(owner-run|owner-optional)\s*$")
+_META = re.compile(r"^\s*\**\s*(dir:|needs:|touches:)|^\s*(owner-run|owner-optional)\s*$")
 _NEEDS = re.compile(r"^\s*\**\s*needs:")
+_TOUCHES = re.compile(r"^\s*\**\s*touches:")
+_DIR = re.compile(r"^\s*\**\s*dir:")
 _TAG = re.compile(r"^\s*\**\s*TAG:")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _SECTION = re.compile(r"^## `([^`]+)`")
@@ -142,8 +145,10 @@ def _drop_asides(text: str) -> str:
 def _title_of(prose: list[str]) -> str:
     """A row's short title: the bold lead of its first descriptive field, else
     that field's first sentence. A parenthetical note (``*(ordering only: …)*``)
-    is history, not a title."""
+    is history, not a title, and a meta field (``touches:``) is never one."""
     for field_ in prose:
+        if _META.match(field_):
+            continue
         text = _drop_asides(field_.strip())
         if not plain(text):
             continue
@@ -168,7 +173,7 @@ class Head:
 
     @property
     def meta(self) -> list[str]:
-        """``dir:``, the owner marker and ``needs:``: what the gates read."""
+        """``dir:``, the owner marker, ``needs:`` and ``touches:``: what the gates read."""
         return [f for f in self.fields if _META.match(f)]
 
     @property
@@ -265,8 +270,8 @@ def _needs_tokens(head: Head) -> list[str]:
     return []
 
 
-def carry_needs(text: str, phase: str) -> tuple[str, list[str]]:
-    """Keep the order a row imposed once it is ticked.
+def carry_needs(text: str, phase: str, *, lanes: bool = False) -> tuple[str, list[str]]:
+    """Keep the order a row imposed once it is ticked (lanes off only).
 
     A ``[x]`` row satisfies its dependents, so ticking ``phase`` releases an open
     row B that needed it even when ``phase``'s own open needs are not built:
@@ -275,7 +280,12 @@ def carry_needs(text: str, phase: str) -> tuple[str, list[str]]:
     that is a real break. So each open dependent gains ``phase``'s open needs,
     first in its list, where a reader that stops at a comma still sees them.
     Returns the new text and the ids that changed.
+
+    With ``lanes`` on it carries nothing: ``needs:`` names only
+    real dependencies, and keeping two rows apart is the lane scheduler's job.
     """
+    if lanes:
+        return text, []
     lines = text.split("\n")
     spans = row_spans(lines)
     heads = {p: split_head(lines[s]) for p, (s, _e) in spans.items()}
@@ -304,12 +314,20 @@ def carry_needs(text: str, phase: str) -> tuple[str, list[str]]:
     return "\n".join(lines), changed
 
 
-def make_row(phase: str, title: str, needs: list[str], dirs: list[str], tags: list[str]) -> str:
+def touches_field(touches: list[str]) -> str:
+    """The ``touches:`` field, in the ledger's own shape."""
+    return "touches:" + " ".join(f"`{t}`" for t in touches)
+
+
+def make_row(phase: str, title: str, needs: list[str], dirs: list[str], tags: list[str],
+             touches: list[str] = ()) -> str:
     """A new open row in the ledger's own shape (fields in the order its gates read)."""
     fields = [f"`{phase}`"]
     if dirs:
         fields.append("dir:" + "+".join(f"`{d}`" for d in dirs))
     fields.append("needs:" + (" ".join(f"`{n}`" for n in needs) if needs else "—"))
+    if touches:
+        fields.append(touches_field(list(touches)))
     fields.append(f"**{clip(plain(title))}**")
     fields += [f"**TAG:`{t}`**" for t in tags]
     return "- [ ] " + _FIELD_SEP.join(fields)
@@ -558,19 +576,162 @@ def check_row(text: str, phase: str, needs: list[str], taken: set[str] = frozens
         raise ReportError("; ".join(new))
 
 
+def _known_lanes(cfg: Config) -> frozenset[str]:
+    from . import launch as launch_mod
+
+    return launch_mod.known_lanes(cfg)
+
+
+def check_touches(phase: str, touches: list[str], dirs: list[str], known) -> None:
+    """Refuse touches that do not parse against the ``known`` lanes, that leave
+    the row's ``dirs`` (its home when it names none), or that leave one of
+    those repos without a touch. A ``@resource`` touch is in no
+    repo, so it is never outside one."""
+    home = [d.rstrip("/") or "." for d in (dirs or ledger_mod.home(phase, {}))]
+    try:
+        parsed = [lanes_mod.parse_touch(t, known) for t in touches]
+    except lanes_mod.LaneError as exc:
+        raise ReportError(str(exc)) from None
+    outside = [str(t) for t in parsed if not t.is_resource and t.lane not in home]
+    if outside:
+        raise ReportError(f"touches outside its dir ({' '.join(home)}): {' '.join(outside)}")
+    bare = [d for d in home if d not in lanes_mod.repos_of(parsed)]
+    if bare:
+        raise ReportError(f"dir {' '.join(bare)} has no touch: name what the row edits there,"
+                          f" or `{bare[0]}/**` for all of it")
+
+
+def _field_index(head: Head, pattern: re.Pattern) -> int | None:
+    return next((k for k, f in enumerate(head.fields) if pattern.match(f)), None)
+
+
+def _meta_slot(head: Head, after: tuple[re.Pattern, ...]) -> int:
+    """Where a new meta field goes: after the last of ``after`` the row has."""
+    at = [k for k, f in enumerate(head.fields) if any(p.match(f) for p in after)]
+    return at[-1] + 1 if at else 0
+
+
+def _edit_needs(part: str, gone: list[str], fresh: list[str]) -> str:
+    """``part`` (a ``needs:`` field) without ``gone`` and with ``fresh`` first,
+    every other word in it (a note, a tag) where it was."""
+    for n in gone:
+        part = re.sub(r"`" + re.escape(n) + r"`,?\s*", "", part, count=1)
+    at = part.index("needs:") + len("needs:")
+    rest = part[at:].strip().rstrip(",").strip()
+    if rest.startswith("—"):
+        rest = rest[1:].strip()
+    lead = " ".join(f"`{n}`" for n in fresh)
+    if not lead and not ledger_mod._BACKTICK_RE.search(rest):
+        lead = "—"
+    return part[:at] + " ".join(x for x in (lead, rest) if x)
+
+
+def reshape_row(text: str, phase: str, *, needs: list[str] | None = None,
+                add: list[str] = (), drop: list[str] = (), touches: list[str] | None = None,
+                done: dict[str, str] | None = None, excluded=frozenset(),
+                known=frozenset()) -> tuple[str, str]:
+    """``text`` with ``phase``'s ``needs:`` and/or ``touches:`` edited (
+    D8), and what changed, in words. ``needs`` replaces the list, then ``drop``
+    and ``add`` edit it; ``touches`` replaces the field. Refuses an unknown,
+    ticked or excluded row, a need that names no row, a new cycle, touches
+    :func:`check_touches` refuses, and an edit that changes nothing."""
+    lines = text.split("\n")
+    span = row_spans(lines).get(phase)
+    if span is None:
+        raise ReportError(f"no ledger row {phase}")
+    if phase in set(excluded):
+        raise ReportError(f"{phase} is excluded: the swarm does not schedule it")
+    head = split_head(lines[span[0]])
+    if head.box != " ":
+        raise ReportError(f"{phase} is ticked: a done row is history")
+    graph = ledger_mod.parse(text)
+    have = _needs_tokens(head)
+    want = list(have if needs is None else needs)
+    missing = [n for n in drop if n not in want]
+    if missing:
+        raise ReportError(f"{phase} does not need {' '.join(missing)}")
+    want = [n for n in want if n not in drop]
+    want += [n for n in add if n not in want]
+    gone = [n for n in have if n not in want]
+    fresh = [n for n in want if n not in have]
+    if phase in fresh:
+        raise ReportError(f"{phase} cannot need itself")
+    unknown = [n for n in fresh if n not in graph]
+    if unknown:
+        raise ReportError(f"needs names no ledger row: {', '.join(unknown)}")
+    said: list[str] = []
+    if gone or fresh:
+        k = _field_index(head, _NEEDS)
+        if k is None:
+            head.fields.insert(_meta_slot(head, (_DIR,)), "needs:—")
+            k = _field_index(head, _NEEDS)
+        head.fields[k] = _edit_needs(head.fields[k], gone, fresh)
+        said.append("needs " + " ".join([f"−{n}" for n in gone] + [f"+{n}" for n in fresh]))
+    if touches is not None:
+        check_touches(phase, touches, ledger_mod.dirs(text).get(phase, []), known)
+        k = _field_index(head, _TOUCHES)
+        old = ledger_mod._BACKTICK_RE.findall(head.fields[k]) if k is not None else []
+        if touches != old:
+            if k is None:
+                head.fields.insert(_meta_slot(head, (_DIR, _NEEDS)), touches_field(touches))
+            else:
+                head.fields[k] = touches_field(touches)
+            said.append("touches → " + " ".join(f"`{t}`" for t in touches))
+    if not said:
+        raise ReportError(f"that changes nothing on {phase}")
+    lines[span[0]] = head.rebuild()
+    out = "\n".join(lines)
+    landed = ledger_mod.done_rows(done or {}, text)
+    before = set(ledger_mod.validate(graph, landed))
+    new = [i for i in ledger_mod.validate(ledger_mod.parse(out), landed) if i not in before]
+    if new:
+        raise ReportError("; ".join(new))
+    return out, "; ".join(said)
+
+
 def file_follow_up(cfg: Config, by: str, phase: str, title: str, needs: list[str],
-                   dirs: list[str], tags: list[str], scope: str) -> str:
-    """Validate and queue a follow-up row filed from ``by``; return its queue key."""
+                   dirs: list[str], tags: list[str], scope: str,
+                   touches: list[str] = ()) -> str:
+    """Validate and queue a follow-up row filed from ``by``; return its queue key.
+
+    ``touches`` is required while lanes are on."""
     if not title.strip():
         raise ReportError("--title is required: the row's one-line title")
+    touches = list(touches)
+    if cfg.lanes_enabled and not touches:
+        raise ReportError("--touches is required while lanes are on: name what the row edits")
     taken = {op["id"] for data in pending(cfg).values() for op in data["ops"]
              if op.get("kind") == "row"}
     text = _ledger_text(cfg)
     check_row(text, phase, needs, taken, _recorded(cfg))
+    if touches:
+        check_touches(phase, touches, dirs, _known_lanes(cfg))
     key = key_for(by)
     queue(cfg, key, {"kind": "row", "by": by, "id": phase, "title": title.strip(),
-                     "needs": needs, "dirs": dirs, "tags": tags, "scope": scope.strip()})
+                     "needs": needs, "dirs": dirs, "tags": tags, "touches": touches,
+                     "scope": scope.strip()})
     return key
+
+
+def _reshape_args(cfg: Config, op: dict) -> dict:
+    return {"needs": op.get("needs"), "add": op.get("add", []), "drop": op.get("drop", []),
+            "touches": op.get("touches"), "done": _recorded(cfg), "excluded": cfg.exclude,
+            "known": _known_lanes(cfg) if op.get("touches") is not None else frozenset()}
+
+
+def file_reshape(cfg: Config, by: str, phase: str, why: str, *, needs: list[str] | None = None,
+                 add: list[str] = (), drop: list[str] = (),
+                 touches: list[str] | None = None) -> str:
+    """Validate a reshape of ``phase``'s row against the ledger as it is and queue
+    it to land at once (:data:`NOW`); the writer checks it again, and runs the
+    ledger gate, when it applies it. Returns the queue key."""
+    if not why.strip():
+        raise ReportError("say why: the reason goes to the row's history")
+    op = {"kind": "reshape", "by": by, "phase": phase, "needs": needs, "add": list(add),
+          "drop": list(drop), "touches": touches, "why": why.strip()}
+    reshape_row(_ledger_text(cfg), phase, **_reshape_args(cfg, op))
+    queue(cfg, NOW, op)
+    return NOW
 
 
 # -- applying -------------------------------------------------------------
@@ -581,6 +742,8 @@ class Applied:
     touched: list[str] = field(default_factory=list)
     refused: list[str] = field(default_factory=list)
     released: bool = False
+    #: Ticked phases whose needs were not carried, because lanes are on.
+    carry_skipped: list[str] = field(default_factory=list)
 
 
 def _run_gate(cfg: Config, root: Path) -> str:
@@ -625,8 +788,28 @@ def apply(cfg: Config, root: Path, key: str, data: dict, status: str | None,
         text = set_state(text, phase, tick=tick, status=status_text,
                          after=after if word == "later" else ("" if tick else None))
         if tick:
-            text, _ = carry_needs(text, phase)
+            text, _ = carry_needs(text, phase, lanes=cfg.lanes_enabled)
+            if cfg.lanes_enabled:
+                res.carry_skipped.append(phase)
             res.released = True
+
+    def gated(before: str, what: str, label: str, filer: str, change) -> bool:
+        """Apply ``change() -> text`` through the ledger gate; on a refusal put
+        the ledger back byte for byte and record why in ``filer``'s history."""
+        nonlocal text
+        try:
+            text = change()
+            ledger_path.write_text(text, encoding="utf-8")
+            gate = _run_gate(cfg, root)
+            if gate:
+                raise ReportError(gate)
+        except ReportError as exc:
+            text = before
+            ledger_path.write_text(text, encoding="utf-8")
+            res.refused.append(f"{label}: {exc}")
+            append_history(root, hist, split_kb, filer, entry(f"{stamp} · {what} refused", str(exc)))
+            return False
+        return True
 
     out = data.get("outcome")
     if out and key != NOW:
@@ -657,27 +840,41 @@ def apply(cfg: Config, root: Path, key: str, data: dict, status: str | None,
                            entry(f"{stamp} · {word} · by {who}", op.get("note", "")))
             res.touched.append(f"{phase} {word}")
         elif kind == "row":
-            before = text
-            try:
+            touches = op.get("touches") or []
+
+            def add_row(op=op, touches=touches) -> str:
                 check_row(text, op["id"], op.get("needs", []), done=_recorded(cfg))
+                if touches:
+                    check_touches(op["id"], touches, op.get("dirs", []), _known_lanes(cfg))
                 row = make_row(op["id"], op["title"], op.get("needs", []),
-                               op.get("dirs", []), op.get("tags", []))
-                text = insert_row(text, op.get("by", ""), row)
-                ledger_path.write_text(text, encoding="utf-8")
-                gate = _run_gate(cfg, root)
-                if gate:
-                    raise ReportError(gate)
-            except ReportError as exc:
-                text = before
-                ledger_path.write_text(text, encoding="utf-8")
-                res.refused.append(f"{op['id']}: {exc}")
-                append_history(root, hist, split_kb, op.get("by") or op["id"],
-                               entry(f"{stamp} · follow-up `{op['id']}` refused", str(exc)))
+                               op.get("dirs", []), op.get("tags", []), touches)
+                return insert_row(text, op.get("by", ""), row)
+
+            if not gated(text, f"follow-up `{op['id']}`", op["id"], op.get("by") or op["id"], add_row):
                 continue
+            scope = op.get("scope", "")
+            if touches:
+                scope = (scope + "\n\n" + touches_field(touches).replace(":", ": ", 1)).strip()
             append_history(root, hist, split_kb, op["id"],
-                           entry(f"{stamp} · filed by `{op.get('by', '?')}`", op.get("scope", "")),
+                           entry(f"{stamp} · filed by `{op.get('by', '?')}`", scope),
                            title=clip(plain(op["title"])))
             res.touched.append(f"follow-up {op['id']}")
+            res.released = True
+        elif kind == "reshape":
+            phase, who = op["phase"], op.get("by") or "a session"
+            said = ""
+
+            def edit(op=op, phase=phase) -> str:
+                nonlocal said
+                out, said = reshape_row(text, phase, **_reshape_args(cfg, op))
+                return out
+
+            filer = who if who in ledger_mod.parse(text) else phase
+            if not gated(text, f"reshape of `{phase}`", f"reshape {phase}", filer, edit):
+                continue
+            append_history(root, hist, split_kb, phase, entry(
+                f"{stamp} · reshape · by {who}", f"reshaped by {who}: {said}; why: {op.get('why', '')}"))
+            res.touched.append(f"reshape {phase}")
             res.released = True
         elif kind == "lesson":
             append_lesson(root, cfg.lessons, op.get("phase", "?"), op.get("text", ""),
@@ -704,6 +901,8 @@ def _summary(due: list[str], queued: dict[str, dict]) -> str:
                 parts.append(f"{op.get('phase')} {op.get('outcome')}")
             elif kind == "row":
                 parts.append(f"follow-up {op.get('id')}")
+            elif kind == "reshape":
+                parts.append(f"reshape {op.get('phase')}")
             elif kind == "lesson":
                 parts.append(f"lesson from {op.get('phase')}")
     return "; ".join(parts)[:200] or "reports"
@@ -741,6 +940,7 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
             got = apply(cfg, root, k, queued[k], finished.get(k), flushed)
             total.touched += got.touched
             total.refused += got.refused
+            total.carry_skipped += got.carry_skipped
             total.released |= got.released
 
     what = _summary(due, queued)
@@ -773,6 +973,8 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
         log.line(f"LEDGER {line}")
     for line in total.refused:
         log.line(f"LEDGER-REFUSED {line}")
+    for phase in total.carry_skipped:
+        log.line(f"CARRY-SKIPPED {phase} lanes")
     return total
 
 

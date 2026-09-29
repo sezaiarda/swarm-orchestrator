@@ -23,6 +23,7 @@ through it every day.
 - [How it works](#how-it-works)
 - [The cast](#the-cast)
 - [A phase's life](#a-phases-life)
+- [Lanes](#lanes)
 - [Quick start](#quick-start)
 - [Answering the swarm](#answering-the-swarm)
 - [Command reference](#command-reference)
@@ -590,6 +591,37 @@ stateDiagram-v2
   always wins: a ticked row the swarm recorded `fail` stays failed until
   `swarm retry`, and a tick on a phase still in flight releases nothing until it
   lands.
+
+## Lanes
+
+Work that touches different files runs at the same time. A ledger row
+declares what it edits in a `touches:` field, and each touch takes one of four
+forms: `repo/path`, `repo/dir/**` (`repo/**` is the whole repo), `./path` for the
+project repo itself, and `@resource` for something that is not a file.
+
+- **Off by default.** `[lanes] enabled = false` keeps the old rule, one phase per
+  repo at a time. `true` schedules per touch instead: a ready row whose touches
+  overlap nothing in flight launches, and one that overlaps waits.
+- **Fair.** A waiting row reserves its touches, so a later overlapping row cannot
+  overtake it, while a later disjoint row still launches. `[lanes] per_repo`
+  (default 2) caps the phases in flight in one repo. `swarm why <row>` says what a
+  row waits for.
+- **Legacy rows.** A row with no `touches:` owns everything under its `dir:`, so
+  it runs alone in that repo, as before.
+- **Landing re-tests.** When a repo's main has moved since a phase branched, the
+  integrator merges main into the phase's worktree and runs `[lanes].check` there
+  before it lands. Red opens the resolver on the worktree, never on your checkout.
+- **Growing a lane.** A worker that must edit outside its touches runs
+  `swarm widen <phase> <touch>` first; files changed outside the lane are noted in
+  the phase history and the Overseer digest.
+- **Shaping rows.** `swarm follow-up … --touches a,b` files a row with its touches
+  (required while lanes are on). `swarm reshape <by> <row> …` edits an open row's
+  `needs:` or `touches:` through the ledger gate, so nobody hand-edits the ledger.
+  Under lanes a tick no longer carries a row's open needs to its dependents
+  (`CARRY-SKIPPED` in the supervisor log), because touches keep rows apart.
+
+See [docs/config.md](docs/config.md#lanes) for every key and
+[docs/cli.md](docs/cli.md) for the commands.
 
 ## Quick start
 

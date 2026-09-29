@@ -21,6 +21,9 @@ drives the merge queue.
   order, into free slots, one thread per launch. No model decides what starts.
   A row ticked `[x]` with no record of the swarm's counts as done, as on the web
   board; a recorded `fail` still wins over a tick.
+  With `[lanes] enabled` it walks `lanes.pick` instead of the plain ready list:
+  rows whose touches overlap nothing in flight launch, waiting rows reserve their
+  touches, and `[lanes] per_repo` caps phases per repo.
 - **Merging and finishing.** It merges finished phases through the queue, and it
   finishes the run once nothing is busy, waiting, parked, launching, queued, held,
   owed as a push or owed as an operator hand-off, and no Overseer pass is due.
@@ -337,9 +340,16 @@ row is ticked only once its work is on main; a `fail` never ticks. When the
 checkout cannot take it (off main, mid-merge, someone's edit in those files) the
 report is held and the watchdog retries it; nothing is lost across a restart.
 
-- **The ledger keeps state:** box, id, dir, needs, a short bold title, tags, an
-  `after:` date and `status:`. A ticked row's open needs are carried to its open
-  dependents, so ticking never lets two rows its chain ordered run together.
+- **The ledger keeps state:** box, id, dir, needs, touches, a short bold title,
+  tags, an `after:` date and `status:`. `touches:` is meta, so a tick, a status or
+  an `after:` never turns it into prose or a title. With lanes off, a ticked row's
+  open needs are carried to its open dependents, so ticking never lets two rows
+  its chain ordered run together; with `[lanes] enabled` the carry is skipped and
+  the log says `CARRY-SKIPPED <phase> lanes`.
+- **`reshape`** edits an open row's `needs:` or `touches:`. The writer re-checks it
+  on the target branch and applies it through `[tasks].ledger_gate`; a failing
+  gate leaves the ledger byte for byte as it was and records the refusal in the
+  filer's history.
 - **The history** is `<history>/<family>.md` (the id up to its first `-`), one
   `## ` section per phase with dated `### ` entries. Past `history_split_kb` it
   becomes `<history>/<family>/<id>.md`. The web board's detail sheet shows it
@@ -382,6 +392,12 @@ as a decline.
 
 It is all-or-nothing: if any conflicted file has no strategy, or a strategy or
 check declines, the tree is left exactly as the failed merge left it.
+
+With `[lanes] enabled`, a changed repo whose main moved since the phase branched
+is re-tested first: main is merged into the phase's worktree and `[lanes].check`
+runs there (`swarm _lane-check`, detached) against the sibling lanes that landed.
+Green lands the tested tree; red or a text conflict holds the queue and opens the
+resolver on the worktree.
 
 A merge can end four ways:
 

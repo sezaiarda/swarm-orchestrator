@@ -1338,17 +1338,39 @@ def cmd_record(cfg: Config, phase: str, outcome: str, note: str, after: str) -> 
     return _report_queued(cfg, ledgerw.NOW, f"{phase} {outcome}")
 
 
+def _ids(value: str | None) -> list[str]:
+    """A comma- or space-separated option value as its words."""
+    return [t for t in (value or "").replace(",", " ").split() if t]
+
+
 def cmd_follow_up(cfg: Config, by: str, phase: str, title: str, needs: str, dirs: str,
-                  tags: str, scope: str) -> int:
+                  tags: str, scope: str, touches: str = "") -> int:
     """File a new ledger row for work found while building ``by``."""
-    split = lambda v: [t for t in (v or "").replace(",", " ").split() if t]  # noqa: E731
     try:
-        key = ledgerw.file_follow_up(cfg, by, phase, title, split(needs), split(dirs),
-                                     split(tags), scope)
+        key = ledgerw.file_follow_up(cfg, by, phase, title, _ids(needs), _ids(dirs),
+                                     _ids(tags), scope, _ids(touches))
     except ledgerw.ReportError as exc:
         print(f"swarm follow-up: {exc}", file=sys.stderr)
         return 2
     return _report_queued(cfg, key, f"follow-up {phase}")
+
+
+def cmd_reshape(cfg: Config, by: str, phase: str, why: str, needs: str | None, add: str,
+                drop: str, touches: str | None) -> int:
+    """Edit an open row's ``needs:`` or ``touches:``, at once.
+
+    The one ledger edit a session makes on an existing row; the swarm applies it
+    on the target branch through the ledger gate, and notes who changed what and
+    why in the row's history. A refusal leaves the ledger as it was.
+    """
+    try:
+        key = ledgerw.file_reshape(
+            cfg, by, phase, why, needs=None if needs is None else _ids(needs),
+            add=_ids(add), drop=_ids(drop), touches=None if touches is None else _ids(touches))
+    except ledgerw.ReportError as exc:
+        print(f"swarm reshape: {exc}", file=sys.stderr)
+        return 2
+    return _report_queued(cfg, key, f"reshape {phase}")
 
 
 def cmd_lesson(cfg: Config, phase: str, text: str, title: str) -> int:
@@ -2252,8 +2274,21 @@ def _build_parser() -> argparse.ArgumentParser:
     fup.add_argument("--needs", default="", help="ids it waits on (comma-separated)")
     fup.add_argument("--dir", default="", help="repo dir(s) it works in (comma-separated)")
     fup.add_argument("--tag", default="", help="owner tag(s) it stops at (comma-separated)")
+    fup.add_argument("--touches", default="",
+                     help="what it edits, each inside --dir (comma-separated; required with lanes on)")
     fup.set_defaults(func=lambda cfg, a: cmd_follow_up(
-        cfg, a.phase, a.id, a.title, a.needs, a.dir, a.tag, " ".join(a.scope)))
+        cfg, a.phase, a.id, a.title, a.needs, a.dir, a.tag, " ".join(a.scope), a.touches))
+
+    rsp = sub.add_parser("reshape", help="edit an open row's needs: or touches:, through the gate")
+    rsp.add_argument("by", help="who reshapes: your phase, or your role (overseer, operator)")
+    rsp.add_argument("row", help="the open row to edit")
+    rsp.add_argument("why", nargs="+", help="why; goes to the row's history")
+    rsp.add_argument("--needs", default=None, help="replace its needs (comma-separated; '' = none)")
+    rsp.add_argument("--add-needs", default="", help="needs to add (comma-separated)")
+    rsp.add_argument("--drop-needs", default="", help="needs to drop (comma-separated)")
+    rsp.add_argument("--touches", default=None, help="replace its touches (comma-separated)")
+    rsp.set_defaults(func=lambda cfg, a: cmd_reshape(
+        cfg, a.by, a.row, " ".join(a.why), a.needs, a.add_needs, a.drop_needs, a.touches))
 
     lsp = sub.add_parser("lesson", help="add a lesson to the project's lessons file")
     lsp.add_argument("phase")

@@ -128,9 +128,10 @@ def test_home_puts_needs_you_work_and_the_feed_on_screen(seeded, size, monkeypat
     text = "\n".join(got["feed_rows"])
     assert "ship without the graph" in text and "kept the v1 schema" in text
     assert "Built the base" in text
-    # Working now and phases done stack when their column is under 100: the
-    # whole screen below 100, the grid's left column at 140.
-    assert got["narrow"] is (size[0] < 100 or size[0] >= 110)
+    # Working now and phases done stack whenever sharing the row would give
+    # working now less than WORK_COLS (a worker line would wrap): at every size
+    # here — below 100, at 100 (half of it is too narrow) and in the grid at 140.
+    assert got["narrow"] is True
     # Short screens give the room to the feed; at 140x40 the grid's left column
     # is too narrow to stack a chart under working now and still show the feed.
     assert got["chart"] is {(80, 24): False, (100, 30): False, (140, 40): False}[size]

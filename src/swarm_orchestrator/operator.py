@@ -415,7 +415,8 @@ def on_finished(cfg: Config, phase: str, log: Log) -> bool:
     act on a phantom — the work it was briefed about would not be in ``main`` yet.
 
     A ``later`` triage is the one thing that holds it back; that item drains from
-    :func:`sweep` once a worker slot is free and no phase wants it instead.
+    :func:`sweep` once a worker slot is free and no phase wants it instead, or
+    once it has waited ``[operator].later_wait_s``.
     """
     item = opqueue.load(cfg, phase)
     if item is None or item.terminal:
@@ -459,8 +460,13 @@ def sweep(
     slot is free and no launchable phase is waiting for it (the supervisor's own
     verdict, which only it can give). Other phases may still be building or
     merging: the session runs in its own window and takes no slot, so waiting
-    for the whole run to go quiet only piled the queue up. Without ``room`` a
-    ``later`` job is not opened here at all.
+    for the whole run to go quiet only piled the queue up.
+
+    Nor does it wait past ``[operator].later_wait_s``: with ready rows keeping
+    every slot busy, ``room()`` stays False for as long as the backlog lasts,
+    and ``later`` came to mean never. The oldest ``later`` job that
+    has waited that long opens without ``room``. Without either, it is not
+    opened here at all.
     """
     if not cfg.operator_enabled:
         return False
@@ -468,12 +474,23 @@ def sweep(
     _reclaim(cfg, log, now)
     st = state_mod.read(cfg)
     due = [i for i in opqueue.ready(cfg, now) if not _in_flight(st, i.phase)]
+    reason = "queue swept"
     pick = next((i for i in due if not deferred(i)), None)
+    if pick is None:
+        pick = next((i for i in due if _overdue(cfg, i, now)), None)
+        if pick is not None:
+            reason = f"queue swept, later job waited {pick.age_s(now) / 3600:.1f}h"
     if pick is None and due and room is not None and room():
         pick = due[0]
     if pick is None:
         return False
-    return dispatch(cfg, pick.phase, log, reason="queue swept")
+    return dispatch(cfg, pick.phase, log, reason=reason)
+
+
+def _overdue(cfg: Config, item: opqueue.Item, now: float) -> bool:
+    """Has a ``later`` job waited out ``[operator].later_wait_s`` (0 = never)?"""
+    wait = cfg.operator_later_wait_s
+    return wait > 0 and item.age_s(now) >= wait
 
 
 def _in_flight(st: state_mod.State, phase: str) -> bool:

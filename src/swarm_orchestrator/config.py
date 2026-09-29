@@ -547,6 +547,13 @@ class Config:
         doc="model that decides now vs later",
         why="triage is spawned by the worker's `swarm done` from its worktree"
             " mirror, so it reads the branched .swarm.toml copy")
+    # With the backlog deep and lanes on, a slot no launchable phase wants never
+    # comes, so a `later` job had no other way out: live-box rolls waited
+    # a long time. The session takes no worker slot, so this costs no build.
+    operator_later_wait_s: int = _k(
+        "operator", "later_wait_s", 10800, HOT, minimum=0,
+        doc="seconds a `later` job waits at most; 0 = no cap",
+        why="read by the supervisor's queue sweep on every wake")
     operator_notify: str = _k(
         "operator", "notify", OPERATOR_NOTIFY_DEFAULT, NEXT, env="SWARM_OPERATOR_NOTIFY",
         choices=OPERATOR_NOTIFY,

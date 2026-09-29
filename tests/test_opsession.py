@@ -259,6 +259,77 @@ def test_a_ready_phase_keeps_the_free_slot_until_it_is_given_up_on(cfg):
     assert state_mod.read(cfg).operator_phase == PHASE
 
 
+def _age(cfg, phase: str, seconds: float) -> None:
+    """Backdate ``phase``'s job so it has been queued for ``seconds``."""
+    item = opqueue.load(cfg, phase)
+    item.queued_at = time.time() - seconds
+    opqueue._write(cfg, item)
+
+
+def _backlog(cfg) -> Supervisor:
+    """Every slot busy and a ready row waiting: room() never comes."""
+    with state_mod.transaction(cfg) as st:
+        for i in range(len(st.slots)):
+            st.claim_slot(f"busy-{i}")
+    ledger = Path(str(cfg.project_dir)) / cfg.ledger
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("- [ ] `R1` · needs:—\n", encoding="utf-8")
+    sup = Supervisor(cfg)
+    assert sup._operator_room() is False
+    return sup
+
+
+def test_a_later_job_opens_once_it_has_waited_out_the_bound(cfg):
+    """Later jobs used to wait for hours behind a backlog that never left a slot
+    free. Held before `later_wait_s`, opened after it, still without room."""
+    _later(cfg)
+    sup = _backlog(cfg)
+    _age(cfg, PHASE, cfg.operator_later_wait_s - 60)
+    sup._check_operator_queue()
+    assert state_mod.read(cfg).operator_phase is None
+
+    _age(cfg, PHASE, cfg.operator_later_wait_s + 60)
+    sup._check_operator_queue()
+    assert state_mod.read(cfg).operator_phase == PHASE
+    assert "later job waited" in cfg.supervisor_log.read_text(encoding="utf-8")
+
+
+def test_overdue_later_jobs_still_open_one_at_a_time_oldest_first(cfg, log):
+    _later(cfg)
+    queue(cfg, OTHER, note="restart the unit on the build host")
+    opqueue.set_triage(cfg, OTHER, when=opqueue.LATER, why="keeps", group="",
+                       source="test")
+    _age(cfg, OTHER, cfg.operator_later_wait_s + 60)
+    _age(cfg, PHASE, cfg.operator_later_wait_s + 120)
+
+    assert operator_mod.sweep(cfg, log) is True
+    assert state_mod.read(cfg).operator_phase == PHASE
+    assert operator_mod.sweep(cfg, log) is False  # the lease admits one session
+    assert state_mod.read(cfg).operator_phase == PHASE
+    assert opqueue.load(cfg, OTHER).state == opqueue.QUEUED
+
+
+def test_an_overdue_later_job_is_still_held_while_its_phase_is_in_flight(cfg, log):
+    _later(cfg)
+    _age(cfg, PHASE, cfg.operator_later_wait_s + 60)
+    with state_mod.transaction(cfg) as st:
+        st.integ_queue = [PHASE]
+    assert operator_mod.sweep(cfg, log) is False
+    with state_mod.transaction(cfg) as st:
+        st.integ_queue = []
+        st.claim_slot(PHASE)
+    assert operator_mod.sweep(cfg, log) is False
+    assert state_mod.read(cfg).operator_phase is None
+
+
+def test_a_zero_later_wait_keeps_a_later_job_for_room_alone(cfg, log):
+    _later(cfg)
+    _age(cfg, PHASE, 30 * 24 * 3600)
+    cfg.operator_later_wait_s = 0
+    assert operator_mod.sweep(cfg, log, room=lambda: False) is False
+    assert operator_mod.sweep(cfg, log, room=lambda: True) is True
+
+
 def test_a_settled_run_opens_its_later_job(cfg):
     """Settled but for a `later` job: the finish check opens it, since nothing
     else may ever wake the loop to."""

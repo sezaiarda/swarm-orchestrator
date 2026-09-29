@@ -184,6 +184,7 @@ check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
 | `cmd` | `""` | `SWARM_OPERATOR_CMD` | next | Replaces the built-in session command. With it set, no brief is typed in. |
 | `model` | `""` | | next | `--model` for operator sessions. `""` inherits the user's setting. |
 | `triage_model` | `"haiku"` | | next | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
+| `later_wait_s` | `10800` | | hot | The longest a job triaged `later` waits. It normally opens when a worker slot is free that no ready phase wants; with a deep backlog that never happens, so once it has been queued this long it opens anyway, oldest first, one session at a time, never before its phase has merged. The session takes no worker slot. `0` means no cap. |
 | `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | next | Which `operator-done` outcomes ping you. `"attention"` pings only an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed); a decision only you can make is asked separately, with `swarm waiting <job> "<question>"`, before the job finishes. `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions and abandoned jobs always ping. Any other value counts as `"attention"`. |
 
 ## `[overseer]`

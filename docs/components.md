@@ -203,10 +203,12 @@ counts as `later`. `now` opens the session at once, or at the merge if its phase
 is still building or merging: no job opens before its work is on main. Any job
 opens when its phase has merged (unless triage said `later`), or from the queue
 sweep, which runs on every supervisor wake and opens the oldest due job whose
-phase is no longer building or merging. A `later` job can wait for the rest of
-the run, so the sweep holds it until the run is quiet: no slot busy, nothing
-launching, merging, held or ready to launch (a phase parked on you does not
-count). `swarm operator <phase>` by hand turns a `later` into `now`.
+phase is no longer building or merging. A `later` job waits for room: the sweep
+holds it until a worker slot is free and nothing is launching or ready to launch
+(a phase parked on you does not count; other phases may still build or merge,
+since the session takes no slot). It never waits longer than
+`[operator].later_wait_s` (3 h by default): then it opens anyway, oldest first.
+`swarm operator <phase>` by hand turns a `later` into `now`.
 
 **Leases and limits:** only one job runs at a time, under a lease in `state.json`.
 The lease lasts 1 h, or 7 days while waiting on you. A job gets 3 attempts, with

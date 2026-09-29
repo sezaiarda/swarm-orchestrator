@@ -243,8 +243,9 @@ flowchart TD
   - `swarm operator-add`;
   - `swarm operator <phase>`.
 - **Triage:** a cheap model (`triage_model`) answers `now` or `later`, and
-  anything odd counts as `later`. `later` means it can wait for the rest of the
-  run: the job is held until nothing is building, launching, ready or merging.
+  anything odd counts as `later`. `later` means it can wait for room: the job
+  is held until a worker slot is free that no ready phase wants, or for at most
+  `[operator].later_wait_s` (3 h by default).
   `swarm operator <phase>` by hand turns a `later` into `now`.
 - **Hand-offs:** a job never opens before its phase has merged. It opens at the
   merge (unless triage said `later`), or from the queue sweep on every

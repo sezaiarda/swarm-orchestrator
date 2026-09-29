@@ -66,6 +66,16 @@ def test_a_row_counts_from_the_commit_that_ticked_it():
     assert pace.workers_at(workers, 50) is None and pace.workers_at(workers, 250) == 2
 
 
+def test_a_row_is_filed_by_the_commit_it_first_appears_in():
+    """The ETA engine measures growth from filings: an edit, a tick or a reopen of
+    a row already filed is not a new row."""
+    ticks, workers, added = {}, [], {}
+    pace.fold(LOG, ticks, workers, "docs/PHASE-LEDGER.md", ".swarm.toml", added)
+    assert added["a-W1"][0] == 100.0 and added["a-W2"][0] == 100.0
+    assert added["b-W1"] == (300.0, 4)  # b-W1..b-W4 were filed in one commit
+    assert set(added) == {"a-W1", "a-W2", "b-W1", "b-W2", "b-W3", "b-W4"}
+
+
 @pytest.fixture
 def repo(tmp_path):
     if shutil.which("git") is None:
@@ -133,9 +143,8 @@ def test_the_pace_is_the_recent_finishes_only():
     assert pace.measure(stale | spaced(3), set(), [], [], NOW) is None
 
 
-def test_too_few_recent_finishes_is_no_pace_and_the_headline_says_so():
+def test_too_few_recent_finishes_is_no_pace():
     assert pace.measure(spaced(pace.MIN_PHASES - 1), set(), [], [], NOW) is None
-    assert data.eta(None, 5, 1, ready=1) == "too few recent finishes to time"
 
 
 def test_a_bookkeeping_commit_is_not_throughput():

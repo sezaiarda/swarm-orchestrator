@@ -10,7 +10,8 @@ history knows every phase wherever it was built — the commit that turned its r
 Two histories are read, both from the project repo:
 
 * the ledger's, for when each row was ticked (and by how big a commit: one that
-  ticks thirty rows at once is bookkeeping, not throughput);
+  ticks thirty rows at once is bookkeeping, not throughput), and when each row
+  was filed (the ETA engine's measure of how campaigns grow while they run);
 * ``.swarm.toml``'s, for how many workers the swarm had at the time, so a pace
   measured at two workers is not promised to one.
 
@@ -31,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CACHE_NAME = "ledger-history.json"
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 
 #: A commit that ticks more rows than this closed a campaign by hand or seeded
 #: the ledger: the rows are done, but they did not take the time between them.
@@ -60,6 +61,8 @@ class History:
     ticks: dict[str, tuple[float, int]] = field(default_factory=dict)
     #: ``(commit time, max_workers)`` each time ``.swarm.toml`` set it, oldest first.
     workers: list[tuple[float, int]] = field(default_factory=list)
+    #: phase -> ``(commit time its row first appeared, rows that commit filed)``.
+    added: dict[str, tuple[float, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,20 +79,28 @@ class Pace:
 
 
 # -- reading git ------------------------------------------------------------
-def fold(log_text: str, ticks: dict, workers: list, ledger: str, config: str) -> None:
+def fold(log_text: str, ticks: dict, workers: list, ledger: str, config: str,
+         added: dict | None = None) -> None:
     """Apply ``git log --reverse -p -U0`` output to ``ticks``/``workers`` in place.
 
     A row counts from the commit that turned it ``[x]``: an edit to an already
-    ticked row keeps its time, a row turned back to ``[ ]`` loses it.
+    ticked row keeps its time, a row turned back to ``[ ]`` loses it. ``added``,
+    when given, gets each row's first appearance; a later edit or move of the
+    row is not a filing.
     """
     ts = 0.0
     path = ""
     new: list[str] = []
+    filed: list[str] = []
+    added = {} if added is None else added
 
     def close() -> None:
         for phase in new:
             ticks[phase] = (ts, len(new))
+        for phase in filed:
+            added[phase] = (ts, len(filed))
         new.clear()
+        filed.clear()
 
     for line in log_text.splitlines():
         if line.startswith("@@@"):
@@ -108,6 +119,8 @@ def fold(log_text: str, ticks: dict, workers: list, ledger: str, config: str) ->
             if m is None:
                 continue
             box, phase = m.groups()
+            if phase not in added and phase not in filed:
+                filed.append(phase)
             if box == " ":
                 ticks.pop(phase, None)
                 if phase in new:
@@ -163,18 +176,19 @@ def load(cfg) -> History:
         return old
     ticks = dict(old.ticks) if old else {}
     workers = list(old.workers) if old else []
+    added = dict(old.added) if old else {}
     text = None
     if old is not None and old.head:
         base = _git(repo, "merge-base", "--is-ancestor", old.head, head)
         if base is not None and base.returncode == 0:
             text = _log(repo, f"{old.head}..{head}", paths)
     if text is None:  # first read, or history was rewritten under the cache
-        ticks, workers = {}, []
+        ticks, workers, added = {}, [], {}
         text = _log(repo, head, paths)
         if text is None:
             return History()
-    fold(text, ticks, workers, ledger, config)
-    got = History(head=head, ticks=ticks, workers=workers)
+    fold(text, ticks, workers, ledger, config, added)
+    got = History(head=head, ticks=ticks, workers=workers, added=added)
     _write_cache(cache, ledger, got)
     return got
 
@@ -190,6 +204,7 @@ def _read_cache(path: Path | None, ledger: str) -> History | None:
             head=str(raw["head"]),
             ticks={str(p): (float(t), int(n)) for p, (t, n) in raw["ticks"].items()},
             workers=[(float(t), int(n)) for t, n in raw["workers"]],
+            added={str(p): (float(t), int(n)) for p, (t, n) in raw["added"].items()},
         )
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
@@ -206,6 +221,7 @@ def _write_cache(path: Path | None, ledger: str, got: History) -> None:
             "version": _CACHE_VERSION, "ledger": ledger, "head": got.head,
             "ticks": {p: list(v) for p, v in got.ticks.items()},
             "workers": [list(w) for w in got.workers],
+            "added": {p: list(v) for p, v in got.added.items()},
         }), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:

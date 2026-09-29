@@ -211,6 +211,24 @@ def load_deferred(path: Path, today: str) -> dict[str, str]:
     return deferred(path.read_text(encoding="utf-8"), today)
 
 
+def dirs(text: str) -> dict[str, list[str]]:
+    """Each checklist row's ``dir:`` repos, as written: ``dir:`a+b``` and
+    ``dir:`a` `b``` both name two. A row with no ``dir:`` field is left out."""
+    out: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        m = _CHECKBOX_RE.match(raw)
+        ids = _BACKTICK_RE.findall(m.group(1)) if m else []
+        if not ids or not _PHASE_RE.match(ids[0]) or ids[0] in out:
+            continue
+        for part in m.group(1).split(_FIELD_SEP):
+            if part.strip().startswith("dir:"):
+                got = [d for tok in _BACKTICK_RE.findall(part) for d in tok.split("+") if d]
+                if got:
+                    out[ids[0]] = got
+                break
+    return out
+
+
 def with_ticked(
     done: dict[str, str],
     ticked_ids: set[str] | frozenset[str],

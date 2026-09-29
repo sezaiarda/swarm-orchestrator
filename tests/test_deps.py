@@ -211,3 +211,12 @@ def test_why_says_a_ticked_row_is_done(tmp_path, monkeypatch):
     exp = why.explain(cfg, "P1")
     assert exp.reason == why.DONE and "ticked" in exp.detail
     assert why.explain(cfg, "P2").reason == why.READY
+
+
+def test_dirs_reads_each_rows_repos_as_written():
+    text = ("- [ ] `a-W1` · dir:`frontend` · needs:—\n"
+            "- [ ] `a-W2` · dir:`orders+frontend` · needs:`a-W1`\n"
+            "- [ ] `a-W3` · dir:`contract` `webhooks` · needs:—\n"
+            "- [ ] `a-W4` · needs:—\n")
+    assert ledger.dirs(text) == {"a-W1": ["frontend"], "a-W2": ["orders", "frontend"],
+                                 "a-W3": ["contract", "webhooks"]}

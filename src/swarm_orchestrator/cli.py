@@ -33,6 +33,7 @@ from . import tui as tui_mod
 from . import doctor as doctor_mod
 from . import drain as drain_mod
 from . import gc as gc_mod
+from . import guide as guide_mod
 from . import promptlint
 from . import procs
 from . import pushowed
@@ -52,6 +53,7 @@ from . import state as state_mod
 from . import statuses
 from . import supervisor as sup_mod
 from . import telegram, tgbot, tmux
+from . import todo as todo_mod
 from . import usage as usage_mod
 from .web import lifecycle as web_lifecycle
 from .config import Config, load
@@ -1120,7 +1122,7 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
     if not shipped.is_dir():
         shipped = Path(__file__).resolve().parent.parent.parent / "prompts"
     for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md",
-                 "big_picture.md"):
+                 "big_picture.md", "owner_guide.md"):
         q = shipped / name
         if q.is_file():
             out.append((f"prompts/{name}", q))
@@ -1935,6 +1937,25 @@ def cmd_layout(cfg: Config, name: str | None) -> int:
     return 0
 
 
+def cmd_todo(cfg: Config, as_json: bool) -> int:
+    """Everything waiting on the owner that is not a question (:mod:`todo`)."""
+    todos = todo_mod.collect(cfg)
+    if as_json:
+        return _dump(todos.to_dict())
+    print(todo_mod.render(todos))
+    return 0
+
+
+def cmd_guide(cfg: Config) -> int:
+    """Open the owner's guide in its own tmux window, or move to the live one."""
+    try:
+        print(guide_mod.open_guide(cfg))
+    except guide_mod.GuideError as exc:
+        print(f"swarm guide: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def _operator_lines(cfg: Config, st: state_mod.State) -> list[str]:
     """The operator queue for ``swarm status``: counts, then the current job."""
     items = opqueue.load_all(cfg)
@@ -2058,6 +2079,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["big_picture"] = bigpic_mod.status_text(cfg, bigpic_mod.load(cfg))
         data["owner_rows"] = [{"row": r, "blocks": n}
                               for r, n in owner_mod.current_owner_rows(cfg, st)]
+        data["owner_todos"] = todo_mod.count(cfg)
         fc, why = _forecast(cfg, st)
         data["eta"] = fc.to_json() if fc is not None else {"unavailable": why}
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -2086,6 +2108,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     # Rows only the owner can do, that hold other rows up: nothing asks about them.
     lines.extend(f"yours to do: {r} (holds up {n})"
                  for r, n in owner_mod.current_owner_rows(cfg, st))
+    lines.append(todo_mod.status_line(todo_mod.count(cfg)))
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.extend(caps.summary_for(cfg, st.usage_hold))
@@ -2461,6 +2484,14 @@ def _build_parser() -> argparse.ArgumentParser:
     bpd.add_argument("summary", nargs="*", help="what changed in the doc, in one line")
     bpd.set_defaults(func=lambda cfg, a: cmd_big_picture_done(cfg, " ".join(a.summary)),
                      tolerant=True)
+
+    tdp = sub.add_parser("todo", help="what waits on you that is not a question")
+    tdp.add_argument("--json", action="store_true")
+    tdp.set_defaults(func=lambda cfg, a: cmd_todo(cfg, a.json))
+
+    sub.add_parser(
+        "guide", help="open the owner guide: a chat that walks you through your to-dos"
+    ).set_defaults(func=lambda cfg, a: cmd_guide(cfg))
 
     ckp = sub.add_parser("check", help="preflight config, ledger, telegram, prompts")
     ckp.add_argument("--strict", action="store_true", help="warnings are fatal")

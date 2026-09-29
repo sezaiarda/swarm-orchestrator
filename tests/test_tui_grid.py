@@ -460,3 +460,33 @@ def test_a_port_that_stays_taken_still_fails(web_cfg):
         held.listen(1)
         with pytest.raises(OSError):
             web_server.make_server(web_cfg, "127.0.0.1", port, bind_wait_s=0.3)
+
+
+# -- the owner's guide ---------------------------------------------------------------
+def test_g_opens_the_guide_and_the_hint_counts_the_owners_todos(seeded, monkeypatch, capfd):
+    """`g guide me (N)` in the footer, the count in the alerts box, `g` and the
+    palette open the guide (its window is faked: no tmux here)."""
+    from swarm_orchestrator import guide
+
+    calls = []
+    monkeypatch.setattr(guide, "open_window",
+                        lambda cfg: calls.append(cfg) or (guide.FOCUSED, "@9"))
+
+    async def steps(app, pilot, got):
+        app.dash.todos = [object(), object()]
+        app.refresh_all()
+        await pilot.pause()
+        got["text"] = screen_text(app)
+        got["problems"] = app.query_one("#tab-home").query_one("#b-problems")._swarm_text
+        got["palette"] = [c.title for c in app.get_system_commands(app.screen)]
+        await pilot.press("g")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    got = _boot(seeded, (209, 50), steps, monkeypatch, capfd)
+    footer = got["text"].rstrip().splitlines()[-1]
+    assert "g guide me (2)" in footer
+    assert "2 to-do(s) for you" in plain(got["problems"])
+    assert "2 to-do(s)" in got["text"] and "g guide me ·" in got["text"]
+    assert "Guide me" in got["palette"]
+    assert len(calls) == 1

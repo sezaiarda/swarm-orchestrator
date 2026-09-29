@@ -15,6 +15,7 @@ from .. import pace as pace_mod
 from .. import runs as runs_mod
 from .. import state as state_mod
 from .. import telegram
+from .. import todo as todo_mod
 from .. import usage as usage_mod
 from ..eta import engine as eta_mod
 from ..meters import LIMITS_LOG, METERS_DIR
@@ -66,6 +67,8 @@ from .data import (
 #: ticks every 10 s, and on WSL two git walks per busy worktree per tick was a
 #: steady CPU and filesystem-lock cost for a commit count that moves per minutes.
 REPO_PROBE_S = 30.0
+#: How often the owner's to-do list (:mod:`todo`) is re-read, on the probe thread.
+TODO_PROBE_S = 30.0
 
 #: The run's usage summary is re-derived at least this often (its $/h moves with
 #: every render of every worker), and at once when a limit sample or the run moves.
@@ -153,6 +156,9 @@ class Dash:
         self._mtimes: dict[str, float] = {}
         self._graph_mtime: float | None = None
         self._repos_at = 0.0  # when the git half of the probe last ran
+        #: The owner's to-dos (not questions): the ``g`` hint and the alerts box.
+        self.todos: list = []
+        self._todos_at = 0.0
 
     @property
     def notifications_path(self) -> Path:
@@ -421,6 +427,12 @@ class Dash:
             self.repos = {p: probes.repo_stat(wt, main) for p, wt in wanted.items()}
         else:
             self.repos = {p: r for p, r in self.repos.items() if p in wanted}
+        if now - self._todos_at >= TODO_PROBE_S:
+            self._todos_at = now
+            try:
+                self.todos = todo_mod.collect(self.cfg).items
+            except Exception:  # noqa: BLE001 - a count must never take the probe down
+                pass
 
     def context_pct(self, phase: str | None) -> float | None:
         """A worker's context use in percent, from its meters file."""

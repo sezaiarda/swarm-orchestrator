@@ -1174,6 +1174,10 @@ class Home(Vertical):
         if self._single and self._needs:
             problems.insert(0, paint(f" {GLYPH[YOU]} {len(self._needs)} thing(s) need you — "
                                      "listed at the top", YOU))
+        todos = len(getattr(dash, "todos", None) or [])
+        if todos:
+            problems.insert(0, paint(f" {GLYPH[YOU]} {todos} to-do(s) for you, not questions"
+                                     " — g guide me", YOU))
         self._set("#b-problems", "\n".join(problems))
         try:
             box = self.query_one("#b-problems", Body)
@@ -1198,7 +1202,9 @@ class Home(Vertical):
             panel.set_class(bool(self._needs) and not self._single, "-you")
             panel.set_class(bad and not (self._needs and not self._single), "-bad")
             count = f" · {len(self._needs)} need you" if self._needs else ""
+            count += f" · {todos} to-do(s)" if todos else ""
             hint = "x clears not-delivered · " if dropped else ""
+            hint = ("g guide me · " if todos else "") + hint
             panel.set_title(f"alerts & notifications{count}",
                             f"newest first · {hint}4 for all")
 

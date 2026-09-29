@@ -730,6 +730,14 @@ stay blocked until it does. Asking stretches an operator job's or the
 Overseer's lease to 7 days, so a question left overnight does not kill it.
 The init pass never asks.
 
+### What is yours to do, that is not a question
+
+Some things only you can do: trying a new feature out by hand, a check on your
+device after a deploy, a to-do a finished phase left you. `swarm todo` lists them
+(`owner to-dos: N` in `swarm status`), and `swarm guide` — `g` in the dashboard —
+opens a Claude chat in its own `guide` window that walks you through them one at
+a time and records what you report. Pressing `g` again goes back to it.
+
 ## Command reference
 
 The full list, one line per subcommand and grouped by purpose, is in
@@ -739,6 +747,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 |---|---|
 | start, watch, stop | `swarm up`, `swarm status`, `swarm down` |
 | see what is wrong | `swarm doctor`, `swarm why <phase>` |
+| see and do what waits on you | `swarm todo`, `swarm guide` |
 | hold or release launching | `swarm pause`, `swarm resume` |
 | start a phase by hand, skip one, retry a failure | `swarm launch <phase>`, `swarm skip <phase>`, `swarm retry <phase>` |
 | release a held merge queue | `swarm resolved <phase>` |

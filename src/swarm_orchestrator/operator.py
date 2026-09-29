@@ -415,7 +415,7 @@ def on_finished(cfg: Config, phase: str, log: Log) -> bool:
     act on a phantom — the work it was briefed about would not be in ``main`` yet.
 
     A ``later`` triage is the one thing that holds it back; that item drains from
-    :func:`sweep` once the run is quiet instead.
+    :func:`sweep` once a worker slot is free and no phase wants it instead.
     """
     item = opqueue.load(cfg, phase)
     if item is None or item.terminal:
@@ -441,7 +441,7 @@ def on_poke(cfg: Config, phase: str, log: Log) -> bool:
 
 
 def sweep(
-    cfg: Config, log: Log, now: float | None = None, *, quiet=None
+    cfg: Config, log: Log, now: float | None = None, *, room=None
 ) -> bool:
     """Reclaim dead leases, then open a session for the oldest due hand-off.
 
@@ -455,9 +455,11 @@ def sweep(
     is still building or merging: the job is briefed about work that must already
     be in main, and under worktree isolation its mirror branches from main.
 
-    A job triaged ``later`` keeps — "it can wait for the rest of the run" — so it
-    opens only once ``quiet()`` says the run has nothing left to build right now
-    (the supervisor's own verdict, which only it can give). Without ``quiet`` a
+    A job triaged ``later`` keeps, so it opens only once ``room()`` says a worker
+    slot is free and no launchable phase is waiting for it (the supervisor's own
+    verdict, which only it can give). Other phases may still be building or
+    merging: the session runs in its own window and takes no slot, so waiting
+    for the whole run to go quiet only piled the queue up. Without ``room`` a
     ``later`` job is not opened here at all.
     """
     if not cfg.operator_enabled:
@@ -467,7 +469,7 @@ def sweep(
     st = state_mod.read(cfg)
     due = [i for i in opqueue.ready(cfg, now) if not _in_flight(st, i.phase)]
     pick = next((i for i in due if not deferred(i)), None)
-    if pick is None and due and quiet is not None and quiet():
+    if pick is None and due and room is not None and room():
         pick = due[0]
     if pick is None:
         return False

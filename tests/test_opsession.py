@@ -35,7 +35,7 @@ from swarm_orchestrator import state as state_mod
 from swarm_orchestrator.cli import _known_commands
 from swarm_orchestrator.config import load
 from swarm_orchestrator.logutil import Log
-from swarm_orchestrator.supervisor import Supervisor
+from swarm_orchestrator.supervisor import LAUNCH_GIVE_UP, Supervisor
 
 REPO = Path(__file__).resolve().parent.parent
 PHASE = "op-S1"
@@ -181,13 +181,13 @@ def test_a_later_triage_is_not_dispatched_by_the_finish_hook(cfg, log):
 
     assert operator_mod.on_finished(cfg, PHASE, log) is False
     assert state_mod.read(cfg).operator_phase is None
-    # ...and so does the sweep, until the run has nothing left to build: `later`
-    # is "it can wait for the rest of the run".
+    # ...and so does the sweep, until a worker slot is free that no launchable
+    # phase wants: `later` is "it can wait for room".
     assert operator_mod.sweep(cfg, log) is False
-    assert operator_mod.sweep(cfg, log, quiet=lambda: False) is False
+    assert operator_mod.sweep(cfg, log, room=lambda: False) is False
     assert state_mod.read(cfg).operator_phase is None
-    # ...but a quiet run drains it, which is the only reason it is not lost.
-    assert operator_mod.sweep(cfg, log, quiet=lambda: True) is True
+    # ...but room drains it, which is the only reason it is not lost.
+    assert operator_mod.sweep(cfg, log, room=lambda: True) is True
     assert state_mod.read(cfg).operator_phase == PHASE
 
 
@@ -197,25 +197,64 @@ def test_the_sweep_opens_a_due_job_past_an_older_later_one(cfg, log):
     opqueue.set_triage(cfg, PHASE, when=opqueue.LATER, why="keeps", group="",
                        source="test")
     queue(cfg, OTHER, note="restart the unit on the build host")
-    assert operator_mod.sweep(cfg, log, quiet=lambda: False) is True
+    assert operator_mod.sweep(cfg, log, room=lambda: False) is True
     assert state_mod.read(cfg).operator_phase == OTHER
 
 
-def test_the_supervisor_holds_a_later_job_while_a_phase_builds(cfg):
+def _later(cfg) -> None:
     queue(cfg, PHASE)
     opqueue.set_triage(cfg, PHASE, when=opqueue.LATER, why="keeps", group="",
                        source="test")
     state_mod.init_state(cfg)
+
+
+def test_the_supervisor_holds_a_later_job_while_every_slot_is_busy(cfg):
+    _later(cfg)
     with state_mod.transaction(cfg) as st:
-        st.claim_slot("some-phase")
+        busy = [f"busy-{i}" for i in range(len(st.slots))]
+        for phase in busy:
+            st.claim_slot(phase)
     sup = Supervisor(cfg)
-    assert sup._build_quiet() is False
+    assert sup._operator_room() is False
     sup._check_operator_queue()
     assert state_mod.read(cfg).operator_phase is None
 
     with state_mod.transaction(cfg) as st:
-        st.free_slot_for("some-phase")
-    assert sup._build_quiet() is True
+        st.free_slot_for(busy[0])
+    sup._launching.add("mid-launch")  # a launch in flight is about to take it
+    assert sup._operator_room() is False
+    sup._launching.clear()
+    assert sup._operator_room() is True
+    sup._check_operator_queue()
+    assert state_mod.read(cfg).operator_phase == PHASE
+
+
+def test_a_later_job_opens_while_a_phase_builds_and_another_merges(cfg):
+    """The rule: run it whenever a slot is free. A busy slot and a
+    merge in the queue used to hold it until the whole run went quiet."""
+    _later(cfg)
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("some-phase")
+        st.integ_queue = ["merging-phase"]
+    sup = Supervisor(cfg)
+    assert sup._operator_room() is True
+    sup._check_operator_queue()
+    assert state_mod.read(cfg).operator_phase == PHASE
+
+
+def test_a_ready_phase_keeps_the_free_slot_until_it_is_given_up_on(cfg):
+    """The operator never takes the slot a launchable phase needs."""
+    _later(cfg)
+    ledger = Path(str(cfg.project_dir)) / cfg.ledger
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("- [ ] `R1` · needs:—\n", encoding="utf-8")
+    sup = Supervisor(cfg)
+    assert sup._operator_room() is False
+    sup._check_operator_queue()
+    assert state_mod.read(cfg).operator_phase is None
+
+    sup._launch_fails["R1"] = (LAUNCH_GIVE_UP, time.time())
+    assert sup._operator_room() is True
     sup._check_operator_queue()
     assert state_mod.read(cfg).operator_phase == PHASE
 

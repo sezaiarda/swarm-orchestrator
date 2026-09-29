@@ -1041,22 +1041,27 @@ class Supervisor:
         ``idle < watchdog_s``, and :meth:`_handle` refreshes the idle clock on
         every FIFO line, so a swarm that is moving never reaches the quiet point
         — and the queue would drain only once the run was already over."""
-        operator_mod.sweep(self.cfg, self.log, quiet=self._build_quiet)
+        operator_mod.sweep(self.cfg, self.log, room=self._operator_room)
 
-    def _build_quiet(self) -> bool:
-        """Has the run nothing left to build right now? When a ``later`` job opens.
+    def _operator_room(self) -> bool:
+        """Is there room for a ``later`` job now? A free slot nothing launchable wants.
 
-        No slot busy (a waiting worker still holds its slot), nothing launching,
-        nothing merging or held, and no ready phase the launcher will still start.
-        A parked phase does not count: it waits on the owner, not on the swarm."""
+        A ``later`` job runs whenever a slot is free: the operator is
+        a side session in its own window, so it may open while other phases build
+        or merge (merging takes no slot), but never into the slot a launchable
+        phase needs. So: a free slot, nothing mid-launch, and no phase the launcher
+        would still start (the lane picks when lanes are on, else every ready
+        phase; one given up on after :data:`LAUNCH_GIVE_UP` failures does not
+        count). A parked phase does not count either: it waits on the owner."""
         st = state_mod.read(self.cfg)
-        if st.busy_slots() or st.integ_queue or st.integ_blocked is not None:
+        if not st.free_slots():
             return False
         with self._launch_lock:
             if self._launching:
                 return False
-        ready = master_mod.build_context(self.cfg, st)["ready"]
-        return not any(not self._given_up(p) for p in ready)
+        ctx = master_mod.build_context(self.cfg, st)
+        waiting = ctx["lanes"]["picked"] if ctx["lanes"].get("enabled") else ctx["ready"]
+        return not any(not self._given_up(p) for p in waiting)
 
     def _operator_blocking(self) -> list[str]:
         """Hand-offs that must hold the finish open, checked BESIDE ``pending()``.

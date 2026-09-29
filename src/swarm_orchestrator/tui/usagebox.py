@@ -7,12 +7,13 @@ how fast the figure had been climbing. So it is a box of its own now:
 * one meter per window (5-hour, weekly) with the ``[usage].rules`` marked on the
   meter where the swarm pauses or stops, and when the window resets;
 * the rules in words, and this run's burn per hour;
-* **next cap** — when the lowest pause (or the account's 100%) is reached at the
-  burn the forecast itself simulates with (:func:`eta.engine.burn_of`, points
-  per busy worker-hour, times the workers busy now), against when the forecast
-  says the work is done;
+* **ahead** — per window, in a sentence, when its lowest pause (or the
+  account's 100%) is reached at the burn the forecast itself simulates with
+  (:func:`eta.engine.burn_of`, points per busy worker-hour, times the workers
+  busy now), or that it will not be before the window resets;
 * a chart of each window over time, on a fixed 0-100% scale with the rules drawn
-  across it, from ``meters/limits.jsonl``.
+  across it, from ``meters/limits.jsonl``, running on to the window's reset with
+  the same projection dotted in, and a break where the account changed.
 
 Text in, text out, like the rest of home's painters: :func:`box_lines` does no
 I/O and never asks what time it is except through ``now``.
@@ -20,14 +21,13 @@ I/O and never asks what time it is except through ``now``.
 
 from __future__ import annotations
 
-import math
-import re
 import time
 
 from rich.text import Text
 
 from .. import usage as usage_mod
-from .charts import axis, axis_time, hold_last, level_chart, time_grid
+from .charts import (BREAK, PROJ, axis, axis_time, hold_last, level_chart, level_plot_width,
+                     time_grid)
 from .data import fmt_coarse, fmt_when
 from .theme import BAD, INFO, MUTED, OK, WARN, paint
 
@@ -85,27 +85,85 @@ def _state(pct: float, pause: list[float], stop: list[float]) -> str:
     return BAD if pct >= first else (WARN if pct >= first - 10 else OK)
 
 
+def _tail(got, now: float, full: bool) -> str:
+    if got is None or got[1] is None:
+        return ""
+    resets = got[1]
+    if full:
+        return f"  resets {fmt_when(resets, now)} (in {fmt_coarse(max(0.0, resets - now))})"
+    return f"  resets {fmt_when(resets, now)}"
+
+
+def meter_width(width: int, tails: list[str]) -> int:
+    """One bar width for every window: the longest tail sets it, so the bars
+    start, end and scale alike (a shorter tail once bought a longer bar, and
+    the same percentage drew a different length)."""
+    return max(6, min(40, width - LABEL_W - 6 - max((len(t) for t in tails), default=0)))
+
+
 def window_line(label: str, got, width: int, pause: list[float], stop: list[float],
-                now: float) -> str:
-    """``5-hour  ██████░░┄░ 25%  resets 19:20 (in 3h 10m)``."""
+                now: float, bar_w: int | None = None, tail: str | None = None) -> str:
+    """``5-hour  ██████░░┄░ 25%  resets 19:20 (in 3h 10m)``.
+
+    ``bar_w`` and ``tail`` come from :func:`window_lines`, which sizes both
+    windows' bars together; alone, the line sizes its own."""
     if got is None:
         return paint(f"{label:<{LABEL_W}}", MUTED) + paint("not reported yet", MUTED)
-    pct, resets = got
-    tail = "" if resets is None else f"  resets {fmt_when(resets, now)} (in {fmt_coarse(max(0.0, resets - now))})"
-    if LABEL_W + 12 + 6 + len(tail) > width:
-        tail = "" if resets is None else f"  resets {fmt_when(resets, now)}"
-    bar_w = max(6, min(40, width - LABEL_W - 6 - len(tail)))
+    pct, _ = got
+    if tail is None:
+        tail = _tail(got, now, True)
+        if LABEL_W + 12 + 6 + len(tail) > width:
+            tail = _tail(got, now, False)
+    if bar_w is None:
+        bar_w = meter_width(width, [tail])
     state = _state(pct, pause, stop)
     return (f"{label:<{LABEL_W}}{_meter(pct, bar_w, pause, stop)} "
             + paint(f"{pct:>3.0f}%", state) + paint(tail, MUTED))
 
 
+def window_lines(cfg, samples, width: int, now: float) -> list[str]:
+    """Both windows' meters on one scale: same start, same width."""
+    got = [(window, label, reading(samples, prefix, now)) for window, prefix, label in WINDOWS]
+    full = [_tail(g, now, True) for _, _, g in got]
+    if LABEL_W + 12 + 6 + max(len(t) for t in full) > width:
+        full = [_tail(g, now, False) for _, _, g in got]
+    bar_w = meter_width(width, full)
+    out = []
+    for (window, label, g), tail in zip(got, full):
+        pause, stop = rules_for(cfg, window)
+        out.append(window_line(label, g, width, pause, stop, now, bar_w, tail))
+    return out
+
+
 #: Short window names for a narrow box.
 SHORT = {"5-hour": "5h", "week": "wk"}
+#: How the outlook names each window in a sentence.
+NAMES = {"five_hour": "5-hour", "week": "weekly"}
 
 
 def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
+def wrap(label: str, text: str, width: int) -> list[str]:
+    """``text`` after ``label`` in words, its continuation lines under the text:
+    nothing in the box is cut off."""
+    room = max(8, width - LABEL_W)
+    lines, cur = [], ""
+    for word in text.split(" "):
+        while len(word) > room:  # a word longer than the room (never in practice)
+            if cur:
+                lines.append(cur)
+                cur = ""
+            lines.append(word[:room])
+            word = word[room:]
+        if cur and len(cur) + 1 + len(word) > room:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}" if cur else word
+    lines.append(cur)
+    return [f"{label if i == 0 else '':<{LABEL_W}}{line}" for i, line in enumerate(lines)]
 
 
 def limits_line(cfg, width: int = 80) -> str:
@@ -157,88 +215,82 @@ def burn_line(run_usage: dict | None, width: int = 80) -> str:
 
     got = text(False)
     if not got:
-        return head + paint(_clip("not measured yet (a quarter of an hour of readings)", room),
+        return head + paint(_clip("not measured yet" if room < 52 else
+                                  "not measured yet (a quarter of an hour of readings)", room),
                             MUTED)
     return head + _clip(got if len(got) <= room else text(True), room)
 
 
-def next_cap(dash, now: float) -> tuple[str, str]:
-    """``(text, state)``: which cap the run reaches first, when, against the work.
+def _busy(dash) -> int:
+    return sum(1 for s in dash.snapshot.slots if s.busy)
 
-    Each window's cap is its lowest pause rule, or the account's 100% — what
-    :func:`eta.holds.from_state` schedules the simulation against — and it is
-    reached at the forecast's burn (points per busy worker-hour) times the
-    workers busy now. A window that resets first is no cap at all.
-    """
-    cfg = dash.cfg
+
+def cap_of(cfg, window: str) -> tuple[float, str]:
+    """``(level, words)``: where a window stops the swarm, as the outlook says it.
+
+    Its lowest pause rule, or the account's 100% — what
+    :func:`eta.holds.from_state` schedules the simulation against."""
+    pause, _ = rules_for(cfg, window)
+    return (min(pause), f"the {min(pause):g}% pause") if pause else (LIMIT, "the 100% limit")
+
+
+def hits_at(dash, window: str, got, now: float) -> float | None:
+    """When ``window`` reaches its cap at this pace (the forecast's burn per busy
+    worker-hour times the workers busy now); ``None`` if it does not burn."""
+    rate = (getattr(dash, "burn", None) or {}).get(window, 0.0) * _busy(dash)
+    if got is None or rate <= 0:
+        return None
+    level, _ = cap_of(dash.cfg, window)
+    return now + max(0.0, level - got[0]) / rate * 3600.0
+
+
+def outlook(dash, now: float) -> list[tuple[str, str]]:
+    """``(sentence, state)`` per window: when it hits its cap at this pace, or
+    that it will not before it resets. ``weekly hits the 90% pause ~Thu 14:20
+    at this pace (resets Wed 11:00)``."""
     samples = getattr(dash, "samples", None) or []
-    burn = getattr(dash, "burn", None) or {}
     hold, override = getattr(dash, "usage_state", ({}, {}))
-    snap = dash.snapshot
-    busy = sum(1 for s in snap.slots if s.busy)
-    fc = getattr(dash, "forecast", None)
-    done = None
-    if fc is not None and fc.overall is not None and math.isfinite(fc.overall.p50):
-        done = fc.overall.p50
-    work = f"the work is done ~{fmt_when(done, now)}" if done is not None else ""
-    held = [w for w, _, _ in WINDOWS if w in hold]
-    if held:
-        label = dict((w, lab) for w, _, lab in WINDOWS)
-        until = max((float((hold[w] or {}).get("resets_at") or 0.0) for w in held), default=0.0)
-        when = f" until {fmt_when(until, now)}" if until else ""
-        return (f"held by the {' and '.join(label[w] for w in held)} cap{when}"
-                " — no new workers", BAD)
-    hits = []
-    safe = []
-    for window, prefix, label in WINDOWS:
-        if override.get(window):
+    busy = _busy(dash)
+    out = []
+    for window, prefix, _ in WINDOWS:
+        name = NAMES[window]
+        if window in hold:
+            until = float((hold[window] or {}).get("resets_at") or 0.0)
+            when = f" until {fmt_when(until, now)}" if until else ""
+            out.append((f"{name} cap holds new work{when}", BAD))
             continue
         got = reading(samples, prefix, now)
         if got is None:
             continue
         pct, resets = got
-        pause, _ = rules_for(cfg, window) if getattr(cfg, "usage_enabled", False) else ([], [])
-        cap = min(pause + [LIMIT])
-        if pct >= cap:
-            hits.append((now, label, cap, resets))
-            continue
-        rate = burn.get(window, 0.0) * busy
-        if rate <= 0:
-            continue
-        at = now + (cap - pct) / rate * 3600.0
-        if resets is not None and at >= resets:
-            safe.append(label)
-            continue
-        hits.append((at, label, cap, resets))
-    if not hits:
-        if busy == 0:
-            text = "none — nothing is running, so nothing burns"
-        elif safe:
-            text = f"none — {' and '.join(safe)} reset before their caps"
+        level, words = cap_of(dash.cfg, window)
+        reset = f"resets {fmt_when(resets, now)}" if resets is not None else ""
+        if override.get(window):
+            out.append((f"{name} runs past {words}, as you chose", MUTED))
+        elif pct >= level:
+            out.append((f"{name} is at {words} ({pct:.0f}%)", BAD))
+        elif busy == 0:
+            out.append((f"{name} won't hit {words}: nothing is running", OK))
         else:
-            text = "not known yet — no burn measured"
-        return (f"{text}{' · ' + work if work else ''}", OK if busy == 0 or safe else MUTED)
-    at, label, cap, resets = min(hits)
-    head = f"{label} {cap:g}% ~{fmt_when(at, now)} (in {fmt_coarse(max(0.0, at - now))})"
-    if at <= now:
-        head = f"{label} {cap:g}% reached"
-    if done is None:
-        return head, WARN
-    if at < done:
-        return f"{head}, before {work}", BAD if at - now < 3600 else WARN
-    return f"{head}, after {work}", OK
+            at = hits_at(dash, window, got, now)
+            if at is None:
+                out.append((f"{name}: no pace measured yet", MUTED))
+            elif resets is not None and at >= resets:
+                out.append((f"{name} won't hit {words} before it {reset}", OK))
+            else:
+                tail = f" ({reset})" if reset else ""
+                out.append((f"{name} hits {words} ~{fmt_when(at, now)} at this pace{tail}",
+                            BAD if at - now < 3600 else WARN))
+    return out
 
 
-def next_line(dash, now: float, width: int) -> str:
-    text, state = next_cap(dash, now)
-    room = width - LABEL_W
-    if len(text) > room:  # a narrow box: the times, without the words around them
-        text = re.sub(r" \(in [^)]*\)", "", text)
-        text = re.sub(r"(before|after) the work is done ~.*$", r"\1 it's done", text)
-        for long, short in SHORT.items():
-            text = text.replace(f"{long} ", f"{short} ")
-    text = _clip(text, room)
-    return f"{'next':<{LABEL_W}}" + paint(text, state)
+def outlook_lines(dash, now: float, width: int) -> list[str]:
+    """The outlook under the label ``ahead``, wrapped, never cut."""
+    out = []
+    for i, (text, state) in enumerate(outlook(dash, now)):
+        out += [line[:LABEL_W] + paint(line[LABEL_W:], state)
+                for line in wrap("ahead" if i == 0 else "", text, width)]
+    return out
 
 
 # -- the chart -----------------------------------------------------------------
@@ -248,14 +300,20 @@ def series(samples, prefix: str, t0: float, now: float) -> list[tuple[float, flo
     Within a window only the running maximum counts: a lagging session's status
     line reports an older, lower figure, and plotting it would draw a dip that
     never happened. A reset with no reading after it drops to zero at the reset.
+    Another account (:func:`usage.accounts`) starts from its own first reading.
     """
     out: list[tuple[float, float]] = []
     top = res = None
+    account = None
     jump = usage_mod.RESET_JUMP_S
-    for s in sorted(samples or (), key=lambda s: s.ts):
+    samples = list(samples or ())
+    for s, seg in sorted(zip(samples, usage_mod.accounts(samples)), key=lambda x: x[0].ts):
         pct, resets = getattr(s, f"{prefix}_pct"), getattr(s, f"{prefix}_resets_at")
-        if pct is None or s.ts > now:
+        if pct is None or s.ts > now or seg is None:
             continue
+        if seg != account:
+            top = res = None
+            account = seg
         if res is not None and s.ts >= res:  # the window reset before this reading
             out.append((res, 0.0))
             top = res = None
@@ -274,9 +332,32 @@ def series(samples, prefix: str, t0: float, now: float) -> list[tuple[float, flo
     return ([(t0, before[-1][1])] if before else []) + after
 
 
+def projection(pct: float, rate: float, now: float, until: float, level: float,
+               grid: list[float]) -> list[float | None]:
+    """The dotted line ahead: ``pct`` climbing at ``rate`` points an hour from
+    now until it reaches ``level`` or the window resets at ``until``."""
+    out: list[float | None] = []
+    reached = False
+    for t in grid:
+        v = pct + rate * (t - now) / 3600.0
+        if t <= now or t > until or reached:
+            out.append(None)
+            continue
+        reached = v >= level
+        out.append(min(v, level))
+    return out
+
+
 def chart(samples, prefix: str, label: str, width: int, height: int, now: float,
-          pause: list[float], stop: list[float], t0: float) -> list[str]:
-    """One window's chart: a title row, the plot, the time axis under it."""
+          pause: list[float], stop: list[float], t0: float, t1: float | None = None,
+          rate: float = 0.0, level: float = LIMIT) -> list[str]:
+    """One window's chart: a title row, the plot, the time axis under it.
+
+    The readings run from ``t0`` to now; with ``t1`` past now, a dotted line
+    carries the figure on at ``rate`` points an hour until it reaches ``level``
+    or the window resets at ``t1``. An account switch is a dashed break, and
+    the other account's readings before it are drawn muted."""
+    t1 = now if t1 is None or t1 < now else t1
     points = series(samples, prefix, t0, now)
     since = f" · since {axis_time(t0, now - t0)}"
     title = paint(f"{label} %", INFO) + paint(since if len(label) + 2 + len(since) <= width
@@ -284,26 +365,36 @@ def chart(samples, prefix: str, label: str, width: int, height: int, now: float,
     if not points:
         return [title, paint(_clip("no readings in this span", width), MUTED)]
     marks = [(p, PAUSE_MARK) for p in pause] + [(s, STOP_MARK) for s in stop]
+    plot = level_plot_width(width, 100.0, marks)
     first = points[0][0]
-    grid = time_grid(t0, now, width)
-    values = [None if t < first else v for t, v in zip(grid, hold_last(points, grid))]
-    body = level_chart(values, width, height, top=100.0, marks=marks)
+    grid = time_grid(t0, t1, plot)
+    # The column holding now shows the reading now, not the one at its left
+    # edge: on a week-wide chart a column is hours wide.
+    at = [now if t <= now < t + (t1 - t0) / max(1, plot - 1) else t for t in grid]
+    values = [None if t < first or t > now else v for t, v in zip(grid, hold_last(points, at))]
+    ahead = projection(points[-1][1], rate, now, t1, level, grid) if t1 > now else []
+    col = (lambda t: round((t - t0) / (t1 - t0) * (plot - 1))) if t1 > t0 else (lambda t: 0)
+    breaks = [col(t) for t in usage_mod.switch_times(list(samples or ())) if t0 < t <= now]
+    body = level_chart(values, width, height, top=100.0, marks=marks, projection=ahead,
+                       breaks=breaks)
     if not body:
         return [title]
-    gutter = body[0].index("┤") + 1 if "┤" in body[0] else 0
-    reach = now - t0
+    gutter = width - plot
+    reach = t1 - t0
     labels = [axis_time(t0 + reach * f, reach) for f in (0.0, 0.5, 1.0)]
-    return [title] + [_paint_row(row, gutter) for row in body] + [
+    dim = gutter + max(breaks) if breaks else 0
+    return [title] + [_paint_row(row, gutter, dim) for row in body] + [
         paint(" " * gutter + axis(labels, max(1, width - gutter)), MUTED)]
 
 
-def _paint_row(row: str, gutter: int) -> str:
-    """Colour a chart row: the scale muted, the curve blue, the cap lines by rule."""
+def _paint_row(row: str, gutter: int, dim: int = 0) -> str:
+    """Colour a chart row: the scale muted, the curve blue (muted before an
+    account switch at column ``dim``), the cap lines by rule, the projection amber."""
     out = [paint(row[:gutter], MUTED)]
     run, kind = "", None
-    for ch in row[gutter:]:
-        k = WARN if ch == PAUSE_MARK else BAD if ch == STOP_MARK else (
-            INFO if ch not in " ·" else MUTED)
+    for i, ch in enumerate(row[gutter:], start=gutter):
+        k = WARN if ch in (PAUSE_MARK, PROJ) else BAD if ch == STOP_MARK else (
+            MUTED if ch in " ·" + BREAK or i < dim else INFO)
         if k != kind and run:
             out.append(paint(run, kind))
             run = ""
@@ -314,19 +405,25 @@ def _paint_row(row: str, gutter: int) -> str:
 
 
 def chart_lines(dash, width: int, height: int, now: float) -> list[str]:
-    """Both windows' charts: side by side when there is room, else stacked."""
+    """Both windows' charts: side by side when there is room, else stacked.
+    Each runs to its window's reset, the projection drawn up to it."""
     samples = getattr(dash, "samples", None) or []
     cfg = dash.cfg
+    burn = getattr(dash, "burn", None) or {}
+    busy = _busy(dash)
     week = reading(samples, "week", now)
+    five = reading(samples, "five", now)
     week_t0 = week[1] - WEEK_S if week and week[1] else now - WEEK_S
-    specs = [("five_hour", "five", "5-hour", now - FIVE_SPAN_S),
-             ("week", "week", "week", max(week_t0, now - WEEK_S))]
+    specs = [("five_hour", "five", "5-hour", now - FIVE_SPAN_S, five),
+             ("week", "week", "week", max(week_t0, now - WEEK_S), week)]
     side = width >= SIDE_BY_SIDE
     each = (width - 2) // 2 if side else width
     blocks = []
-    for window, prefix, label, t0 in specs:
+    for window, prefix, label, t0, got in specs:
         pause, stop = rules_for(cfg, window)
-        blocks.append(chart(samples, prefix, label, each, height, now, pause, stop, t0))
+        t1 = got[1] if got and got[1] else None
+        blocks.append(chart(samples, prefix, label, each, height, now, pause, stop, t0, t1,
+                            burn.get(window, 0.0) * busy, cap_of(cfg, window)[0]))
     if not side:
         return blocks[0] + blocks[1]
     left, right = blocks
@@ -349,13 +446,10 @@ def box_lines(dash, width: int, now: float | None = None, chart_rows: int = 5) -
     now = time.time() if now is None else now
     samples = getattr(dash, "samples", None) or []
     cfg = dash.cfg
-    lines = []
-    for window, prefix, label in WINDOWS:
-        pause, stop = rules_for(cfg, window)
-        lines.append(window_line(label, reading(samples, prefix, now), width, pause, stop, now))
+    lines = window_lines(cfg, samples, width, now)
     lines.append(limits_line(cfg, width))
     lines.append(burn_line(getattr(dash, "usage", None), width))
-    lines.append(next_line(dash, now, width))
+    lines += outlook_lines(dash, now, width)
     if chart_rows > 0 and samples:
         if chart_rows >= 5:
             lines.append("")

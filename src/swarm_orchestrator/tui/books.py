@@ -75,6 +75,26 @@ def overall_line(fc: Forecast, now: float) -> str:
     return f"{left} row{'' if left == 1 else 's'} left · {tail}{yours}"
 
 
+def finish_phrase(fc: Forecast, now: float) -> str:
+    """When everything the swarm can do by itself is done, as the page's headline
+    says it: ``all done ~Mon 16:20 (by Wed 09:00)``, P50 then P85."""
+    r = fc.overall
+    if r is None:
+        return "nothing the swarm can do by itself is left"
+    if fc.stopped and not math.isfinite(r.p50):
+        return fc.stopped
+    if fc.stopped:
+        work = fmt_range(r.p50 - fc.made_at,
+                         r.p85 - fc.made_at if math.isfinite(r.p85) else None)
+        return f"{fc.stopped} · {work} of work once it runs again"
+    if fc.floor:
+        return f"all done {span(r, fc, now)} (simulating…)"
+    held = f" · held by the cap until {fmt_when(fc.held_until, now)}" if fc.held_until else ""
+    if not math.isfinite(r.p50):
+        return f"all done {when(r.p50, fc, now)}{held}"
+    return f"all done ~{when(r.p50, fc, now)} (by {when(r.p85, fc, now)}){held}"
+
+
 def basis_line(fc: Forecast, now: float) -> str:
     """What the forecast was made on, in words: its small print."""
     if fc.floor:

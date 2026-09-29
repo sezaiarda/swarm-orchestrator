@@ -132,6 +132,100 @@ def latest(samples: list[Sample], which: str, now: float) -> tuple[float, float 
     return None
 
 
+# -- accounts -----------------------------------------------------------------
+#: A reading this close to its window's end may already belong to the next one.
+_EDGE_S = 60.0
+
+
+def _moved(s: Sample, cur: dict[str, float | None]) -> dict[str, float] | None:
+    """The windows whose reset ``s`` moves while the window it replaces is
+    still open, which one account's windows never do; ``None`` when none does.
+
+    A later reset read before the current window ends, or an earlier one read
+    before *that* ends, is another account's window. An earlier reset read
+    after it passed is only a lagging reading of the last window."""
+    out = {}
+    for which in ("five", "week"):
+        r, res = getattr(s, f"{which}_resets_at"), cur[which]
+        if r is None or res is None or abs(r - res) <= RESET_JUMP_S:
+            continue
+        if (r > res and s.ts < res - _EDGE_S) or (r < res and s.ts < r - _EDGE_S):
+            out[which] = r
+    return out or None
+
+
+def _follow(s: Sample, cur: dict[str, float | None]) -> None:
+    """Carry each window's reset forward past ``s``: jitter and new windows,
+    never back to an earlier window a lagging reading still reports."""
+    for which in ("five", "week"):
+        r, res = getattr(s, f"{which}_resets_at"), cur[which]
+        if r is not None and (res is None or r > res - RESET_JUMP_S):
+            cur[which] = r
+
+
+def accounts(samples: list[Sample]) -> list[int | None]:
+    """Which account each reading came from, as a segment number per sample
+    (in ``samples``' order), ``None`` for a reading to ignore.
+
+    The status line reports no account, so a switch is read off the figures:
+    an account change mid-window moved the weekly
+    reading sharply down and its reset to another day, which
+    the running-maximum logic below took for a lagging reading and a new
+    window, charting the old account and counting the new one's reading as used.
+    A window's reset moving while that window is still open (:func:`_moved`)
+    starts a new segment once the next reading agrees with it; a lone reading
+    the next one contradicts is a lagging session of the other account, and is
+    ignored. The newest readings are believed until one contradicts them.
+    A drop under an unchanged reset stays a lagging reading, as before: that is
+    the far commoner case, and nothing tells the two apart.
+    """
+    order = sorted(range(len(samples)), key=lambda i: samples[i].ts)
+    tags: list[int | None] = [None] * len(samples)
+    seg = 0
+    cur: dict[str, float | None] = {"five": None, "week": None}
+    pending: list[int] = []
+    pend: dict[str, float] = {}
+    for i in order:
+        s = samples[i]
+        moved = _moved(s, cur)
+        if moved is None:
+            tags[i] = seg
+            _follow(s, cur)
+            pending, pend = [], {}
+            continue
+        agrees = bool(pending) and all(abs(r - pend[w]) <= RESET_JUMP_S
+                                       for w, r in moved.items() if w in pend) \
+            and bool(set(moved) & set(pend))
+        if not agrees:
+            pending, pend = [i], moved
+            continue
+        seg += 1
+        for j in pending + [i]:
+            tags[j] = seg
+        cur = {w: getattr(s, f"{w}_resets_at") for w in ("five", "week")}
+        pending, pend = [], {}
+    if pending:
+        seg += 1
+        for j in pending:
+            tags[j] = seg
+    return tags
+
+
+def switch_times(samples: list[Sample]) -> list[float]:
+    """When the account behind the readings changed (:func:`accounts`), oldest first."""
+    first: dict[int, float] = {}
+    for s, t in zip(samples, accounts(samples)):
+        if t:
+            first[t] = min(first.get(t, s.ts), s.ts)
+    return [first[t] for t in sorted(first)]
+
+
+def switched_at(samples: list[Sample]) -> float | None:
+    """When the account behind the readings last changed, ``None`` if it never did."""
+    times = switch_times(samples)
+    return times[-1] if times else None
+
+
 # -- pace ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class Pace:
@@ -160,12 +254,24 @@ def window_pace(points, start: float, end: float) -> Pace:
     line lags, and a reading carrying an earlier window's reset is stale too:
     both are skipped. Treating the first as a reset once counted a whole
     weekly figure as fresh usage.
+
+    A point may carry a fourth item, its account (:func:`accounts`): a reading
+    of another account starts from its own figure, never counting it as used,
+    and one tagged ``None`` is skipped.
     """
-    pts = sorted(((t, p, r) for t, p, r in points if p is not None and start <= t <= end),
-                 key=lambda x: x[0])
+    pts = sorted(((pt[0], pt[1], pt[2], pt[3] if len(pt) > 3 else 0) for pt in points
+                  if pt[1] is not None and start <= pt[0] <= end), key=lambda x: x[0])
     used, windows = 0.0, 0
     top = res = None
-    for _, pct, resets in pts:
+    account = 0
+    for _, pct, resets, seg in pts:
+        if seg is None:
+            continue
+        if seg != account and top is not None:
+            windows += 1
+            top, res, account = pct, resets, seg
+            continue
+        account = seg
         known = resets is not None and res is not None
         if known and (res - resets > RESET_JUMP_S or (
                 abs(resets - res) <= RESET_JUMP_S and pct < top - 0.5)):
@@ -184,11 +290,13 @@ def window_pace(points, start: float, end: float) -> Pace:
 
 
 def five_pace(samples: list[Sample], start: float, end: float) -> Pace:
-    return window_pace(((s.ts, s.five_pct, s.five_resets_at) for s in samples), start, end)
+    return window_pace(((s.ts, s.five_pct, s.five_resets_at, a)
+                        for s, a in zip(samples, accounts(samples))), start, end)
 
 
 def week_pace(samples: list[Sample], start: float, end: float) -> Pace:
-    return window_pace(((s.ts, s.week_pct, s.week_resets_at) for s in samples), start, end)
+    return window_pace(((s.ts, s.week_pct, s.week_resets_at, a)
+                        for s, a in zip(samples, accounts(samples))), start, end)
 
 
 # -- cost ---------------------------------------------------------------------

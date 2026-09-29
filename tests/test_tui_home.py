@@ -216,10 +216,16 @@ def test_headline_carries_the_forecast_and_what_it_was_made_on():
     dash = FakeDash(data.Snapshot(ok=True, done={"dash-W1": "ok"}, slots=[slot(0, "dash-W2")]),
                     graph=graph, forecast=forecast())
     text = plain(home.headline(dash, 160))
-    assert "7 rows left · done ~" in text
-    assert "simulated 500× · 4 workers · working 40% of the time" in text
-    assert "weekly cap pauses at 90% (80% now)" in text
-    assert "waiting on you: ivory-W0 holds 3 rows (ivory)" in text
+    fc = dash.forecast
+    p50, p85 = (data.fmt_when(t, time.time()) for t in (fc.overall.p50, fc.overall.p85))
+    assert f"all done ~{p50} (by {p85})" in text
+    assert "1 running · 6 ready" in text
+    # One answer: the basis, the caps and the owner's queue live elsewhere now.
+    assert len(text.splitlines()) == 3
+    for gone in ("simulated", "cap pauses", "waiting on you"):
+        assert gone not in text
+    detail = home.book_detail(dash, fc.books[0].name) if fc.books else home.basis_text(dash)
+    assert "simulated 500× · 4 workers · working 40% of the time" in detail
 
 
 def test_headline_says_it_is_working_it_out_before_the_first_forecast():
@@ -249,7 +255,7 @@ def test_headline_says_how_many_done_rows_the_ledger_still_shows_open():
     landed = {"perf-F1": "ledger", "perf-F2": "ledger", "perf-F3": "operator", "perf-F4": "ok"}
     snap = data.Snapshot(ok=True, landed=landed, slots=[slot(0, "perf-F5")])
     text = plain(home.headline(FakeDash(snap, graph=graph, ticked={"perf-F1", "perf-F2"}), 100))
-    assert "4 / 6 phases" in text and "2 done but still open in the ledger" in text
+    assert "4 / 6 phases" in text and "1 running · 1 ready" in text
 
 
 def test_headline_counts_a_failed_row_and_what_waits_behind_it():
@@ -257,7 +263,7 @@ def test_headline_counts_a_failed_row_and_what_waits_behind_it():
     graph = {"dash-W1": set(), "dash-W2": {"dash-W1"}}
     dash = FakeDash(data.Snapshot(ok=True, done={"dash-W1": "fail"}), graph=graph)
     text = plain(home.headline(dash, 76))
-    assert "1 failed" in text and "1 blocked" in text
+    assert "1 failed" in text and "ready" not in text
 
 
 def test_headline_counts_a_row_waiting_for_its_date_apart_from_ready():
@@ -266,7 +272,7 @@ def test_headline_counts_a_row_waiting_for_its_date_apart_from_ready():
     snap = data.Snapshot(ok=True, slots=[slot(0, "perf-F35")])
     text = plain(home.headline(FakeDash(snap, graph=graph, deferred={"perf-F36": "2026-10-01"}),
                                100))
-    assert "1 running" in text and "1 waiting for a date" in text and "ready" not in text
+    assert "1 running" in text and "ready" not in text
 
 
 def test_headline_before_the_run_starts():

@@ -191,15 +191,16 @@ def set_text(widget, text: str) -> None:
 
 # -- headline -------------------------------------------------------------
 def headline(dash, width: int = 76, compact: bool = False) -> str:
-    """The page title: how far along every open phase book is, and when it lands.
+    """The page title, one answer: how far along the open phase books are, when
+    all of them are done, and what is moving.
 
     Unbordered on purpose. A box around the title of the page is a box for its
     own sake, and this screen only spends borders on things that move. The
-    books themselves are the panel under it (:func:`book_rows`); this is the
-    whole ledger in one line, what the forecast was made on, and what waits on
-    the owner. ``compact`` (a short terminal) drops the basis, so the feed still
-    fits on an 80x24 screen. Usage is not here: it has a box of its own
-    (:mod:`.usagebox`).
+    books themselves are the panel under it (:func:`book_rows`). What the
+    forecast was made on is in a phase book's detail and under ``?``; the caps
+    are in the usage box (:mod:`.usagebox`); what waits on the owner is ``g``
+    (to-dos) and ``n`` (questions). ``compact`` is kept for callers; the
+    headline is three lines at every size.
     """
     snap = dash.snapshot
     busy = {s.phase for s in snap.slots if s.busy and s.phase}
@@ -220,14 +221,12 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     first = f"{PAD}[b]{escape(title)}[/b]{' ' * gap}{paint(count, MUTED)}"
 
     now = time.time()
-    fc = getattr(dash, "forecast", None)
-    failed = getattr(getattr(dash, "eta", None), "error", "")
-    left = (books_mod.overall_line(fc, now) if fc is not None
-            else f"no forecast: {failed}" if failed else "working out when…")
+    left = finish_text(dash, now)
     fill = OK if cur.complete else (INFO if cur.running or cur.ready else MUTED)
+    left = clip(left, max(10, inner - 12))
     second = (
         f"{PAD}{paint(bar(cur.built, max(1, cur.live_total), max(10, inner - len(left) - 2)), fill)}"
-        f"  {paint(left, MUTED)}"
+        f"  [b]{escape(left)}[/b]"
     )
 
     counts = []
@@ -235,30 +234,34 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
         counts.append(paint(f"{len(cur.running)} running", INFO))
     if cur.ready:
         counts.append(paint(f"{len(cur.ready)} ready", READY))
-    if cur.blocked:
-        counts.append(paint(f"{cur.blocked} blocked", BLOCKED))
-    if cur.dated:
-        counts.append(paint(f"{cur.dated} waiting for a date", BLOCKED))
     if cur.failed:
         counts.append(paint(f"{cur.failed} failed", BAD))
     if not counts:
         counts.append(
-            paint("complete", OK) if cur.complete else paint("nothing scheduled", MUTED)
+            paint("complete", OK) if cur.complete else paint("nothing can start yet", MUTED)
         )
     if not snap.ok:
         counts.append(paint("run not started — `swarm up`", MUTED))
-    if cur.held:
-        counts.append(paint(f"{cur.held} done but still open in the ledger", MUTED))
     if getattr(dash, "big_picture", ""):
         counts.append(paint(escape(dash.big_picture), MUTED))
-    lines = [first, second]
-    if fc is not None and not compact:
-        lines.append(PAD + paint(clip(books_mod.basis_line(fc, now), inner), MUTED))
-    waiting = books_mod.waiting_line(fc) if fc is not None else ""
-    if waiting:
-        lines.append(PAD + paint(escape(clip(waiting, inner)), YOU))
-    lines.append(PAD + " · ".join(counts))
-    return rows(*lines)
+    return rows(first, second, PAD + " · ".join(counts))
+
+
+def finish_text(dash, now: float) -> str:
+    """``all done ~Mon 16:20 (by Wed 09:00)``, or why there is no such time yet."""
+    fc = getattr(dash, "forecast", None)
+    if fc is not None:
+        return books_mod.finish_phrase(fc, now)
+    failed = getattr(getattr(dash, "eta", None), "error", "")
+    return f"no forecast: {failed}" if failed else "working out when…"
+
+
+def basis_text(dash, now: float | None = None) -> str:
+    """What the forecast was made on, for the detail views."""
+    fc = getattr(dash, "forecast", None)
+    if fc is None:
+        return ""
+    return f"forecast basis: {books_mod.basis_line(fc, time.time() if now is None else now)}"
 
 
 #: Phase books listed on a short terminal before the rest become "+n more".
@@ -293,7 +296,8 @@ def book_detail(dash, name: str) -> str:
     if book is None:
         return f"{name}: no forecast yet"
     what = (getattr(dash, "campaign_what", None) or {}).get(name, "")
-    body = books_mod.detail(book, fc, time.time())
+    now = time.time()
+    body = books_mod.detail(book, fc, now) + "\n\n" + basis_text(dash, now)
     return f"{what}\n\n{body}" if what else body
 
 
@@ -1105,7 +1109,9 @@ class Home(Vertical):
             fc = getattr(dash, "forecast", None)
             total = len(fc.books) if fc is not None else 0
             extra = total - cut["books"] if cut["books"] else 0
-            panel.set_title(f"phase books ({total})" if total else "phase books",
+            name = f"phase books ({total})" if total else "phase books"
+            done = f"{name} · {finish_text(dash, now)}" if fc is not None else name
+            panel.set_title(done if len(done) <= main_inner - 4 else name,
                             f"+{extra} more · enter opens" if extra > 0 else
                             "soonest first · enter opens" if total else "")
 

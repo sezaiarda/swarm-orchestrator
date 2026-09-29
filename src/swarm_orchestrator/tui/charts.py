@@ -290,8 +290,28 @@ def axis_time(ts: float | None, span: float) -> str:
     return moment.strftime("%H:%M")
 
 
+#: A projection drawn ahead of the readings, and a break in the series.
+PROJ = "∙"
+BREAK = "╎"
+
+
+def _levels(top: float, marks) -> list[tuple[float, str]]:
+    return sorted(((float(lvl), ch) for lvl, ch in marks if 0 < float(lvl) <= top),
+                  key=lambda m: m[0])
+
+
+def level_plot_width(width: int, top: float = 100.0, marks=()) -> int:
+    """The columns :func:`level_chart` plots in after its scale column, so a
+    caller can sample exactly one value per column. Resampled down by max, a
+    fall at the right edge (a reset, another account) stayed hidden behind the
+    peak before it."""
+    labels = [_num(top), "0"] + [_num(lvl) for lvl, _ in _levels(top, marks)]
+    plot = width - max(len(t) for t in labels) - 1
+    return plot if plot >= 1 else width
+
+
 def level_chart(values, width: int, height: int, *, top: float = 100.0,
-                marks=()) -> list[str]:
+                marks=(), projection=(), breaks=()) -> list[str]:
     """A series on a fixed ``0..top`` scale, with reference levels drawn across it.
 
     :func:`area` scales to the series' own maximum, which is right for a count and
@@ -301,20 +321,24 @@ def level_chart(values, width: int, height: int, *, top: float = 100.0,
     of the row holding that level, with the level in the scale column, so the line
     the swarm stops at is on the chart the value climbs towards. ``None`` values
     (no reading yet) are left blank.
+
+    ``projection`` (one value or ``None`` per value) is drawn as a dotted line
+    through the cells with no reading, and each index in ``breaks`` (plot
+    columns) as a dashed vertical line through the empty cells of its column.
     """
     if width <= 0 or height <= 0 or top <= 0:
         return []
-    marks = sorted(((float(lvl), ch) for lvl, ch in marks if 0 < float(lvl) <= top),
-                   key=lambda m: m[0])
-    labels = [_num(top), "0"] + [_num(lvl) for lvl, _ in marks]
-    pad = max(len(t) for t in labels)
-    plot = width - pad - 1
-    if plot < 1:
-        pad, plot = 0, width
+    marks = _levels(top, marks)
+    plot = level_plot_width(width, top, marks)
+    pad = 0 if plot == width else width - plot - 1
     raw = list(values)
     if not raw:
         return []
     cells = _samples([-1.0 if v is None else v for v in raw], plot)
+    proj = list(projection)
+    ahead = (_samples([-1.0 if v is None else v for v in proj], plot) if proj
+             else [-1.0] * plot)
+    cut = set(breaks)
 
     def band(row: int) -> tuple[float, float]:
         level = height - 1 - row
@@ -327,15 +351,21 @@ def level_chart(values, width: int, height: int, *, top: float = 100.0,
         mark = next((m for m in marks if lo <= m[0] < hi or (m[0] == top and row == 0)), None)
         level = height - 1 - row
         line = []
-        for value in cells:
+        for i, value in enumerate(cells):
             if value < 0:
-                line.append(mark[1] if mark else " ")
+                p = ahead[i]
+                if p >= 0 and (lo <= p < hi or (row == 0 and p >= hi)):
+                    line.append(PROJ)
+                else:
+                    line.append(BREAK if i in cut else mark[1] if mark else " ")
                 continue
             fill = value / top * height - level
             if fill >= 1.0:
                 line.append(_BLOCKS[-1])
             elif fill > 0.0:
                 line.append(_BLOCKS[min(len(_BLOCKS) - 1, int(fill * len(_BLOCKS)))])
+            elif i in cut:
+                line.append(BREAK)
             elif mark:
                 line.append(mark[1])
             else:

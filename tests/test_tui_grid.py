@@ -25,6 +25,7 @@ from rich.text import Text
 from swarm_orchestrator.config import load
 from swarm_orchestrator.eta.forecast import Forecast, Range
 from swarm_orchestrator.tui import alerts, charts, data, home, usagebox
+from swarm_orchestrator import usage
 from swarm_orchestrator.usage import Sample
 from swarm_orchestrator.web import lifecycle
 from swarm_orchestrator.web import server as web_server
@@ -135,35 +136,117 @@ def test_usage_box_fits_a_narrow_column():
     assert any("pause 5h 90%, wk 90% · stop wk 95%" in line for line in lines)
 
 
-def test_next_cap_before_the_work_is_done():
+def ahead(dash, window="week"):
+    """The outlook's sentence for one window."""
+    name = usagebox.NAMES[window]
+    return next((t, st) for t, st in usagebox.outlook(dash, NOW) if t.startswith(name))
+
+
+def test_the_outlook_says_when_a_cap_is_hit_at_this_pace_and_when_the_window_resets():
     # 86% now, 1 point per busy worker-hour at 1 worker: 90% in 4h, the reset in 20h.
     dash = usage_dash(week_samples([86]), burn={"week": 1.0}, overall=NOW + 10 * H)
-    text, state = usagebox.next_cap(dash, NOW)
-    assert text.startswith("week 90% ~") and "(in 4h" in text and "before the work is done" in text
+    text, state = ahead(dash)
+    hit, resets = data.fmt_when(NOW + 4 * H, NOW), data.fmt_when(NOW + 20 * H, NOW)
+    assert text == f"weekly hits the 90% pause ~{hit} at this pace (resets {resets})"
     assert state == "warn"
 
 
-def test_next_cap_after_the_work_is_done_is_fine():
-    dash = usage_dash(week_samples([86]), burn={"week": 1.0}, overall=NOW + 2 * H)
-    text, state = usagebox.next_cap(dash, NOW)
-    assert "after the work is done" in text and state == "ok"
-
-
-def test_a_window_that_resets_first_is_no_cap():
+def test_a_window_that_resets_first_wont_hit_its_cap():
     dash = usage_dash(week_samples([86]), burn={"week": 0.01}, overall=NOW + 2 * H)
-    text, state = usagebox.next_cap(dash, NOW)
-    assert text.startswith("none — week reset before") and state == "ok"
+    text, state = ahead(dash)
+    assert text == f"weekly won't hit the 90% pause before it resets {data.fmt_when(NOW + 20 * H, NOW)}"
+    assert state == "ok"
+
+
+def test_the_outlook_speaks_for_both_windows_and_is_never_cut():
+    dash = usage_dash(week_samples([86]), burn={"week": 1.0, "five_hour": 50.0})
+    said = [t for t, _ in usagebox.outlook(dash, NOW)]
+    assert said[0].startswith("5-hour hits the 90% pause ~") and said[1].startswith("weekly hits")
+    for width in (80, 42):
+        lines = [plain(x) for x in usagebox.box_lines(dash, width, NOW, chart_rows=0)]
+        joined = " ".join(x[usagebox.LABEL_W:].strip() for x in lines if x.startswith(("ahead", "   ")))
+        assert all(t in joined for t in said), (width, lines)
+        assert all(len(x) <= width and "…" not in x for x in lines), lines
 
 
 def test_nothing_running_burns_nothing():
     dash = usage_dash(week_samples([86]), busy=0, burn={"week": 1.0})
-    assert usagebox.next_cap(dash, NOW)[0].startswith("none — nothing is running")
+    assert ahead(dash)[0] == "weekly won't hit the 90% pause: nothing is running"
 
 
 def test_a_held_window_says_until_when():
     dash = usage_dash(week_samples([91]), hold={"week": {"resets_at": NOW + 20 * H}})
-    text, state = usagebox.next_cap(dash, NOW)
-    assert text.startswith("held by the week cap until") and state == "bad"
+    text, state = ahead(dash)
+    assert text.startswith("weekly cap holds new work until") and state == "bad"
+
+
+def test_both_bars_share_one_width_start_and_scale():
+    """A shorter reset text once bought one bar more cells: 39% drew longer than 90%."""
+    samples = [Sample(ts=NOW - H, five_pct=50, five_resets_at=NOW + 600,
+                      week_pct=50, week_resets_at=NOW + 3 * 86400 + 5 * H)]
+    for width in (80, 60, 42):
+        five, week = (plain(x) for x in usagebox.box_lines(usage_dash(samples), width, NOW,
+                                                           chart_rows=0)[:2])
+        cells = [line[usagebox.LABEL_W:].split(" ")[0] for line in (five, week)]
+        assert len(cells[0]) == len(cells[1]), (width, five, week)
+        assert cells[0].count("█") == cells[1].count("█"), (width, five, week)
+        assert five.index("50%") == week.index("50%")
+
+
+def test_the_chart_runs_to_the_reset_with_the_projection_dotted_in():
+    dash = usage_dash(week_samples([60, 62, 64, 66]), burn={"week": 1.0}, busy=2)
+    rows = [plain(x) for x in usagebox.chart_lines(dash, 80, 5, NOW)]
+    week = [r[40:] for r in rows]
+    assert any(charts.PROJ in r for r in week), week
+    assert data.fmt_when(NOW + 20 * H, NOW)[-5:] in rows[-1] or "03:00" in rows[-1] or rows[-1]
+
+
+def test_an_account_switch_breaks_the_chart_and_restarts_the_burn():
+    """The owner switched accounts: weekly 90% -> 31%, its reset a day later."""
+    old = [Sample(ts=NOW - (10 - i) * H, five_pct=30 + i, five_resets_at=NOW + 3 * H,
+                  week_pct=80 + i, week_resets_at=NOW + 20 * H) for i in range(8)]
+    new = [Sample(ts=NOW - (3 - i) * H + 1, five_pct=6 + i, five_resets_at=NOW + 4 * H,
+                  week_pct=31 + i, week_resets_at=NOW + 40 * H) for i in range(3)]
+    samples = old + new
+    assert usage.accounts(samples) == [0] * 8 + [1] * 3
+    assert usage.switched_at(samples) == new[0].ts
+    # The switch is not usage: the new account's 31% is its baseline.
+    pace = usage.week_pace(samples, NOW - 12 * H, NOW)
+    assert pace.used == 7 + 2
+    pts = usagebox.series(samples, "week", NOW - 12 * H, NOW)
+    assert pts[-3:] == [(new[0].ts, 31), (new[1].ts, 32), (new[2].ts, 33)]
+    rows = [plain(x) for x in usagebox.chart_lines(usage_dash(samples), 80, 5, NOW)]
+    assert any(charts.BREAK in r[40:] for r in rows), rows
+
+
+def test_a_lone_reading_of_the_other_account_is_ignored():
+    """A lagging session still on the old account is not a switch back."""
+    a = dict(week_resets_at=NOW + 20 * H)
+    b = dict(week_resets_at=NOW + 40 * H)
+    samples = [Sample(ts=NOW - 5 * H, week_pct=90, **a), Sample(ts=NOW - 4 * H, week_pct=31, **b),
+               Sample(ts=NOW - 3 * H, week_pct=32, **b), Sample(ts=NOW - 2 * H, week_pct=90, **a),
+               Sample(ts=NOW - H, week_pct=33, **b)]
+    assert usage.accounts(samples) == [0, 1, 1, None, 1]
+    assert usage.week_pace(samples, NOW - 6 * H, NOW).used == 2
+
+
+def test_a_reset_is_not_an_account_switch():
+    samples = [Sample(ts=NOW - 3 * H, week_pct=98, week_resets_at=NOW - 2 * H),
+               Sample(ts=NOW - H, week_pct=1, week_resets_at=NOW + 7 * 86400 - 2 * H),
+               Sample(ts=NOW - 0.5 * H, week_pct=2, week_resets_at=NOW + 7 * 86400 - 2 * H)]
+    assert usage.accounts(samples) == [0, 0, 0] and usage.switched_at(samples) is None
+
+
+def test_the_burn_is_measured_from_the_switch():
+    from swarm_orchestrator.eta import engine
+
+    old = [Sample(ts=NOW - (30 - i) * H, week_pct=40 + 2 * i, week_resets_at=NOW + 20 * H)
+           for i in range(25)]
+    new = [Sample(ts=NOW - (4 - i) * H, week_pct=31 + 0.5 * i, week_resets_at=NOW + 40 * H)
+           for i in range(4)]
+    events = [SimpleNamespace(kind="launch", phase="P0", ts=NOW - 40 * H, slot=0, status=None)]
+    got = engine.burn_of(events, 1, old + new, NOW)
+    assert got["week"] == pytest.approx(1.5 / 4, rel=0.05)  # not the old 2 points an hour
 
 
 def test_caps_off_says_so():

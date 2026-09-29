@@ -28,6 +28,7 @@ command-history re-sort twice a second to draw pixels nobody could see.
 
 from __future__ import annotations
 
+from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -153,10 +154,17 @@ class HelpScreen(ModalScreen[None]):
 [{COLOR[MUTED]}]destructive commands confirm first — y to go, n / esc to stop[/]
 [{COLOR[MUTED]}]q quits the dashboard; the swarm keeps running[/]"""
 
+    def __init__(self, basis: str = "") -> None:
+        super().__init__()
+        #: What the forecast was made on (:func:`home.basis_text`), under the keys.
+        self._basis = basis
+
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label(f"[b]keys[/b]   [{COLOR[MUTED]}]esc or ? closes this[/]")
             yield Static(self.HELP)
+            if self._basis:
+                yield Static(f"\n[b]the forecast[/b]\n[{COLOR[MUTED]}]{escape(self._basis)}[/]")
 
 
 class DetailScreen(ModalScreen[None]):
@@ -535,7 +543,13 @@ class SwarmApp(App):
             run()
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen())
+        try:
+            from .home import basis_text
+
+            basis = basis_text(self.dash)
+        except Exception:  # noqa: BLE001 - the keys matter more than the small print
+            basis = ""
+        self.push_screen(HelpScreen(basis))
 
     def action_drain(self) -> None:
         """``D``: ``swarm down --drain [--then CMD]`` through the command centre,

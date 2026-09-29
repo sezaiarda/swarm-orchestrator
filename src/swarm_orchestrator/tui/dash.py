@@ -69,6 +69,10 @@ from .data import (
 REPO_PROBE_S = 30.0
 #: How often the owner's to-do list (:mod:`todo`) is re-read, on the probe thread.
 TODO_PROBE_S = 30.0
+#: ``claude agents --json`` runs at most this often, or when the busy phases
+#: change: each call starts a Claude Code CLI (and, under WSL, two ``reg.exe``),
+#: the costliest thing the dashboard ran, five times a minute.
+AGENTS_PROBE_S = 60.0
 
 #: The run's usage summary is re-derived at least this often (its $/h moves with
 #: every render of every worker), and at once when a limit sample or the run moves.
@@ -127,9 +131,9 @@ class Dash:
         self._deferred_day = ""
         #: The forecast worker (:mod:`swarm_orchestrator.eta`); views read
         #: :attr:`forecast`, never wait on it.
-        self.eta = eta_mod.Engine(cfg)
+        self.eta = eta_mod.shared_engine(cfg)
         self._eta_seen = 0
-        self._rebuilds = 0
+        self._eta_asked = 0
         self._state: dict | None = None
         #: The open run's usage summary (legacy period when no run is open).
         self.usage: dict | None = None
@@ -152,10 +156,13 @@ class Dash:
         self._passes_live: object = ()
         self._samples = usage_mod.SampleTail(cfg.state_dir / METERS_DIR / LIMITS_LOG)
         self._all_meters: dict[str, Meter] = {}
+        self._meter_files: dict = {}
         self._usage_at = 0.0
         self._mtimes: dict[str, float] = {}
         self._graph_mtime: float | None = None
         self._repos_at = 0.0  # when the git half of the probe last ran
+        self._agents_at = 0.0
+        self._agents_for: frozenset = frozenset()
         #: The owner's to-dos (not questions): the ``g`` hint and the alerts box.
         self.todos: list = []
         self._todos_at = 0.0
@@ -232,7 +239,7 @@ class Dash:
             changed.add("run")
         # The tap replaces its file atomically, so every write moves the dir.
         if self._changed("meters", self.meters_dir):
-            self._all_meters = load_meters(self.meters_dir)
+            self._all_meters = load_meters(self.meters_dir, self._meter_files)
             changed.add("meters")
         if changed & {"meters", "run"}:
             # Only phases active in this run feed the live views; a busy one is
@@ -309,15 +316,19 @@ class Dash:
         return self.eta.result
 
     def _ask_eta(self, now: float) -> None:
-        """Hand the forecast worker what moved; it gathers and simulates on its
-        own thread, so this is a tuple comparison on the render path."""
+        """Hand the forecast worker what moved, when a forecast is due
+        (:class:`eta.engine.Gate`); it gathers and simulates on its own thread,
+        so this is a few tuple comparisons on the render path."""
         state = self._state
-        if not isinstance(state, dict):
+        if not isinstance(state, dict) or not self.eta.drives(self):
             return
         busy = any(s.busy for s in self.snapshot.slots)
         every = eta_mod.RECOMPUTE_S if busy else eta_mod.IDLE_RECOMPUTE_S
-        stamp = (self._rebuilds, len(self._samples.samples), self._deferred_day,
-                 busy, int(now // every))
+        real, soft = self._eta_inputs(state, now)
+        if not self.eta.gate.due(real, soft, now, every):
+            return
+        self._eta_asked += 1
+        stamp = (id(self), self._eta_asked)
         cfg, events, history = self.cfg, self.tail.events, self.history
         ledger_history, samples = self.ledger_history, self._samples.samples
 
@@ -327,6 +338,27 @@ class Dash:
                                   usage=samples, now=time.time())
 
         self.eta.request(stamp, make)
+
+    def _eta_inputs(self, state: dict, now: float) -> tuple[tuple, tuple]:
+        """``(real, soft)`` for :meth:`eta.engine.Gate.due`: what a forecast is
+        made from, as this dash already holds it, split by how soon a change
+        must show."""
+        done = state.get("done") if isinstance(state.get("done"), dict) else {}
+        busy = frozenset(s.phase for s in self.snapshot.slots if s.busy and s.phase)
+        real = (self._mtimes.get("ledger"), frozenset(done.items()), busy)
+        usage = tuple(eta_mod.usage_key(usage_mod.latest(self._samples.samples, w, now))
+                      for w in ("week", "five"))
+
+        def names(key: str) -> tuple:
+            got = state.get(key)
+            return tuple(sorted(map(str, got))) if isinstance(got, (dict, list)) else ()
+
+        soft = (names("parked"), names("waiting"), names("integ_queue"),
+                str(state.get("integ_blocked") or ""), bool(state.get("paused")),
+                bool(state.get("drain")), state.get("pause_at"), names("usage_hold"),
+                names("usage_override"), self._mtimes.get("config"), self._deferred_day,
+                usage)
+        return real, soft
 
     def _poll_kept(self, now: float) -> bool:
         """Re-read the kept records when their dir moved, or a death may have gone unseen.
@@ -381,7 +413,6 @@ class Dash:
         events = self.tail.events
         state = read_state(self.cfg)
         self._state = state if isinstance(state, dict) else None
-        self._rebuilds += 1
         st = state if isinstance(state, dict) else {}
         # A pass parked on the owner is alive too, in a window of its own.
         parked = {ident for kind, ident in map(state_mod.waiter, st.get("parked") or [])
@@ -416,10 +447,13 @@ class Dash:
         :data:`REPO_PROBE_S`, or at once for a busy phase it has not seen yet.
         """
         now = time.time() if now is None else now
-        self.agents = probes.agents()
+        busy = [s for s in self.snapshot.slots if s.busy and s.pane_id]
+        running = frozenset(s.phase for s in busy)
+        if now - self._agents_at >= AGENTS_PROBE_S or running != self._agents_for:
+            self._agents_at, self._agents_for = now, running
+            self.agents = probes.agents()
         self.panes = probes.panes()
         main = getattr(self.cfg, "git_main_branch", "master")
-        busy = [s for s in self.snapshot.slots if s.busy and s.pane_id]
         self.tails = {s.pane_id: probes.capture(s.pane_id) for s in busy}
         wanted = {s.phase: s.worktree for s in busy if s.phase and s.worktree}
         if now - self._repos_at >= REPO_PROBE_S or set(wanted) - set(self.repos):

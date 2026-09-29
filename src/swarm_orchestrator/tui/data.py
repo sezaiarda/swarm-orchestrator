@@ -25,6 +25,7 @@ Two forward-compatibility decisions are worth spelling out:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import time
@@ -1469,31 +1470,54 @@ class Meter:
         return self.cost_usd / (self.duration_ms / 3_600_000)
 
 
-def load_meters(meters_dir: Path) -> dict[str, Meter]:
+def load_meters(meters_dir: Path, cache: dict | None = None) -> dict[str, Meter]:
+    """Every ``meters/<phase>.json``.
+
+    With ``cache`` (the caller's, kept between calls) only the files replaced
+    since the last call are read. The tap replaces a file atomically, so a new
+    one has a new inode, and a directory listing carries inodes for free: the
+    dashboard re-read hundreds of files every time any worker's status line moved.
+    """
     out: dict[str, Meter] = {}
     try:
-        paths = sorted(meters_dir.glob("*.json"))
+        entries = sorted((e.name, e.inode()) for e in os.scandir(meters_dir)
+                         if e.name.endswith(".json"))
     except OSError:
         return out
-    for path in paths:
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(raw, dict) or not isinstance(raw.get("phase"), str):
-            continue
-        num = {k: _as_float(raw.get(k)) for k in (
-            "ts", "started_at", "context_tokens", "context_window", "peak_tokens",
-            "cost_usd", "duration_ms")}
-        out[raw["phase"]] = Meter(
-            phase=raw["phase"], ts=num["ts"] or 0.0, started_at=num["started_at"],
-            context_tokens=num["context_tokens"], context_window=num["context_window"],
-            peak_tokens=num["peak_tokens"], cost_usd=num["cost_usd"],
-            duration_ms=num["duration_ms"], effort=_as_str(raw.get("effort")),
-            seven_day=raw.get("seven_day") if isinstance(raw.get("seven_day"), dict) else None,
-            five_hour=raw.get("five_hour") if isinstance(raw.get("five_hour"), dict) else None,
-        )
+    fresh: dict = {}
+    for name, inode in entries:
+        got = cache.get(name) if cache is not None else None
+        if got is not None and got[0] == inode:
+            meter = got[1]
+        else:
+            meter = _read_meter(meters_dir / name)
+        fresh[name] = (inode, meter)
+        if meter is not None:
+            out[meter.phase] = meter
+    if cache is not None:
+        cache.clear()
+        cache.update(fresh)
     return out
+
+
+def _read_meter(path: Path) -> Meter | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("phase"), str):
+        return None
+    num = {k: _as_float(raw.get(k)) for k in (
+        "ts", "started_at", "context_tokens", "context_window", "peak_tokens",
+        "cost_usd", "duration_ms")}
+    return Meter(
+        phase=raw["phase"], ts=num["ts"] or 0.0, started_at=num["started_at"],
+        context_tokens=num["context_tokens"], context_window=num["context_window"],
+        peak_tokens=num["peak_tokens"], cost_usd=num["cost_usd"],
+        duration_ms=num["duration_ms"], effort=_as_str(raw.get("effort")),
+        seven_day=raw.get("seven_day") if isinstance(raw.get("seven_day"), dict) else None,
+        five_hour=raw.get("five_hour") if isinstance(raw.get("five_hour"), dict) else None,
+    )
 
 
 def live_meters(meters: dict[str, Meter], epoch: float | None,

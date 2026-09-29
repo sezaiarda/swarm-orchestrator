@@ -167,3 +167,22 @@ def test_the_owner_command_is_resolved_at_launch_not_per_render(tmp_path):
     out = subprocess.run(argv, input=json.dumps(payload()), capture_output=True, text=True,
                          env={**os.environ, "HOME": str(home)})
     assert out.returncode == 0 and out.stdout.strip() == "cached s1"
+
+
+def test_the_dashboard_rereads_only_the_meter_files_that_were_replaced(tmp_path, monkeypatch):
+    import json
+
+    from swarm_orchestrator.tui import data
+
+    for phase in ("a-W1", "a-W2"):
+        (tmp_path / f"{phase}.json").write_text(json.dumps({"phase": phase, "ts": 1.0}))
+    cache: dict = {}
+    assert data.load_meters(tmp_path, cache) == data.load_meters(tmp_path)
+    reads = []
+    real = data._read_meter
+    monkeypatch.setattr(data, "_read_meter", lambda p: reads.append(p.name) or real(p))
+    tmp = tmp_path / ".a-W2.json.1"
+    tmp.write_text(json.dumps({"phase": "a-W2", "ts": 2.0}))
+    tmp.replace(tmp_path / "a-W2.json")  # the tap's atomic replace: a new inode
+    got = data.load_meters(tmp_path, cache)
+    assert reads == ["a-W2.json"] and got["a-W2"].ts == 2.0 and got["a-W1"].ts == 1.0

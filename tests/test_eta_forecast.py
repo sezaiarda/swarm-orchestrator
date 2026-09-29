@@ -266,3 +266,84 @@ def test_a_forecast_that_fails_says_why_instead_of_hanging(cfg):
     eng.request(("x",), broken)
     assert eng.wait(30) and eng.result is None
     assert eng.error == "ValueError: the ledger moved under it"
+
+
+# -- when a forecast is remade -------------------------------------------------------
+def test_the_gate_remakes_on_a_real_change_at_once():
+    gate = engine.Gate()
+    assert gate.due("r1", "s1", NOW, 300)
+    assert not gate.due("r1", "s1", NOW + 2, 300)  # nothing moved
+    assert gate.due("r2", "s1", NOW + 4, 300)  # a row landed: at once
+    assert gate.due("r3", "s1", NOW + 5, 300)  # and the next one too
+
+
+def test_the_gate_holds_any_other_change_for_the_minimum_interval():
+    gate = engine.Gate()
+    assert gate.due("r", "s1", NOW, 300)
+    assert not gate.due("r", "s2", NOW + 30, 300)  # a merge started: not yet
+    assert not gate.due("r", "s2", NOW + engine.MIN_RECOMPUTE_S - 1, 300)
+    assert gate.due("r", "s2", NOW + engine.MIN_RECOMPUTE_S, 300)  # now it is due
+    assert not gate.due("r", "s2", NOW + engine.MIN_RECOMPUTE_S + 60, 300)
+
+
+def test_the_gate_remakes_on_the_clock_alone():
+    gate = engine.Gate()
+    assert gate.due("r", "s", NOW, 300)
+    assert not gate.due("r", "s", NOW + 299, 300)
+    assert gate.due("r", "s", NOW + 300, 300)
+
+
+def test_the_cache_key_ignores_a_one_point_usage_tick(cfg):
+    from swarm_orchestrator.usage import Sample
+
+    st = state_mod.read(cfg)
+    base = engine.from_files(cfg, st)
+    fid = engine.fit_key(base)
+
+    def with_week(pct):
+        s = Sample(ts=base.now - 60, week_pct=pct, week_resets_at=base.now + 9 * H)
+        return engine.Inputs(**{**base.__dict__, "usage": [s]})
+
+    assert engine.key(with_week(41), fid) == engine.key(with_week(43), fid)
+    assert engine.key(with_week(41), fid) != engine.key(with_week(46), fid)
+
+
+def test_the_dashboard_asks_only_when_a_forecast_is_due(cfg, monkeypatch):
+    from swarm_orchestrator.tui.dash import Dash
+
+    dash = Dash(cfg)
+    asked = []
+    monkeypatch.setattr(dash.eta, "request", lambda stamp, make: asked.append(stamp))
+    clock = [time.time()]
+    monkeypatch.setattr("swarm_orchestrator.tui.dash.time.time", lambda: clock[0])
+    dash.poll()
+    assert len(asked) == 1
+    for _ in range(5):  # the dashboard ticks; the log and meters move, nothing else
+        clock[0] += 2
+        cfg.supervisor_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(cfg.supervisor_log, "a") as fh:
+            fh.write("2026-09-29 18:00:00.000 1.0 WATCHDOG ok\n")
+        dash.poll()
+    assert len(asked) == 1
+    with state_mod.transaction(cfg) as state:
+        state.integ_queue.append("a-W1")  # a merge: waits for the minimum interval
+    clock[0] += 2
+    dash.poll()
+    assert len(asked) == 1
+    clock[0] += engine.MIN_RECOMPUTE_S
+    dash.poll()
+    assert len(asked) == 2
+    with state_mod.transaction(cfg) as state:
+        state.integ_queue.clear()
+        state.done["a-W1"] = "ok"  # a row landed: at once
+    clock[0] += 2
+    dash.poll()
+    assert len(asked) == 3
+
+
+def test_every_view_of_one_state_dir_shares_one_engine(cfg):
+    from swarm_orchestrator.tui.dash import Dash
+
+    tui, board = Dash(cfg), Dash(cfg)
+    assert tui.eta is board.eta
+    assert tui.eta.drives(tui) and not tui.eta.drives(board)

@@ -387,6 +387,78 @@ def ready(
     return result
 
 
+class ReadySet:
+    """:func:`ready`, kept current one event at a time.
+
+    For a caller that asks thousands of times while only a row starting or
+    landing changes the answer: the forecast's replays (:mod:`eta.sim`) asked
+    :func:`ready` on every event of every replay, and rebuilding its sets from
+    all the landed rows each time was over half of a forecast's cost. Here each
+    open row counts the needs it still lacks, and a landing releases only the
+    rows that were waiting on it.
+
+    ``graph`` is the open rows, in the order they are offered (ledger order).
+    :meth:`ready` equals ``ready(open rows, done, set(), excluded)``, where the
+    open rows are ``graph`` plus every :meth:`add` minus every :meth:`take`.
+    """
+
+    def __init__(self, graph: dict[str, set[str] | frozenset[str]], done: dict[str, str]) -> None:
+        self._done: dict[str, str] = {}
+        self._satisfied: set[str] = set()
+        self._order: dict[str, int] = {}
+        self._unmet: dict[str, int] = {}
+        self._dependents: dict[str, list[str]] = {}
+        self._ready: set[str] = set()
+        for row, status in done.items():
+            self.land(row, status)
+        for row, deps in graph.items():
+            self.add(row, deps)
+
+    def add(self, row: str, deps: Iterable[str]) -> None:
+        """File an open row after the rest."""
+        self._order.setdefault(row, len(self._order))
+        unmet = 0
+        for dep in set(deps):
+            self._dependents.setdefault(dep, []).append(row)
+            unmet += dep not in self._satisfied
+        self._unmet[row] = unmet
+        if not unmet:
+            self._ready.add(row)
+
+    def take(self, row: str) -> None:
+        """A row started: it is no longer open."""
+        self._unmet.pop(row, None)
+        self._ready.discard(row)
+
+    def land(self, row: str, status: str) -> None:
+        """``row`` ended with ``status``: a satisfying one releases the rows that
+        need it, and one that no longer satisfies (a retry's) holds them again."""
+        self._done[row] = status
+        now = status in SATISFIES_DEPS
+        if now == (row in self._satisfied):
+            return
+        step = -1 if now else 1
+        if now:
+            self._satisfied.add(row)
+        else:
+            self._satisfied.discard(row)
+        for dependent in self._dependents.get(row, ()):
+            left = self._unmet.get(dependent)
+            if left is None:
+                continue
+            left += step
+            self._unmet[dependent] = left
+            if left:
+                self._ready.discard(dependent)
+            else:
+                self._ready.add(dependent)
+
+    def ready(self, excluded: set[str] | frozenset[str] = frozenset()) -> list[str]:
+        """The open rows that may start now, in the order they were filed."""
+        return sorted((r for r in self._ready if r not in excluded and r not in self._done),
+                      key=self._order.__getitem__)
+
+
 def blocked_behind(
     graph: dict[str, set[str]],
     phase: str,

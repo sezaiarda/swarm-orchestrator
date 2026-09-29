@@ -179,6 +179,8 @@ class _Replay:
         self.meta: dict[str, Meta] = {}
         self.depth: dict[str, int] = {}
         self.done: dict[str, str] = {}
+        #: :func:`ledger.ready` over :attr:`pending`, kept current as rows land.
+        self.picks: ledger_mod.ReadySet | None = None
         self.finish: dict[str, float] = {}
         self.cause: dict[str, str | None] = {}
         self.work: dict[str, list] = {}
@@ -215,6 +217,7 @@ class _Replay:
         for gate in plan.gates.values():
             if gate > plan.now:
                 self._push(gate, _WAKE, "")
+        self.picks = ledger_mod.ReadySet(self.pending, self.done)
         self._fill()
         while self.heap:
             t = self.heap[0][0]
@@ -242,6 +245,7 @@ class _Replay:
             self.trigger = row
         elif kind == _FIN:
             self.done[row] = "ok"
+            self.picks.land(row, "ok")
             self.finish[row] = self.t
             self.trigger = row
             if row not in self.plan.rows:
@@ -296,8 +300,9 @@ class _Replay:
             if until <= self.t:
                 gated = {r for r, g in self.plan.gates.items()
                          if g > self.t and r in self.pending}
-                for row in ledger_mod.ready(self.pending, self.done, frozenset(), gated)[:free]:
+                for row in self.picks.ready(gated)[:free]:
                     del self.pending[row]
+                    self.picks.take(row)
                     self.cause[row] = self._why_now(row)
                     self._start(row, 0.0)
             else:
@@ -386,6 +391,7 @@ class _Replay:
             self.depth[child] = self.depth[row] + 1
             self.needs[child] = frozenset({row})
             self.pending[child] = frozenset()
+            self.picks.add(child, ())
             self.future.filed[meta.campaign] = self.future.filed.get(meta.campaign, 0) + 1
             self.budget -= 1
 

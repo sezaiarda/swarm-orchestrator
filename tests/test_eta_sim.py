@@ -164,3 +164,72 @@ def test_rows_behind_the_owner_are_never_scheduled():
     p = plan_of(text, workers=4, excluded={"o-W1"})
     assert "o-W1" not in p.rows and "o-W2" not in p.rows
     assert set(finishes(p)) == {"a-W1", "a-W2", "a-W3"}
+
+
+# -- the incremental pick ----------------------------------------------------------
+def test_ready_set_matches_ready_on_random_dags():
+    """:class:`ledger.ReadySet` answers what :func:`ledger.ready` would, event by
+    event: rows landing (some failing, some retried to ok), starting, filed late."""
+    import random
+
+    statuses = ["ok", "ok", "ok", "fail", "skip", "operator"]
+    for seed in range(60):
+        rnd = random.Random(seed)
+        n = rnd.randint(1, 40)
+        rows = [f"r{i}" for i in range(n)]
+        graph = {r: {rows[j] for j in rnd.sample(range(i), rnd.randint(0, min(i, 3)))}
+                 | ({"gone"} if rnd.random() < 0.05 else set())
+                 for i, r in enumerate(rows)}
+        done = {r: rnd.choice(statuses) for r in rows if rnd.random() < 0.2}
+        open_ = {r: d for r, d in graph.items() if r not in done}
+        picks = ledger.ReadySet(open_, done)
+        extra = 0
+        for _ in range(3 * n):
+            excluded = {r for r in open_ if rnd.random() < 0.1}
+            assert picks.ready(excluded) == ledger.ready(open_, done, set(), excluded), seed
+            move = rnd.random()
+            if move < 0.4 and open_:
+                row = rnd.choice(picks.ready() or list(open_))
+                del open_[row]
+                picks.take(row)
+                status = rnd.choice(statuses)
+                done[row] = status
+                picks.land(row, status)
+            elif move < 0.55 and done:
+                row = rnd.choice(sorted(done))
+                done[row] = rnd.choice(statuses)  # a retry lands again
+                picks.land(row, done[row])
+            elif move < 0.7:
+                extra += 1
+                child = f"x{extra}"
+                deps = set(rnd.sample(rows, min(len(rows), rnd.randint(0, 2))))
+                open_[child] = deps
+                picks.add(child, deps)
+        assert picks.ready() == ledger.ready(open_, done, set(), set()), seed
+
+
+def test_the_replay_picks_as_it_did_with_ready_asked_every_event(monkeypatch):
+    """The incremental pick changes no replay: the same futures as asking
+    :func:`ledger.ready` over the replay's own open rows at every event."""
+    text = "\n".join(f"- [ ] `w-W{i}`" + (f" · needs:`w-W{i // 2}`" if i else "")
+                     for i in range(14))
+    p = plan_of(text, workers=3, busy={"w-W0": NOW - H / 2})
+    grow = hazards.Hazards(follow_all=0.8)
+    spread = model.Durations(mu=math.log(H), sigma=0.6, shared=0.3)
+    new = sim.simulate(p, spread, grow, holds.Holds(), sim.Options(runs=6))
+
+    class AskEveryTime:
+        def __init__(self, graph, done):
+            self.graph, self.done = graph, done  # the replay's own dicts, live
+
+        def ready(self, excluded=frozenset()):
+            return ledger.ready(self.graph, self.done, set(), excluded)
+
+        def take(self, row): ...
+        def land(self, row, status): ...
+        def add(self, row, deps): ...
+
+    monkeypatch.setattr(sim.ledger_mod, "ReadySet", AskEveryTime)
+    old = sim.simulate(p, spread, grow, holds.Holds(), sim.Options(runs=6))
+    assert [f.finish for f in new] == [f.finish for f in old]
+    assert [f.filed for f in new] == [f.filed for f in old] and any(f.filed for f in new)

@@ -5,10 +5,14 @@ simulation takes seconds. So the forecast is computed on a thread of its own
 (:class:`Engine`) and every view reads the last one it made: the cheap
 :func:`forecast.floor` first, the replays when they land.
 
-It is recomputed only when something it depends on moved — the ledger, the
-state, the config, a pause or a cap — plus every :data:`RECOMPUTE_S` while rows
-run, since a running row's remaining time changes as it ages, and every
-:data:`IDLE_RECOMPUTE_S` when none does. The result is kept in
+It is recomputed at once when the plan really moved — a row landed or
+launched, the ledger was edited — and when anything else it depends on moved
+(a question, a merge, a hold, the config, a cap's reading) no sooner than
+:data:`MIN_RECOMPUTE_S` after the last one (:class:`Gate`); plus every
+:data:`RECOMPUTE_S` while rows run, since a running row's remaining time changes
+as it ages, and every :data:`IDLE_RECOMPUTE_S` when none does. Keyed on every
+state move, it re-simulated back to back through a merge and cost the dashboard
+a third of a core. The result is kept in
 ``<state>/cache/eta.json`` under the key of what it was made from, so the TUI,
 the web board and ``swarm status`` share one answer instead of each simulating
 its own: whoever computes first writes it under a lock, and the others, waiting
@@ -24,9 +28,11 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import threading
 import time
+import weakref
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -47,6 +53,17 @@ from . import sim as sim_mod
 
 #: Replays per forecast. P85 from 500 is good to about 1.6 percentile points.
 RUNS = 500
+#: Replays per forecast the dashboard makes (P85 good to about 3 points): it
+#: remakes one every few minutes all day, and ``swarm status`` reads it from the
+#: cache rather than simulating its own.
+LIVE_RUNS = 150
+#: Anything but a landed or launched row, or a ledger edit, recomputes no
+#: sooner than this after the last forecast.
+MIN_RECOMPUTE_S = 120.0
+#: A cap's reading moves the forecast in steps this coarse (percentage points).
+USAGE_STEP = 5.0
+#: How much the forecast thread yields to the dashboard (``nice``, Linux only).
+NICE = 10
 #: A forecast is remade at least this often while it has rows running…
 RECOMPUTE_S = 300.0
 #: …and this often when none is: its clock still moves.
@@ -232,10 +249,20 @@ def key(inputs: Inputs, fit_id: str) -> str:
                   sorted(st.usage_override)],
         "config": [sorted(inputs.exclude), inputs.workers, inputs.build_slots,
                    inputs.park_after, json.dumps(inputs.rules, sort_keys=True)],
-        "usage": [usage_mod.latest(inputs.usage, w, inputs.now) for w in ("week", "five")],
+        "usage": [usage_key(usage_mod.latest(inputs.usage, w, inputs.now))
+                  for w in ("week", "five")],
         "fit": fit_id,
     }
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def usage_key(got: tuple[float, float | None] | None) -> tuple | None:
+    """A cap's reading as the forecast needs it: :data:`USAGE_STEP` steps, and
+    the reset to the hour. Every one-point tick used to make a new forecast."""
+    if got is None:
+        return None
+    pct, resets = got
+    return (math.floor(pct / USAGE_STEP), None if resets is None else round(resets / 3600.0))
 
 
 def compute(inputs: Inputs, fitted: Fitted | None = None, runs: int = RUNS,
@@ -296,13 +323,14 @@ def recompute_s(inputs: Inputs) -> float:
     return RECOMPUTE_S if running else IDLE_RECOMPUTE_S
 
 
-def shared(cfg, inputs: Inputs, fitted: Fitted, fit_id: str, runs: int
-           ) -> forecast_mod.Forecast:
-    """The cached forecast for ``inputs`` if it still stands, else one simulated
+def shared(cfg, inputs: Inputs, fitted: Fitted, fit_id: str, runs: int,
+           max_age: float | None = None) -> forecast_mod.Forecast:
+    """The cached forecast for ``inputs`` if it still stands (made under
+    ``max_age`` seconds ago, by default :func:`recompute_s`), else one simulated
     and cached now. The lock makes a second asker wait for the first one's
     answer instead of simulating the same thing beside it."""
     want = key(inputs, fit_id)
-    not_before = inputs.now - recompute_s(inputs)
+    not_before = inputs.now - (recompute_s(inputs) if max_age is None else max_age)
     path = cache_path(cfg)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,7 +355,53 @@ def current(cfg, inputs: Inputs, runs: int = RUNS) -> forecast_mod.Forecast:
     return shared(cfg, inputs, fit(inputs), fit_key(inputs), runs)
 
 
+# -- when to remake it -----------------------------------------------------------------
+class Gate:
+    """When a forecast is due, from what the asker has seen.
+
+    ``real`` is what moves the plan itself (the rows landed and running, the
+    ledger's text): a change there is due at once. ``soft`` is the rest a
+    forecast reads (questions, merges, holds, the config, a cap's reading in
+    :data:`USAGE_STEP` steps): a change there waits until :data:`MIN_RECOMPUTE_S`
+    have passed since the last forecast. With neither moved, one is due every
+    ``every`` seconds, since the clock moves a forecast too.
+    """
+
+    def __init__(self, min_s: float = MIN_RECOMPUTE_S) -> None:
+        self.min_s = min_s
+        self.real: object = None
+        self.soft: object = None
+        self.at: float | None = None
+
+    def due(self, real, soft, now: float, every: float) -> bool:
+        """Whether to remake the forecast now; if so, it counts as made now."""
+        if self.at is not None and real == self.real:
+            since = now - self.at
+            if since < (self.min_s if soft != self.soft else every):
+                return False
+        self.real, self.soft, self.at = real, soft, now
+        return True
+
+
 # -- the background worker -------------------------------------------------------------
+_SHARED: dict[str, "Engine"] = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def shared_engine(cfg, runs: int = LIVE_RUNS) -> "Engine":
+    """The one :class:`Engine` of this process for ``cfg``'s state dir.
+
+    The dashboard and the web board it serves each hold a :class:`~tui.dash.Dash`;
+    with an engine each, both remade the same forecast, and while one had read a
+    state the other had not yet, each found the other's cached forecast stale."""
+    key = str(cfg.state_dir)
+    with _SHARED_LOCK:
+        eng = _SHARED.get(key)
+        if eng is None:
+            eng = _SHARED[key] = Engine(cfg, runs)
+        return eng
+
+
 class Engine:
     """Makes forecasts on a thread of its own; views read :attr:`result`.
 
@@ -341,6 +415,8 @@ class Engine:
     def __init__(self, cfg, runs: int = RUNS) -> None:
         self.cfg = cfg
         self.runs = runs
+        #: When the next forecast is due (:meth:`due`).
+        self.gate = Gate()
         #: The latest forecast, or ``None`` before the first one.
         self.result: forecast_mod.Forecast | None = None
         #: Why the last attempt made none ("" when it did).
@@ -352,6 +428,18 @@ class Engine:
         self._stamp = None
         self._fit: tuple[str, Fitted] | None = None
         self._thread: threading.Thread | None = None
+        self._driver: weakref.ref | None = None
+
+    def drives(self, asker) -> bool:
+        """Whether ``asker`` is the one that asks for forecasts: the first to ask
+        while it lives. The others read :attr:`result`; a second asker a poll
+        behind the first would otherwise undo each of its requests."""
+        with self._lock:
+            got = self._driver() if self._driver is not None else None
+            if got is None:
+                self._driver = weakref.ref(asker)
+                return True
+            return got is asker
 
     def request(self, stamp, make) -> None:
         """Ask for a forecast of ``make()`` unless ``stamp`` is the last one asked."""
@@ -372,6 +460,7 @@ class Engine:
         return thread is None or not thread.is_alive()
 
     def _work(self) -> None:
+        _yield_cpu()
         while True:
             with self._lock:
                 make, self._make = self._make, None
@@ -394,4 +483,15 @@ class Engine:
         fitted = self._fit[1]
         if self.result is None:
             self._publish(floor(inputs, fitted))
-        self._publish(shared(self.cfg, inputs, fitted, fid, self.runs))
+        # Its gate already said a forecast is due, so the cache stands only when
+        # another process made it just now, not when it is this one's last.
+        self._publish(shared(self.cfg, inputs, fitted, fid, self.runs, MIN_RECOMPUTE_S))
+
+
+def _yield_cpu() -> None:
+    """Lower this thread's priority: on Linux ``nice`` is per thread, so the
+    dashboard's own thread keeps its place while a forecast simulates."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), NICE)
+    except (AttributeError, OSError):
+        pass

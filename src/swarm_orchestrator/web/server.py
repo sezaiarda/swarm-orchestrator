@@ -25,12 +25,14 @@ path.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import signal
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -60,10 +62,20 @@ _SECURITY = {
 }
 
 
+#: How long a start waits for the port to come free before it gives up. A
+#: restart (``respawn-pane -k``, or a dashboard restarted) starts the new board
+#: while the old one is still closing its listener — SIGHUP lets its request loop
+#: finish its poll first — and the new one died with "Address already in use",
+#: status 2. SO_REUSEADDR covers a port left in TIME_WAIT; this covers the rest.
+BIND_WAIT_S = 5.0
+_BIND_RETRY_S = 0.2
+
+
 class BoardServer(ThreadingHTTPServer):
     """A threading server that carries the shared :class:`Feed` and the page."""
 
     daemon_threads = True
+    #: SO_REUSEADDR: a restart must not wait out the old socket's TIME_WAIT.
     allow_reuse_address = True
 
     def __init__(self, addr, feed: Feed, page: bytes) -> None:
@@ -189,15 +201,29 @@ def _health_body(cfg) -> dict:
     return {"app": lifecycle.APP_ID, "project": cfg.project_dir.name}
 
 
+def bind(host: str, port: int, feed: Feed, page: bytes,
+         wait_s: float = BIND_WAIT_S) -> BoardServer:
+    """The server, bound — retrying for up to ``wait_s`` while the port is in use."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            return BoardServer((host, port), feed, page)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+            time.sleep(_BIND_RETRY_S)
+
+
 def make_server(cfg, host: str, port: int, explicit_config: str | None = None,
-                poll_s: float | None = None) -> BoardServer:
+                poll_s: float | None = None, bind_wait_s: float = BIND_WAIT_S) -> BoardServer:
     """A bound server with its feed built and its watcher thread running.
 
-    Split from :func:`serve` so tests can run one on port 0 in-process.
+    Split from :func:`serve` so tests — and the dashboard, which runs the board
+    in-process (:mod:`swarm_orchestrator.tui.webboard`) — can run one on a thread.
     """
     feed = Feed(cfg, explicit_config)
     feed.refresh(force=True)
-    srv = BoardServer((host, port), feed, PAGE.read_bytes())
+    srv = bind(host, port, feed, PAGE.read_bytes(), bind_wait_s)
     kwargs = {} if poll_s is None else {"poll_s": poll_s}
     threading.Thread(target=feed.run, kwargs=kwargs, name="swarm-web-feed",
                      daemon=True).start()

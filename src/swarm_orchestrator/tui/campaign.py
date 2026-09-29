@@ -54,6 +54,8 @@ class Campaign:
     running: list[str] = field(default_factory=list)
     ready: list[str] = field(default_factory=list)
     blocked: int = 0
+    #: Rows whose dependencies have landed but whose ``after:`` date is ahead.
+    dated: int = 0
     excluded: int = 0
     #: Of ``built``, the rows the swarm holds done that the ledger has not
     #: ticked: an operator hand-off still to prove, a standing target it ran.
@@ -89,6 +91,7 @@ def summarise(
     busy: set[str] | None = None,
     excluded: set[str] | None = None,
     ticked: set[str] | None = None,
+    deferred: dict[str, str] | set[str] | None = None,
 ) -> list[Campaign]:
     """Campaign standings, active first, then by size.
 
@@ -102,10 +105,14 @@ def summarise(
     ``held`` say how many done rows the ledger itself still shows open. A phase is
     *ready* when every dependency is satisfied and it has not been attempted — a
     ``fail`` does NOT satisfy a dependency, matching ledger.SATISFIES_DEPS, so a
-    dependent of a failed phase reads as blocked rather than ready.
+    dependent of a failed phase reads as blocked rather than ready. Nor is a
+    row whose ``after:`` date is still ahead (``deferred``, as
+    :func:`ledger.deferred` reads it): the launcher leaves it alone, so it is
+    ``dated``, never ready.
     """
     busy = busy or set()
     excluded = excluded or set()
+    deferred = deferred or set()
     satisfied = {p for p, s in done.items() if s in SATISFIED}
 
     buckets: dict[str, dict] = {}
@@ -114,7 +121,7 @@ def summarise(
         b = buckets.setdefault(
             name,
             {"total": 0, "built": 0, "skipped": 0, "failed": 0,
-             "running": [], "ready": [], "blocked": 0, "excluded": 0, "held": 0},
+             "running": [], "ready": [], "blocked": 0, "dated": 0, "excluded": 0, "held": 0},
         )
         b["total"] += 1
         status = done.get(phase)
@@ -128,10 +135,12 @@ def summarise(
             b["excluded"] += 1
         elif status == "fail":
             b["failed"] += 1
-        elif deps <= satisfied:
-            b["ready"].append(phase)
-        else:
+        elif not deps <= satisfied:
             b["blocked"] += 1
+        elif phase in deferred:
+            b["dated"] += 1
+        else:
+            b["ready"].append(phase)
 
     out = [
         Campaign(
@@ -143,6 +152,7 @@ def summarise(
             running=sorted(b["running"]),
             ready=sorted(b["ready"]),
             blocked=b["blocked"],
+            dated=b["dated"],
             excluded=b["excluded"],
             held=b["held"],
         )
@@ -174,6 +184,7 @@ def overall(campaigns: list[Campaign]) -> Campaign:
         running=sorted(p for c in campaigns for p in c.running),
         ready=sorted(p for c in campaigns for p in c.ready),
         blocked=sum(c.blocked for c in campaigns),
+        dated=sum(c.dated for c in campaigns),
         excluded=sum(c.excluded for c in campaigns),
         held=sum(c.held for c in campaigns),
     )

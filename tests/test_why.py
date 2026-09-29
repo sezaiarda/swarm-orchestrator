@@ -367,3 +367,33 @@ def test_render_without_tree_stays_one_short_answer(tmp_path, monkeypatch):
     assert why_mod.render(why_mod.explain(cfg, "solo")) == (
         "solo: ready NOW — nothing is blocking it (`swarm launch solo`)"
     )
+
+
+# -- `after:` dates ------------------------------------------------------------
+DATED = (
+    "- [x] `perf-F35` · needs:—\n"
+    "- [ ] `perf-F36` · needs:`perf-F35` · after:`2999-10-01`\n"
+    "- [ ] `perf-F37` · needs:`perf-F36`\n"
+    "- [ ] `perf-F38` · needs:— · after:`2000-01-01`\n"
+)
+
+
+def test_a_row_waiting_for_its_date_is_not_ready(tmp_path, monkeypatch):
+    """perf-F36 read "ready NOW — nothing is blocking it" while the launcher,
+    rightly, would not start it before its `after:` date."""
+    cfg = _cfg(tmp_path, monkeypatch, DATED)
+    _state(cfg)
+    exp = why_mod.explain(cfg, "perf-F36")
+    assert exp.reason == why_mod.DEFERRED
+    assert "waits until 2999-10-01" in why_mod.render(exp)
+    # A date already past is no gate at all.
+    assert why_mod.explain(cfg, "perf-F38").reason == why_mod.READY
+
+
+def test_a_dated_row_is_the_root_cause_of_what_waits_behind_it(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch, DATED)
+    _state(cfg)
+    exp = why_mod.explain(cfg, "perf-F37")
+    assert exp.reason == why_mod.BLOCKED and exp.root_cause == "perf-F36"
+    assert exp.root_detail.startswith("waits until 2999-10-01")
+    assert exp.tree.children[0].state == why_mod.DEFERRED

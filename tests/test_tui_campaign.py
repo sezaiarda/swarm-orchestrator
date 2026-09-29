@@ -34,3 +34,13 @@ def test_counts_match_the_web_board_everything_done_over_everything_scheduled():
                                  excluded={"teal-W16", "teal-W19"})
     assert (teal.built, teal.live_total) == (16, 18)
     assert (teal.excluded, teal.running, teal.ready) == (1, ["teal-W17"], ["teal-W18"])
+
+
+def test_a_row_waiting_for_its_after_date_is_dated_not_ready():
+    """perf-F36 (`after:2026-10-01`) counted as ready on the dashboard and in
+    `swarm status`, while the launcher, rightly, left it alone."""
+    graph = {"perf-F35": set(), "perf-F36": {"perf-F35"}, "perf-F37": {"perf-F36"}}
+    (perf,) = campaign.summarise(graph, {"perf-F35": "ok"}, deferred={"perf-F36": "2026-10-01"})
+    assert perf.ready == [] and perf.dated == 1 and perf.blocked == 1
+    assert not perf.active
+    assert campaign.overall([perf]).dated == 1

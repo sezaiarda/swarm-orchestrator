@@ -45,6 +45,7 @@ PARKED = "parked"
 WAITING = "waiting"
 DONE = "done"
 BLOCKED = "blocked"
+DEFERRED = "deferred"
 READY = "ready"
 
 # Node labels used only in the rendered tree (a superset of the keys above:
@@ -103,20 +104,22 @@ def explain(cfg: Config, phase: str, st: State | None = None) -> Explanation:
     st = dataclasses.replace(
         st, done=ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(path), flying)
     )
-    exp = _classify(cfg, phase, st, graph)
+    # The launcher's own reading of `after:`: a date still ahead, today in UTC.
+    dated = ledger_mod.load_deferred(path, time.strftime("%Y-%m-%d", time.gmtime()))
+    exp = _classify(cfg, phase, st, graph, dated)
     if exp.reason != BLOCKED:
         return exp
 
     exp.deps = sorted(graph.get(phase, set()))
     exp.unmet = _unmet(graph, st.done, phase)
     exp.roots = _roots(graph, st.done, phase, {phase})
-    exp.tree = _tree(cfg, st, graph, phase, set(exp.roots), {phase})
+    exp.tree = _tree(cfg, st, graph, phase, set(exp.roots), {phase}, dated=dated)
     exp.issues = _issues_for(
         graph, _tree_phases(exp.tree), {p for p, status in st.done.items() if status in ledger_mod.SATISFIES_DEPS}
     )
     if len(exp.roots) == 1:
         exp.root_cause = exp.roots[0]
-        exp.root_detail = _classify(cfg, exp.root_cause, st, graph).detail
+        exp.root_detail = _classify(cfg, exp.root_cause, st, graph, dated).detail
     elif not exp.roots:
         # Every unmet dep was already on the stack: the phase sits in a cycle and
         # can never become ready. `validate` names the cycle; say so plainly.
@@ -128,8 +131,10 @@ def explain(cfg: Config, phase: str, st: State | None = None) -> Explanation:
 
 
 # -- classification (non-recursive: one phase, one answer) ----------------
-def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) -> Explanation:
-    """The single best one-line answer for ``phase``, without walking deps."""
+def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]],
+              dated: dict[str, str] | None = None) -> Explanation:
+    """The single best one-line answer for ``phase``, without walking deps.
+    ``dated`` are the rows whose ``after:`` date is still ahead."""
     if phase not in graph:
         known = len(graph)
         where = cfg.project_dir / cfg.ledger
@@ -210,6 +215,12 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]]) ->
         return Explanation(
             phase, BLOCKED, f"blocked: {len(unmet)} of the {total} rows it needs are not built yet"
         )
+    if phase in (dated or {}):
+        return Explanation(
+            phase, DEFERRED,
+            f"waits until {dated[phase]}: its `after:` date is still ahead, and the swarm"
+            " starts it on that day, not before",
+        )
 
     if st.paused:
         return Explanation(
@@ -284,6 +295,7 @@ def _tree(
     roots: set[str],
     seen: set[str],
     expanded: set[str] | None = None,
+    dated: dict[str, str] | None = None,
 ) -> Node:
     """The blocking sub-tree under ``phase``.
 
@@ -296,7 +308,7 @@ def _tree(
     if expanded is None:
         expanded = set()
     expanded.add(phase)
-    exp = _classify(cfg, phase, st, graph)
+    exp = _classify(cfg, phase, st, graph, dated)
     # A `done` node's *status* is the whole diagnosis (`fail` vs `ok`), so it goes
     # in the label rather than hiding one level down in the detail text.
     label = f"{DONE}:{exp.status}" if exp.reason == DONE else exp.reason
@@ -312,7 +324,7 @@ def _tree(
             node.children.append(Node(dep, _SHOWN, "expanded elsewhere in this tree"))
         else:
             node.children.append(
-                _tree(cfg, st, graph, dep, roots, seen | {dep}, expanded)
+                _tree(cfg, st, graph, dep, roots, seen | {dep}, expanded, dated)
             )
     return node
 

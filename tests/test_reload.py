@@ -365,3 +365,22 @@ def test_facts_from_state_reads_the_live_run():
     assert facts.busy == {0: "P0"}
     assert facts.layout == "tiled" and facts.paused is True
     assert facts.in_flight() == ["P0", "P4", "P9"]
+
+
+def test_a_supervisor_older_than_a_new_setting_can_still_be_reloaded(tmp_path, monkeypatch):
+    """The snapshot of a supervisor started before a setting existed lacks that
+    field. It runs on the default, so the default is its "before" — not a reason
+    to report "no running supervisor" (a new gc_wait_s setting once blocked a cap change)."""
+    import json
+
+    from swarm_orchestrator import cli
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    cfg.ensure_dirs()
+    snap = {f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init}
+    snap.pop("gc_wait_s")
+    (cfg.state_dir / "config.json").write_text(json.dumps(snap, default=str), encoding="utf-8")
+    old = cli._snapshot_cfg(cfg)
+    assert old is not None
+    assert old.gc_wait_s == SETTINGS["gc_wait_s"].default
+    assert old.max_workers == 4

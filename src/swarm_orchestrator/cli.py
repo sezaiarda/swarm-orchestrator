@@ -56,7 +56,7 @@ from . import telegram, tgbot, tmux
 from . import todo as todo_mod
 from . import usage as usage_mod
 from .web import lifecycle as web_lifecycle
-from .config import Config, load
+from .config import SETTINGS, Config, load
 from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
@@ -1143,11 +1143,20 @@ def _snapshot_cfg(cfg: Config) -> Config | None:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    init_fields = {f.name for f in fields(Config) if f.init}
     kwargs = {}
-    for name in init_fields:
+    for f in fields(Config):
+        if not f.init:
+            continue
+        name = f.name
         if name not in raw:
-            return None
+            # A setting added after this supervisor started: it runs on the
+            # default, so that is its "before".
+            setting = SETTINGS.get(name)
+            if setting is None:
+                return None
+            d = setting.default
+            kwargs[name] = d(cfg.project_dir) if callable(d) else d
+            continue
         val = raw[name]
         kwargs[name] = Path(val) if name in ("project_dir",) and isinstance(val, str) else val
     try:

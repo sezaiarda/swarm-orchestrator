@@ -53,6 +53,7 @@ KINDS = (
     "usage-cap",  # supervisor: a usage cap paused or stopped the swarm, or a pause lifted
     "blocked",  # supervisor: blocked phases of one burst, one ping grouped by reason
     "drain",  # supervisor: `swarm down --drain` finished waiting and is stopping the swarm
+    "idle-build",  # resources.sampler: a build holds a slot with its tree idle
     "other",  # unclassified (the default)
 )
 

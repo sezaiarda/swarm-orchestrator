@@ -211,6 +211,14 @@ def _backup_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _resources_off(monkeypatch):
+    """The resource sampler is on by default in a real project; in the suite it
+    is off, so no supervisor under test samples /proc every second or runs
+    ``du`` over the temp tree. ``tests/test_resources_*.py`` turn it back on."""
+    monkeypatch.setenv("SWARM_RESOURCES", "0")
+
+
+@pytest.fixture(autouse=True)
 def _web_off(monkeypatch):
     """The web board is on by default in a real project; in the suite it is off.
 

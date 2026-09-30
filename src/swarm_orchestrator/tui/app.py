@@ -233,6 +233,7 @@ class SwarmApp(App):
         Binding("d", "doctor", "doctor", show=False),
         Binding("n", "toggle_drawer", "needs you"),
         Binding("g", "guide", "guide me"),
+        Binding("u", "copy_url", "board url"),
         Binding("r", "rescan", "rescan", show=False),
         Binding("question_mark", "help", "help"),
         Binding("q", "quit", "quit"),
@@ -533,6 +534,33 @@ class SwarmApp(App):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Guide me", "open a chat that walks you through your to-dos (g)",
                             self.action_guide)
+        yield SystemCommand("Copy the board's URL", "to your clipboard, and shown in full (u)",
+                            self.action_copy_url)
+
+    def board_url(self) -> str:
+        """The web board's address: the one this dashboard serves or found running,
+        else the first the board would be reached at."""
+        board = getattr(self, "web_board", None)
+        if board is not None and board.url:
+            return board.url
+        from ..web import lifecycle
+
+        try:
+            got = lifecycle.urls(self.cfg)
+        except Exception:  # noqa: BLE001 - an address is a nicety
+            got = []
+        return got[0] if got else f"http://localhost:{self.cfg.web_port}/"
+
+    def action_copy_url(self) -> None:
+        """``u``: copy the board's URL and show it whole.
+
+        The copy is an OSC 52 escape, which reaches a phone's clipboard through
+        ssh and tmux (tmux needs ``set-clipboard on``). A terminal that drops it
+        still shows the toast: the URL in full, to read or long-press.
+        """
+        url = self.board_url()
+        self.copy_to_clipboard(url)
+        self.notify(url, title="board URL copied", timeout=20)
 
     def action_doctor(self) -> None:
         """Run the health checks and show them, from whichever tab you were on."""

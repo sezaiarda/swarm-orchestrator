@@ -68,7 +68,8 @@ CASES = [
     ("env RUST_LOG=debug cargo test", "rs", HEAVY), ("env A=1 git log", ".", LIGHT),
     ("nice -n 10 cargo build", "rs", HEAVY), ("nohup ls", ".", LIGHT),
     ("flock /tmp/l cargo build", "rs", HEAVY), ("xargs cargo build", "rs", HEAVY),
-    ("find . -name x -exec rm {} ;", ".", LIGHT),
+    ("find . -name x -exec touch {} ;", ".", LIGHT),
+    ("rm -rf target/debug", ".", HEAVY),  # clearing build output must not race a build
     ("find . -name Cargo.toml -execdir cargo build ;", ".", HEAVY),
     ("git bisect run cargo test", "rs", HEAVY), ("swarm status", ".", LIGHT),
     ("swarm build cargo build", "rs", HEAVY), ("swarm build git log", ".", LIGHT),

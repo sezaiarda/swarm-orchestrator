@@ -70,12 +70,15 @@ LIGHT_NAMES = frozenset("""
     ls cat head tail grep egrep fgrep rg ag fd find wc sort uniq cut tr sed awk gawk jq yq diff
     cmp comm
     sleep date realpath readlink basename dirname tee xxd od hexdump file stat du df tree column
-    paste join seq mkdir rmdir rm cp mv ln touch chmod chown install mktemp
+    paste join seq mkdir rmdir cp mv ln touch chmod chown install mktemp
     sha1sum sha256sum sha512sum md5sum b2sum cksum printenv id whoami hostname uname nproc free
     uptime ps pgrep pkill kill lsof ss ip
-    git gh curl wget ssh scp rsync tar gzip gunzip zstd unzstd xz unzip zip base64
+    git gh curl wget ssh scp tar gzip gunzip zstd unzstd xz unzip zip base64
     rustfmt prettier shellcheck shfmt ruff black isort codespell yamllint taplo
 """.split())
+
+# `rm` and `rsync` are left out on purpose: through the gate they are usually
+# clearing or syncing build output, which must not race a running build.
 
 # Programs that always count as heavy (they compile, test, bundle or build images).
 HEAVY_NAMES = frozenset("""

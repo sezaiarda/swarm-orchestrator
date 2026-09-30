@@ -560,19 +560,112 @@ sentinels, never from branch shape:
 
 ## Build gate (`swarm build`)
 
-N workers in N worktrees means N independent builds. `swarm build <cmd…>` is a
-swarm-wide counting semaphore: one `flock` per slot under `<state>/buildsem/`, at
-most `[build].max_concurrent` held at once, the rest waiting.
+N workers in N worktrees means N independent builds. `swarm build <cmd…>` lets
+at most `[build].max_concurrent` heavy builds run at once, swarm-wide; the rest
+wait their turn. For `cargo` it also sets `CARGO_BUILD_JOBS` to `[build].jobs`.
 
-It then `exec`s the command, so the build process itself holds the lock. If a
-build is killed (by a tool timeout, for example), its slot is released with it:
-no daemon, no leak. For `cargo` it also sets `CARGO_BUILD_JOBS` to
-`[build].jobs`.
+**Slots.** One `flock` per slot, `<state>/buildsem/slot<N>`. The lock is taken on
+a descriptor the build inherits, so the build's whole process tree holds the
+slot: however the build ends (exit, crash, SIGKILL, a tool timeout), the slot
+frees when its last process is gone. There is no daemon and no counter to leak.
+A `swarm build` from before the queue existed takes the same slot locks, so old
+and new callers together still never exceed the cap. The slot file also holds a
+small record of its current build (id, phase, pid, command, start), which is
+what `--status` and the waiting line show.
+
+**The queue.** A heavy command takes a ticket, `buildsem/queue/<seq>-<id>.json`,
+numbered under `queue.lock` and locked by its waiter for as long as it waits.
+A ticket whose lock can be taken belongs to a dead waiter and is deleted, so a
+killed waiter never blocks anyone. Only the waiter whose turn it is tries for a
+free slot (under `queue.lock`), so arrivals are served in order; with several
+slots, the next free one goes to the next in line. A waiter that stops polling
+(a stopped process) is passed over until it polls again.
+
+**Short builds first, boundedly.** A command whose recent runs took at most
+`[build].short_s` (the median of its last runs in the same place, from the log
+below) may start ahead of older waiters predicted to be long. Each long waiter
+counts the times it is passed (`queue.json`), and once it has been passed
+`[build].overtake` times nothing more may go ahead of it. So a waiter starts
+after at most the waiters older than it plus `overtake` short ones: nobody
+starves, and a 30-second targeted test does not sit behind a 15-minute browser
+suite. Unknown commands are never "short". `overtake = 0` is plain FIFO.
+
+**Light commands skip the gate.** The command is read the way the shell would
+run it. Wrappers are looked through (`env`, `timeout`, `nice`, `flock FILE cmd`,
+`xargs`, `uv run`, `bunx`…), `sh -c` scripts and `#!` shell scripts are split into
+their commands, `bun run <script>` is read from `package.json`, and python is
+read for anything that starts processes. It is light only if every command in
+it is known to do no compile, test, bundle or image work: `git`, `ls`, `cargo
+update`/`metadata`/`fmt`/`tree`, `docker buildx bake --print`, a python script
+that starts no processes. Anything it cannot read (an unknown program, `$(…)`,
+`eval`, a heredoc, a shell function) stays heavy. `[build].heavy`/`[build].light`
+add patterns over the rules (a command prefix whose words are globs).
+
+**Pre-flight.** Before a heavy command queues, what it needs must exist: its
+program, a literal `cd` target, an explicit `-f`/`--file`, `--manifest-path`
+or `-C` directory, a `Cargo.toml` (here or above) for cargo, a `Makefile`, a
+bake or compose file when none is given, a `bun run` script. Otherwise it is
+refused at once (exit 127 for a missing program, 2 otherwise) instead of after
+the queue. Only checks nothing earlier in the command could have made true (a
+`mkdir` or a build step ends them).
+
+**What it says** (stderr only; worker prompts are unchanged):
+
+- on joining, and every 45 s while queued: its place, who holds each slot
+  (phase, command, how long, how long it usually takes) and an estimated start;
+  on joining, also that queue time does not count toward `--timeout` and how to
+  batch steps;
+- `queued 3m12s, starting on slot 0: cargo nextest run`;
+- `ran 2m03s, exit 0 (queued 3m12s)`.
+
+**Batching and timeouts.** `swarm build -- sh -c 'a && b'` or
+`swarm build --script FILE` (run with `bash -e -o pipefail`) runs several steps
+in one turn. `--timeout D` counts from the start, not the queue: at `D` the
+build's process tree gets SIGTERM, then SIGKILL after 10 s, and the exit code is
+124. Signals `swarm build` receives are passed on to the build's process tree;
+if `swarm build` itself is SIGKILLed, the build gets SIGTERM. A `swarm build`
+inside a build that already holds a slot runs straight through.
+
+**The event log**, `buildsem/events.jsonl`, is append-only, one JSON object per
+line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
+20 MB. Every line has exactly these keys:
+
+```json
+{"ts": 1790000000.123, "event": "start", "id": "3f2a9c01be44", "phase": "P-1",
+ "pid": 4242, "slot": 0, "cls": "heavy", "argv": "cargo nextest run",
+ "cwd": "/…/wt/P-1/lib", "wait_s": 12.5, "run_s": null, "exit": null}
+```
+
+| event | when | `pid` | notes |
+|---|---|---|---|
+| `queued` | a heavy command joined the queue | the waiting `swarm build` | |
+| `start` | it got slot `slot` | the build process | `wait_s` = time queued |
+| `bypass` | a light command (or any, gate off) started unqueued | the command's process | `slot` null |
+| `end` | it finished | as in its `start`/`bypass` | `run_s`; `exit` (signal N → 128+N, `--timeout` → 124) |
+| `preflight_fail` | refused before queueing; nothing ran | `swarm build` | |
+
+`phase` is `$SWARM_PHASE` (null outside a worker); `argv` is at most 300
+characters. A `queued` with no `start` gave up while waiting. A `start` whose
+`end` never came and whose `pid` is gone died unrecorded: the gate writes a
+synthetic `end` with `exit` null as soon as it notices (when a waiter reports,
+or when the slot is next taken).
+
+**`swarm build --status [--json]`** shows the holders, the queue in the order it
+would start with ETAs, and the last builds with their wait and run times;
+`swarm status` and `swarm doctor` carry a one-line summary. A slot that is busy
+with no current record is an older `swarm build` or a process a build left
+behind; `--status` names the pids holding it open.
 
 Workers are told to wrap their gates in it (`swarm build cargo nextest run`), and
 to give those commands a generous timeout, since they may queue. Automatic gc
 takes every build slot before it deletes anything, so it never runs during a
-build.
+build. The landing's lane check queues like any other build.
+
+**Sizing.** `[build].jobs` and `max_concurrent` describe the host the swarm runs
+on. Derive them from that machine's cores and memory (one build's peak memory
+times `max_concurrent` must fit with room to spare; `jobs` times
+`max_concurrent` should not exceed the cores), never copy them from another
+machine's config.
 
 ## Stop hook, recaps, notes and the report
 

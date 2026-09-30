@@ -342,8 +342,9 @@ def run_check(cfg: Config, phase: str, lane: str) -> int:
     with check_log(cfg, phase, repo).open("w", encoding="utf-8") as fh:
         fh.write(f"# swarm _lane-check {phase} {lane}: `{cmd}` in {wt}\n")
         fh.flush()
-        with buildsem.slot(cfg):
+        with buildsem.slot(cfg, cmd, wt, phase) as held:
             ok = _run(cmd, wt, fh, cfg.lanes_check_timeout_s)
+            held.exit = 0 if ok else 1
         fh.write(f"# result: {'ok' if ok else 'fail'}\n")
     result = _result_path(cfg, phase, repo)
     tmp = result.with_suffix(".tmp")

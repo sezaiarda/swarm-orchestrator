@@ -88,6 +88,7 @@ def test_cargo_build_jobs_only_for_cargo(tmp_path):
     fake.mkdir()
     (fake / "cargo").write_text('#!/bin/sh\necho "jobs=$CARGO_BUILD_JOBS"\n')
     (fake / "cargo").chmod(0o755)
+    (tmp_path / "Cargo.toml").write_text("[package]\n")  # pre-flight wants a manifest
     env = {"PATH": f"{fake}:{os.environ['PATH']}", "SWARM_BUILD_JOBS": "5"}
     cargo = _build(tmp_path, "cargo", "build", extra_env=env)
     assert "jobs=5" in cargo.stdout  # cargo gets the cap

@@ -416,6 +416,23 @@ class Config:
         "build", "cache", True, NEXT, env="SWARM_BUILD_CACHE",
         doc="share one cargo target cache across worktrees",
         why="only read while linking a new worktree's target/ at worktree_add")
+    build_heavy: list[str] = _k(
+        "build", "heavy", [], HOT, env="SWARM_BUILD_HEAVY",
+        doc="extra command patterns that always queue",
+        why="every `swarm build` call reads it before classifying its command")
+    build_light: list[str] = _k(
+        "build", "light", [], HOT, env="SWARM_BUILD_LIGHT",
+        doc="extra command patterns that skip the queue",
+        why="every `swarm build` call reads it before classifying its command")
+    build_short_s: int = _k(
+        "build", "short_s", 60, HOT, env="SWARM_BUILD_SHORT_S", minimum=0,
+        doc="a build that usually runs this long (s) is short",
+        why="every `swarm build` call reads it when it joins the queue")
+    build_overtake: int = _k(
+        "build", "overtake", 2, HOT, env="SWARM_BUILD_OVERTAKE", minimum=0,
+        doc="short builds that may pass a long one; 0 = FIFO",
+        why="each waiter reads it when it joins the queue; the queue follows the"
+            " value its current waiters were started with")
 
     # -- [gc] -------------------------------------------------------------
     # Nothing else prunes the build caches. Every 15 minutes, because a busy run

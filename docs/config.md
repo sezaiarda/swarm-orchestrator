@@ -172,9 +172,18 @@ check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
 
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
-| `max_concurrent` | `2` | `SWARM_BUILD_MAX` | next | The most `swarm build` commands that run at once. `0` turns the gate off; builds still get the jobs cap. |
+| `max_concurrent` | `2` | `SWARM_BUILD_MAX` | next | The most heavy `swarm build` commands that run at once; the rest queue. `0` turns the gate off; builds still get the jobs cap. |
 | `jobs` | `6` | `SWARM_BUILD_JOBS` | next | `CARGO_BUILD_JOBS` for a `cargo` run through `swarm build`, and for every worker under worktree isolation. `0` means no cap. |
 | `cache` | `true` | `SWARM_BUILD_CACHE` | next | Point each Rust worktree's `target/` at one shared per-repo cache, `<state>/cache/target/<repo>`. This happens only where the repo gitignores `target`. |
+| `heavy` | `[]` | `SWARM_BUILD_HEAVY` | hot | Command patterns that always queue, over the built-in rules. A pattern is a command prefix whose words are globs (`"cargo check"`, `"scripts/*.sh"`). Heavy wins over light. |
+| `light` | `[]` | `SWARM_BUILD_LIGHT` | hot | Command patterns that never queue (`"bun run lint*"`). Only for commands that do no compile, test, bundle or image work. |
+| `short_s` | `60` | `SWARM_BUILD_SHORT_S` | hot | A command whose last runs took at most this long (median, from the gate's log) counts as short and may go ahead of long ones. |
+| `overtake` | `2` | `SWARM_BUILD_OVERTAKE` | hot | How many short builds may go ahead of one long build that is waiting. `0` is plain first-come, first-served. |
+
+`jobs` and `max_concurrent` describe the machine the swarm runs on. Derive them
+from that host's cores and memory (roughly: one build's peak memory times
+`max_concurrent` must fit with room to spare, and `jobs` times `max_concurrent`
+should not exceed the cores); never copy them from another machine's file.
 
 ## `[operator]`
 

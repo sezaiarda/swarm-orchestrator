@@ -98,6 +98,18 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | `autostart` | `true` | `SWARM_TUI_AUTOSTART` | restart | Run the dashboard in window 0 at `swarm up`. |
 | `cmd` | `"swarm tui"` | `SWARM_TUI_CMD` | restart | The command window 0 runs. |
 
+## `[console]`
+
+The owner console: your own Claude session in the `console` window, between the
+dashboard and the overseer. See [components](components.md#the-owner-console).
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `enabled` | `true` | `SWARM_CONSOLE` | restart | Open the `console` window at `swarm up`. |
+| `prompt_file` | `""` | | next | A file, relative to the project, appended to the console's primer under "This project": what the project calls things, its rules for rows and campaigns. Read each time the console's `claude` starts. |
+| `model` | `""` | | next | `--model` for the console. `""` inherits your own setting. |
+| `cmd` | `""` | `SWARM_CONSOLE_CMD` | next | Replaces `claude` as the console's base command; the console's flags (`-n`, `--resume`/`--session-id`, `--append-system-prompt`) are still appended. The tests use it to inject a fake. |
+
 ## `[git]`
 
 Leave the table out for in-place work (`isolation = "none"`).

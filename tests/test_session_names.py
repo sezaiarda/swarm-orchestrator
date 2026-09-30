@@ -11,7 +11,7 @@ import shlex
 
 import pytest
 
-from swarm_orchestrator import bigpic, guide, master, tmux
+from swarm_orchestrator import bigpic, console, guide, master, tmux
 from swarm_orchestrator import config as config_mod
 from swarm_orchestrator import launch as launch_mod
 from swarm_orchestrator import operator as operator_mod
@@ -25,7 +25,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     for leak in ("SWARM_WORKER_CMD", "SWARM_MASTER_CMD", "SWARM_OVERSEER_CMD",
                  "SWARM_OPERATOR_CMD", "SWARM_RESOLVER_CMD", "SWARM_BIG_PICTURE_CMD",
-):
+                 "SWARM_CONSOLE_CMD"):
         monkeypatch.delenv(leak, raising=False)
     return config_mod.load(project_dir=str(project))
 
@@ -60,6 +60,7 @@ def test_every_launch_path_names_its_session(cfg, monkeypatch):
         "resolver": resolver_cmd(cfg, monkeypatch),
         "guide": guide.command(cfg),
         "big-picture": bigpic.command(cfg, cfg.project_dir),
+        "console": console.claude_argv(cfg, "abc", resume=False),
     }
     assert {kind: names(cmd) for kind, cmd in launched.items()} == {
         "worker": ["swarm · worker · P1"],
@@ -69,6 +70,7 @@ def test_every_launch_path_names_its_session(cfg, monkeypatch):
         "resolver": ["swarm · resolver · P1"],
         "guide": ["swarm · guide"],
         "big-picture": ["swarm · big-picture"],
+        "console": ["swarm · console"],
     }
 
 
@@ -77,6 +79,9 @@ def test_a_command_that_names_itself_keeps_its_name(cfg):
     it did, with that one name, never two."""
     cfg.worker_cmd = "claude --model opus -n worker:{phase}"
     assert names(launch_mod._worker_shell(cfg, "P1", cfg.project_dir)) == ["worker:P1"]
+    cfg.console_cmd = "claude --name=mine"
+    argv = console.claude_argv(cfg, "abc", resume=True)
+    assert names(argv) == [] and "--name=mine" in argv
 
 
 def test_a_worker_whose_agent_is_named_either_way_is_still_matched():

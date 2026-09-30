@@ -85,7 +85,7 @@ flowchart TB
 
   subgraph S["tmux session, one per project"]
     direction LR
-    dash["0 · dash<br/>swarm tui"] ~~~ ovs["1 · overseer<br/>init pass, then<br/>Overseer passes"] ~~~ opw["2 · operator<br/>one job at a time"] ~~~ wk["3+ · workers<br/>one claude per slot"] ~~~ web["last · web<br/>web board"]
+    dash["dash<br/>swarm tui"] ~~~ con["console<br/>your own claude"] ~~~ ovs["overseer<br/>init pass, then<br/>Overseer passes"] ~~~ opw["operator<br/>one job at a time"] ~~~ wk["workers<br/>one claude per slot"]
   end
 
   fifo[["control.fifo"]]
@@ -173,7 +173,7 @@ part.
 
 ### Init pass and Overseer
 
-Both run in window 1 (`overseer`), never at the same time, spawned and killed only
+Both run in the `overseer` window, never at the same time, spawned and killed only
 by the supervisor.
 
 **The init pass** (`prompts/init_master.md`):
@@ -224,14 +224,14 @@ flowchart TD
   mn["swarm overseer --now"] --> pend
   pend["pending reasons, coalesced<br/>(overseer/policy.json)"] --> due["a pass starts when none is running,<br/>the init pass is over and min_gap_s has passed<br/>(urgent reasons: no gap)"]
   due --> prep["supervisor writes the digest, record and brief;<br/>worktree mode: builds mirror ovs-&lt;id&gt;"]
-  prep --> pass["Overseer session in window 1:<br/>reads the digest, acts, fills in its record"]
+  prep --> pass["Overseer session in the overseer window:<br/>reads the digest, acts, fills in its record"]
   pass <-- "swarm waiting / resumed" --> own(["owner"])
   pass -- "overseer-done, or killed at timeout_s" --> fin["pane idled, record closed,<br/>mirror merged through the queue,<br/>launcher looks again"]
 ```
 
 ### Operator
 
-- **Is:** one Claude session in window 2 (`operator`) that carries out work a phase
+- **Is:** one Claude session in the `operator` window that carries out work a phase
   could not wait on: deploys, post-deploy checks, provisioning, cross-repo chores
   (`prompts/operator.md`). It holds your authority, so it is **off until
   `[operator].enabled = true`**. While it is off, each hand-off is telegrammed to
@@ -448,7 +448,7 @@ ten tabs, switched with `1`–`9` and `0`, are:
 - **shells** (`0`): what `swarm keep` left running, and why.
 
 `R` resets the run, `D` drains (see `swarm down --drain`), `g` opens the owner
-guide, `?` lists every key, and `q` quits the dashboard only. It fits an 80×24
+guide, `o` reopens the owner console, `?` lists every key, and `q` quits the dashboard only. It fits an 80×24
 terminal.
 
 ### Web board (`swarm web`)
@@ -750,6 +750,19 @@ device after a rollout, a to-do a finished phase left you. `swarm todo` lists th
 opens a Claude chat in its own `guide` window that walks you through them one at
 a time and records what you report. Pressing `g` again goes back to it.
 
+### Talking to the swarm: the owner console
+
+The `console` window, right after the dashboard, is your own Claude session for
+this swarm: report a problem, ask for a change, add a phase or a whole campaign,
+reshape the ledger, check on a worker. It is unrestricted, and primed with the
+swarm's commands, where the ledger, lessons and state live, and how rows are
+added (through the swarm, so it builds them); `[console] prompt_file` adds the
+project's own words. `/exit` closes it and leaves the window; Enter there, `o` in
+the dashboard or `swarm console` reopens the same conversation, and
+`swarm console --new` starts a fresh one. It is not a worker: no slot, no phase,
+no reaper while the swarm runs. `swarm down` ends it with the rest, and the next
+`swarm up` resumes it.
+
 ## Command reference
 
 The full list, one line per subcommand and grouped by purpose, is in
@@ -760,6 +773,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 | start, watch, stop | `swarm up`, `swarm status`, `swarm down` |
 | see what is wrong | `swarm doctor`, `swarm why <phase>` |
 | see and do what waits on you | `swarm todo`, `swarm guide` |
+| talk to the swarm in your own Claude session | `swarm console` (`--new` for a fresh one) |
 | hold or release launching | `swarm pause`, `swarm resume` |
 | start a phase by hand, skip one, retry a failure | `swarm launch <phase>`, `swarm skip <phase>`, `swarm retry <phase>` |
 | release a held merge queue | `swarm resolved <phase>` |
@@ -817,6 +831,7 @@ project path, so two projects with the same folder name never share state.
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
+| `console.json`, `console.lock` | The owner console's conversation id (what the next start resumes), and the lock that keeps two opens from racing. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
 | `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |

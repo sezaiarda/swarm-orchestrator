@@ -115,7 +115,7 @@ an operator. The sentinel is still written, but no job is queued.
 
 ## Init pass and the Overseer
 
-Both run in window 1 (`overseer`), one at a time, and both are spawned and killed
+Both run in the `overseer` window, one at a time, and both are spawned and killed
 only by the supervisor.
 
 **The init pass** runs once per `swarm up`, and the first launch waits for it
@@ -180,7 +180,7 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
 
 ## Operator
 
-**What it is:** one Claude session in window 2 (`operator`) that carries out
+**What it is:** one Claude session in the `operator` window that carries out
 concrete work a phase could not wait on: deploys and rolls, checks after a deploy,
 provisioning, downloads, chores that span repos (prompt: `prompts/operator.md`). It
 works with your authority, so it is **off unless you set
@@ -734,6 +734,39 @@ and exits 1 if any check FAILs. It checks:
 - **Automatic runs:** the supervisor runs a conservative gc by itself (`[gc]`) at
   most every 15 minutes, plus once per idle stretch, and never during a build.
 
+## The owner console
+
+**What it is:** your own Claude session for the swarm, in the `console` window
+between `dash` and `overseer` (`[console]`, on by default). You talk to it as to
+any Claude session: report a problem, ask for a change, add phases or a campaign,
+reshape the ledger, check on the workers. Nothing is clamped; it keeps your own
+settings and hooks.
+
+- **Its primer** is appended to Claude Code's system prompt
+  (`--append-system-prompt`): `prompts/console.md` (what the swarm is, where the
+  ledger, history, lessons, state and log are, that rows go in through
+  `follow-up`/`reshape`/`record` so the swarm builds them, that workers are
+  observed rather than typed into), then every CLI subcommand with its one-line
+  help, read off the parser so it cannot drift, then `[console] prompt_file`.
+- **The window** runs a keeper (`swarm _console-pane`) that starts `claude` in
+  the project directory. When you `/exit`, the keeper stays with one idle line
+  and never relaunches by itself. Enter in the pane, `o` in the dashboard or
+  `swarm console` starts it again; while it runs they only move you there, so
+  there is never a second one. A missing window is recreated after `dash`.
+- **One conversation.** The swarm picks its id and keeps it in
+  `<state>/console.json`. Each start passes `--resume <id>` once Claude Code has
+  its transcript, and `--session-id <id>` before; never `--continue`, which would
+  take the newest session in the directory (an Overseer pass, say).
+  `swarm console --new` stores a fresh id, and is refused while the console runs.
+  Claude Code records the primer once per conversation, so a primer edit reaches
+  a resumed console only after it compacts, or with `--new`.
+- **Not a worker.** It carries no phase marker and no `SWARM_SESSION_ID`, even if
+  the tmux server's environment does, so no `Stop`-hook recap, slot, ETA,
+  per-phase usage or session reaper counts it, and its pane has no `@swarm_slot`
+  tag for a watchdog to look at. It carries the run's `SWARM_STATE_DIR`, so its
+  `swarm` commands find the run and `swarm down` ends it; the next `swarm up`
+  resumes the conversation.
+
 ## The dashboard (`swarm tui`)
 
 A Textual app in window 0 (`dash`), started by `swarm up` under tmux. It re-reads
@@ -769,7 +802,8 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
 
 It also serves the web board (below), and the status bar ends with its address.
 
-`n` opens the **needs-you** drawer. `1`–`9` and `0` switch between the tabs (the
+`n` opens the **needs-you** drawer; `o` reopens the owner console (or moves you
+to it while it runs). `1`–`9` and `0` switch between the tabs (the
 strip at the top lists them; the footer keeps the other keys, and `?` lists all):
 
 1. **home:** the overall ETA with what it was made on and what waits on you,

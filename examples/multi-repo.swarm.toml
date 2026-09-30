@@ -81,3 +81,13 @@ triage_model = "haiku"            # decides now-vs-later per hand-off. An ALIAS,
                                   # never a dated build: triage runs unattended
                                   # on every operator finish, so a retired
                                   # snapshot would silently defer every one.
+
+[console]
+# Your own Claude session for the swarm, in the `console` window after the
+# dashboard (`o` there, or `swarm console`). /exit closes it; it reopens on the
+# same conversation. Not a worker: no slot, no phase, no reaper.
+enabled     = true
+prompt_file = ""                  # e.g. "docs/swarm-console.md": your project's
+                                  # words for rows, campaigns and rules, appended
+                                  # to the console's primer
+model       = ""                  # "" = inherit

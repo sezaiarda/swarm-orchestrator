@@ -1,9 +1,10 @@
 """Bring up / tear down the ``swarm`` tmux topology.
 
-Layout: window 0 ``dash`` (the always-on TUI dashboard), window 1 ``overseer``
-(the master pane: the init pass, then Overseer passes — the supervisor process
-itself is detached and has no tty), window 2 ``operator`` (idle until a hand-off opens a session in it), then
-one or more worker windows tagged
+Layout: window 0 ``dash`` (the always-on TUI dashboard), then ``console`` (the
+owner's own Claude session, :mod:`console`; not with ``[console] enabled`` off),
+``overseer`` (the master pane: the init pass, then Overseer passes — the
+supervisor process itself is detached and has no tty), ``operator`` (idle until a
+hand-off opens a session in it), then one or more worker windows tagged
 ``@swarm_slot 0..N-1`` across a GLOBAL slot index. Slots paginate into windows of
 at most ``[tmux].panes_per_window`` (default :data:`PANES_PER_WINDOW`; ``workers``,
 ``workers-2``, …), each laid out by
@@ -70,6 +71,10 @@ def setup(cfg: Config) -> dict[str, str]:
     tmux.rename_window(dash_win, "dash")
     dash_pane = tmux.list_panes(dash_win)[0]
 
+    # The owner console sits right beside the dashboard, before the swarm's own
+    # sessions. Its keeper is started below, once state knows the run.
+    console_win = tmux.new_window(cfg.session, "console") if cfg.console_enabled else None
+
     master_win = tmux.new_window(cfg.session, "overseer")
     master_pane = tmux.list_panes(master_win)[0]
 
@@ -85,6 +90,8 @@ def setup(cfg: Config) -> dict[str, str]:
     # runs in it for all but the first minute (the init pass, then Overseer
     # passes). Renaming the key would invalidate st.windows for any run mid-flight.
     windows = {"dash": dash_win, "master": master_win, "operator": operator_win}
+    if console_win is not None:
+        windows["console"] = console_win
     slot_panes: dict[int, str] = {}
     base = 0
     for name, size in plan_worker_windows(cfg.max_workers, cfg.tmux_panes_per_window):
@@ -116,6 +123,10 @@ def setup(cfg: Config) -> dict[str, str]:
         for gidx, pane in slot_panes.items():
             if gidx < len(st.slots):
                 st.slots[gidx].pane_id = pane
+    if console_win is not None:
+        from . import console as console_mod
+
+        console_mod.start_keeper(cfg, tmux.list_panes(console_win)[0])
     return windows
 
 

@@ -263,9 +263,9 @@ def command(cfg: Config, cwd: Path) -> str:
     if cfg.big_picture_cmd:
         return f"cd {shlex.quote(str(cwd))} && {cfg.big_picture_cmd}"
     model = cfg.big_picture_model
-    base = ("claude" + (f" --model {shlex.quote(model)}" if model else "")
-            + f" -n {WINDOW}")
-    return launch_mod._worker_shell(cfg, WINDOW, cwd, base)
+    base = "claude" + (f" --model {shlex.quote(model)}" if model else "")
+    return launch_mod._worker_shell(cfg, WINDOW, cwd, base,
+                                    name=launch_mod.session_name(WINDOW))
 
 
 def env(cfg: Config, pid: str) -> dict[str, str]:

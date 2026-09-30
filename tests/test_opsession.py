@@ -728,7 +728,7 @@ def test_the_session_is_built_like_a_worker_but_with_its_own_model(cfg, monkeypa
 
     assert cmd.startswith(f"cd {cfg.project_dir} && exec claude --model opus")
     assert "--settings" in cmd and "--effort high" in cmd
-    assert f"operator:{PHASE}" in cmd
+    assert f"-n 'swarm · operator · {PHASE}'" in cmd
     assert env["SWARM_STATE_DIR"] == str(cfg.state_dir)
     assert env[operator_mod.JOB_ENV] == PHASE
     assert cfg.env_marker not in env

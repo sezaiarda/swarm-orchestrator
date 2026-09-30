@@ -162,15 +162,43 @@ def pretrust_dir(path: Path, log: Log) -> None:
     log.line(f"PRETRUST-SKIPPED {key} {cfg_path} unreadable or changing; left untouched")
 
 
-def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None) -> str:
+#: What every session's display name starts with, so the owner can tell the
+#: swarm's sessions from his own in claude's ``/resume`` picker.
+NAME_PREFIX = "swarm"
+
+
+def session_name(kind: str, ident: str = "") -> str:
+    """A session's display name: ``swarm · <kind>`` or ``swarm · <kind> · <ident>``."""
+    return " · ".join(p for p in (NAME_PREFIX, kind, ident) if p)
+
+
+def names_itself(cmd: str) -> bool:
+    """Whether ``cmd`` already passes claude a display name (``-n``/``--name``)."""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    return any(t in ("-n", "--name") or t.startswith("--name=") for t in tokens)
+
+
+def with_name(cmd: str, name: str) -> str:
+    """``cmd`` plus ``-n <name>``, unless it names the session itself: a
+    configured name (an older ``worker_cmd`` carries ``-n worker:{phase}``) wins."""
+    return cmd if names_itself(cmd) else f"{cmd} -n {shlex.quote(name)}"
+
+
+def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
+                  name: str | None = None) -> str:
     """``cd <cwd> && exec <claude ...>`` for one session, worker-configured.
 
     ``cmd`` overrides the ``worker_cmd`` base for a session that is not a phase
     worker — the operator runs its own model — while keeping everything else a
     worker gets: in-process teammates, the meters tap and the effort level. One
-    builder, so the two sessions can never drift apart on those.
+    builder, so the two sessions can never drift apart on those. ``name`` is the
+    session's display name (:func:`session_name`); a worker's by default.
     """
-    cmd = cmd or cfg.worker_cmd.format(phase=phase)
+    cmd = with_name(cmd or cfg.worker_cmd.format(phase=phase),
+                    name or session_name("worker", phase))
     if cfg.worker_settings:
         # Force in-process teammates: a worker's own subagents then never open
         # extra tmux panes in the workers window. Merges over the user's

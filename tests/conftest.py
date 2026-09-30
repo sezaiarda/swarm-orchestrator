@@ -169,6 +169,15 @@ def _overseer_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _console_off(monkeypatch):
+    """The owner console is on by default in a real project; in the suite it is
+    off, for the Overseer's reason: its window runs a real ``claude`` unless
+    ``SWARM_CONSOLE_CMD`` names a fake. ``tests/test_console.py`` turns it on."""
+    monkeypatch.setenv("SWARM_CONSOLE", "0")
+    monkeypatch.delenv("SWARM_CONSOLE_CMD", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _big_picture_off(monkeypatch):
     """The big-picture pass is on by default in a real project; in the suite it is
     off, for the Overseer's reason: a pass is a real ``claude`` session unless

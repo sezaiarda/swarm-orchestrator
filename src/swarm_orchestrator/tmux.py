@@ -246,14 +246,18 @@ def kill_pane(pane_id: str) -> None:
     run(["kill-pane", "-t", pane_id])
 
 
-def new_window(session: str, name: str, hold: str = "sleep infinity") -> str:
-    """Create a window running a holding command; return its window id."""
+def new_window(
+    session: str, name: str, hold: str = "sleep infinity", after: str | None = None
+) -> str:
+    """Create a window running a holding command; return its window id.
+
+    ``after`` (a window id) places it right after that window, moving later ones
+    up, instead of at the next free index."""
     out = run(
         [
             "new-window",
             "-d",
-            "-t",
-            f"={session}:",
+            *(["-a", "-t", after] if after else ["-t", f"={session}:"]),
             "-n",
             name,
             "-P",

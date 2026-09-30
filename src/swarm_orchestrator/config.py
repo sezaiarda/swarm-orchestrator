@@ -300,7 +300,7 @@ class Config:
         doc="slash-command file the init master patches",
         why="resolved while composing the launch line for a new worker")
     worker_cmd: str = _k(
-        "worker", "worker_cmd", "claude -n worker:{phase}", NEXT, env="SWARM_WORKER_CMD",
+        "worker", "worker_cmd", "claude", NEXT, env="SWARM_WORKER_CMD",
         doc="command each worker pane is launched with",
         why="it is the command a pane is respawned with")
     # Merged over user settings on each worker's `claude` so a worker's own
@@ -700,6 +700,29 @@ class Config:
         doc="command the dashboard pane is respawned with",
         why="the dashboard pane is respawned once, by session.setup at `swarm up`;"
             " a live dash keeps the command it was started with")
+
+    # -- [console] --------------------------------------------------------
+    # The owner's own Claude session, in the window beside the dashboard. Never a
+    # worker: no phase marker, no slot, no reaper while the swarm runs.
+    console_enabled: bool = _k(
+        "console", "enabled", True, RESTART, env="SWARM_CONSOLE",
+        doc="open the owner console window at `swarm up`",
+        why="the console window is created once, by session.setup at `swarm up`;"
+            " there is no later moment a reload could reach")
+    console_prompt_file: str = _k(
+        "console", "prompt_file", "", NEXT,
+        doc='project primer appended to the console\'s; "" none',
+        why="read each time the console's `claude` starts; a running session keeps"
+            " the primer it started with")
+    console_model: str = _k(
+        "console", "model", "", NEXT,
+        doc='model for the console session; "" inherits',
+        why="baked into the console's command line each time its `claude` starts")
+    console_cmd: str = _k(
+        "console", "cmd", "", NEXT, env="SWARM_CONSOLE_CMD",
+        doc='base command of the console; "" = claude',
+        why="read each time the console's `claude` starts; a running session keeps"
+            " the command it started with")
 
     # -- [web] ------------------------------------------------------------
     # Open to the LAN by the owner's choice: it serves computed JSON only, never

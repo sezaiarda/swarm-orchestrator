@@ -23,6 +23,7 @@ from . import caps
 from . import backup as backup_mod
 from . import bigpic as bigpic_mod
 from . import buildsem
+from . import console as console_mod
 from . import notes as notes_mod
 from . import operator as operator_mod
 from . import owner as owner_mod
@@ -328,6 +329,9 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         return 1
     _poke(cfg, "bootstrap")
     print(f"swarm up: supervisor pid={pid} driver={cfg.driver}")
+    if cfg.driver == "tmux" and cfg.console_enabled:
+        print(f"console: tmux window {console_mod.WINDOW} — your own Claude session"
+              " (o in the dashboard, or `swarm console`)")
     if cfg.web_enabled:
         # The dashboard serves the board (tui.webboard); with no dashboard — the
         # headless driver, or `[tui] autostart` off — it gets its own process.
@@ -1126,7 +1130,7 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
     if not shipped.is_dir():
         shipped = Path(__file__).resolve().parent.parent.parent / "prompts"
     for name in ("init_master.md", "resolver.md", "operator.md", "overseer.md",
-                 "big_picture.md", "owner_guide.md"):
+                 "big_picture.md", "owner_guide.md", "console.md"):
         q = shipped / name
         if q.is_file():
             out.append((f"prompts/{name}", q))
@@ -1999,6 +2003,17 @@ def cmd_todo(cfg: Config, as_json: bool) -> int:
     return 0
 
 
+def cmd_console(cfg: Config, new: bool) -> int:
+    """Open the owner console, or move to it; ``--new`` starts a fresh conversation."""
+    try:
+        print(console_mod.open_words(cfg, new))
+    except console_mod.ConsoleError as exc:
+        print(f"swarm console: {exc}", file=sys.stderr)
+        return 2
+    _attach(cfg)  # from a terminal outside the session, land in it
+    return 0
+
+
 def cmd_guide(cfg: Config) -> int:
     """Open the owner's guide in its own tmux window, or move to the live one."""
     try:
@@ -2606,6 +2621,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "guide", help="open the owner guide: a chat that walks you through your to-dos"
     ).set_defaults(func=lambda cfg, a: cmd_guide(cfg))
+
+    cnp = sub.add_parser(
+        "console", help="open the owner console (your own Claude session), or move to it")
+    cnp.add_argument("--new", action="store_true",
+                     help="start a fresh conversation instead of resuming the last one")
+    cnp.set_defaults(func=lambda cfg, a: cmd_console(cfg, a.new))
+    sub.add_parser("_console-pane").set_defaults(  # what the console window runs
+        func=lambda cfg, a: console_mod.run_pane(cfg.project_dir, a.config))
 
     ckp = sub.add_parser("check", help="preflight config, ledger, telegram, prompts")
     ckp.add_argument("--strict", action="store_true", help="warnings are fatal")

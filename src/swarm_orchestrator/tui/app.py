@@ -133,6 +133,7 @@ class HelpScreen(ModalScreen[None]):
 [b]anywhere[/b]
   [{COLOR[OK]}]n[/] needs-you drawer   [{COLOR[OK]}]c[/] command centre   [{COLOR[OK]}]d[/] run the doctor
   [{COLOR[OK]}]g[/] guide me: a chat in its own window that walks you through your to-dos
+  [{COLOR[OK]}]o[/] owner console: your own Claude session for this swarm (reopens it)
   [{COLOR[OK]}]j k[/] / arrows move    [{COLOR[OK]}]enter[/] or click opens what is selected
   [{COLOR[OK]}]R[/] reset the run: ETA and usage count from now (asks first)
   [{COLOR[OK]}]D[/] drain: stop once the running work is done, then maybe run a command
@@ -233,6 +234,7 @@ class SwarmApp(App):
         Binding("d", "doctor", "doctor", show=False),
         Binding("n", "toggle_drawer", "needs you"),
         Binding("g", "guide", "guide me"),
+        Binding("o", "console", "console"),
         Binding("u", "copy_url", "board url"),
         Binding("r", "rescan", "rescan", show=False),
         Binding("question_mark", "help", "help"),
@@ -528,12 +530,29 @@ class SwarmApp(App):
                                   " take its first line — see the guide window",
                                   severity="warning")
 
+    def action_console(self) -> None:
+        """``o``: reopen the owner console (resuming its conversation), or go to it."""
+        self._open_console()
+
+    @work(thread=True, exclusive=True, group="console")
+    def _open_console(self) -> None:
+        """Off the UI thread: tmux calls and a keeper start. Never a second claude:
+        a running console is only focused (:func:`console.open_console`)."""
+        from .. import console as console_mod
+
+        try:
+            console_mod.open_console(self.cfg)
+        except Exception as exc:  # noqa: BLE001 - say it, never crash the cockpit
+            self.call_from_thread(self.notify, f"console: {exc}", severity="error")
+
     def get_system_commands(self, screen):
         from textual.app import SystemCommand
 
         yield from super().get_system_commands(screen)
         yield SystemCommand("Guide me", "open a chat that walks you through your to-dos (g)",
                             self.action_guide)
+        yield SystemCommand("Owner console", "your own Claude session for this swarm (o)",
+                            self.action_console)
         yield SystemCommand("Copy the board's URL", "to your clipboard, and shown in full (u)",
                             self.action_copy_url)
 

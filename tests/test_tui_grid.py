@@ -545,6 +545,42 @@ def test_a_port_that_stays_taken_still_fails(web_cfg):
             web_server.make_server(web_cfg, "127.0.0.1", port, bind_wait_s=0.3)
 
 
+# -- the owner console ---------------------------------------------------------------
+def test_o_reopens_the_owner_console_and_is_listed(seeded, monkeypatch, capfd):
+    """`o` in the footer, the help and the palette; pressing it asks the console to
+    open (tmux is faked here: tests/test_console.py runs the real window), once
+    per press, and says so when it cannot."""
+    from swarm_orchestrator import console
+    from swarm_orchestrator.tui.app import HelpScreen
+
+    calls = []
+    monkeypatch.setattr(console, "open_console",
+                        lambda cfg, new=False: calls.append(new) or (console.FOCUSED, "@9"))
+
+    async def steps(app, pilot, got):
+        got["text"] = screen_text(app)
+        got["palette"] = [c.title for c in app.get_system_commands(app.screen)]
+        await pilot.press("o")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        got["calls"] = list(calls)
+
+        def refuse(cfg, new=False):
+            raise console.ConsoleError("the console is off")
+        monkeypatch.setattr(console, "open_console", refuse)
+        await pilot.press("o")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        got["toasts"] = [str(n.message) for n in app._notifications]
+
+    got = _boot(seeded, (209, 50), steps, monkeypatch, capfd)
+    assert "o console" in got["text"].rstrip().splitlines()[-1]
+    assert "Owner console" in got["palette"]
+    assert "owner console" in HelpScreen.HELP
+    assert got["calls"] == [False]  # resume, never --new, from the key
+    assert any("console: the console is off" in t for t in got["toasts"])
+
+
 # -- the owner's guide ---------------------------------------------------------------
 def test_g_opens_the_guide_and_the_hint_counts_the_owners_todos(seeded, monkeypatch, capfd):
     """`g guide me (N)` in the footer, the count in the alerts box, `g` and the

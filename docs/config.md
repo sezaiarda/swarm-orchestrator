@@ -50,7 +50,7 @@ way, which is why `[operator].notify` is "next" too.
 | `command_template` | `"/prime {phase}"` | | next | The line typed into a worker's pane once `claude` has booted. |
 | `command_file` | `".claude/commands/prime.md"` | | next | The project's slash-command file. The init pass patches it for swarm mode, and `swarm check` lints it. |
 | `env_marker` | `"SWARM_PHASE"` | | next | The variable that carries the phase id into the worker's environment. |
-| `worker_cmd` | `"claude -n worker:{phase}"` | `SWARM_WORKER_CMD` | next | The base command a slot pane is respawned with, as `cd <cwd> && exec <worker_cmd> --settings … --effort …`. |
+| `worker_cmd` | `"claude"` | `SWARM_WORKER_CMD` | next | The base command a slot pane is respawned with, as `cd <cwd> && exec <worker_cmd> -n 'swarm · worker · <phase>' --settings … --effort …`. `{phase}` expands. The `-n` display name is added only when the command sets none itself (an older `-n worker:{phase}` is kept as it is). |
 | `ready_marker` | `""` | `SWARM_READY_MARKER` | next | Text that means "claude has booted". `""` means the running `claude --version`, which the boot banner prints; if that cannot be read, `Claude Code`. |
 | `worker_settings` | `'{"teammateMode":"in-process"}'` | `SWARM_WORKER_SETTINGS` | next | JSON merged over the user's settings via `--settings`. The meters status-line tap is added unless this JSON sets its own `statusLine`. Register `scripts/stop-hook.py` here as a `Stop` hook to get recaps (see below). `""` passes no settings. |
 | `effort` | `"high"` | `SWARM_WORKER_EFFORT` | next | `claude --effort` for every worker: one of `low`, `medium`, `high`, `xhigh` or `max`. `""` inherits the user's setting. |
@@ -97,6 +97,18 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 |---|---|---|---|---|
 | `autostart` | `true` | `SWARM_TUI_AUTOSTART` | restart | Run the dashboard in window 0 at `swarm up`. |
 | `cmd` | `"swarm tui"` | `SWARM_TUI_CMD` | restart | The command window 0 runs. |
+
+## `[console]`
+
+The owner console: your own Claude session in the `console` window, between the
+dashboard and the overseer. See [components](components.md#the-owner-console).
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `enabled` | `true` | `SWARM_CONSOLE` | restart | Open the `console` window at `swarm up`. |
+| `prompt_file` | `""` | | next | A file, relative to the project, appended to the console's primer under "This project": what the project calls things, its rules for rows and campaigns. Read each time the console's `claude` starts. |
+| `model` | `""` | | next | `--model` for the console. `""` inherits your own setting. |
+| `cmd` | `""` | `SWARM_CONSOLE_CMD` | next | Replaces `claude` as the console's base command; the console's flags (`-n`, `--resume`/`--session-id`, `--append-system-prompt`) are still appended. The tests use it to inject a fake. |
 
 ## `[git]`
 

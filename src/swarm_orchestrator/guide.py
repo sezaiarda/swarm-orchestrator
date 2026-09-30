@@ -49,8 +49,9 @@ class GuideError(Exception):
 def command(cfg: Config) -> str:
     """The session's shell command: a worker-built ``claude`` in the project."""
     model = cfg.operator_model or cfg.master_model
-    base = "claude" + (f" --model {shlex.quote(model)}" if model else "") + f" -n {WINDOW}"
-    return launch_mod._worker_shell(cfg, WINDOW, cfg.project_dir, base)
+    base = "claude" + (f" --model {shlex.quote(model)}" if model else "")
+    return launch_mod._worker_shell(cfg, WINDOW, cfg.project_dir, base,
+                                    name=launch_mod.session_name(WINDOW))
 
 
 def env(cfg: Config) -> dict[str, str]:

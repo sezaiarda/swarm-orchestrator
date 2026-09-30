@@ -186,10 +186,12 @@ def master_command(cfg: Config, kind: str, cwd: Path | None = None) -> str:
         return override
     if kind == OVERSEER:
         model = cfg.overseer_model or cfg.master_model
-        base = "claude" + (f" --model {shlex.quote(model)}" if model else "") + " -n overseer"
-        return launch_mod._worker_shell(cfg, OVERSEER, cwd or cfg.project_dir, base)
+        base = "claude" + (f" --model {shlex.quote(model)}" if model else "")
+        return launch_mod._worker_shell(cfg, OVERSEER, cwd or cfg.project_dir, base,
+                                        name=launch_mod.session_name(OVERSEER))
     model = f" --model {cfg.master_model}" if cfg.master_model else ""
-    return f"cd {cfg.project_dir} && exec claude{model}"
+    name = shlex.quote(launch_mod.session_name(INIT))
+    return f"cd {cfg.project_dir} && exec claude{model} -n {name}"
 
 
 def overseer_brief(

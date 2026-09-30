@@ -56,6 +56,7 @@ from . import alerts as alerts_mod
 from . import books as books_mod
 from . import probes
 from . import timeline as tl
+from . import resourcebox
 from . import usagebox
 from .campaign import active, overall, summarise
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
@@ -927,6 +928,7 @@ class Home(Vertical):
     #work-rows, #need-rows, #alert-need-rows { height: auto; }
     #feed-rows { height: 1fr; }
     #p-usage { height: auto; margin-bottom: 1; }
+    #p-resources { height: auto; margin-bottom: 1; }
     #p-alerts { height: 1fr; min-height: 6; }
     #alert-rows { height: 1fr; }
     #p-shells { height: auto; margin-top: 1; }
@@ -1015,6 +1017,8 @@ class Home(Vertical):
             with Vertical(id="side"):
                 with Panel("usage", id="p-usage"):
                     yield Body(id="b-usage")
+                with Panel("resources", id="p-resources"):
+                    yield Body(id="b-resources")
                 with Panel("alerts & notifications", id="p-alerts"):
                     yield Vertical(id="alert-need-rows")
                     yield Body(id="b-problems")
@@ -1262,6 +1266,7 @@ class Home(Vertical):
             feed_panel.styles.height = max(8, app_h - 18) if single else "1fr"
 
         self._paint_usage(dash, side_inner, cut["usage_chart"], now)
+        self._paint_resources(dash, now)
         self._paint_alerts(dash, side_inner, kind, key, now)
         self._paint_shells(dash, side_inner)
 
@@ -1284,6 +1289,15 @@ class Home(Vertical):
         panel = self._panel("#p-usage")
         if panel is not None:
             panel.set_title("usage", self._build_text(lambda: usagebox.subtitle(dash, now)))
+
+    def _paint_resources(self, dash, now: float) -> None:
+        """The resources box: the sampler's snapshot, already read by ``Dash``."""
+        snap = getattr(dash, "resources", None)
+        self._set("#b-resources", "\n".join(
+            self._build_lines(lambda: resourcebox.box_lines(snap, now))))
+        panel = self._panel("#p-resources")
+        if panel is not None:
+            panel.set_title("resources", resourcebox.subtitle(snap))
 
     def _paint_alerts(self, dash, width: int, kind: str, key, now: float) -> None:
         """Alerts & notifications: needs you, what is wrong now, then every ping."""

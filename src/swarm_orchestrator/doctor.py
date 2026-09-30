@@ -56,6 +56,7 @@ from . import telegram, tgbot
 from .config import Config
 from .logutil import parse_ts, read_all
 from .master import build_context
+from .resources import view as resources_view
 from .state import State
 from .web import lifecycle as web_lifecycle
 
@@ -1373,7 +1374,15 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_tgbot(cfg, st))
     checks.append(_check_usage(cfg, st))
     checks.append(_check_kept(cfg))
+    checks.extend(_check_resources(cfg, st))
     return checks
+
+
+def _check_resources(cfg: Config, st: State) -> list[Check]:
+    """The resource sampler: fresh samples, bounded files, idle build holders."""
+    alive = bool(st.supervisor_pid) and _pid_alive(st.supervisor_pid)
+    return [Check(name, status, detail, fix)
+            for name, status, detail, fix in resources_view.doctor_checks(cfg, alive)]
 
 
 def _check_kept(cfg: Config, now: float | None = None) -> Check:

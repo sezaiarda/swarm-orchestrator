@@ -20,6 +20,7 @@ from .. import todo as todo_mod
 from .. import usage as usage_mod
 from ..eta import engine as eta_mod
 from ..meters import LIMITS_LOG, METERS_DIR
+from ..resources import store as resources_store
 from . import probes
 from .data import (
     Blocker,
@@ -118,6 +119,7 @@ class Dash:
         self.tails: dict[str, str] = {}  # pane_id -> last visible lines
         self.repos: dict[str, probes.RepoStat] = {}  # phase -> commits/dirty
         self.meters: dict[str, Meter] = {}  # phase -> its worker's status-line figures
+        self.resources: dict | None = None  # the resource sampler's snapshot
         self.limits: Limits | None = None
         # The open run (``None`` = a state dir from before runs) and the phase
         # runs a running phase's own ETA is made from.
@@ -258,6 +260,9 @@ class Dash:
             self.run = runs_mod.current(self.cfg.state_dir)
             self.past_runs = usage_mod.past_summaries(self.cfg.state_dir, 50)
             changed.add("run")
+        if self._changed("resources", resources_store.now_path(self.cfg.state_dir)):
+            self.resources = resources_store.read_now(self.cfg.state_dir)
+            changed.add("resources")
         # The tap replaces its file atomically, so every write moves the dir.
         if self._changed("meters", self.meters_dir):
             self._all_meters = load_meters(self.meters_dir, self._meter_files)

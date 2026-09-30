@@ -317,6 +317,8 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
     proc = subprocess.Popen(
         [sys.executable, "-m", "swarm_orchestrator", "_supervise"],
         cwd=str(cfg.project_dir),
+        # `swarm up` typed in the owner console: the supervisor is the swarm's own.
+        env={k: v for k, v in os.environ.items() if k != console_mod.CONSOLE_ENV},
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

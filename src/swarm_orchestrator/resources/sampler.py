@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from .. import buildsem
 from .. import gc as gc_mod
 from ..config import Config
 from . import builds as builds_mod
@@ -92,6 +93,7 @@ class Sampler:
         self.last_row: dict | None = None
         self.last_workers: list[dict] = []
         self.last_infra: dict | None = None
+        self.last_console: dict | None = None
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -161,12 +163,17 @@ class Sampler:
         if self.book.active:
             row["b"] = {bid: [round(b.cores, 2), round(b.anon_mb, 1)]
                         for bid, b in self.book.active.items()}
-        workers = {k: v for k, v in groups.items() if k != ptree.INFRA}
+        workers = {k: v for k, v in groups.items() if k not in (ptree.INFRA, ptree.CONSOLE)}
         if workers:
             row["w"] = {k: [v["cores"], v["anon_mb"]] for k, v in workers.items()}
         if ptree.INFRA in groups:
             infra = groups[ptree.INFRA]
             row["x"] = [infra["cores"], infra["anon_mb"]]
+        # The owner console is the owner's, like anything else on the host: shown
+        # apart, never a worker, and left in "everything else" by the capacity maths.
+        if ptree.CONSOLE in groups:
+            con = groups[ptree.CONSOLE]
+            row["o"] = [con["cores"], con["anon_mb"]]
         if self.book.busy():
             row["fast"] = 1
         path = store.meters_dir(self.state_dir) / store.FULL
@@ -178,6 +185,7 @@ class Sampler:
         self.last_row = row
         self.last_workers = [{"label": k, **v} for k, v in sorted(workers.items())]
         self.last_infra = groups.get(ptree.INFRA)
+        self.last_console = groups.get(ptree.CONSOLE)
         if not self.book.busy() or now - self._last_now >= NOW_EVERY_S:
             self._last_now = now
             store.write_now(self.state_dir, self.snapshot(now, idle_s))
@@ -223,7 +231,7 @@ class Sampler:
 
     def _idle_holders(self, now: float, idle_s: float, cfg: Config) -> None:
         for b in self.book.active.values():
-            if not b.idle_for(now, idle_s):
+            if not b.idle_for(now, idle_s) or not gate_holds(cfg, b):
                 continue
             b.idle_flagged = True
             last = self._idle_pinged.get(b.id)
@@ -306,10 +314,34 @@ class Sampler:
             "host": self.last_row, "disk": self._disk, "dirs": self._dirs,
             "builds": builds, "queued": len(self.book.queued),
             "workers": self.last_workers, "infra": self.last_infra,
+            "console": self.last_console,
             "idle_holders": [b for b in builds if b["idle"]],
             "idle_s": idle_s, "sampler": self.overhead(now),
             "files": store.sizes(self.state_dir),
         }
+
+
+def gate_holds(cfg: Config, b: builds_mod.Build) -> bool:
+    """Does the build gate agree that ``b`` holds its slot? Its holder record
+    (the start of ``buildsem/slotN``) is the gate's own word: one naming another
+    build, or saying the build ended, means the sampler missed the ``end`` and
+    ``b`` holds nothing (:attr:`Build.released`). A matching record's phase and
+    command replace the sampler's. No record (a gate that writes none, a bare
+    ``flock``) leaves the sampler's view as it is."""
+    if b.source != "events" or b.slot is None:
+        return True
+    try:
+        rec = buildsem.read_record(buildsem._slot_path(cfg, int(b.slot)))
+    except (TypeError, ValueError):
+        return True
+    if not rec or rec.get("v") != 1:
+        return True
+    if rec.get("ended") or rec.get("id") != b.id:
+        b.released = True
+        return False
+    b.phase = rec.get("phase") or b.phase
+    b.argv = rec.get("argv") or b.argv
+    return True
 
 
 def idle_message(b: builds_mod.Build, now: float, idle_s: float) -> str:
@@ -319,5 +351,5 @@ def idle_message(b: builds_mod.Build, now: float, idle_s: float) -> str:
         f"swarm: a build has held a build slot for {int((now - b.started) // 60)} min"
         f" and used under 1% of a core for the last {int(idle_s // 60)} min"
         f" ({short}, phase {b.phase or '?'}, pid {b.pid}). Other builds queue behind it."
-        " Nothing was stopped; `swarm resources` shows it."
+        " Nothing was stopped; `swarm build --status` and `swarm resources` show it."
     )

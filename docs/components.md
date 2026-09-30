@@ -709,7 +709,10 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   environment (`SWARM_STATE_DIR` of this run, `SWARM_SESSION_ID`), children
   inherit it. A worker's figures leave its builds out (they are the build's) and
   count its processes' own CPU, so a reaped build is never charged to the shell
-  that ran it. The supervisor and dashboards are "swarm itself".
+  that ran it. The supervisor and dashboards are "swarm itself". The owner
+  console carries `SWARM_OWNER_CONSOLE` and no session id: it is shown apart
+  ("owner console"), never as a worker or as the swarm's overhead, and the
+  capacity maths leaves it with everything else on the host.
 - **Storage** (`resources/store.py`): `meters/resources.jsonl` holds every
   sample for a day; hourly compaction folds older ones into
   `meters/resources-1m.jsonl`, one row a minute with `[min, avg, max]` per figure
@@ -722,7 +725,10 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
 - **Idle holders.** A heavy build that holds a slot for `[resources].idle_s`
   (default 600) with its whole tree under 1% of a core shows in `swarm status`,
   as a `swarm doctor` WARN, in the dashboard's resources box, and pings once
-  (again hourly while it stays idle). Nothing is killed.
+  (again hourly while it stays idle). The gate's own holder record
+  (`buildsem/slotN`) confirms it first: a record naming another build, or saying
+  it ended, means the sampler missed an `end` and nothing is reported; a matching
+  one supplies the phase and command. Nothing is killed.
 - **Cost.** The thread's CPU time (`time.thread_time`) and `du`'s (from
   `wait4`) are published in the snapshot, with the bytes written per day. On a
   24-core host with a few hundred processes a full sample costs about 5 ms, so

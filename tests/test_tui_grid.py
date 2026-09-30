@@ -581,6 +581,42 @@ def test_o_reopens_the_owner_console_and_is_listed(seeded, monkeypatch, capfd):
     assert any("console: the console is off" in t for t in got["toasts"])
 
 
+@pytest.mark.parametrize("size", [(209, 50), (120, 40)], ids=lambda s: f"{s[0]}x{s[1]}")
+def test_home_fits_the_resources_box_beside_the_console_key(seeded, size, monkeypatch, capfd):
+    """Both features on one screen: the footer keeps `o console`, and the side
+    column fits the resources box (a build, an idle holder, a queue) above the
+    alerts, all inside the window."""
+    from swarm_orchestrator.resources import store as resources_store
+
+    now = time.time()
+    resources_store.write_now(seeded.state_dir, {
+        "ts": now, "static": {"ncpu": 8}, "queued": 2,
+        "host": {"cpu": 42.0, "load": 3.1, "avail_mb": 9000, "anon_mb": 5000,
+                 "cache_mb": 2000, "swap_mb": 0, "psi": {"mem": 1, "memf": 0, "io": 2, "iof": 1},
+                 "wr_mbs": 12.5},
+        "disk": {"headroom_gb": 80.0},
+        "builds": [{"id": "a", "slot": 0, "phase": "P1", "age_s": 300, "cores": 3.2,
+                    "anon_mb": 2048, "idle": False},
+                   {"id": "b", "slot": 1, "phase": "P3", "age_s": 900, "cores": 0.0,
+                    "anon_mb": 300, "idle": True}],
+    })
+
+    async def steps(app, pilot, got):
+        got["text"] = screen_text(app)
+        node = app.query_one("#tab-home")
+        got["res"] = node.query_one("#p-resources").region
+        got["alerts"] = node.query_one("#p-alerts").region
+        got["h"] = app.size.height
+
+    got = _boot(seeded, size, steps, monkeypatch, capfd)
+    text = got["text"]
+    assert "o console" in text.rstrip().splitlines()[-1]
+    assert "─ resources" in text and "2 build(s) · swarm resources" in text
+    assert "IDLE holder" in text and "2 build(s) queued behind" in text
+    assert got["res"].height >= 7 and got["res"].bottom <= got["alerts"].y
+    assert got["alerts"].height >= 6 and got["alerts"].bottom < got["h"]
+
+
 # -- the owner's guide ---------------------------------------------------------------
 def test_g_opens_the_guide_and_the_hint_counts_the_owners_todos(seeded, monkeypatch, capfd):
     """`g guide me (N)` in the footer, the count in the alerts box, `g` and the

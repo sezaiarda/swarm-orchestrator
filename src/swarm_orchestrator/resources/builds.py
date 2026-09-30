@@ -154,6 +154,7 @@ class Build:
     samples: int = 0
     last_ts: float | None = None
     idle_flagged: bool = False
+    released: bool = False  # the gate's record names another build, or says it ended
     # the end, once known
     ended: float | None = None
     run_s: float | None = None
@@ -228,7 +229,7 @@ class Build:
             "argv": self.argv[:200], "age_s": round(now - self.started, 1),
             "cores": round(self.cores, 2), "anon_mb": round(self.anon_mb, 1),
             "peak_anon_mb": round(self.peak_anon_mb, 1), "cpu_s": round(self.cpu_s, 1),
-            "procs": len(self.tree), "idle": self.idle_for(now, idle_s),
+            "procs": len(self.tree), "idle": self.idle_for(now, idle_s) and not self.released,
             "source": self.source,
         }
 

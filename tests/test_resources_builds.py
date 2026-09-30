@@ -260,6 +260,34 @@ def test_an_idle_holder_is_reported_once_an_hour_and_never_killed(env):
     assert len(pings) == 2
 
 
+def _holder_record(cfg, slot: int, **rec) -> None:
+    (cfg.buildsem_dir / f"slot{slot}").write_text(json.dumps({"v": 1, "ended": None, **rec}))
+
+
+def test_an_idle_holder_is_confirmed_by_the_gates_own_record(env):
+    """The gate's holder record decides: another build's id there means the
+    sampler missed an end, so no warning; a matching one lends its words."""
+    cfg, fake, pings = env
+    fake.add(900, started=T0 - 1, own=100, argv="sleep 9999")
+    fake.add(901, started=T0 - 1, own=100, argv="sleep 9999")
+    event(cfg, ts=T0 - 1, event="start", id="stale", pid=900, slot=0, cls="heavy",
+          argv="old cmd")
+    event(cfg, ts=T0 - 1, event="start", id="mine", pid=901, slot=1, cls="heavy",
+          argv="cmd")
+    _holder_record(cfg, 0, id="newer", phase="P9", argv="cargo build")
+    _holder_record(cfg, 1, id="mine", phase="P2", argv="cargo test --workspace")
+    s = make_sampler(cfg, fake, pings)
+    for t in (0, 300, 610):
+        s.step(T0 + t)
+    assert [k for k, _ in pings] == ["idle-build:mine"]
+    assert "P2" in pings[0][1] and "cargo test" in pings[0][1]
+    assert "swarm build --status" in pings[0][1]
+    snap = store.read_now(cfg.state_dir)
+    assert [b["id"] for b in snap["idle_holders"]] == ["mine"]
+    lines = view.status_lines(cfg, now=T0 + 611)
+    assert sum(line.startswith("IDLE BUILD HOLDER") for line in lines) == 1
+
+
 def test_a_busy_build_is_not_idle(env):
     cfg, fake, pings = env
     fake.add(900, started=T0 - 1)
@@ -316,6 +344,28 @@ def test_a_worker_is_measured_without_its_builds(env):
     assert anon == round(10_000 * ptree.PAGE / 2**20, 1)  # the build's 90k pages are the build's
     assert row["b"]["b"][0] == pytest.approx(4.0)
     assert row["x"][1] > 0 and row["nb"] == 1 and row["fast"] == 1
+
+
+def test_the_owner_console_is_neither_a_worker_nor_overhead(env):
+    """The console carries the run's state dir but no session id; its marker files
+    it apart, so per-worker figures and the swarm's overhead leave it out."""
+    cfg, fake, pings = env
+    console_env = {"SWARM_STATE_DIR": str(cfg.state_dir), ptree.CONSOLE_ENV: "1"}
+    fake.add(700, anon_pages=20_000, comm="claude", env=console_env)
+    fake.add(701, ppid=700, anon_pages=5_000, comm="bash", env=console_env)
+    fake.add(600, anon_pages=1_000, env={"SWARM_STATE_DIR": str(cfg.state_dir)}, comm="swarm")
+    fake.add(500, anon_pages=10_000, comm="claude", env=worker_env(cfg))
+    s = make_sampler(cfg, fake, pings)
+    row = s.step(T0)
+    assert set(row["w"]) == {"worker:P1"}
+    assert row["x"][1] == round(1_000 * ptree.PAGE / 2**20, 1)
+    assert row["o"][1] == round(25_000 * ptree.PAGE / 2**20, 1)
+    snap = store.read_now(cfg.state_dir)
+    assert [w["label"] for w in snap["workers"]] == ["worker:P1"]
+    assert snap["console"]["procs"] == 2
+    assert "owner console" in view.render(view.collect(cfg, now=T0 + 1))
+    [minute] = store.aggregate([row])
+    assert minute["o"] == row["o"]
 
 
 def test_idle_sampling_is_slow_and_building_is_fast(env):

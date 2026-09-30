@@ -49,7 +49,8 @@ def _ago(s: float | None) -> str:
 
 # -- status and doctor ----------------------------------------------------------
 def status_lines(cfg: Config, now: float | None = None) -> list[str]:
-    """``swarm status``: one line, plus one per idle holder."""
+    """``swarm status``: one line, plus one per idle holder. The builds running
+    and queued are the build gate's line (``build gate: …``), not repeated here."""
     snap, age = fresh_now(cfg.state_dir, now)
     if snap is None:
         return ["resources: no samples yet" + ("" if cfg.resources_enabled else " (off)")]
@@ -57,8 +58,7 @@ def status_lines(cfg: Config, now: float | None = None) -> list[str]:
         return [f"resources: last sample {_ago(age)} (sampler not running)"]
     h = snap.get("host") or {}
     line = (f"resources: cpu {_f(h.get('cpu'), '{:.0f}')}% · MemAvailable"
-            f" {_gb(h.get('avail_mb'))} · {len(snap.get('builds') or [])} build(s)"
-            f" · {snap.get('queued', 0)} queued")
+            f" {_gb(h.get('avail_mb'))}")
     d = snap.get("disk") or {}
     if d.get("headroom_gb") is not None:
         line += f" · disk headroom {d['headroom_gb']:.0f}G"
@@ -269,6 +269,10 @@ def _now_lines(snap: dict) -> list[str]:
     x = snap.get("infra")
     if x:
         out.append(f"    {'swarm itself':<28} {x['cores']:.2f} cores · anon {_gb(x['anon_mb'])}")
+    c = snap.get("console")
+    if c:
+        out.append(f"    {'owner console':<28} {c['cores']:.2f} cores · anon {_gb(c['anon_mb'])}"
+                   " (yours, not the swarm's)")
     o = snap.get("sampler") or {}
     out.append(f"  sampler cost {o.get('pct_core', 0):.2f}% of one core ({o.get('cpu_s', 0):.1f}s"
                f" + du {o.get('du_cpu_s', 0):.1f}s CPU over {o.get('samples', 0)} samples),"

@@ -22,6 +22,7 @@ from swarm_orchestrator import cli, console, promptlint, resolver, tmux
 from swarm_orchestrator import session as session_mod
 from swarm_orchestrator import state as state_mod
 from swarm_orchestrator.config import load
+from swarm_orchestrator.resources import ptree
 
 
 def _wait(pred, timeout: float = 15.0) -> bool:
@@ -140,7 +141,9 @@ def test_the_console_carries_no_session_or_phase_marker(cfg):
             "worker:P1", "SWARM_WORKTREE": "/wt/P1", "SWARM_OVERSEER_PASS": "p1",
             "SWARM_SLUG": "s"}
     env = console.claude_env(cfg, base)
-    assert env == {"PATH": "/bin", "SWARM_SLUG": "s", "SWARM_STATE_DIR": str(cfg.state_dir)}
+    assert env == {"PATH": "/bin", "SWARM_SLUG": "s", "SWARM_STATE_DIR": str(cfg.state_dir),
+                   console.CONSOLE_ENV: "1"}
+    assert console.CONSOLE_ENV == ptree.CONSOLE_ENV
 
 
 def test_no_session_reaper_matches_the_console_but_down_ends_it(cfg):
@@ -157,6 +160,9 @@ def test_no_session_reaper_matches_the_console_but_down_ends_it(cfg):
             markers = session_mod.session_markers(cfg, kind, ident)
             assert proc.pid not in session_mod.session_processes(cfg, markers=markers), kind
         assert proc.pid in session_mod.session_processes(cfg)  # what `swarm down` ends
+        # the resource sampler files it as the owner's: not a worker, not overhead
+        table = ptree.scan()
+        assert ptree.Attributor(cfg.state_dir).label(table).get(proc.pid) == ptree.CONSOLE
     finally:
         proc.kill()
         proc.wait()

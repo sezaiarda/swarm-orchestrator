@@ -19,7 +19,9 @@ It is not a worker. It carries no phase marker and no ``SWARM_SESSION_ID``, so n
 ``Stop`` hook recap, slot, ETA, usage-per-phase or session reaper ever counts it;
 it holds no ``@swarm_slot`` pane, so no watchdog looks at it. It does carry the
 run's ``SWARM_STATE_DIR``, so its ``swarm`` commands find this run and
-``swarm down`` ends it with the rest (the transcript stays, to resume). It keeps
+``swarm down`` ends it with the rest (the transcript stays, to resume), and
+``SWARM_OWNER_CONSOLE``, so ``swarm resources`` shows it apart: neither a worker
+nor the swarm's own overhead. It keeps
 the owner's own settings and hooks, and its primer (``prompts/console.md``, the
 CLI's commands, the project's ``[console] prompt_file``) is appended to Claude
 Code's system prompt.
@@ -71,6 +73,11 @@ SESSION_MARKERS = frozenset({
     procs.SESSION_ENV, "SWARM_PHASE", "SWARM_WORKTREE", "SWARM_TOUCHES", "SWARM_MAIN",
     "SWARM_OPERATOR_JOB", "SWARM_OVERSEER_PASS", "SWARM_MASTER_KIND", "SWARM_ASK",
 })
+
+#: Marks the console's processes, so the resource sampler files them as the
+#: owner's rather than as the swarm's own overhead (a session id would make it a
+#: worker). Must equal :data:`swarm_orchestrator.resources.ptree.CONSOLE_ENV`.
+CONSOLE_ENV = "SWARM_OWNER_CONSOLE"
 
 #: Commands that belong to the swarm's own sessions or to the owner's terminal.
 #: Everything else the CLI has is listed in the primer as the console's.
@@ -212,6 +219,7 @@ def claude_env(cfg: Config, base: dict[str, str] | None = None) -> dict[str, str
     drop = SESSION_MARKERS | {cfg.env_marker}
     env = {k: v for k, v in base.items() if k not in drop}
     env["SWARM_STATE_DIR"] = str(cfg.state_dir)
+    env[CONSOLE_ENV] = "1"
     return env
 
 
@@ -231,6 +239,7 @@ def pane_env(cfg: Config) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items()
            if k.startswith("SWARM_") and k not in SESSION_MARKERS and k != cfg.env_marker}
     env["SWARM_STATE_DIR"] = str(cfg.state_dir)
+    env[CONSOLE_ENV] = "1"
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
     return env

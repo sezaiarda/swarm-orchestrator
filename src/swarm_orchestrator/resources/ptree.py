@@ -204,9 +204,14 @@ def cwd(pid: int, root: Path = PROC) -> str:
 #: The environment every swarm session carries (see :mod:`swarm_orchestrator.procs`).
 SESSION_ENV = "SWARM_SESSION_ID"
 STATE_ENV = "SWARM_STATE_DIR"
+#: Carried by the owner console (see :mod:`swarm_orchestrator.console`), which has
+#: this run's state dir but no session id: it is the owner's, not the swarm's.
+CONSOLE_ENV = "SWARM_OWNER_CONSOLE"
 #: The label of a process of this run that belongs to no session (the
 #: supervisor, the dashboard, the board): the swarm's own overhead.
 INFRA = "swarm"
+#: The label of the owner console's processes: neither a worker nor overhead.
+CONSOLE = "console"
 
 
 class Attributor:
@@ -215,7 +220,8 @@ class Attributor:
     A process is labelled once, when first seen, from its environment: this
     run's ``SWARM_STATE_DIR`` plus a ``SWARM_SESSION_ID`` (``worker:<phase>``,
     ``operator:<job>``…) names the session; the state dir alone is the swarm's
-    own overhead (:data:`INFRA`). A process whose environment cannot be read
+    own overhead (:data:`INFRA`), unless it carries :data:`CONSOLE_ENV` (the owner
+    console, :data:`CONSOLE`). A process whose environment cannot be read
     (or was cleared) inherits its parent's label. A pid is remembered with its
     start time, so a reused pid is labelled afresh.
     """
@@ -238,7 +244,7 @@ class Attributor:
                 lab = self._from_env(pid)
                 if lab is None:
                     parent = out.get(proc.ppid)
-                    lab = parent if parent not in (None, INFRA) else None
+                    lab = parent if parent not in (None, INFRA, CONSOLE) else None
             seen[pid] = (proc.start, lab)
             if lab is not None:
                 out[pid] = lab
@@ -251,4 +257,6 @@ class Attributor:
             return None
         if comm(pid, self.root).startswith("tmux"):
             return None  # a tmux server started from a swarm shell hosts other sessions
-        return env.get(SESSION_ENV) or INFRA
+        if env.get(SESSION_ENV):
+            return env[SESSION_ENV]
+        return CONSOLE if env.get(CONSOLE_ENV) else INFRA

@@ -152,9 +152,11 @@ def aggregate(rows: list[dict]) -> list[dict]:
                            round(max(p[1] for p in pairs), 1)]
                     for name, pairs in per.items()
                 }
-        if any(isinstance(r.get("x"), list) for r in group):
-            xs = [r["x"] for r in group if isinstance(r.get("x"), list)]
-            agg["x"] = [round(sum(x[0] for x in xs) / len(xs), 2), round(max(x[1] for x in xs), 1)]
+        for key in ("x", "o"):
+            xs = [r[key] for r in group if isinstance(r.get(key), list)]
+            if xs:
+                agg[key] = [round(sum(x[0] for x in xs) / len(xs), 2),
+                            round(max(x[1] for x in xs), 1)]
         out.append(agg)
     out.sort(key=lambda r: r.get("ts") or 0)
     return out

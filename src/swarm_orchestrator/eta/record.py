@@ -10,7 +10,7 @@ Two sources, each read by a parser that already exists:
 * **the ledger's git history** (:mod:`pace`), which knows every row wherever it
   was built but only when it was ticked and filed. That says how fast the swarm
   delivered and how campaigns grew; it is *not* a work time. A start
-  reconstructed from the ticks around a row (``docs/research/eta-history``
+  reconstructed from the ticks around a row (the offline backtest
   calibrated one) runs long whenever the swarm sat idle, and the backtest scored
   the fit worse with those samples than without them.
 

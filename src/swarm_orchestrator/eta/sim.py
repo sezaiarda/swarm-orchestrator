@@ -96,8 +96,7 @@ def poisson(rate: float, u: float) -> int:
 class Options:
     """Which parts of the model a simulation uses.
 
-    The defaults are the backtest's verdict (``docs/research/eta-history/
-    backtest.md``). Owner questions, lost attempts and the build slot are
+    The defaults are the offline backtest's verdict. Owner questions, lost attempts and the build slot are
     measured and implemented, but each made the forecast worse: the swarm's
     measured availability already carries what they cost, so adding them
     counted it twice. They stay switchable so the backtest can ask again once

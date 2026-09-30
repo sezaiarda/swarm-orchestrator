@@ -69,8 +69,8 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 |---|---|---|---|---|
 | `ledger` | `"docs/PHASE-LEDGER.md"` | | hot | The phase ledger, relative to the project root. The launcher parses it on every decision. |
 | `exclude` | `[]` | | hot | Phase ids never to launch, for example rows blocked outside the swarm. `swarm why` quotes the comment next to an entry. |
-| `history` | `"docs/phases"` | | hot | Where the swarm files what was written about each phase: `<history>/<family>.md`, where the family is the id up to its first `-` (`docs-W12` goes to `docs.md`). Sessions never edit it; see [cli.md](cli.md#reporting-the-ledger-and-the-history). |
-| `history_split_kb` | `256` | | hot | A family file that grows past this many KB becomes a directory with one file per phase (`<history>/docs/docs-W12.md`). `0` never splits. |
+| `history` | `"docs/phases"` | | hot | Where the swarm files what was written about each phase: `<history>/<family>.md`, where the family is the id up to its first `-` (`api-W12` goes to `api.md`). Sessions never edit it; see [cli.md](cli.md#reporting-the-ledger-and-the-history). |
+| `history_split_kb` | `256` | | hot | A family file that grows past this many KB becomes a directory with one file per phase (`<history>/api/api-W12.md`). `0` never splits. |
 | `lessons` | `"tasks/lessons.md"` | | hot | The file `swarm lesson` appends to. |
 | `ledger_gate` | `""` | | hot | A command that checks the ledger, run in the project checkout with `SWARM_LEDGER` set to the ledger's path each time the swarm adds a follow-up row. If it exits non-zero the row is not added and the refusal goes into the filing phase's history. |
 
@@ -79,7 +79,7 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `notify` | `<this repo>/scripts/notify.sh` | | hot | The sender. It is called with the message as `$1`. The bundled script reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's `.env`, or from the file named by `SWARM_TG_ENV`. |
-| `pings` | `"necessary"` | `SWARM_TG_PINGS` | hot | `"necessary"` sends only what needs you: questions, holds you must clear, flagged operator outcomes, a `fail` after the Overseer's retry, a push owed past the grace, errors, the cadence summary and the finish. Everything else is logged to `notifications.jsonl` marked `suppressed` and not sent. `"all"` sends every ping, as before 2026-09-26 (it also makes `[operator].notify = "attention"` send every outcome). Any other value counts as `"necessary"`. A worker's own `done`/`waiting` reads its mirror's copy, so for it the change lands at the next launch. The full list is in [components.md](components.md#telegram-and-asking-the-owner). |
+| `pings` | `"necessary"` | `SWARM_TG_PINGS` | hot | `"necessary"` sends only what needs you: questions, holds you must clear, flagged operator outcomes, a `fail` after the Overseer's retry, a push owed past the grace, errors, the cadence summary and the finish. Everything else is logged to `notifications.jsonl` marked `suppressed` and not sent. `"all"` sends every ping, as the swarm did before this setting existed (it also makes `[operator].notify = "attention"` send every outcome). Any other value counts as `"necessary"`. A worker's own `done`/`waiting` reads its mirror's copy, so for it the change lands at the next launch. The full list is in [components.md](components.md#telegram-and-asking-the-owner). |
 | `push_owed_grace_s` | `3600` | `SWARM_PUSH_OWED_GRACE` | hot | Under `"necessary"`, a repo owing a push pings once it has owed one this long (checked after every integration and on the watchdog tick). The "pushed" ping follows only if that one went out. |
 | `commands` | `true` | `SWARM_TG_COMMANDS` | restart | Start the bot's command listener at `swarm up`, so `/usage` and `/help` sent to the bot are answered. It reads the token and chat id from the file the sender reads, answers only that chat, and is not started when the file lacks them. |
 
@@ -124,7 +124,7 @@ auto_resolve_check = { "docs/PHASE-LEDGER.md" = "python3 ci/ledger-gate.py" }
 ## `[lanes]`
 
 Rows that touch different files run at the same time, even in one repo. A ledger row declares what it
-edits in a `touches:` field (`- [ ] `x-W3` · dir:`frontend` · needs:`x-W1` · touches:`frontend/src/ui/a.tsx` `frontend/src/api/**` · **title**`).
+edits in a `touches:` field (`- [ ] `web-F2` · dir:`web` · needs:`api-W1` · touches:`web/src/ui/a.tsx` `web/src/api/**` · **title**`).
 A touch is `<repo>/<path>`, `<repo>/<dir>/**` (`<repo>/**` is the whole repo), `./<path>` for the
 project repo itself, or `@<resource>` for something that is not a file. `*` may appear once, in the last
 segment only; `**` only as the whole last segment. A row with no `touches:` owns every repo in its
@@ -163,7 +163,7 @@ Example:
 enabled   = true
 per_repo  = 2
 resources = ["live-box"]
-external  = { "swarm-orchestrator" = "~/Projects/swarm-orchestrator" }
+external  = { "shared-lib" = "~/projects/shared-lib" }
 commons   = ["./docs/PHASE-LEDGER.md", "./docs/phases/**", "*/CHANGELOG.md"]
 check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
 ```
@@ -252,8 +252,8 @@ read where the project stands instead of surveying it. See
 | `every_s` | `900` | `SWARM_GC_EVERY` | hot | At most this often (a busy build slot defers it a few minutes). `0` leaves only the idle trigger. |
 | `idle_s` | `1800` | `SWARM_GC_IDLE` | hot | Also once per idle stretch (no busy slot) of this length. `0` turns this off. |
 | `wait_s` | `600` | `SWARM_GC_WAIT` | hot | How long an automatic gc waits for the build slots before it gives up and retries later. It polls faster than a queued build, so it runs between two builds instead of never. `0` only takes a slot that is free right now. |
-| `keep_days` | `3` | `SWARM_GC_KEEP_DAYS` | hot | Build output used within this many days survives `cargo sweep`. |
-| `attic_days` | `30` | `SWARM_GC_ATTIC_DAYS` | hot | Work the swarm set aside instead of deleting (a discarded phase's commits, under `refs/swarm-attic/<phase>/<utc-stamp>`) is kept this many days before gc drops the ref, and its backup branch on origin with it. |
+| `keep_days` | `3` | `SWARM_GC_KEEP_DAYS` | hot | Build output used within this many days survives `cargo sweep`. At least 1. |
+| `attic_days` | `30` | `SWARM_GC_ATTIC_DAYS` | hot | Work the swarm set aside instead of deleting (a discarded phase's commits, under `refs/swarm-attic/<phase>/<utc-stamp>`) is kept this many days before gc drops the ref, and its backup branch on origin with it. At least 1. |
 
 ## `[backup]`
 

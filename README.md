@@ -10,8 +10,7 @@ supervisor process launches every phase the moment its dependencies have landed.
 It merges each finished phase back into the project, and pings you on Telegram
 only when something needs you. Nothing in it is specific to a language or a
 repository layout: it drives one repo or an umbrella of many, configured by one
-`.swarm.toml`. It is aimed at multi-repo projects that build
-through it every day.
+`.swarm.toml`.
 
 <p align="center">
   <img src="docs/architecture.svg" alt="swarm-orchestrator at runtime: a detached supervisor reads control.fifo and owns state.json; it launches Claude Code sessions into a tmux session with a dashboard (which serves the web board), an overseer window, an operator window and worker slots; it merges finished phases into the project's repos and pings the owner on Telegram" width="900">
@@ -56,7 +55,7 @@ through it every day.
 - Cap concurrent heavy builds swarm-wide, so parallel workers cannot run the host
   out of memory.
 - Show everything live: a terminal dashboard in window 0, a read-only web board
-  for your phone over Tailscale, `swarm status`, `swarm doctor`, `swarm why <phase>`,
+  for a phone or laptop, `swarm status`, `swarm doctor`, `swarm why <phase>`,
   and `swarm report`.
 - Measure every run: phases per hour, 5-hour and weekly subscription usage per
   hour, and cost per hour. Past runs are kept in a history.
@@ -82,7 +81,7 @@ or waiting on you, the run finishes and tells you.
 
 ```mermaid
 flowchart TB
-  owner(["owner: terminal or phone"])
+  owner(["owner: terminal, phone or laptop"])
 
   subgraph S["tmux session, one per project"]
     direction LR
@@ -406,7 +405,7 @@ flowchart TD
   --override-cap` runs through it. When the tap's figures are stale, the
   supervisor asks Claude Code's usage endpoint, at most every 30 minutes. Workers
   are never told.
-- **On your phone:** usage only when you ask: `/usage` to the swarm bot answers
+- **On your phone (Telegram):** usage only when you ask: `/usage` to the swarm bot answers
   with both limits, how old the reading is, and the caps' state. A cap pausing or
   stopping the swarm pings once, and so does a pause lifting.
 
@@ -445,13 +444,16 @@ ten tabs, switched with `1`–`9` and `0`, are:
 - **runs**;
 - **shells** (`0`): what `swarm keep` left running, and why.
 
-`R` resets the run and `q` quits the dashboard only. It fits an 80×24 terminal.
+`R` resets the run, `D` drains (see `swarm down --drain`), `g` opens the owner
+guide, `?` lists every key, and `q` quits the dashboard only. It fits an 80×24
+terminal.
 
 ### Web board (`swarm web`)
 
 - **Is:** a read-only board for a phone or a laptop, in the last tmux window.
   `swarm status` prints its address: the machine's Tailscale IP (the LAN
-  address only when Tailscale is absent).
+  address only when Tailscale is absent). `u` in the dashboard copies it to
+  your clipboard.
 - **Tabs:** Overview (when every phase is done, P50 and P85, what runs now, the
   next usage cap), Phase books (every campaign with its finish range, and a
   status board), Graph (the `needs:` graph laid out left to right: what blocks
@@ -636,7 +638,7 @@ git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
 1. **Install:**
 
    ```bash
-   uv tool install --editable ~/Projects/swarm-orchestrator   # puts `swarm` on PATH
+   uv tool install --editable ~/projects/swarm-orchestrator   # puts `swarm` on PATH
    ```
 
 2. **Set up Telegram** (optional; the swarm runs without it): create a bot, put
@@ -702,7 +704,9 @@ attaching; `swarm up --no-attach` is for scripts.
 
 **Stopping:** `swarm down` stops the supervisor. It then ends every session
 process the run started (SIGHUP, then SIGTERM, then SIGKILL), kills the tmux
-session, and prints the run's summary.
+session, and prints the run's summary. `swarm down --drain` launches nothing new
+and stops once the running work is finished (`--then CMD` runs a command
+afterwards, `--cancel` drops a pending drain).
 
 ## Answering the swarm
 
@@ -737,8 +741,8 @@ The init pass never asks.
 
 ### What is yours to do, that is not a question
 
-Some things only you can do: trying a new feature out by hand, a check on your
-device after a deploy, a to-do a finished phase left you. `swarm todo` lists them
+Some things only you can do: trying a new feature by hand, a check on a real
+device after a rollout, a to-do a finished phase left you. `swarm todo` lists them
 (`owner to-dos: N` in `swarm status`), and `swarm guide` — `g` in the dashboard —
 opens a Claude chat in its own `guide` window that walks you through them one at
 a time and records what you report. Pressing `g` again goes back to it.
@@ -775,6 +779,10 @@ The full list, one line per subcommand and grouped by purpose, is in
 - `[build]`: the gate, the jobs cap, the target cache;
 - `[operator]`;
 - `[overseer]`: triggers, timeout;
+- `[big_picture]`: the periodically refreshed project-overview doc;
+- `[lanes]`: touch-based scheduling (see [Lanes](#lanes));
+- `[usage]`: the subscription usage caps;
+- `[backup]`: pushing unmerged phase work to `origin`;
 - `[gc]`;
 - `[web]`.
 
@@ -840,7 +848,7 @@ fake scripts need bash (`read -t`).
 
 ## Design principles
 
-These are the owner's rules, and the code follows them.
+The code follows these rules.
 
 - **Pure injection, minimal lifecycle.** The supervisor reacts to events. Its only
   timed wakes are:

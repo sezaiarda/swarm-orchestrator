@@ -58,9 +58,10 @@ exact flags.
 | `waiting <who> ["question"]` | Tell the owner you are blocked on them: `<who>` is a worker's phase, an operator job's id, or `overseer`. Pings once, arms the park timer. |
 | `resumed <who> ["answer"]` | The owner answered. Records the answer as an owner decision and cancels the park. |
 | `widen <phase> <touch…>` | Add touches (the [`touches:`](config.md#lanes) grammar) to the lane `<phase>` holds, so the launcher keeps rows that overlap them waiting. Run it before editing outside your declared lane (`$SWARM_TOUCHES`). The lane only grows: it starts from what the phase holds now. Prints `<holder> holds <touch>: your merge will be re-tested against it and may need a resolver` for each phase in flight already holding an overlapping touch. Exit 0 once the touches are recorded, whatever it printed; 2, recording nothing, for a touch that does not parse or a phase not in flight. |
-| `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently. |
+| `note <phase> [decision\|assumption\|risk] "text"` | Log a judgement call, silently (`decision` by default; `--kind K` also sets the kind). |
 | `build <cmd…>` | Run a heavy build through the swarm-wide gate. |
-| `notify "message"` | Message the owner through the swarm's own sender, the only way a session should. |
+| `notify "message" [--attention]` | Message the owner through the swarm's own sender, the only way a session should. `--attention` sends an Overseer summary that needs the owner whatever triggered the pass. |
+| `notify --ack` | Acknowledge the pings that never reached the owner's phone: the dashboard and `doctor` count only drops after this. Sends nothing; the ping log is kept. |
 | `keep --name N --why "one line" [--cwd DIR] -- <cmd…>` | Leave one process running after your session ends (everything else a session starts is ended with it). Starts it detached without the session's markers, records `<state>/keep/N.json`, prints its pid and log. `--why` is required (≤120 chars); a live name is refused, a dead one replaced. Use it only when something must outlive the session, and name it in your recap. |
 | `keep --list [--json]` / `keep --stop N` | Every kept process, alive or dead, with why, who and age / stop one (SIGTERM, then SIGKILL, to its group) and forget it. |
 
@@ -81,7 +82,7 @@ else lands at once. See [components.md](components.md#the-ledger-writer).
 | `reshape <by> <row> [--needs a,b] [--add-needs a,b] [--drop-needs a,b] [--touches t1,t2] "why"` | Edit an open row's `needs:` or `touches:`, the one edit a session makes to an existing row. `--needs` replaces the list (`''` empties it), then `--drop-needs` and `--add-needs` edit it; `--touches` replaces the field, under `follow-up`'s rules. Refused at once for a ticked, unknown or `[tasks].exclude`d row, a need with no row, a dropped need the row does not have, a new dependency cycle, or an edit that changes nothing. It lands at once like `record`: the writer checks it again on the target branch and runs `[tasks].ledger_gate` on the edited ledger; a failing gate leaves the ledger byte for byte as it was and records the refusal in `<by>`'s history (the row's own when `<by>` is not a row). On success the row's history gets *reshaped by `<by>`: needs −x +y; touches → …; why: …*. `<by>` is your phase, or your role (`overseer`, `operator`). |
 | `lesson <phase> "text" [--title T]` | Append `## (date, `phase`) title` and the text to `[tasks].lessons`. |
 
-`python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--gate CMD] [--components] [--write]`
+`python -m swarm_orchestrator.ledgermigrate --project-dir DIR [--status PATH] [--gate CMD] [--components] [--write]`
 moves a ledger's accumulated notes into the history once (and the dated entries
 of `docs/STATUS.md` into `<history>/STATUS-archive.md`), proving the ledger reads
 the same before and after. `--components` does the same to each component repo's
@@ -93,7 +94,7 @@ repos. Run it with the swarm stopped.
 | command | what it does |
 |---|---|
 | `operator <phase>` | Open an operator session for a phase's hand-off now (or the moment the phase merges, if it has not yet), overriding a `later` triage. Builds the job from its sentinel if needed. |
-| `operator-add "brief" [--phase P] [--not-before <when>]` | Queue an ad-hoc job. `--not-before` holds it until `<when>` (`90m`, `6h`, `3d`, `2026-09-30`, `"2026-09-30 08:00"`). |
+| `operator-add "brief" [--phase P] [--not-before <when>]` | Queue an ad-hoc job. `--not-before` holds it until `<when>` (`90m`, `6h`, `3d`, `2027-01-15`, `"2027-01-15 08:00"`). |
 | `operator-triage <job>` | Decide `now` or `later` for a queued job. `swarm done` spawns it. |
 | `operator-done <job> ["outcome"] [--attention] [--not-before <when>]` | The session is finished. Records the outcome, merges its mirror. `--attention` sends the outcome to the owner's phone; a decision only the owner can make is asked first with `swarm waiting <job> "<question>"`. `--not-before` means "not yet": the job goes back in the queue until `<when>` instead of finishing, the attempt is not counted, and its next brief says why the last attempt ended. |
 
@@ -125,6 +126,7 @@ Sent by the tooling; you rarely type these.
 | `bootstrap` | Ask the supervisor to run the init pass. `swarm up` sends it. |
 | `master-idle` | The init pass is finished. |
 | `_supervise` | The supervisor process itself. |
+| `_drain-down` | The stop a `down --drain` runs once the running work is finished. |
 | `_poke-done <phase> <status>` | The delayed `done` poke a `done_grace_s` child delivers. |
 | `_lane-check <phase> <repo>` | The landing re-test under lanes, started detached by the integrator. Runs `[lanes].check` for `<repo>` (its name, `.` for the project repo; else `check["*"]`, else nothing) in `<phase>`'s own worktree, through the build semaphore, for at most `check_timeout_s` (a timeout is red). Writes `<state>/landing/<phase>.<repo>.log` and pokes `lane-checked <phase> <repo> ok\|fail`. Exit 0 green, 1 red, 2 unknown repo. |
 | `lane-checked <phase> <repo> ok\|fail` | The FIFO event `_lane-check` sends: the supervisor looks at the merge queue again. |

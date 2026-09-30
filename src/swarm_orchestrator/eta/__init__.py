@@ -23,6 +23,6 @@ actually works through the ledger:
 * :mod:`.engine` — the background worker the dashboard, the web board and
   ``swarm status`` all read, so every view says the same thing.
 
-The method and the measurements behind every constant are in
-``docs/research/eta-engine-literature.md`` and ``docs/research/eta-history/``.
+The method behind every constant is in ``docs/research/eta-engine-literature.md``;
+the constants were fitted offline against recorded phase histories.
 """

@@ -4,18 +4,14 @@
 * **the fit** is the conformal 85% quantile of the scores, read through
   Kaplan-Meier when campaigns are still open, and falls back to the caller's
   default when there is too little to say;
-* **the backtest** fits each snapshot only on what the snapshots before it knew;
 * **the runtime** logs its own forecasts, scores them against the ledger's ticks,
   and applies the default until enough of them have finished.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import math
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -108,42 +104,6 @@ def test_too_little_history_says_the_default():
     assert calibrate.fit(few, default=calibrate.DEFAULT_K).k == calibrate.DEFAULT_K
     open_heavy = [(0.5, True)] * calibrate.MIN_EVENTS + [(5.0, False)] * 10
     assert calibrate.fit(open_heavy, default=2.5) == calibrate.Calibration(2.5, 0)
-
-
-# -- the backtest's split -------------------------------------------------------------------
-@pytest.fixture(scope="module")
-def backtest():
-    script = (Path(__file__).resolve().parent.parent / "docs" / "research" / "eta-history"
-              / "backtest.py")
-    spec = importlib.util.spec_from_file_location("eta_backtest_calibrate", script)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def test_the_backtest_fits_only_on_what_was_known_at_the_scored_snapshot(backtest):
-    snap = SimpleNamespace(t=NOW, start=NOW)
-    raw = {("campaign", "a"): [NOW + i * H for i in range(1, 21)],   # P50 10 h, P85 17 h
-           ("campaign", "b"): [NOW + i * H for i in range(1, 21)],
-           ("milestone", "50%"): [NOW + i * H for i in range(1, 21)]}
-    truth = {("campaign", "a"): NOW + 5 * H, ("campaign", "b"): NOW + 40 * H,
-             ("milestone", "50%"): NOW + 5 * H}
-    past = [(snap, truth, raw)]
-    at_30 = backtest.history_pairs(past, NOW + 30 * H)
-    # b finished at 40 h: at 30 h it is only known to be open, censored at 30 h.
-    assert sorted(at_30) == sorted([(calibrate.score(10, 17, 5), True),
-                                    (calibrate.score(10, 17, 30), False)])
-    at_50 = backtest.history_pairs(past, NOW + 50 * H)
-    assert (calibrate.score(10, 17, 40), True) in at_50
-    # A paused snapshot that had not resumed yet says nothing.
-    paused = SimpleNamespace(t=NOW, start=NOW + 60 * H)
-    assert backtest.history_pairs([(paused, truth, raw)], NOW + 50 * H) == []
-
-
-def test_the_backtest_stretches_every_target_about_its_own_median(backtest):
-    got = backtest.stretched({("x", "y"): [NOW + 10 * H, NOW + 20 * H, NOW + 40 * H]}, NOW, 2.0)
-    assert got[("x", "y")] == pytest.approx([NOW + 10 * H, NOW + 20 * H, NOW + 80 * H])
 
 
 # -- the runtime's record ---------------------------------------------------------------------

@@ -258,7 +258,7 @@ environment, and `operator:<job>` / `overseer:<pass>` are accepted as written.
 **The ping.** One plain Telegram message: the question in one line (a worker's
 still leads with its cost line), then which tmux window to open, for example
 "Answer in tmux window operator (tmux attach -t myproject); after 2 min it
-moves to its own window wait:op-teal-W10." A worker's ping goes every time it
+moves to its own window wait:op-web-F2." A worker's ping goes every time it
 asks; an operator job's or the Overseer's only when the question is new, so a
 re-run cannot ring you twice.
 
@@ -452,8 +452,9 @@ show the standing debt.
 
 ## Processes: everything dies with its session; `swarm keep` is the exception
 
-Every shell a session starts is cleaned up with it.
-So a session's end ends every process it started.
+Shells and helper processes must not be left lying around: when a worker is
+done, all of its processes go too. So a session's end ends every process it
+started.
 
 **The marker.** Every session is spawned with `SWARM_STATE_DIR` and its own
 `SWARM_SESSION_ID=<kind>:<id>`: `worker:<phase>` (a worker also carries
@@ -740,9 +741,8 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
   rows run, and cached in `<state>/cache/eta.json` so the dashboard, the web
   board and `swarm status` share one answer. Until the first replay lands, a
   floor is shown (the longest chain, or the work over the workers). The method
-  and its backtest are in `docs/research/eta-engine-literature.md` and
-  `docs/research/eta-history/`. The chart of phases done reads the same git
-  history, so it runs to today;
+  is described in `docs/research/eta-engine-literature.md`. The chart of phases
+  done reads the same git history, so it runs to today;
 - the time since the last event, which turns amber after 30 minutes and red after
   2 hours while a slot is busy;
 - how many phases wait on you.
@@ -881,8 +881,8 @@ An operator's result that needs you
 with `--attention`; a decision it needs first is asked with
 `swarm waiting <job> "<question>"`.
 
-**What pings you.** Only necessary messages ring, so by default
-(`[telegram].pings = "necessary"`) the phone rings only for these:
+**What pings you.** Only necessary messages ring by default
+(`[telegram].pings = "necessary"`); the phone rings only for these:
 
 - a worker, the operator or the Overseer asking you something (`swarm waiting`);
 - an owner-run row that starts holding other rows up (once per row);
@@ -990,3 +990,26 @@ subcommand that does not exist, "an agent call is synchronous", the retired
 measured time-wasters as *wasteful*: `sleep` loops, `git status` polling, and
 heredoc string-replace edits. The command exits 1 on a
 Telegram or ledger failure, or on a *contradicted* finding.
+
+## Smaller modules
+
+- **`blockedping.py`:** under `[telegram].pings = "necessary"`, gathers a burst of
+  `blocked` outcomes and sends one ping listing the phases under each distinct
+  reason, instead of one ping per phase.
+- **`todo.py`, `guide.py`:** `swarm todo` lists everything waiting on the owner that
+  is not a question (owner-run ledger rows, operator results, and so on). `swarm
+  guide` (`g` in the dashboard) opens a chat session in its own tmux window that
+  walks through that list.
+- **`opqueue.py`:** the durable queue of operator hand-offs, one JSON file per phase
+  under `<state>/operator/`, written by `swarm done` after the sentinel.
+- **`ovdigest.py`, `ovrecord.py`:** the digest the Overseer reads before each pass,
+  and the per-pass record (`<state>/overseer/<id>.md` and `.json`).
+- **`landing.py`:** the re-test of a phase against what landed beside it when
+  `[lanes]` is on (see the integrator section).
+- **`pauseat.py`:** `swarm pause --in 12h` / `--at 03:00`, a pause scheduled in
+  `state.json` that survives `swarm down` and `up`.
+- **`procs.py`:** reads `/proc` for the process table and process identity (pid plus
+  start time), shared by the reaper and `swarm keep`.
+- **`ledgermigrate.py`:** one-time move of a ledger's accumulated notes and journal
+  into history.
+- **`logutil.py`:** the supervisor's structured, greppable log lines.

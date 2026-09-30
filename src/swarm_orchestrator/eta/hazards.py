@@ -1,7 +1,6 @@
 """The rarer things that happen to a phase, and how often.
 
-Three, each fitted offline against recorded phase histories
-and refitted from this project's own record where it has enough of it:
+Three, each fitted offline against recorded phase histories and refitted from this project's own record where it has enough of it:
 
 * **an owner question.** Some phases ask the owner; the wait is heavy
   tailed (median in minutes, P90 in hours). It delays that phase's finish, but after

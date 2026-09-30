@@ -361,12 +361,24 @@ flowchart TD
 
 ### Build gate (`swarm build`)
 
-- **Is:** a swarm-wide counting semaphore over heavy builds. At most
-  `[build].max_concurrent` run at once (one `flock` per slot), and for `cargo`
-  it also sets `CARGO_BUILD_JOBS` to `[build].jobs`.
-- **How:** it `exec`s the build, so the build itself holds the lock, and a killed
-  build frees its slot. Workers wrap their gates in it
-  (`swarm build cargo nextest run`). Automatic gc takes every slot first, so it
+- **Is:** a swarm-wide gate over heavy builds. At most `[build].max_concurrent`
+  run at once (one `flock` per slot); the rest wait in a queue, served in
+  arrival order. A build that usually takes under `[build].short_s` may pass a
+  long one, but no long one is passed more than `[build].overtake` times. For
+  `cargo` it also sets `CARGO_BUILD_JOBS` to `[build].jobs`.
+- **Light commands skip it:** `git`, `ls`, `cargo update`/`metadata`/`fmt`/`tree`,
+  `docker buildx bake --print`, python scripts that start no processes. Unknown
+  commands count as heavy; `[build].heavy`/`light` add patterns.
+- **Fails fast:** a heavy command whose program, `cd` target, `-f` file or
+  manifest does not exist is refused before it queues.
+- **Says what it is doing:** while queued, its place, who holds each slot and an
+  ETA from past runs (stderr); then the wait and run times.
+  `swarm build --status` shows the gate, and every call is logged to
+  `buildsem/events.jsonl`.
+- **How:** the build inherits the slot's lock, so a killed build frees its slot,
+  and an older `swarm build` still shares the same cap. Workers wrap their gates
+  in it (`swarm build cargo nextest run`; several steps in one turn with
+  `swarm build -- sh -c 'a && b'`). Automatic gc takes every slot first, so it
   never runs during a build.
 
 ### Stop hook, recaps, notes, report
@@ -815,7 +827,9 @@ project path, so two projects with the same folder name never share state.
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
-| `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots. |
+| `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots (each slot file also holds a record of its current build). |
+| `buildsem/queue/`, `queue.json`, `queue.lock` | The build gate's waiting tickets, sequence and overtake counts. |
+| `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail` (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |

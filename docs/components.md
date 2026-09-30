@@ -68,8 +68,12 @@ sends `done`.
 ## Workers
 
 **What they are:** full, unrestrained Claude Code sessions, one per slot, started
-as `cd <cwd> && exec <worker_cmd> --settings <worker_settings> --effort <effort>`.
+as `cd <cwd> && exec <worker_cmd> -n 'swarm · worker · <phase>' --settings <worker_settings> --effort <effort>`.
 Their teammates run in-process (`teammateMode`), so they never open extra panes.
+Every session the swarm opens carries such a display name, so they stand apart
+in claude's `/resume` picker: `swarm · overseer`, `swarm · init`,
+`swarm · operator · <job>`, `swarm · resolver · <phase>`, `swarm · guide`,
+`swarm · big-picture`, `swarm · console`. A command that sets its own `-n` keeps it.
 Each worker's environment carries:
 
 - `SWARM_PHASE`, `SWARM_SESSION_ID=worker:<phase>` and `SWARM_STATE_DIR`

@@ -84,7 +84,8 @@ def spawn(
     # that no-ops on resolve-* windows would leave every merge conflict silently
     # landing on the owner to fix by hand.
     model = f" --model {cfg.resolver_model}" if cfg.resolver_model else ""
-    cmd = cfg.resolver_cmd or f"cd {repo} && exec claude{model}"
+    name = launch_mod.with_name(f"claude{model}", launch_mod.session_name("resolver", phase))
+    cmd = cfg.resolver_cmd or f"cd {repo} && exec {name}"
     tmux.respawn_pane(pane, cmd, env=_resolver_env(cfg, phase))
     if not cfg.resolver_cmd:
         _deliver(cfg, pane, phase, repo, log, line)

@@ -286,7 +286,7 @@ def test_guide_opens_once_focuses_after_and_starts_fresh_when_it_ends(tmux_cfg, 
 def test_guide_launch_is_a_worker_built_claude_in_the_project(cfg):
     cfg.operator_model = "opus"
     cmd = guide.command(cfg)
-    assert cmd.startswith(f"cd {cfg.project_dir}") and "claude --model opus -n guide" in cmd
+    assert cmd.startswith(f"cd {cfg.project_dir}") and "claude --model opus -n 'swarm · guide'" in cmd
     env = guide.env(cfg)
     assert env["SWARM_STATE_DIR"] == str(cfg.state_dir) and env["SWARM_SESSION_ID"].startswith(
         "guide:")

@@ -300,7 +300,7 @@ class Config:
         doc="slash-command file the init master patches",
         why="resolved while composing the launch line for a new worker")
     worker_cmd: str = _k(
-        "worker", "worker_cmd", "claude -n worker:{phase}", NEXT, env="SWARM_WORKER_CMD",
+        "worker", "worker_cmd", "claude", NEXT, env="SWARM_WORKER_CMD",
         doc="command each worker pane is launched with",
         why="it is the command a pane is respawned with")
     # Merged over user settings on each worker's `claude` so a worker's own

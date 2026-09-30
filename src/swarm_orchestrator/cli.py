@@ -56,6 +56,7 @@ from . import supervisor as sup_mod
 from . import telegram, tgbot, tmux
 from . import todo as todo_mod
 from . import usage as usage_mod
+from .resources import view as resources_view
 from .web import lifecycle as web_lifecycle
 from .config import SETTINGS, Config, load
 from . import logutil
@@ -2126,6 +2127,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["web"] = web_lifecycle.status_line(cfg)
         data["telegram_bot"] = tgbot.status_line(cfg)
         data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
+        data["resources"] = resources_view.status_lines(cfg)
         data["drain_line"] = drain_mod.line(st.drain)
         data["pause_line"] = pauseat.line(st.pause_at)
         data["big_picture"] = bigpic_mod.status_text(cfg, bigpic_mod.load(cfg))
@@ -2183,7 +2185,20 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     lines.append(bigpic_mod.status_text(cfg, bigpic_mod.load(cfg)))
     # What `swarm keep` left running on purpose: nothing else outlives its session.
     lines.extend(f"kept: {keep_mod.line(r)}" for r in keep_mod.load_all(cfg))
+    lines.extend(resources_view.status_lines(cfg))
     print("\n".join(lines))
+    return 0
+
+
+def cmd_resources(cfg: Config, as_json: bool = False, hours: float = 24.0,
+                  days: float = 30.0) -> int:
+    """What the host, the builds and the workers used: now, the last day, the
+    worst builds, and whether the gate or the worker count could go up."""
+    data = resources_view.collect(cfg, hours=hours, days=days)
+    if as_json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        print(resources_view.render(data))
     return 0
 
 
@@ -2470,6 +2485,15 @@ def _build_parser() -> argparse.ArgumentParser:
     dcp = sub.add_parser("doctor", help="diagnose a stuck or unhealthy swarm")
     dcp.add_argument("--json", action="store_true")
     dcp.set_defaults(func=lambda cfg, a: cmd_doctor(cfg, a.json))
+
+    rsc = sub.add_parser(
+        "resources", help="host, build and worker resource use: now, history, capacity")
+    rsc.add_argument("--json", action="store_true")
+    rsc.add_argument("--hours", type=float, default=24.0,
+                     help="the sparkline window (default 24)")
+    rsc.add_argument("--days", type=float, default=30.0,
+                     help="the build table and capacity window (default 30)")
+    rsc.set_defaults(func=lambda cfg, a: cmd_resources(cfg, a.json, a.hours, a.days))
 
     whp = sub.add_parser("why", help="why is this phase not running?")
     whp.add_argument("phase")

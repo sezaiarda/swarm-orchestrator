@@ -381,6 +381,18 @@ flowchart TD
   `swarm build -- sh -c 'a && b'`). Automatic gc takes every slot first, so it
   never runs during a build.
 
+### Resource tracking (`swarm resources`)
+
+- **Is:** a sampler thread in the supervisor that records host CPU, pressure,
+  memory (anon and page cache apart), swap, disk throughput and real free space
+  (WSL-aware), and attributes CPU, memory and IO to each gated build and each
+  worker session. One sample a second while a build runs, one every 15 s idle.
+- **Why:** so raising `[build].max_concurrent`, `[build].jobs` or
+  `[swarm].max_workers` is decided from measured peaks, not guessed.
+  `swarm resources` shows now, the last day, the worst builds and the capacity
+  arithmetic. A build that holds a slot idle for 10 minutes is reported (never
+  killed). Details: [components.md](docs/components.md#resource-tracking-swarm-resources).
+
 ### Stop hook, recaps, notes, report
 
 - **Stop hook** (`scripts/stop-hook.py`, opt-in via `worker_settings`): appends
@@ -824,6 +836,7 @@ project path, so two projects with the same folder name never share state.
 | `recaps/<phase>.json` | Generated recaps. |
 | `meters/` | Per-phase meters, `limits.jsonl` (5-hour and weekly samples), `sessions.jsonl`. `limits.jsonl` is not rotated: a row is written only when a usage figure moves (a few hundred small rows a day at most), the open run's usage is computed from every sample since its start, and each closed run keeps its own slice in `history/runs/<id>/`. |
 | `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
+| `meters/resources.jsonl`, `meters/resources-1m.jsonl`, `meters/builds.jsonl`, `resources-now.json` | The resource sampler's samples (a day at full resolution, then a month of minute rows), one summary per finished heavy build, and the latest snapshot. Each file is bounded by age and bytes. |
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |

@@ -79,6 +79,7 @@ from . import telegram, tmux
 from . import usage as usage_mod
 from .config import Config, load
 from . import logutil
+from .resources import sampler as resources_mod
 from .logutil import Log
 
 
@@ -183,6 +184,9 @@ class Supervisor:
         # after start-up: `swarm down` pushes too, so nothing waits on this one.
         self._backup_thread: threading.Thread | None = None
         self._backup_last = time.time()
+        # The resource sampler (see resources/sampler.py): its own thread, started
+        # with the loop and stopped with it. It only reads /proc and writes meters/.
+        self._resources: resources_mod.Sampler | None = None
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -236,6 +240,7 @@ class Supervisor:
             f"SUPERVISOR-START pid={os.getpid()} driver={self.cfg.driver}"
             f" watchdog_s={self.watchdog_s:g}"
         )
+        self._start_resources()
         buf = b""
         try:
             while not self._stop:
@@ -306,6 +311,8 @@ class Supervisor:
             # window nothing owns is worse than leaving a master.
             operator_mod.release(self.cfg, self.log)
             self.bigpic.shutdown()
+            if self._resources is not None:
+                self._resources.stop()
             # A finished session's processes are ended off the loop thread; the
             # run's last `done` is often what finished it, so let those land.
             session_mod.join_reaps()
@@ -2280,6 +2287,23 @@ class Supervisor:
             backup_mod.run(self.cfg, self.log)
         except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
             self.log.line(f"BACKUP-ERROR {exc!r}")
+
+    # -- resource sampler -----------------------------------------------------
+    def _start_resources(self) -> None:
+        """Start the sampler thread. A sampler that cannot start is logged and
+        left out: measuring must never stop the swarm."""
+        try:
+            self._resources = resources_mod.Sampler(
+                lambda: self.cfg, notify=self._resources_ping, log=self.log.line)
+            self._resources.start()
+        except Exception as exc:  # noqa: BLE001 - optional instrument, never fatal
+            self._resources = None
+            self.log.line(f"RESOURCES-ERROR not started: {exc!r}")
+
+    def _resources_ping(self, key: str, msg: str) -> None:
+        """An idle build holder: the sampler rate-limits per build itself."""
+        self._ping(key, msg, cooldown=0.0, kind="idle-build",
+                   source="resources.sampler")
 
     # -- finish -----------------------------------------------------------
     def _finish(

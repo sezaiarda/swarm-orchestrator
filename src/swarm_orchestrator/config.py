@@ -478,6 +478,22 @@ class Config:
         doc="push unmerged work to origin on `swarm down`",
         why="read by `swarm down` itself, which loads the file afresh")
 
+    # -- [resources] ------------------------------------------------------
+    resources_enabled: bool = _k(
+        "resources", "enabled", True, HOT, env="SWARM_RESOURCES",
+        doc="sample host, builds and workers into meters/",
+        why="the sampler thread reads it before every step; off leaves the"
+            " thread idle, on resumes it")
+    resources_idle_s: int = _k(
+        "resources", "idle_s", 600, HOT, env="SWARM_RESOURCES_IDLE", minimum=60,
+        doc="warn when a build holds a slot idle this long (s)",
+        why="the sampler reads it on every sample")
+    resources_vhdx: str = _k(
+        "resources", "vhdx", "", RESTART, env="SWARM_RESOURCES_VHDX",
+        doc="WSL virtual disk to measure; \"\" = find it",
+        why="the sampler resolves the virtual disk once, when the supervisor"
+            " starts it")
+
     # -- [git] ------------------------------------------------------------
     git_isolation: str = _k(
         "git", "isolation", "none", RESTART, env="SWARM_GIT_ISOLATION",

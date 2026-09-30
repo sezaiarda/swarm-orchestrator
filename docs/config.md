@@ -272,6 +272,17 @@ failure is logged (`BACKUP` in `supervisor.log`) and never holds anything up.
 | `every_s` | `1800` | `SWARM_BACKUP_EVERY` | hot | A pass this often, on a supervisor thread, the first one a full interval after start-up. `0` turns the periodic pass off. |
 | `on_down` | `true` | `SWARM_BACKUP_ON_DOWN` | hot | `swarm down` (and so a drain) runs a pass once its sessions have ended, for at most about 5 minutes. |
 
+## `[resources]`
+
+The supervisor's resource sampler (see [components.md](components.md#resource-tracking-swarm-resources)
+and `swarm resources` in [cli.md](cli.md)). It reads `/proc` and never signals anything.
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `enabled` | `true` | `SWARM_RESOURCES` | hot | Sample the host, each gated build and each swarm session into `<state>/meters/` (one sample a second while a build runs, one every 15 s otherwise). `false` leaves the sampler idle. |
+| `idle_s` | `600` | `SWARM_RESOURCES_IDLE` | hot | A heavy build that holds a slot this long with its whole process tree under 1% of a core is an idle holder: `swarm doctor` warns, `swarm status` says so, and one telegram goes out (again hourly while it stays idle). Nothing is killed. At least 60. |
+| `vhdx` | `""` | `SWARM_RESOURCES_VHDX` | restart | Under WSL, the distro's virtual disk, used to compute real free space (slack inside the vhdx plus free space on the Windows drive). `""` finds it: the largest `ext4.vhdx` under `/mnt/*/Users/*/AppData/Local/wsl/` (or `…/Packages/*/LocalState/`). Ignored outside WSL. |
+
 ## `[web]`
 
 | key | default | env | reload | meaning |

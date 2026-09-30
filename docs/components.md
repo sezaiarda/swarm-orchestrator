@@ -574,6 +574,70 @@ to give those commands a generous timeout, since they may queue. Automatic gc
 takes every build slot before it deletes anything, so it never runs during a
 build.
 
+## Resource tracking (`swarm resources`)
+
+Whether `[build].max_concurrent`, `[build].jobs` or `[swarm].max_workers` can go
+up is a question about what a build and a worker actually take on this host.
+The supervisor answers it with a sampler thread of its own
+(`resources/sampler.py`), started with the loop and stopped with it. It only
+reads `/proc` and the state dir, and writes under `<state>/meters/`.
+
+- **Cadence.** Every second it makes a cheap check: has the gate's event log
+  grown, does anyone hold a build slot? While a build runs it takes a full sample
+  every second; otherwise every 15 s. A peak sampled every few seconds reads low
+  (a 2 s sampler missed a quarter of a 4 s ramp), so the fast rate is kept while
+  building.
+- **The host** (`resources/host.py`): CPU busy % from `/proc/stat`, load,
+  pressure from `/proc/pressure/{cpu,memory,io}` (the `total` stall counters
+  differenced over the sample, not the smoothed `avg10`), `MemAvailable`, anon
+  memory and page cache reported apart (`memory.peak` and `docker stats` count
+  cache, which overstates need several times), swap, and disk read/write MB/s
+  from `/proc/diskstats` (whole disks only).
+- **Disk** (`resources/disk.py`): free space every minute. Under WSL `df /`
+  shows the virtual disk's ceiling, not real room, so headroom is the vhdx's slack
+  (file size minus bytes used inside the distro) plus the free space of the
+  Windows drive holding it (`[resources].vhdx`, or found). Every ten minutes, on a
+  thread of its own, `du` at nice 19 and idle IO class (60 s budget each) sizes
+  the state dir, the worktrees and each shared build cache (`cache/target/*`,
+  resolved), and the growth per hour between two measurements.
+- **Builds** (`resources/builds.py`): the build holding each slot comes from the
+  gate's event log, `buildsem/events.jsonl` (`queued`, `start` with the build's
+  pid, `end` with its run time and exit code; a `start` whose process is gone
+  counts as ended, since a SIGKILLed build writes no `end`). Without that log,
+  the slot file's `flock` holder, read from `/proc/locks`, is the build. Each
+  sample sums over the build's process tree: CPU seconds (live processes'
+  `utime+stime+cutime+cstime`, which counts reaped compiler processes once),
+  anon and total RSS, and storage IO from `/proc/<pid>/io`.
+- **Sessions** (`resources/ptree.py`): each process is labelled once from its
+  environment (`SWARM_STATE_DIR` of this run, `SWARM_SESSION_ID`), children
+  inherit it. A worker's figures leave its builds out (they are the build's) and
+  count its processes' own CPU, so a reaped build is never charged to the shell
+  that ran it. The supervisor and dashboards are "swarm itself".
+- **Storage** (`resources/store.py`): `meters/resources.jsonl` holds every
+  sample for a day; hourly compaction folds older ones into
+  `meters/resources-1m.jsonl`, one row a minute with `[min, avg, max]` per figure
+  and per build/worker average cores and peak anon, kept 30 days. Each finished
+  heavy build gets a row in `meters/builds.jsonl`: id, phase, argv, cwd, wait,
+  run time, exit, CPU seconds, average and peak cores, peak anon and total RSS of
+  the tree, the lowest `MemAvailable` and the highest pressure during it, IO.
+  Byte caps (48, 32 and 8 MiB) win over the age limits. `<state>/resources-now.json`
+  holds the latest sample, what is running and the sampler's own cost.
+- **Idle holders.** A heavy build that holds a slot for `[resources].idle_s`
+  (default 600) with its whole tree under 1% of a core shows in `swarm status`,
+  as a `swarm doctor` WARN, in the dashboard's resources box, and pings once
+  (again hourly while it stays idle). Nothing is killed.
+- **Cost.** The thread's CPU time (`time.thread_time`) and `du`'s (from
+  `wait4`) are published in the snapshot, with the bytes written per day. On a
+  24-core host with a few hundred processes a full sample costs about 5 ms, so
+  1 s sampling is about half a percent of one core while building.
+- **`swarm resources`** prints now (host, each build, each session), the last
+  day as sparklines, the finished builds with the worst peaks, and a capacity
+  section: p95 per heavy build and per worker, and what 2 concurrent builds, 8
+  workers or doubled jobs would have needed against this host's RAM (85% of it,
+  the rest left to page cache and the kernel) and cores, with the arithmetic shown
+  and the data called thin under 5 builds or an hour of worker samples. `--json`
+  for scripts.
+
 ## Stop hook, recaps, notes and the report
 
 **Stop hook** (`scripts/stop-hook.py`, opt-in): register it as a `Stop` hook in
@@ -778,6 +842,10 @@ strip at the top lists them; the footer keeps the other keys, and `?` lists all)
      reaches (at the forecast's burn per busy worker-hour, times the workers busy
      now) against when the work is done, and a chart of each window over time
      (the last day of 5-hour, the current week) with the caps drawn across it;
+   - **resources:** the resource sampler's latest reading: CPU, memory
+     (available, anon, page cache), swap, pressure, disk write rate and free
+     space, and each running build (an idle holder in red). History and capacity
+     are `swarm resources`;
    - **alerts & notifications:** what needs you (`◆`), what is wrong now (the
      footer's list, and any warning or failure from the last doctor run), then
      every ping newest first: `✓` delivered, `·` held, `✗` never arrived.
@@ -933,6 +1001,8 @@ with `--attention`; a decision it needs first is asked with
 - a note from the init pass or a resolver (`swarm notify`);
 - the finish summary;
 - a usage cap pausing or stopping the swarm, and a usage pause lifting;
+- a heavy build holding a build slot with its whole process tree idle
+  (`[resources].idle_s`, default 10 minutes), again hourly while it stays idle;
 - the bot's answers to your `/usage` and `/help`.
 
 **Logged, not sent:** routine operator outcomes (the Overseer's digest lists

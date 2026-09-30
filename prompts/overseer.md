@@ -67,7 +67,9 @@ Go through the digest and ask, in this order:
   dependencies go in `needs:` — never add a `needs:` edge just to keep two rows
   apart: with lanes on, the scheduler already keeps rows that touch the same files
   apart. A starving slot has two fixes. Narrow an over-broad `touches:` with
-  `swarm reshape --touches`. Or split the row: file the parts as new rows with
+  `swarm reshape --touches`; on a phase in flight (a parked one included) this
+  also narrows the lane it holds, and is refused, naming the files, if the new
+  touches leave out anything its worktree has already changed. Or split the row: file the parts as new rows with
   `swarm follow-up <phase> <new-id> --title "<one line>" --needs <ids> --touches
   <t1,t2> "<what it must deliver>"`, so they can run side by side. Loosen a
   `needs:` that is not real with `--drop-needs`. File new rows for the risks and

@@ -386,6 +386,78 @@ def lane_view(cfg: Config, st: state_mod.State) -> LaneView:
     return LaneView(rows, held, issues, frozenset(ledger_mod.parse(text)))
 
 
+def _changed_paths(cfg: Config, repo: Path, main: str, phase: str) -> set[str]:
+    """What ``phase`` changed in ``repo`` against its base: committed on
+    ``swarm/<phase>`` since it left ``main``, edited in its worktree, or new and
+    not ignored there. Nested repos are left out; raises :class:`gitq.GitError`."""
+    def names(where: Path, *args: str) -> set[str]:
+        return {p for p in gitq._git(where, *args).stdout.splitlines() if p.strip()}
+
+    branch = f"swarm/{phase}"
+    out = names(repo, "diff", "--name-only", f"{main}...{branch}") \
+        if gitq._branch_exists(repo, branch) else set()
+    wt = gitq._wt_for(cfg, repo, phase)
+    if gitq._is_worktree(wt):
+        spec = ["--", ".", *(f":(exclude){p}" for p in gitq._nested_repos(cfg, repo))]
+        out |= names(wt, "diff", "--name-only", "HEAD", *spec)
+        out |= names(wt, "ls-files", "--others", "--exclude-standard", *spec)
+    return out
+
+
+def lane_changes(cfg: Config, phase: str, lanes: set[str]) -> tuple[list[str], set[str]]:
+    """What ``phase`` has changed in each repo lane of ``lanes``, as
+    ``<lane>/<path>`` with ``[lanes] commons`` left out, and the lanes whose
+    changes cannot be read: a resource, an external repo (it has no mirror),
+    every repo under isolation ``none`` (one shared checkout) and a repo git
+    could not answer for."""
+    from . import landing  # landing imports this module; keep it lazy
+
+    changed: list[str] = []
+    blind: set[str] = set()
+    for lane in sorted(lanes):
+        found = landing.repo_for(cfg, lane) if cfg.git_isolation == "worktree" else None
+        try:
+            paths = _changed_paths(cfg, *found, phase) if found else None
+        except gitq.GitError:
+            paths = None
+        if paths is None:
+            blind.add(lane)
+            continue
+        changed += [f"{lane}/{p}" for p in landing._commons(cfg, lane, sorted(paths))]
+    return changed, blind
+
+
+def relane(cfg: Config, st: state_mod.State, phase: str, touches: list[lanes_mod.Touch],
+           dirs: list[str]) -> tuple[list[str], list[str]] | None:
+    """The lane a reshape to ``touches`` gives ``phase`` while it is in flight,
+    and the lane it held until then, as snapshots; None when it is not in
+    flight. Refused (:class:`ledgerw.ReportError`, naming each path) when the
+    new lane leaves out a path it has changed in a repo its row names (its
+    ``dirs``, its held lane and ``touches``), or a touch it holds where its
+    changes cannot be read, unless that touch is kept or its whole lane is."""
+    held = lane_view(cfg, st).held.get(phase)
+    if held is None:
+        return None
+    new = frozenset(touches)
+    repos = set(lanes_mod.repos_of(held) | lanes_mod.repos_of(new))
+    repos |= {d.rstrip("/") or "." for d in dirs}
+    changed, blind = lane_changes(cfg, phase, repos)
+
+    def covered(path: str) -> bool:
+        lane, _, rest = path.partition("/")
+        file = lanes_mod.Touch(lane, tuple(rest.split("/")))
+        return any(lanes_mod.overlaps(file, t) for t in new)
+
+    left = [p for p in changed if not covered(p)]
+    left +=[f"{t} (its changes there cannot be read)" for t in sorted(held)
+             if (t.is_resource or t.lane in blind) and t not in new
+             and lanes_mod.Touch(t.lane, (lanes_mod.DEEP,)) not in new]
+    if left:
+        raise ledgerw.ReportError(
+            f"{phase} is in flight and the new touches leave out what it holds: {' '.join(left)}")
+    return sorted(str(t) for t in new), sorted(str(t) for t in held)
+
+
 def _lane_busy(cfg: Config, st: state_mod.State, phase: str) -> str | None:
     """The lane backstop, under the claiming flock: record ``phase``'s lane, or
     say why it may not launch (its touches do not parse, or a phase in flight

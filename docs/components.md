@@ -351,7 +351,10 @@ report is held and the watchdog retries it; nothing is lost across a restart.
 - **`reshape`** edits an open row's `needs:` or `touches:`. The writer re-checks it
   on the target branch and applies it through `[tasks].ledger_gate`; a failing
   gate leaves the ledger byte for byte as it was and records the refusal in the
-  filer's history.
+  filer's history. A `--touches` reshape of a phase in flight also replaces its
+  `State.lanes` snapshot once the edit lands (`launch.relane`), but only if the
+  new lane still covers every file its mirror changed against its base; else it
+  is refused and names them.
 - **The history** is `<history>/<family>.md` (the id up to its first `-`), one
   `## ` section per phase with dated `### ` entries. Past `history_split_kb` it
   becomes `<history>/<family>/<id>.md`. The web board's detail sheet shows it

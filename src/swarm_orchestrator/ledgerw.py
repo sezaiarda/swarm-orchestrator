@@ -729,9 +729,30 @@ def file_reshape(cfg: Config, by: str, phase: str, why: str, *, needs: list[str]
         raise ReportError("say why: the reason goes to the row's history")
     op = {"kind": "reshape", "by": by, "phase": phase, "needs": needs, "add": list(add),
           "drop": list(drop), "touches": touches, "why": why.strip()}
-    reshape_row(_ledger_text(cfg), phase, **_reshape_args(cfg, op))
+    text = _ledger_text(cfg)
+    reshape_row(text, phase, **_reshape_args(cfg, op))
+    moved = _relane(cfg, text, phase, touches)
+    if moved is not None:
+        op["held"] = moved[1]  # a touch widened after this is kept when it lands
     queue(cfg, NOW, op)
     return NOW
+
+
+def _relane(cfg: Config, text: str, phase: str,
+            touches: list[str] | None) -> tuple[list[str], list[str]] | None:
+    """What a reshape to ``touches`` makes the lane ``phase`` holds, if it is in
+    flight (:func:`launch.relane`, which refuses a lane that leaves out what its
+    worktree changed), with the lane it held until now; None when there is
+    nothing to move: lanes off, no ``--touches`` or the phase not in flight."""
+    if touches is None or not cfg.lanes_enabled:
+        return None
+    from . import launch as launch_mod
+    from . import state as state_mod
+
+    known = _known_lanes(cfg)
+    lane = [lanes_mod.parse_touch(t, known) for t in touches]
+    return launch_mod.relane(cfg, state_mod.read(cfg), phase, lane,
+                             ledger_mod.dirs(text).get(phase, []))
 
 
 # -- applying -------------------------------------------------------------
@@ -744,6 +765,8 @@ class Applied:
     released: bool = False
     #: Ticked phases whose needs were not carried, because lanes are on.
     carry_skipped: list[str] = field(default_factory=list)
+    #: Phases in flight a reshape gave a new lane: ``{phase: (new, held when filed)}``.
+    relaned: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
 
 
 def _run_gate(cfg: Config, root: Path) -> str:
@@ -867,6 +890,9 @@ def apply(cfg: Config, root: Path, key: str, data: dict, status: str | None,
             def edit(op=op, phase=phase) -> str:
                 nonlocal said
                 out, said = reshape_row(text, phase, **_reshape_args(cfg, op))
+                moved = _relane(cfg, text, phase, op.get("touches"))
+                if moved is not None:
+                    res.relaned[phase] = (moved[0], op.get("held") or moved[1])
                 return out
 
             filer = who if who in ledger_mod.parse(text) else phase
@@ -941,6 +967,7 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
             total.touched += got.touched
             total.refused += got.refused
             total.carry_skipped += got.carry_skipped
+            total.relaned.update(got.relaned)
             total.released |= got.released
 
     what = _summary(due, queued)
@@ -975,7 +1002,27 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
         log.line(f"LEDGER-REFUSED {line}")
     for phase in total.carry_skipped:
         log.line(f"CARRY-SKIPPED {phase} lanes")
+    _hold_relaned(cfg, total.relaned, log)
     return total
+
+
+def _hold_relaned(cfg: Config, relaned: dict[str, tuple[list[str], list[str]]],
+                  log: Log) -> None:
+    """Write each landed reshape's lane into the snapshot the scheduler reads
+    (``State.lanes``), for a phase still in flight. A touch its worker widened
+    since the reshape was filed is kept: widen only ever adds."""
+    if not relaned:
+        return
+    from . import state as state_mod
+
+    with state_mod.transaction(cfg) as st:
+        live = {*st.claimed_phases(), *st.integrating()}
+        for phase, (new, before) in sorted(relaned.items()):
+            if phase not in live:
+                continue
+            widened = set(st.lanes.get(phase) or []) - set(before)
+            st.lanes[phase] = sorted({*new, *widened})
+            log.line(f"LANE-RESHAPED {phase} {' '.join(before)} -> {' '.join(st.lanes[phase])}"[:600])
 
 
 def release_due(cfg: Config, log: Log) -> list[str]:

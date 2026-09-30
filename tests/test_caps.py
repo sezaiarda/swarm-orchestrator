@@ -118,10 +118,80 @@ def test_down_acts_once_per_window():
     assert nxt.down is not None
 
 
-# -- readings ----------------------------------------------------------------------
-def _sample(ts, week=None, five=None, week_reset=WEEK_RESET, five_reset=FIVE_RESET):
+def _sample(ts, week=None, five=None, week_reset=WEEK_RESET, five_reset=FIVE_RESET, account=None):
     return usage_mod.Sample(ts=ts, week_pct=week, week_resets_at=week_reset,
-                            five_pct=five, five_resets_at=five_reset)
+                            five_pct=five, five_resets_at=five_reset, account=account)
+
+
+# -- accounts ----------------------------------------------------------------------
+A, B = "acct-a", "acct-b"
+
+
+def _on(account, reads, **kw):
+    kw.setdefault("now", NOW)
+    return caps.evaluate(kw.pop("rules", RULES), reads, kw.pop("hold", {}), kw.pop("fired", {}),
+                         kw.pop("override", {}), kw.pop("now"), account)
+
+
+def test_a_hold_lifts_when_another_account_reads_under_the_limit():
+    hold = _on(A, {"week": _r(91)}).hold
+    assert hold["week"]["account"] == A
+    # The new account's week resets *before* the held one: under the old rule
+    # that read as a lagging reading of the held window, and held until 03:00.
+    for resets in (NOW + 3600, WEEK_RESET + 6 * 86400):
+        out = _on(B, {"week": _r(2, resets, NOW + 60)}, hold=hold, now=NOW + 60)
+        assert out.hold == {} and out.switched == ["week"] and not out.lifted
+
+
+def test_the_same_accounts_lagging_reading_never_lifts_its_hold():
+    hold = _on(A, {"week": _r(91)}).hold
+    for account, reads in ((A, {"week": _r(44)}), (B, {})):  # lagging; nothing fresh on B
+        out = _on(account, reads, hold=hold, now=NOW + 600)
+        assert out.hold == hold and not (out.lifted or out.switched or out.released)
+
+
+def test_a_switch_to_an_account_over_the_limit_holds_it_anew():
+    hold = _on(A, {"week": _r(91)}).hold
+    out = _on(B, {"week": _r(95, NOW + 3600, NOW + 60)}, hold=hold, now=NOW + 60)
+    assert out.held == ["week"]
+    assert out.hold["week"] == {"at": 60, "pct": 95, "resets_at": NOW + 3600,
+                                "since": NOW + 60, "account": B}
+
+
+def test_down_crossings_and_overrides_are_per_account():
+    first = _on(A, {"week": _r(71)})
+    assert first.down is not None and first.fired == {"week:70@acct-a": WEEK_RESET}
+    other = _on(B, {"week": _r(72, NOW + 3600)}, fired=first.fired)
+    assert other.down is not None
+    back = _on(A, {"week": _r(73)}, fired=other.fired)  # A's window again: acted already
+    assert back.down is None
+    # An override written before the tag (plain key) still counts for its own window.
+    assert _on(A, {"week": _r(71)}, fired={"week:70": WEEK_RESET}).down is None
+    override = {"week": WEEK_RESET, "week@acct-a": WEEK_RESET}
+    assert _on(A, {"week": _r(65)}, override=override).hold == {}
+    assert _on(B, {"week": _r(65, NOW + 3600)}, override=override).held == ["week"]
+
+
+def test_a_hold_from_before_the_tag_is_adopted_by_its_own_window():
+    legacy = {"week": {"at": 60, "pct": 61, "resets_at": WEEK_RESET, "since": NOW}}
+    assert _on(A, {"week": _r(62)}, hold=legacy).hold["week"]["account"] == A
+    out = _on(A, {"week": _r(44)}, hold=legacy)  # lagging, but its own window
+    assert out.hold["week"] == legacy["week"] | {"account": A}
+    # Without an account on either side it is the old rule, untouched.
+    assert _on(None, {"week": _r(44)}, hold=legacy).hold == legacy
+
+
+def test_readings_never_blend_accounts():
+    samples = [_sample(NOW - 60, week=91, five=50, account=A),
+               _sample(NOW - 30, week=2, five=1, week_reset=NOW + 3600, five_reset=NOW + 1800,
+                       account=B)]
+    assert caps.readings(usage_mod.of_account(samples, B), NOW, 1800)["week"].pct == 2
+    assert caps.readings(usage_mod.of_account(samples, A), NOW, 1800)["week"].pct == 91
+    line = caps.reading_line(caps.readings(usage_mod.of_account(samples, B), NOW, 1800), NOW, B)
+    assert line.startswith("Usage now: weekly 2%, 5-hour 1% (as of") and "account acct-b" in line
+
+
+# -- readings ----------------------------------------------------------------------
 
 
 def test_a_reading_is_the_highest_fresh_figure_of_the_newest_window():
@@ -234,12 +304,13 @@ def sup(cfg, api, monkeypatch):
     s.log.close()
 
 
-def _tap(cfg, week=None, five=None, ago=60.0, week_reset=None, five_reset=None):
+def _tap(cfg, week=None, five=None, ago=60.0, week_reset=None, five_reset=None, account=None):
     now = time.time()
     row = usage_mod.sample_row(
         now - ago, None,
         None if five is None else {"pct": five, "resets_at": five_reset or now + 7200},
-        None if week is None else {"pct": week, "resets_at": week_reset or now + 3 * 86400})
+        None if week is None else {"pct": week, "resets_at": week_reset or now + 3 * 86400},
+        account)
     path = cfg.state_dir / "meters" / "limits.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
@@ -358,6 +429,49 @@ def test_turning_caps_off_by_reload_lifts_the_hold(sup, cfg, monkeypatch):
     assert sup.stub_launches[:2] == ["P0", "P1"]
 
 
+def _login(tmp_path, monkeypatch, uuid):
+    path = tmp_path / f"claude-{uuid[-1]}.json"
+    path.write_text(json.dumps({"oauthAccount": {"accountUuid": uuid}}))
+    monkeypatch.setenv("SWARM_CLAUDE_JSON", str(path))
+    return usage_mod.account_key(uuid)
+
+
+def test_a_login_switch_lifts_the_hold_at_once(sup, cfg, tmp_path, api, monkeypatch):
+    """The owner's case: held at 90% weekly on one account, then ``/login`` to
+    another whose week is at 0% and resets later — or sooner."""
+    a = _login(tmp_path, monkeypatch, "00000000-0000-0000-0000-00000000000a")
+    _tap(cfg, week=91, five=20, week_reset=time.time() + 3 * 3600, account=a)
+    sup._usage_tick()
+    assert state_mod.read(cfg).usage_hold["week"]["account"] == a
+    b = _login(tmp_path, monkeypatch, "00000000-0000-0000-0000-00000000000b")
+    now = time.time()
+    with state_mod.transaction(cfg) as st:
+        st.usage_api_at = now  # the endpoint was just asked: a switch asks again anyway
+    api.answer = (usage_mod.sample_row(now, None, {"pct": 0, "resets_at": now + 7200},
+                                       {"pct": 1, "resets_at": now + 3600}, b) | {"src": "api"},
+                  "ok")
+    sup._usage_tick()  # long before `check_s`: the switch is checked at once
+    assert len(api.calls) == 1
+    assert state_mod.read(cfg).usage_hold == {}
+    assert f"USAGE-LIFT week account switched to {b}" in cfg.supervisor_log.read_text()
+    assert _tg(tmp_path)[-1].startswith(
+        f"Swarm resumed: the weekly cap held another account; Claude is now logged in as "
+        f"account {b}, whose weekly usage is 1%.")
+    assert sup.stub_launches[:2] == ["P0", "P1"]
+    sup._usage_tick()  # same login, inside the interval: no further check
+    assert len(api.calls) == 1
+
+
+def test_a_lagging_reading_of_the_held_account_keeps_the_hold(sup, cfg, tmp_path, monkeypatch):
+    a = _login(tmp_path, monkeypatch, "00000000-0000-0000-0000-00000000000a")
+    _tap(cfg, week=91, five=20, account=a)
+    sup._usage_check(time.time())
+    _tap(cfg, week=40, five=20, ago=0, account=a)  # a session whose status line lags
+    _tap(cfg, week=5, five=5, ago=0, week_reset=time.time() + 3600)  # untagged: anyone's
+    sup._usage_check(time.time())
+    assert state_mod.read(cfg).usage_hold["week"]["pct"] == 91
+
+
 def test_the_check_is_scheduled_not_polled(sup, cfg):
     sup._usage_tick()
     left = sup._next_timeout()
@@ -391,6 +505,14 @@ def test_override_runs_until_the_reset(cfg, capsys):
         capsys.readouterr().out)
     st = state_mod.read(cfg)
     assert st.usage_hold == {} and st.usage_override == {"week": reset}
+    # A hold on a known account is overridden for that account; the plain key
+    # stays for a supervisor older than the tag.
+    with state_mod.transaction(cfg) as st:
+        st.usage_override = {}
+        st.usage_hold = {"week": {"at": 60, "pct": 61, "resets_at": reset,
+                                  "since": time.time(), "account": "acct-a"}}
+    assert cli_main(["--project-dir", str(cfg.project_dir), "resume", "--override-cap"]) == 0
+    assert state_mod.read(cfg).usage_override == {"week": reset, "week@acct-a": reset}
 
 
 def test_status_why_and_doctor_say_it_in_plain_english(cfg, capsys):

@@ -572,8 +572,10 @@ def cmd_usage(cfg: Config, as_json: bool, last: int) -> int:
     cur = usage_mod.live_summary(cfg, src, now)
     past = usage_mod.past_summaries(cfg.state_dir, last)
     if as_json:
-        return _dump({"current": cur, "runs": past,
-                      "now": {w: usage_mod.latest(src.samples, w, now) for w in ("five", "week")},
+        account = usage_mod.active_account(src.samples)
+        mine = usage_mod.of_account(src.samples, account)
+        return _dump({"current": cur, "runs": past, "account": account,
+                      "now": {w: usage_mod.latest(mine, w, now) for w in ("five", "week")},
                       "note": usage_mod.SKEW_NOTE})
     print(usage_mod.render(cur, past, src.samples, now))
     return 0
@@ -1873,7 +1875,10 @@ def cmd_resume(cfg: Config, override_cap: bool = False) -> int:
         hold = dict(st.usage_hold)
         if override_cap:
             for window, h in hold.items():
+                # The plain key is what a supervisor older than the account tag reads.
                 st.usage_override[window] = h.get("resets_at") or now
+                if h.get("account"):
+                    st.usage_override[f"{window}@{h['account']}"] = h.get("resets_at") or now
             st.usage_hold = {}
     if scheduled:
         _log_pause_schedule(

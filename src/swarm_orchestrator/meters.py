@@ -10,8 +10,8 @@ the owner stepped in).
 
 So each worker's settings carry this module as its status line
 (:func:`settings_with_tap`). It writes ``<state>/meters/<phase>.json`` and, when
-the 5-hour or weekly figure moves, appends a sample tagged with the open run to
-``meters/limits.jsonl`` (see :mod:`swarm_orchestrator.usage`) — then runs
+the 5-hour or weekly figure moves, appends a sample tagged with the open run and
+the logged-in account to ``meters/limits.jsonl`` (see :mod:`swarm_orchestrator.usage`) — then runs
 the owner's own status line on the same payload and prints what it prints, so a
 pane looks exactly as it did and the pane-scraped meter keeps working.
 
@@ -112,7 +112,13 @@ def record(payload: dict, state_dir: str | Path, phase: str, now: float | None =
         "effort": (payload.get("effort") or {}).get("level") if isinstance(payload.get("effort"), dict) else None,
         "five_hour": _window(limits, "five_hour"),
         "seven_day": _window(limits, "seven_day"),
+        "account": prev.get("account"),
     }
+    figures = meter["five_hour"] != prev.get("five_hour") or meter["seven_day"] != prev.get("seven_day")
+    if figures and (meter["five_hour"] or meter["seven_day"]):
+        # The login the figures were read under: looked up only when they
+        # move, never on a plain render (the file is Claude Code's whole config).
+        meter["account"] = usage.login_account()
     moved = any(meter[k] != prev.get(k) for k in meter if k not in _VOLATILE)
     # The previous write's own timestamp, not the file's mtime: one clock, and
     # no extra stat per render.
@@ -129,8 +135,8 @@ def record(payload: dict, state_dir: str | Path, phase: str, now: float | None =
             "ts", "phase", "session_id", "started_at", "cost_usd", "duration_ms")})
 
     five, week = meter["five_hour"], meter["seven_day"]
-    if (five or week) and (five != prev.get("five_hour") or week != prev.get("seven_day")):
-        row = usage.sample_row(now, runs.current_id(state_dir), five, week)
+    if (five or week) and figures:
+        row = usage.sample_row(now, runs.current_id(state_dir), five, week, meter["account"])
         # Every worker reports the same account-wide figures, so each change
         # would otherwise be logged once per worker. Compare with the last row
         # written by anyone; reading a file's last kilobyte is cheap and only

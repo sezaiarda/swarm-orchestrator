@@ -154,7 +154,7 @@ class State:
     # window, not a lost nudge, and only the supervisor's memory knew it.
     bootstrapping: bool = False
     # Usage caps (see :mod:`caps`). ``usage_hold`` is the cap's own pause,
-    # ``{window: {at, pct, resets_at, since}}``: kept apart from ``paused`` so
+    # ``{window: {at, pct, resets_at, since, account}}``: kept apart from ``paused`` so
     # lifting it never undoes a pause the owner made, and ``swarm resume`` never
     # silently overrides it. ``usage_fired`` remembers which ``down`` rule acted
     # in which window, ``usage_override`` the windows the owner chose to run

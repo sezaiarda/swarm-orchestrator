@@ -197,6 +197,8 @@ def _usage_caps_off(monkeypatch):
     monkeypatch.setenv("SWARM_USAGE", "0")
     # Belt and braces: an in-process check that does run finds no login to send.
     monkeypatch.setattr(caps, "CREDENTIALS", Path("/nonexistent/.credentials.json"))
+    # Nor any account: samples are tagged, and read, as if logged out.
+    monkeypatch.setenv("SWARM_CLAUDE_JSON", "/nonexistent/.claude.json")
 
 
 @pytest.fixture(autouse=True)

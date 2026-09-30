@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 
-from swarm_orchestrator import launch, meters
+from swarm_orchestrator import launch, meters, usage
 from swarm_orchestrator.config import load
 
 
@@ -44,9 +44,44 @@ def test_limit_samples_are_logged_only_when_a_figure_moves(tmp_path):
         meters.record(payload(week=week), tmp_path, "P1", now=now)
     rows = [json.loads(r) for r in (tmp_path / "meters" / "limits.jsonl").read_text().splitlines()]
     assert [r["week_pct"] for r in rows] == [41.0, 42.0]
-    # Both windows ride on every row, tagged with the run (none open here).
+    # Both windows ride on every row, tagged with the run (none open here) and
+    # the account (none logged in here).
     assert rows[0] == {"ts": 100.0, "run_id": None, "five_pct": 12, "five_resets_at": 1_900_000_000 - 3600,
-                       "week_pct": 41.0, "week_resets_at": 1_900_000_000}
+                       "week_pct": 41.0, "week_resets_at": 1_900_000_000, "account": None}
+
+
+def _login(tmp_path, monkeypatch, uuid):
+    path = tmp_path / ".claude.json"
+    path.write_text(json.dumps({"oauthAccount": {
+        "accountUuid": uuid, "emailAddress": "someone@example.com"}}))
+    monkeypatch.setenv("SWARM_CLAUDE_JSON", str(path))
+
+
+def test_a_sample_carries_a_hash_of_the_login_never_the_login(tmp_path, monkeypatch):
+    uuid_a = "00000000-0000-0000-0000-00000000000a"
+    _login(tmp_path, monkeypatch, uuid_a)
+    meters.record(payload(week=41.0), tmp_path, "P1", now=100.0)
+    text = (tmp_path / "meters" / "limits.jsonl").read_text()
+    row = json.loads(text)
+    assert row["account"] == usage.account_key(uuid_a) and len(row["account"]) == 8
+    assert uuid_a not in text and "example.com" not in text
+    assert "example.com" not in (tmp_path / "meters" / "P1.json").read_text()
+    # A switch to another account with the very same figures is still a new row.
+    _login(tmp_path, monkeypatch, "00000000-0000-0000-0000-00000000000b")
+    meters.record(payload(week=42.0, session="s2"), tmp_path, "P2", now=101.0)
+    meters.record(payload(week=42.0), tmp_path, "P1", now=110.0)
+    rows = [json.loads(r) for r in (tmp_path / "meters" / "limits.jsonl").read_text().splitlines()]
+    assert [r["week_pct"] for r in rows] == [41.0, 42.0]
+    assert rows[1]["account"] == usage.account_key("00000000-0000-0000-0000-00000000000b")
+
+
+def test_the_account_is_looked_up_only_when_a_figure_moves(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(usage, "login_account", lambda: calls.append(1) or "acct-a")
+    meters.record(payload(week=41.0), tmp_path, "P1", now=100.0)
+    meters.record(payload(week=41.0, tokens=500_000), tmp_path, "P1", now=110.0)
+    assert len(calls) == 1
+    assert json.loads((tmp_path / "meters" / "P1.json").read_text())["account"] == "acct-a"
 
 
 def test_a_limit_change_seen_by_two_workers_is_logged_once_with_the_open_run(tmp_path):

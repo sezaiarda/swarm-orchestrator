@@ -175,6 +175,8 @@ class Supervisor:
         # Usage caps (see `_usage_tick`): the last check, and the tap's samples
         # read incrementally, since `limits.jsonl` is never rotated.
         self._usage_last = 0.0
+        # The login the last check ran under: a switch is checked at once.
+        self._usage_login: str | None = None
         self._usage_tail = usage_mod.SampleTail(
             cfg.state_dir / usage_mod.METERS_DIR / usage_mod.LIMITS_LOG)
         # Periodic backup pushes (see `_backup_tick`), first one a full interval
@@ -2166,9 +2168,14 @@ class Supervisor:
     def _usage_tick(self) -> None:
         """Check usage against the caps, at most once per ``[usage].check_s``.
 
-        Runs with the caps off too, so that turning them off lifts a hold."""
+        Runs with the caps off too, so that turning them off lifts a hold. A
+        switch of the logged-in account checks at once: a hold on the old
+        account should not wait out the interval once the new one reads under
+        its limit."""
         now = time.time()
-        if now - self._usage_last >= self.cfg.usage_check_s:
+        login = usage_mod.login_account()
+        if now - self._usage_last >= self.cfg.usage_check_s or (
+                login is not None and login != self._usage_login):
             self._usage_check(now)
 
     def _usage_check(self, now: float) -> bool:
@@ -2177,15 +2184,21 @@ class Supervisor:
 
         The tap's samples come first. Only when they hold no fresh reading does
         this ask the usage endpoint, at most once per :data:`caps.API_MIN_GAP_S`
-        across restarts; a failed call is logged and the last reading stands.
+        across restarts — or at once after an account switch, whose account has
+        nothing fresh yet; a failed call is logged and the last reading stands.
+        Only the samples of the account in use count (:func:`usage.active_account`).
         """
         self._usage_last = now
         cfg = self.cfg
         rules = cfg.usage_rules if cfg.usage_enabled else []
+        login = usage_mod.login_account()
+        switched = None not in (login, self._usage_login) and login != self._usage_login
+        self._usage_login = login
         self._usage_tail.poll()
-        samples = self._usage_tail.samples
+        account = usage_mod.active_account(self._usage_tail.samples)
+        samples = usage_mod.of_account(self._usage_tail.samples, account)
         if cfg.usage_enabled and caps.needs_api(samples, now, cfg.usage_stale_s):
-            if now - state_mod.read(cfg).usage_api_at >= caps.API_MIN_GAP_S:
+            if switched or now - state_mod.read(cfg).usage_api_at >= caps.API_MIN_GAP_S:
                 with state_mod.transaction(cfg) as st:
                     st.usage_api_at = now
                 row, note = caps.fetch_api(cfg.state_dir, now)
@@ -2193,15 +2206,16 @@ class Supervisor:
                 if row is not None:
                     caps.record_api(cfg.state_dir, row)
                     self._usage_tail.poll()
-                    samples = self._usage_tail.samples
+                    samples = usage_mod.of_account(self._usage_tail.samples, account)
         reads = caps.readings(samples, now, cfg.usage_stale_s)
         with state_mod.transaction(cfg) as st:
             out = caps.evaluate(rules, reads, st.usage_hold, st.usage_fired,
-                                st.usage_override, now)
+                                st.usage_override, now, account)
             st.usage_hold, st.usage_fired, st.usage_override = out.hold, out.fired, out.override
             on_hold = st.on_hold
         figures = " ".join(f"{w}={r.pct:g}%" for w, r in sorted(reads.items())) or "unknown"
-        self.log.line(f"USAGE-CHECK {figures} held={','.join(sorted(out.hold)) or '-'}")
+        self.log.line(f"USAGE-CHECK {figures} account={account or '?'} "
+                      f"held={','.join(sorted(out.hold)) or '-'}")
         for window in out.held:
             h = out.hold[window]
             self.log.line(f"USAGE-HOLD {window} {h['pct']:g}% limit={h['at']:g}%")
@@ -2210,6 +2224,9 @@ class Supervisor:
         for window in out.lifted:
             self.log.line(f"USAGE-LIFT {window} window reset")
             self._usage_ping(caps.lift_ping(window, reads.get(window)))
+        for window in out.switched:
+            self.log.line(f"USAGE-LIFT {window} account switched to {account}")
+            self._usage_ping(caps.switch_ping(window, reads.get(window), account))
         for window in out.released:
             self.log.line(f"USAGE-RELEASE {window} no rule holds it now")
         if out.down is not None:
@@ -2218,7 +2235,7 @@ class Supervisor:
             self._usage_ping(caps.down_ping(d, now, bool(out.hold)))
             self._usage_down()
             return True
-        if (out.lifted or out.released) and not on_hold:
+        if (out.lifted or out.switched or out.released) and not on_hold:
             self._fill_slots("usage cap lifted")
         return False
 

@@ -13,11 +13,19 @@ window's first reading as usage since that reset.
 
 Both figures are account-wide. Any other Claude session on the same login in
 the same hours counts too, and nothing here can tell those apart.
+
+The owner may switch the logged-in account (``/login``) mid-run, so every sample
+carries the account it was read under (:func:`login_account`): a short hash of
+Claude Code's ``accountUuid``, never the uuid or the email themselves. Figures
+of two accounts are never blended; rows written before the tag existed load as
+account unknown.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +49,44 @@ def _num(value) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+# -- the logged-in account ------------------------------------------------------
+#: Claude Code's global config; its ``oauthAccount`` is the login every session
+#: uses, rewritten by ``/login``. ``SWARM_CLAUDE_JSON`` points elsewhere (the
+#: suite points it nowhere).
+CLAUDE_JSON = Path.home() / ".claude.json"
+
+_login_seen: tuple = (None, None)
+
+
+def account_key(uuid: str) -> str:
+    """The short, stable name an account goes by here: never the uuid itself."""
+    return hashlib.sha256(uuid.encode("utf-8")).hexdigest()[:8]
+
+
+def login_account() -> str | None:
+    """:func:`account_key` of the account Claude Code is logged in as now,
+    ``None`` when that cannot be read. The file is parsed again only when it
+    changed, so a caller on every tick costs a ``stat``."""
+    global _login_seen
+    path = Path(os.environ.get("SWARM_CLAUDE_JSON") or CLAUDE_JSON)
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    stamp = (str(path), st.st_mtime_ns, st.st_size)
+    if _login_seen[0] == stamp:
+        return _login_seen[1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    oauth = data.get("oauthAccount") if isinstance(data, dict) else None
+    uuid = oauth.get("accountUuid") if isinstance(oauth, dict) else None
+    key = account_key(uuid) if isinstance(uuid, str) and uuid else None
+    _login_seen = (stamp, key)
+    return key
+
+
 # -- samples ------------------------------------------------------------------
 @dataclass(frozen=True)
 class Sample:
@@ -52,6 +98,8 @@ class Sample:
     five_resets_at: float | None = None
     week_pct: float | None = None
     week_resets_at: float | None = None
+    #: :func:`account_key` of the login it was read under; ``None`` = unknown.
+    account: str | None = None
 
 
 def parse_sample(row) -> Sample | None:
@@ -60,24 +108,27 @@ def parse_sample(row) -> Sample | None:
     if "pct" in row and "week_pct" not in row:  # written before runs existed
         return Sample(ts=_num(row["ts"]), week_pct=_num(row.get("pct")),
                       week_resets_at=_num(row.get("resets_at")))
-    rid = row.get("run_id")
+    rid, acct = row.get("run_id"), row.get("account")
     return Sample(
         ts=_num(row["ts"]), run_id=rid if isinstance(rid, str) else None,
         five_pct=_num(row.get("five_pct")), five_resets_at=_num(row.get("five_resets_at")),
         week_pct=_num(row.get("week_pct")), week_resets_at=_num(row.get("week_resets_at")),
+        account=acct if isinstance(acct, str) and acct else None,
     )
 
 
-def sample_row(ts: float, run_id: str | None, five: dict | None, week: dict | None) -> dict:
+def sample_row(ts: float, run_id: str | None, five: dict | None, week: dict | None,
+               account: str | None = None) -> dict:
     """The row the tap appends. ``five``/``week`` are the meter's ``{"pct", "resets_at"}``."""
     five, week = five or {}, week or {}
     return {"ts": ts, "run_id": run_id,
             "five_pct": five.get("pct"), "five_resets_at": five.get("resets_at"),
-            "week_pct": week.get("pct"), "week_resets_at": week.get("resets_at")}
+            "week_pct": week.get("pct"), "week_resets_at": week.get("resets_at"),
+            "account": account}
 
 
 def same_values(a: dict, b: dict) -> bool:
-    keys = ("five_pct", "five_resets_at", "week_pct", "week_resets_at")
+    keys = ("five_pct", "five_resets_at", "week_pct", "week_resets_at", "account")
     return all(a.get(k) == b.get(k) for k in keys)
 
 
@@ -121,6 +172,30 @@ def load_samples(path: Path) -> list[Sample]:
     tail = SampleTail(path)
     tail.poll()
     return tail.samples
+
+
+def newest_account(samples: list[Sample]) -> str | None:
+    """The account of the newest tagged sample."""
+    tagged = [s for s in samples if s.account is not None]
+    return max(tagged, key=lambda s: s.ts).account if tagged else None
+
+
+def active_account(samples: list[Sample]) -> str | None:
+    """The account the swarm runs on now: the login, else the newest tag."""
+    return login_account() or newest_account(samples)
+
+
+def of_account(samples: list[Sample], account: str | None) -> list[Sample]:
+    """``account``'s samples; all of them when the account is not known.
+
+    An untagged sample is left out once the account is known: it may be
+    anyone's, and one wrong figure would hold or free the swarm."""
+    return list(samples) if account is None else [s for s in samples if s.account == account]
+
+
+def current(samples: list[Sample]) -> list[Sample]:
+    """The samples of :func:`active_account`: what every "now" figure reads."""
+    return of_account(samples, active_account(samples))
 
 
 def latest(samples: list[Sample], which: str, now: float) -> tuple[float, float | None] | None:
@@ -178,16 +253,32 @@ def accounts(samples: list[Sample]) -> list[int | None]:
     ignored. The newest readings are believed until one contradicts them.
     A drop under an unchanged reset stays a lagging reading, as before: that is
     the far commoner case, and nothing tells the two apart.
+
+    A sample tagged with its account (:attr:`Sample.account`) needs none of
+    that: a new tag is a new segment at once. Once tags appear, an untagged
+    reading that moves a window is ignored rather than trusted over them.
     """
     order = sorted(range(len(samples)), key=lambda i: samples[i].ts)
     tags: list[int | None] = [None] * len(samples)
     seg = 0
     cur: dict[str, float | None] = {"five": None, "week": None}
+    who: str | None = None
     pending: list[int] = []
     pend: dict[str, float] = {}
     for i in order:
         s = samples[i]
         moved = _moved(s, cur)
+        if s.account is not None:
+            if (s.account != who) if who is not None else moved is not None:
+                seg += 1
+                cur = {w: getattr(s, f"{w}_resets_at") for w in ("five", "week")}
+            else:
+                _follow(s, cur)
+            who, tags[i] = s.account, seg
+            pending, pend = [], {}
+            continue
+        if moved is not None and who is not None:
+            continue
         if moved is None:
             tags[i] = seg
             _follow(s, cur)
@@ -475,7 +566,9 @@ def _seed(cfg, rec: dict, now: float) -> None:
     def live(w):
         return w if isinstance(w, dict) and (_num(w.get("resets_at")) or now + 1) > now else None
 
-    row = sample_row(now, rec["run_id"], live(best.get("five_hour")), live(best.get("seven_day")))
+    acct = best.get("account")
+    row = sample_row(now, rec["run_id"], live(best.get("five_hour")), live(best.get("seven_day")),
+                     acct if isinstance(acct, str) and acct else None)
     if row["five_pct"] is None and row["week_pct"] is None:
         return
     try:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import signal
 import subprocess
@@ -1396,13 +1397,50 @@ def cmd_lesson(cfg: Config, phase: str, text: str, title: str) -> int:
     return _report_queued(cfg, key, "lesson")
 
 
-def cmd_build(cfg: Config, argv: list[str]) -> int:
-    """Run a heavy build command through the swarm-wide concurrency gate.
+def cmd_build(cfg: Config, argv: list[str], *, status: bool = False, as_json: bool = False,
+              timeout: str | None = None, script: str | None = None) -> int:
+    """Run a build command through the swarm-wide gate (see :mod:`buildsem`).
 
-    ``swarm build cargo nextest run`` etc. On success this ``exec``s the command
-    (never returns); the returned code only covers the error paths.
+    A worker's cwd is a worktree, whose ``.swarm.toml`` may not be the project's:
+    the project's own file is read when ``SWARM_PROJECT`` names it, so a
+    ``[build]`` edit reaches the next call (frozen env overrides still win).
     """
-    return buildsem.run(cfg, argv)
+    project = os.environ.get("SWARM_PROJECT")
+    if project and Path(project).resolve() != cfg.project_dir and \
+            (Path(project) / ".swarm.toml").is_file():
+        try:
+            cfg = load(project_dir=project)
+        except (ValueError, OSError):
+            pass
+    if status:
+        from . import buildstatus
+
+        snap = buildstatus.snapshot(cfg)
+        if as_json:
+            return _dump(snap)
+        print(buildstatus.render(snap))
+        return 0
+    if argv[:1] == ["--"]:
+        argv = argv[1:]
+    limit = None
+    if timeout is not None:
+        limit = _timeout_s(timeout)
+        if limit is None:
+            print(f"swarm build: --timeout {timeout!r} is not a duration (600, 90s, 10m, 1h30m)",
+                  file=sys.stderr)
+            return 2
+    if script is not None:
+        argv = ["bash", "-e", "-o", "pipefail", script, *argv]
+    return buildsem.run(cfg, argv, timeout=limit)
+
+
+def _timeout_s(text: str) -> float | None:
+    m = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s?)?", text.strip().lower())
+    if not m or not any(m.groups()):
+        return None
+    h, mins, secs = m.groups()
+    total = int(h or 0) * 3600 + int(mins or 0) * 60 + float(secs or 0)
+    return total if total > 0 else None
 
 
 def cmd_keep(cfg: Config, name: str | None, why: str | None, argv: list[str],
@@ -2135,6 +2173,11 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     else:
         lines.append(f"eta: unavailable ({why})")
     lines.append(f"done={st.done}" if show_all else _done_summary(st.done))
+    from . import buildstatus
+
+    gate = buildstatus.summary_line(cfg)
+    if gate:
+        lines.append(gate)
     lines.append(web_lifecycle.status_line(cfg))
     lines.append(tgbot.status_line(cfg))
     lines.append(bigpic_mod.status_text(cfg, bigpic_mod.load(cfg)))
@@ -2248,9 +2291,42 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="also run through a usage cap's hold until its window resets")
     rsm.set_defaults(func=lambda cfg, a: cmd_resume(cfg, a.override_cap))
 
-    bp = sub.add_parser("build", help="run a build command through the concurrency gate")
+    bp = sub.add_parser(
+        "build", help="run a build command through the concurrency gate",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Run COMMAND once it is its turn: at most [build].max_concurrent heavy builds\n"
+            "run at once, swarm-wide, and the rest wait in arrival order. A build that\n"
+            "usually finishes within [build].short_s may go ahead of a long one, but no\n"
+            "long one is passed more than [build].overtake times.\n\n"
+            "Light commands (no compile: git, ls, cargo update/metadata/fmt/tree,\n"
+            "docker buildx bake --print, python scripts that start no processes...) run\n"
+            "at once without queueing. Unknown commands count as heavy.\n\n"
+            "Before queueing, a heavy command is checked: its program, a `cd` target, a\n"
+            "-f/--file or --manifest-path, a Cargo.toml / Makefile / bake file must exist.\n\n"
+            "While queued it prints (stderr) its place, who holds each slot and for how\n"
+            "long, and an estimated start; then 'queued Xs, starting' and 'ran Ys, exit N'.\n"
+            "The exit code is the command's (124 on --timeout)."),
+        epilog=(
+            "several steps in one turn:\n"
+            "  swarm build -- sh -c 'cargo clippy -- -D warnings && cargo nextest run'\n"
+            "  swarm build --script gate.sh      (runs it with bash -e -o pipefail)\n"
+            "stop a build that runs too long (the wait does not count):\n"
+            "  swarm build --timeout 15m -- cargo nextest run\n"
+            "see the gate:  swarm build --status [--json]\n"
+            "Time in the queue does not count toward --timeout, but it does count toward\n"
+            "any timeout of whatever runs `swarm build`: killing a queued call loses its place."),
+    )
+    bp.add_argument("--status", action="store_true",
+                    help="show holders, the queue and recent builds, then exit")
+    bp.add_argument("--json", action="store_true", help="with --status: machine-readable")
+    bp.add_argument("--timeout", metavar="DURATION",
+                    help="stop the build this long after it STARTS (600, 90s, 10m, 1h30m)")
+    bp.add_argument("--script", metavar="FILE",
+                    help="run FILE with bash -e -o pipefail in one turn")
     bp.add_argument("argv", nargs=argparse.REMAINDER, help="the build command, e.g. cargo nextest run")
-    bp.set_defaults(func=lambda cfg, a: cmd_build(cfg, a.argv))
+    bp.set_defaults(func=lambda cfg, a: cmd_build(cfg, a.argv, status=a.status, as_json=a.json,
+                                                  timeout=a.timeout, script=a.script))
 
     kpp = sub.add_parser(
         "keep", help="leave one process running after your session ends (list / stop them)",

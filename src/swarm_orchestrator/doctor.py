@@ -1373,7 +1373,22 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_tgbot(cfg, st))
     checks.append(_check_usage(cfg, st))
     checks.append(_check_kept(cfg))
+    checks.append(_check_build_gate(cfg))
     return checks
+
+
+def _check_build_gate(cfg: Config) -> Check:
+    """Who holds the build gate and how many wait (information only)."""
+    from . import buildstatus
+
+    try:
+        line = buildstatus.summary_line(cfg)
+    except OSError as exc:
+        return Check("build.gate", OK, f"unreadable: {exc}")
+    if line is None:
+        off = cfg.build_max_concurrent < 1
+        return Check("build.gate", OK, "off" if off else "no build has used it yet")
+    return Check("build.gate", OK, line.removeprefix("build gate: "))
 
 
 def _check_kept(cfg: Config, now: float | None = None) -> Check:

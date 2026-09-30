@@ -57,8 +57,9 @@ def rules_for(cfg, window: str) -> tuple[list[float], list[float]]:
 
 
 def reading(samples, prefix: str, now: float) -> tuple[float, float | None] | None:
-    """``(pct, resets_at)`` — the newest reading still in its window."""
-    return usage_mod.latest(list(samples or ()), prefix, now)
+    """``(pct, resets_at)`` — the newest reading of the account in use still in
+    its window."""
+    return usage_mod.latest(usage_mod.current(list(samples or ())), prefix, now)
 
 
 def _meter(pct: float, width: int, pause: list[float], stop: list[float]) -> str:
@@ -460,5 +461,6 @@ def box_lines(dash, width: int, now: float | None = None, chart_rows: int = 5) -
 def subtitle(dash, now: float | None = None) -> str:
     """``as of 14:05, 12 min ago`` — every reader says how old the figures are."""
     now = time.time() if now is None else now
-    return usage_mod.as_of(list(getattr(dash, "samples", None) or ()), now) or "no reading yet"
+    mine = usage_mod.current(list(getattr(dash, "samples", None) or ()))
+    return usage_mod.as_of(mine, now) or "no reading yet"
 

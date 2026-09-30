@@ -217,18 +217,29 @@ def burn_of(events, workers: int, usage, now: float) -> dict[str, float]:
     so it and the forecast burn at the same rate.
 
     Measured from the last account switch (:func:`usage.switched_at`) when
-    there was one: another account's plan burns at its own rate."""
-    start = max(now - BURN_WINDOW_S, usage_mod.switched_at(list(usage or ())) or 0.0)
+    there was one: another account's plan burns at its own rate. Until the
+    account in use has burned long enough to say, the whole stretch speaks for
+    it (each account counted from its own first reading, never across the
+    switch)."""
+    usage = list(usage or ())
     # The whole log, so a worker launched before the stretch counts inside it.
     events = [e for e in events if e.ts is not None and e.ts <= now]
     busy = data_mod.occupancy_series(events, workers).points
-    seat_h = sum(v * max(0.0, min(b, now) - max(a, start))
-                 for (a, v), (b, _) in zip(busy, busy[1:] + [(now, 0.0)])) / 3600.0
-    out = {}
-    for window, pace in (("week", usage_mod.week_pace(usage, start, now)),
-                         ("five_hour", usage_mod.five_pace(usage, start, now))):
-        if pace.per_h is not None and seat_h >= 1.0:
-            out[window] = pace.used / seat_h
+
+    def rates(start: float) -> dict[str, float]:
+        seat_h = sum(v * max(0.0, min(b, now) - max(a, start))
+                     for (a, v), (b, _) in zip(busy, busy[1:] + [(now, 0.0)])) / 3600.0
+        out = {}
+        for window, pace in (("week", usage_mod.week_pace(usage, start, now)),
+                             ("five_hour", usage_mod.five_pace(usage, start, now))):
+            if pace.per_h is not None and seat_h >= 1.0:
+                out[window] = pace.used / seat_h
+        return out
+
+    since = max(now - BURN_WINDOW_S, usage_mod.switched_at(usage) or 0.0)
+    out = rates(since)
+    if since > now - BURN_WINDOW_S and len(out) < 2:
+        out = rates(now - BURN_WINDOW_S) | out
     return out
 
 
@@ -253,7 +264,8 @@ def key(inputs: Inputs, fit_id: str) -> str:
                   sorted(st.usage_override)],
         "config": [sorted(inputs.exclude), inputs.workers, inputs.build_slots,
                    inputs.park_after, json.dumps(inputs.rules, sort_keys=True)],
-        "usage": [usage_key(usage_mod.latest(inputs.usage, w, inputs.now))
+        "usage": [usage_key(usage_mod.latest(usage_mod.current(list(inputs.usage)), w,
+                                             inputs.now))
                   for w in ("week", "five")],
         "fit": fit_id,
     }

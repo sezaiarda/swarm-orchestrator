@@ -628,6 +628,14 @@ isolation splits the run's averages.
 weekly figures are account-wide, so other Claude sessions on the same account
 during a run count too.
 
+Every sample carries the account it was read under: the tap and the endpoint
+call tag it with the first 8 hex digits of a SHA-256 of `oauthAccount.accountUuid`
+in `~/.claude.json` (never the uuid or the email). Every "now" figure is the
+account in use (the login, else the newest tag), a switch starts that account
+from its own figure instead of counting as a reset or as usage, and a run that
+spans a switch lists each account's points used. Rows from before the tag load
+as account unknown and are left out once the account is known.
+
 Usage reaches your phone only when you ask: `/usage` to the bot (see
 [Telegram](#telegram-and-asking-the-owner)) answers with (`usage.brief`):
 
@@ -657,9 +665,14 @@ or logged; a failed call is logged (`USAGE-API`) and the last reading stands.
   running workers finish. The hold is its own record (`usage_hold` in
   `state.json`), apart from `swarm pause`: lifting it never undoes your pause.
   It lifts by itself once the window has reset and a fresh reading is under the
-  limit. `swarm resume` leaves it in place and says so;
-  `swarm resume --override-cap` runs through it until the window resets.
-- **down:** runs `swarm down`, once per window. The swarm stays down.
+  limit. The hold remembers its account: after a `/login` to another account,
+  the supervisor checks at once (asking the endpoint if nothing fresh is in
+  yet), and a fresh reading of the new account under the limit lifts it. A
+  lagging reading of the held account never does. `swarm resume` leaves it in
+  place and says so; `swarm resume --override-cap` runs through it until the
+  window resets.
+- **down:** runs `swarm down`, once per window of each account. The swarm stays
+  down.
 
 A stale or missing reading never creates a hold and never lifts one. Each
 crossing pings once, and so does a hold lifting. The hold and the reading show on

@@ -344,3 +344,56 @@ def test_home_usage_lines_show_both_windows_at_this_runs_pace():
     assert "lasts until the reset" in five
     # No run (legacy): the weekly line falls back to its recent slope.
     assert data.usage_outlook(lim, None, None, now=T0)[1][0].endswith("pace unknown")
+
+
+# -- accounts -------------------------------------------------------------------
+def test_untagged_rows_load_as_account_unknown_and_never_join_a_known_one():
+    assert usage.parse_sample(_row(T0, week=5, week_r=T0 + 90 * H)).account is None
+    assert usage.parse_sample(_row(T0, week=5) | {"account": 7}).account is None
+    assert usage.parse_sample(_row(T0, week=5) | {"account": "acct-a"}).account == "acct-a"
+    old = usage.parse_sample(_row(T0, week=90, week_r=T0 + 20 * H))
+    new = usage.parse_sample(_row(T0 + H, week=1, week_r=T0 + 3 * H) | {"account": "acct-b"})
+    assert usage.newest_account([old, new]) == "acct-b"
+    assert usage.current([old, new]) == [new]  # nobody logged in here: the newest tag
+    assert usage.of_account([old, new], None) == [old, new]
+    assert usage.current([old]) == [old]  # a log from before the tag reads as it always did
+
+
+def _tagged(ts, week, week_r, account, five=None, five_r=None):
+    return usage.parse_sample(_row(ts, five=five, five_r=five_r, week=week, week_r=week_r)
+                              | {"account": account})
+
+
+def test_a_switch_is_neither_a_reset_nor_usage():
+    """Weekly 88 -> 90% on one account, then 0 -> 3% on another whose week
+    resets *sooner*: the old guesswork read those as lagging readings."""
+    samples = [_tagged(T0, 88, T0 + 20 * H, "acct-a"), _tagged(T0 + H, 90, T0 + 20 * H, "acct-a"),
+               _tagged(T0 + 2 * H, 0, T0 + 5 * H, "acct-b"),
+               _tagged(T0 + 3 * H, 3, T0 + 5 * H, "acct-b"),
+               _tagged(T0 + 4 * H, 91, T0 + 20 * H, "acct-a")]  # and back again
+    assert usage.accounts(samples) == [0, 0, 1, 1, 2]
+    assert usage.switch_times(samples) == [T0 + 2 * H, T0 + 4 * H]
+    assert usage.week_pace(samples, T0, T0 + 5 * H).used == 2 + 3
+    assert usage.by_account(samples, T0, T0 + 5 * H) == [
+        {"account": "acct-a", "five_used": 0.0, "week_used": 3.0},
+        {"account": "acct-b", "five_used": 0.0, "week_used": 3.0}]
+
+
+def test_usage_shows_the_account_in_use_and_each_accounts_share(tmp_path):
+    cfg = _cfg(tmp_path)
+    runs.start(cfg.state_dir, 1, "none", now=T0)
+    rows = [(T0, 88, T0 + 20 * H, "acct-a", 40), (T0 + H, 90, T0 + 20 * H, "acct-a", 50),
+            (T0 + 2 * H, 0, T0 + 50 * H, "acct-b", 0), (T0 + 3 * H, 3, T0 + 50 * H, "acct-b", 4)]
+    _write_samples(cfg, [_row(t, five=f, five_r=T0 + 4 * H if a == "acct-b" else T0 + 1.5 * H,
+                              week=w, week_r=r) | {"account": a} for t, w, r, a, f in rows])
+    src = usage.Sources(cfg)
+    now = T0 + 3.5 * H
+    cur = usage.live_summary(cfg, src, now=now)
+    assert cur["week_used"] == 5 and cur["five_used"] == 10 + 4
+    out = usage.render(cur, [], src.samples, now)
+    assert "account acct-b" in out
+    assert "now 3% (resets in" in out and "now 90%" not in out
+    assert "account acct-a: 5-hour 10 pts · weekly 2 pts used this run" in out
+    assert "account acct-b (now): 5-hour 4 pts · weekly 3 pts used this run" in out
+    brief = usage.brief(src.samples, now)
+    assert brief.startswith("Weekly 3%") and "account acct-b" in brief and "90%" not in brief

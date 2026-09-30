@@ -367,7 +367,8 @@ class Dash:
         done = state.get("done") if isinstance(state.get("done"), dict) else {}
         busy = frozenset(s.phase for s in self.snapshot.slots if s.busy and s.phase)
         real = (self._mtimes.get("ledger"), frozenset(done.items()), busy)
-        usage = tuple(eta_mod.usage_key(usage_mod.latest(self._samples.samples, w, now))
+        mine = usage_mod.current(self._samples.samples)
+        usage = tuple(eta_mod.usage_key(usage_mod.latest(mine, w, now))
                       for w in ("week", "five"))
 
         def names(key: str) -> tuple:

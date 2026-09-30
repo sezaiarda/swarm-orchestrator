@@ -398,10 +398,13 @@ flowchart TD
   ledger's git history, so phases built on another machine count too.
 - **`swarm usage`:** each run's hours, phases, average 5-hour and weekly %/h,
   windows spanned, and $/h. The figures are account-wide, so other Claude sessions
-  on the same account count too.
+  on the same account count too. Each sample is tagged with a short hash of the
+  logged-in account, so a `/login` switch is never read as a reset: "now" figures
+  are the account in use, and a run across a switch lists each account's share.
 - **Usage caps (`[usage]`):** at weekly 60% the swarm stops starting workers
   (running ones finish), at weekly 70% it runs `swarm down`, and at 5-hour 90% it
-  pauses too. A pause lifts by itself after the window resets; `swarm resume
+  pauses too. A pause lifts by itself after the window resets, or at once when
+  you log in to another account that reads under the limit; `swarm resume
   --override-cap` runs through it. When the tap's figures are stale, the
   supervisor asks Claude Code's usage endpoint, at most every 30 minutes. Workers
   are never told.

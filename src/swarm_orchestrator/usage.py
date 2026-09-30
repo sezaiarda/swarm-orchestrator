@@ -390,6 +390,23 @@ def week_pace(samples: list[Sample], start: float, end: float) -> Pace:
                         for s, a in zip(samples, accounts(samples))), start, end)
 
 
+def by_account(samples: list[Sample], start: float, end: float) -> list[dict]:
+    """Each account's points used inside ``[start, end]``, in the order the
+    accounts were first read; empty unless more than one tagged account ran."""
+    first: dict[str, float] = {}
+    for s in samples:
+        if s.account is not None and start <= s.ts <= end:
+            first[s.account] = min(first.get(s.account, s.ts), s.ts)
+    if len(first) < 2:
+        return []
+    out = []
+    for acct in sorted(first, key=first.get):
+        mine = of_account(samples, acct)
+        out.append({"account": acct, "five_used": five_pace(mine, start, end).used,
+                    "week_used": week_pace(mine, start, end).used})
+    return out
+
+
 # -- cost ---------------------------------------------------------------------
 def load_sessions(meters_dir: Path) -> list[dict]:
     """Every worker session the tap saw: live meter files plus finished ones.
@@ -479,6 +496,7 @@ def summarize(rec: dict, end: float, *, samples: list[Sample], events: list,
         "week_pct_per_h": week.per_h,
         "usd": cost,
         "usd_per_h": _rate(cost, hours),
+        "accounts": by_account(samples, start, end),
         "segments": [],
     }
     spans = runs.segments(rec, end) if rec.get("run_id") else []
@@ -709,14 +727,18 @@ def _window(samples: list[Sample], which: str, label: str, now: float) -> str:
 
 
 def brief(samples: list[Sample], now: float, cap_lines: list[str] = ()) -> str:
-    """The bot's answer to ``/usage``: both limits, how old they are, and the caps."""
+    """The bot's answer to ``/usage``: both limits of the account in use, how
+    old they are, and the caps."""
+    account = active_account(samples)
+    samples = of_account(samples, account)
     s = newest_sample(samples)
     if s is None:
         lines = ["No usage reading yet. One arrives while a swarm session runs."]
     else:
+        on = f", account {account}" if account else ""
         lines = [_window(samples, "week", "Weekly", now),
                  _window(samples, "five", "5-hour", now),
-                 f"Read at {_clock(s.ts, now)}, {_ago(max(0.0, now - s.ts))}."]
+                 f"Read at {_clock(s.ts, now)}, {_ago(max(0.0, now - s.ts))}{on}."]
     return "\n".join([*lines, *cap_lines])
 
 
@@ -749,14 +771,21 @@ def render(cur: dict | None, past: list[dict], samples: list[Sample], now: float
                f" · {cur.get('max_workers')} worker(s) · isolation {cur.get('isolation')}")
         lines.append(f"{head}\n  started {_when(cur['start'])} · {cur['hours']:.1f} h elapsed{cfg}")
         span = "this period" if cur.get("legacy") else "this run"
-        lines.append(f"  sample  {as_of(samples, now) or 'none yet'}")
+        account = active_account(samples)
+        mine = of_account(samples, account)
+        on = f" · account {account}" if account else ""
+        lines.append(f"  sample  {as_of(mine, now) or 'none yet'}{on}")
         for which, label in (("five", "5-hour"), ("week", "weekly")):
-            now_fig = latest(samples, which, now)
+            now_fig = latest(mine, which, now)
             state = ("not reported" if now_fig is None
                      else f"now {now_fig[0]:.0f}% (resets in {_in(now_fig[1], now)})")
             extra = f" over {cur['five_windows']} window(s)" if which == "five" else ""
             lines.append(f"  {label:<7} {state:<28} {span} {_f(cur[f'{which}_pct_per_h'], '{:.2f}')} %/h"
                          f" · {cur[f'{which}_used']:.0f} pts used{extra}")
+        for a in cur.get("accounts") or []:
+            mark = " (now)" if a["account"] == account else ""
+            lines.append(f"    account {a['account']}{mark}: 5-hour {a['five_used']:.0f} pts"
+                         f" · weekly {a['week_used']:.0f} pts used {span}")
         lines.append(f"  phases  {cur['phases_finished']} finished · {cur['phases_failed']} failed"
                      f" · {_f(cur['phases_per_h'], '{:.2f}')}/h"
                      f"   cost {_f(cur['usd'], '${:.2f}')} · {_f(cur['usd_per_h'], '${:.2f}')}/h")

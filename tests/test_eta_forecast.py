@@ -115,6 +115,38 @@ def test_caps_come_from_the_rules_and_the_accounts_own_limit():
     assert paused.stopped == holds.PAUSED and paused.pause_at == NOW
 
 
+def test_the_projection_reads_the_account_in_use_not_the_held_one():
+    """Held at 91% on one account, the owner logged in to another at 10%: the
+    cap ahead is the new account's, from its own reading and reset."""
+    from swarm_orchestrator.usage import Sample
+
+    rules = [{"window": "week", "at": 90.0, "action": "pause"}]
+    samples = [Sample(NOW - 600, week_pct=91.0, week_resets_at=NOW + 2 * H, account="acct-a"),
+               Sample(NOW - 60, week_pct=10.0, week_resets_at=NOW + 5 * 86400, account="acct-b")]
+    held = state_mod.State(usage_hold={"week": {"pct": 91, "at": 90, "resets_at": NOW + 2 * H,
+                                                "account": "acct-a"}})
+    got = holds.from_state(held, rules, samples, {"week": 0.5}, NOW)
+    assert got.held_until == 0.0
+    week = {c.window: c for c in got.caps}["week"]
+    assert (week.pct, week.resets_at, week.held) == (10.0, NOW + 5 * 86400, False)
+    # Held on the account in use: held, as before.
+    same = state_mod.State(usage_hold={"week": {"pct": 91, "at": 90, "resets_at": NOW + 2 * H,
+                                                "account": "acct-b"}})
+    assert holds.from_state(same, rules, samples, {}, NOW).held_until == NOW + 2 * H
+
+
+def test_a_fresh_switch_burns_at_the_pooled_rate_until_it_has_its_own():
+    from swarm_orchestrator.usage import Sample
+
+    old = [Sample(ts=NOW - (30 - i) * H, week_pct=40 + 2 * i, week_resets_at=NOW + 20 * H,
+                  account="acct-a") for i in range(25)]
+    new = [Sample(ts=NOW - 600, week_pct=1.0, week_resets_at=NOW + 40 * H, account="acct-b")]
+    events = [SimpleNamespace(kind="launch", phase="P0", ts=NOW - 40 * H, slot=0, status=None)]
+    got = engine.burn_of(events, 1, old + new, NOW)
+    # 48 points over the 40 busy hours since the launch, across both accounts.
+    assert got["week"] == pytest.approx(48 / 40, rel=0.05)
+
+
 # -- the forecast -----------------------------------------------------------------------
 def test_ranges_are_read_off_the_replays():
     r = forecast.Range.of([float(i) for i in range(1, 101)])

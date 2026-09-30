@@ -22,6 +22,8 @@ Four kinds of stop, all of which leave running workers to finish (that is what
   worker-hour, so a forecast that crosses a cap waits for that window's reset
   like the swarm will. A reading does not go stale for this: within one window
   usage only rises, so an old one still says at least how far it has got.
+  Reading, cap and reset are the account in use now (:func:`usage.active_account`):
+  another account's window says nothing about when this one fills.
 """
 
 from __future__ import annotations
@@ -139,13 +141,19 @@ def from_state(st, rules: list[dict], samples: list, burn: dict[str, float],
     ``usage_hold``), the ``pause`` rules, the usage samples (the newest still
     in its window counts, :func:`usage.latest`), each window's burn per busy
     worker-hour and the availability. A paused swarm is forecast as if resumed
-    now."""
+    now. A hold measured on another account than the one in use is about to
+    lift (:func:`caps.evaluate`), so the reading in use stands in for it."""
     stopped = PAUSED if st.paused else DRAINING if st.drain else ""
+    account = usage_mod.active_account(list(samples))
+    samples = usage_mod.of_account(list(samples), account)
     out = []
     for window in caps_mod.WINDOWS:
         limits = [r["at"] for r in rules if r["window"] == window and r["action"] == "pause"]
         limits.append(LIMIT)
         hold = (st.usage_hold or {}).get(window)
+        if hold is not None and None not in (account, hold.get("account")) \
+                and hold["account"] != account:
+            hold = None
         if hold is not None:
             resets = hold.get("resets_at") or now + PERIOD_S.get(window, 0.0)
             out.append(Cap(window, float(hold.get("pct", 100.0)), float(hold.get("at", 0.0)),
@@ -154,7 +162,7 @@ def from_state(st, rules: list[dict], samples: list, burn: dict[str, float],
         read = usage_mod.latest(samples, caps_mod.WINDOWS[window][0], now)
         if read is None or read[1] is None:
             continue
-        if (st.usage_override or {}).get(window):
+        if caps_mod.overridden(st.usage_override or {}, window, account, read[1]):
             continue  # the owner chose to run through this window
         out.append(Cap(window, read[0], min(limits), read[1], burn.get(window, 0.0)))
     return Holds(stopped=stopped, pause_at=st.pause_at if st.pause_at > now else

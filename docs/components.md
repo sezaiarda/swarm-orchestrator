@@ -637,9 +637,25 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
   alive in its tree. A tree with a process whose IO cannot be read (another
   user's, after `sudo`) is never quiet either. **Not covered:** containers a
   build started and then only waits for with `sleep`. Nothing of theirs is in
-  the build's tree, so such a holder yields. If such a step must keep the box
-  to itself, have it keep a `docker` client attached (`docker compose up`
-  without `-d`, `docker wait <container>`) instead of sleeping.
+  the build's tree, so such a holder yields, unless it was started with
+  `--hold`.
+- *The opt-out: `swarm build --hold <cmd>`.* For a command that needs the
+  machine to itself while it looks idle (a measurement script that sleeps while
+  a container stack, or anything else outside its process tree, is measured).
+  It takes a slot even if the command is light (`sleep 600` alone would skip
+  the gate), keeps it for as long as it runs, and is never set aside, so no
+  build starts beside it. Its `start` event says `"hold": true` and `--status`
+  shows `keeps its slot while idle (--hold)`. The queue waits behind it, as it
+  did before idle yield.
+- *The command is told.* The `swarm build` that runs a command prints, on that
+  command's stderr, the moment its slot is released (`this command was idle for
+  2m30s, so its build slot was released at 14:02:11 and other builds may run
+  beside it from now on (nothing was stopped). If it needs the machine to
+  itself (a measurement), rerun it with …--hold…`) and again as its last line
+  when the command ends, with how long builds may have run beside it. So
+  whoever reads the output afterwards knows the run was not alone. (The
+  landing's lane check holds its slot inside the swarm's own process and
+  prints nothing: its log is not a worker's.)
 - *The caps.* At most `[build].idle_yield_max` (default 2) holders are set aside
   at once; a further idle holder keeps counting and the queue waits, as it does
   with `idle_yield_s = 0`. The seats bound the builds alive at
@@ -694,7 +710,8 @@ the queue. Only checks nothing earlier in the command could have made true (a
 
 The waiting line also says when a holder has been quiet for a while (`idle
 1m40s (yields its slot at 2m30s)`), which holder never yields and why, and
-lists the holders already set aside.
+lists the holders already set aside. A command that was itself set aside is
+told so twice, when it happens and as its last line (see *Idle yield*).
 
 **Batching and timeouts.** `swarm build -- sh -c 'a && b'` or
 `swarm build --script FILE` (run with `bash -e -o pipefail`) runs several steps
@@ -712,13 +729,13 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 {"ts": 1790000000.123, "event": "start", "id": "3f2a9c01be44", "phase": "P-1",
  "pid": 4242, "slot": 0, "cls": "heavy", "argv": "cargo nextest run",
  "cwd": "/…/wt/P-1/lib", "wait_s": 12.5, "run_s": null, "exit": null,
- "idle_s": null}
+ "idle_s": null, "hold": false}
 ```
 
 | event | when | `pid` | notes |
 |---|---|---|---|
 | `queued` | a heavy command joined the queue | the waiting `swarm build` | |
-| `start` | it got slot `slot` | the build process | `wait_s` = time queued |
+| `start` | it got slot `slot` | the build process | `wait_s` = time queued; `hold` = started with `--hold` (null on every other event) |
 | `bypass` | a light command (or any, gate off) started unqueued | the command's process | `slot` null |
 | `end` | it finished | as in its `start`/`bypass` | `run_s`; `exit` (signal N → 128+N, `--timeout` → 124) |
 | `preflight_fail` | refused before queueing; nothing ran | `swarm build` | |

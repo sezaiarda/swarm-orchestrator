@@ -26,7 +26,7 @@ from swarm_orchestrator import buildlog, buildsem
 from swarm_orchestrator.config import load
 
 KEYS = {"ts", "event", "id", "phase", "pid", "slot", "cls", "argv", "cwd", "wait_s", "run_s",
-        "exit", "idle_s"}
+        "exit", "idle_s", "hold"}
 
 
 class Gate:

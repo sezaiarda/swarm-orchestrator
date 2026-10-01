@@ -98,6 +98,7 @@ def builds(cfg: Config, now: float) -> list[dict]:
                        "phase": rec.get("phase"), "argv": rec.get("argv", ""),
                        "cwd": rec.get("cwd", ""), "pid": rec.get("pid") or rec.get("gate_pid"),
                        "running_s": now - start, "pred_s": rec.get("pred_s"),
+                       "hold": bool(rec.get("hold")),
                        "state": "left" if rec.get("ended") or not rec else "active"}
         entry.update(buildidle.describe(cfg, st, rec, now))
         if "yielded_s" in entry:
@@ -124,7 +125,7 @@ def holders(cfg: Config, hist: buildlog.History, now: float,
             first = counted[-1]  # the newest: the one a waiter is behind
             entry.update({k: first.get(k) for k in ("id", "phase", "argv", "cwd", "pid",
                                                     "running_s", "pred_s", "seat")})
-            for key in ("quiet_s", "noyield", "busy_why"):
+            for key in ("quiet_s", "noyield", "busy_why", "hold"):
                 if key in first:
                     entry[key] = first[key]
             if first["state"] == "left":
@@ -190,7 +191,9 @@ def _holder_text(h: dict, yield_s: int = 0) -> str:
             f" running {fmt_s(h['running_s'])}{usual}")
     if h.get("left"):
         text += ", ended, but a process it started still holds the slot"
-    if h.get("noyield"):
+    if h.get("hold"):
+        text += ", keeps its slot while idle (--hold)"
+    elif h.get("noyield"):
         text += f", never yields ({h['noyield']})"
     elif yield_s and (h.get("quiet_s") or 0) >= min(30.0, yield_s / 2):
         text += f", idle {fmt_s(h['quiet_s'])} (yields its slot at {fmt_s(yield_s)})"

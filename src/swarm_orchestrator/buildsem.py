@@ -30,7 +30,11 @@ beside it on the same slot. If it wakes up it counts again from that moment
 (the build beside it keeps running; no new one starts while the builds that
 count fill the slots). At most ``[build].idle_yield_max`` holders are set aside
 at once. The waiters measure, and a set-aside holder's own ``swarm build``
-keeps watching it while nobody waits; see :mod:`buildidle`.
+keeps watching it while nobody waits; see :mod:`buildidle`. That same process
+tells whoever ran the command, on stderr, when its slot was released and again
+when it ends. ``swarm build --hold`` is the opt-out: such a build takes a slot
+even if its command is light, and keeps it for as long as it runs (a
+measurement that sleeps while something outside its process tree is measured).
 
 **The queue.** Waiters take a ticket: ``<state>/buildsem/queue/<seq>-<id>.json``,
 numbered under ``queue.lock`` and flocked by its waiter for as long as it waits.
@@ -88,6 +92,9 @@ _REPORT_S = 45.0
 _STALE_S = 15.0  # a ticket not refreshed this long is passed over
 _KILL_GRACE_S = 10.0
 HELD_ENV = "SWARM_BUILD_HELD"  # "<slot>:<id>:<seat>" inside a build that holds a slot
+HOLD_WHY = "started with --hold"
+_HOLD_HINT = ("If it needs the machine to itself (a measurement), rerun it with"
+              " `swarm build --hold ...`")
 
 
 def _say(msg: str) -> None:
@@ -616,7 +623,7 @@ def _record(meta: dict, pid: int | None, start_ts: float | None,
         "gate_pid": os.getpid(), "gate_start": procs.start_ticks(os.getpid()),
         "pid": pid, "pid_start": procs.start_ticks(pid) if pid else None, "ended": None,
         "slot": claim.slot if claim else None, "seat": claim.seat if claim else None,
-        "noyield": meta.get("noyield"),
+        "noyield": meta.get("noyield"), "hold": bool(meta.get("hold")),
     }
 
 
@@ -697,28 +704,63 @@ def _signal_tree(members: list[tuple[int, int | None]], sig: int) -> None:
                 pass
 
 
-def _own_yield_watch(cfg: Config, bid: str):
+class _OwnYield:
     """What a holder's own ``swarm build`` does once a second while it waits for
-    its build: nothing, unless the build is set aside. Then it keeps the holders
-    measured at the usual rate when no waiter does, so a set-aside build that
-    wakes up is counted (and logged) when it happens, not when the next waiter
-    arrives. The waiters do not depend on it: a dead gate changes nothing."""
-    every = buildidle.sample_every(cfg)
-    due = [0.0]
+    its build. It tells whoever ran the command (stderr) when the gate sets the
+    build aside as idle, and again when the build ends: other builds may have run
+    beside it, which matters to a measurement. And while the build is set aside
+    it keeps the holders measured at the usual rate when no waiter does, so a
+    wake-up is counted (and logged) when it happens, not when the next waiter
+    arrives. The waiters do not depend on any of it: a dead gate changes nothing."""
 
-    def tick() -> None:
+    def __init__(self, cfg: Config, bid: str) -> None:
+        self.cfg, self.bid = cfg, bid
+        self.every = buildidle.sample_every(cfg)
+        self.due = 0.0
+        self.since: float | None = None  # set aside since (None: it counts)
+        self.first: tuple[float, float | None] | None = None  # when first, after how long idle
+        self.total = 0.0  # seconds set aside, stretches already over
+
+    def _look(self, now: float) -> bool:
+        entry = buildidle.load(self.cfg)["h"].get(self.bid) or {}
+        ts = entry.get("yielded")
+        if ts is not None and self.since is None:
+            self.since = float(ts)
+            if self.first is None:
+                self.first = (self.since, entry.get("idle_s"))
+            _say(f"this command was idle for {buildlog.fmt_s(entry.get('idle_s'))}, so its build"
+                 f" slot was released at {_clock(self.since)} and other builds may run beside it"
+                 f" from now on (nothing was stopped). {_HOLD_HINT}")
+        elif ts is None and self.since is not None:
+            self.total += max(0.0, now - self.since)
+            self.since = None
+        return ts is not None
+
+    def tick(self) -> None:
         now = time.time()
-        if now < due[0]:
+        if not self._look(now) or now < self.due:
             return
-        due[0] = now + every
-        entry = buildidle.load(cfg)["h"].get(bid)
-        if not entry or not entry.get("yielded"):
-            return
-        with _qlock(cfg, wait_s=0.0) as got:
+        self.due = now + self.every
+        with _qlock(self.cfg, wait_s=0.0) as got:
             if got:
-                _idle_pass(cfg, live_holders(cfg), time.time())
+                _idle_pass(self.cfg, live_holders(self.cfg), time.time())
 
-    return tick if buildidle.enabled(cfg) else None
+    def finish(self, now: float, run_s: float) -> None:
+        """The last word, after the build's own output: was it ever set aside."""
+        try:
+            self._look(now)
+        except Exception:  # noqa: BLE001 -- a notice must never change an exit code
+            pass
+        if self.first is None:
+            return
+        total = self.total + (max(0.0, now - self.since) if self.since is not None else 0.0)
+        _say(f"note: this command sat idle for {buildlog.fmt_s(self.first[1])}, so its build"
+             f" slot was released at {_clock(self.first[0])}; other builds may have run beside"
+             f" it for {buildlog.fmt_s(total)} of its {buildlog.fmt_s(run_s)}. {_HOLD_HINT}")
+
+
+def _clock(ts: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
 def _wait_child(proc: subprocess.Popen, timeout: float | None, start: float,
@@ -810,7 +852,7 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
         if held:
             _finish(cfg, held, _record(meta or {"id": call.id}, None, now, held), now)
         call.log(cfg, "start" if held else "bypass", pid=os.getpid(), slot=slot,
-                 wait_s=wait_s)
+                 wait_s=wait_s, hold=bool(meta and meta.get("hold")) if held else None)
         call.log(cfg, "end", pid=os.getpid(), slot=slot, run_s=0.0, exit=127)
         if held:
             held.close()
@@ -824,14 +866,18 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
         waited = "no wait" if wait_s < 1 else f"queued {buildlog.fmt_s(wait_s)}"
         _say(f"{waited}, starting on slot {slot}: {buildlog.short_cmd(call.text)}"
              f"{_beside_text(held.beside)}")
-    call.log(cfg, "start" if held else "bypass", pid=proc.pid, slot=slot, wait_s=wait_s)
-    code = _wait_child(proc, timeout, start, _own_yield_watch(cfg, call.id) if held else None)
+    call.log(cfg, "start" if held else "bypass", pid=proc.pid, slot=slot, wait_s=wait_s,
+             hold=bool(rec and rec.get("hold")) if held else None)
+    watch = _OwnYield(cfg, call.id) if held and buildidle.enabled(cfg) else None
+    code = _wait_child(proc, timeout, start, watch.tick if watch else None)
     now = time.time()
     if held:
         _finish(cfg, held, rec, now)
     call.log(cfg, "end", pid=proc.pid, slot=slot, run_s=now - start, exit=code, ts=now)
     if held:
         _say(f"ran {buildlog.fmt_s(now - start)}, exit {code} (queued {buildlog.fmt_s(wait_s)})")
+        if watch:
+            watch.finish(now, now - start)
         held.close()  # the seat and slot free once the build's leftovers are gone too
     return code
 
@@ -851,8 +897,10 @@ def _inside_held(cfg: Config) -> bool:
     return bool(rec and rec.get("id") == bid and not rec.get("ended"))
 
 
-def run(cfg: Config, argv: list[str], timeout: float | None = None) -> int:
-    """Run ``argv`` through the gate and return its exit code."""
+def run(cfg: Config, argv: list[str], timeout: float | None = None,
+        hold: bool = False) -> int:
+    """Run ``argv`` through the gate and return its exit code. ``hold``: it takes
+    a slot whatever the command is, and never yields it for looking idle."""
     if not argv:
         _say("no command given")
         return 2
@@ -862,12 +910,16 @@ def run(cfg: Config, argv: list[str], timeout: float | None = None) -> int:
         _say("cannot run: the current directory no longer exists")
         return 2
     if cfg.build_max_concurrent >= 1 and _inside_held(cfg):
-        _say("already inside a build that holds a slot — running without queueing")
+        _say("already inside a build that holds a slot — running without queueing"
+             + (" (--hold does nothing here: give it to the outer swarm build)" if hold else ""))
         return _exec(cfg, argv)
     try:
         verdict = buildclass.classify(argv, cwd, cfg.build_heavy, cfg.build_light)
     except Exception as exc:  # noqa: BLE001 -- a classifier bug must not stop a build
         verdict = buildclass.Verdict(buildclass.HEAVY, f"could not classify ({exc})")
+    noyield = HOLD_WHY if hold else buildclass.daemon_side(verdict)
+    if hold and verdict.cls == buildclass.LIGHT and cfg.build_max_concurrent >= 1:
+        verdict.cls, verdict.why = buildclass.HEAVY, "--hold takes a slot"
     call = _Call(uuid.uuid4().hex[:12], _phase(cfg), list(argv), cwd, verdict.cls)
     try:
         if verdict.cls == buildclass.LIGHT or cfg.build_max_concurrent < 1:
@@ -883,7 +935,7 @@ def run(cfg: Config, argv: list[str], timeout: float | None = None) -> int:
         queued = time.time()
         meta = {"id": call.id, "phase": call.phase, "pid": os.getpid(), "argv": call.text,
                 "cwd": cwd, "queued_ts": queued, "pred_s": hist.predict(argv, cwd),
-                "noyield": buildclass.daemon_side(verdict)}
+                "noyield": noyield, "hold": hold}
         ticket = _enqueue(cfg, meta)
         call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued)
         held = _wait_turn(cfg, ticket, hist, announce=True)
@@ -930,7 +982,8 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
     rec = _record(ticket.meta, os.getpid(), start, claim)
     _write_record(claim.seat_fd, rec)
     _write_record(claim.slot_fd, rec)
-    call.log(cfg, "start", pid=os.getpid(), slot=claim.slot, wait_s=start - queued)
+    call.log(cfg, "start", pid=os.getpid(), slot=claim.slot, wait_s=start - queued,
+             hold=False)
     try:
         yield held
     finally:

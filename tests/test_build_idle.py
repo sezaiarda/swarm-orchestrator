@@ -3,8 +3,9 @@
 A holder that does nothing for ``[build].idle_yield_s`` is set aside: it keeps
 running, stops counting against ``max_concurrent``, and the next waiter starts
 beside it. Proved here: the yield itself and its events; no yield for a busy
-holder, across short quiet gaps, or for work that runs in a daemon; a woken
-holder counts again; the cap on set-aside holders; SIGKILL of a yielded holder
+holder, across short quiet gaps, for work that runs in a daemon, or under
+``--hold``; what the command itself is told; a woken holder counts again; the
+cap on set-aside holders; SIGKILL of a yielded holder
 and of the waiter that was measuring; gc and old callers still shut out;
 ``--status``; and the rule itself (:func:`buildidle.advance`) sample by sample.
 
@@ -127,6 +128,71 @@ def test_an_idle_holder_yields_and_the_waiter_starts_beside_it(gate):
     assert g.wait_event("end", "P-h")["exit"] == 0
     err = w.stderr.read()
     assert "beside P-h `cargo build`" in err and "its slot was yielded" in err
+    assert "--hold" not in err  # w itself was never set aside: nothing to tell it
+
+
+def test_the_command_that_was_set_aside_is_told_then_and_at_the_end(gate):
+    """Whoever ran the idle command reads its output afterwards. It must be able
+    to tell that other builds may have run beside it: once when the slot is
+    released, and once more as the last line."""
+    g = gate()
+    h = g.run("h", f"sleep:{WINDOW * 2 + 1.5}")
+    g.wait_event("start", "P-h")
+    w = g.run("w", "burn:1")
+    y = g.wait_event("yield", "P-h")
+    time.sleep(1.3)  # h's own `swarm build` looks once a second
+    assert h.poll() is None
+    _finish([h, w])
+    lines = [x for x in h.stderr.read().splitlines() if x.startswith("swarm build: ")]
+    at = time.strftime("%H:%M:%S", time.localtime(y["ts"]))
+    then = [x for x in lines if "this command was idle for" in x]
+    assert len(then) == 1 and f"its build slot was released at {at}" in then[0]
+    assert "nothing was stopped" in then[0] and "`swarm build --hold ...`" in then[0]
+    assert lines.index(then[0]) < next(i for i, x in enumerate(lines) if " ran " in x)
+    last = lines[-1]  # after "ran ..., exit 0": what a reader of the tail sees
+    assert last.startswith("swarm build: note: this command sat idle for")
+    assert f"released at {at}" in last and "other builds may have run beside it for" in last
+    assert "`swarm build --hold ...`" in last
+    assert g.wait_event("end", "P-h")["exit"] == 0 and h.returncode == 0
+
+
+def test_hold_keeps_the_slot_however_idle_the_command_looks(gate):
+    g = gate()
+    out = subprocess.run([sys.executable, "-m", "swarm_orchestrator", "build", "--help"],
+                         cwd=g.proj, env=g.env, capture_output=True, text=True, timeout=20)
+    assert "--hold" in out.stdout and "swarm build --hold -- ./measure.sh" in out.stdout
+    h = g.start("h", "cargo", "build", extra=("--hold",), env={"PLAN": f"sleep:{WINDOW + 2.5}"})
+    start_h = g.wait_event("start", "P-h")
+    w = g.run("w", "sleep:0.1")
+    g.wait_event("queued", "P-w")
+    time.sleep(WINDOW + 1.0)  # idle for more than a window, and still the holder
+    snap, text = g.look()
+    assert snap["slots"][0]["phase"] == "P-h" and snap["slots"][0]["hold"] is True
+    assert snap["yielded"] == [] and "keeps its slot while idle (--hold)" in text
+    _finish([h, w])
+    assert g.lines() == ["start h", "end h", "start w", "end w"]
+    assert "yield" not in [e["event"] for e in g.events()]
+    assert start_h["hold"] is True and g.wait_event("start", "P-w")["hold"] is False
+    assert all(e["hold"] is None for e in g.events() if e["event"] != "start")
+    assert "--hold" not in h.stderr.read()  # nothing to tell it: it was never set aside
+
+
+def test_hold_takes_a_slot_even_for_a_light_command(gate):
+    """``sleep`` alone skips the gate. Under ``--hold`` it is the measurement that
+    wants the machine to itself: it queues, holds a slot, and nothing starts
+    beside it."""
+    g = gate()
+    light = g.start("light", "sleep", "0.2")
+    light.wait(timeout=15)
+    assert g.kinds("P-light") == ["bypass", "end"]
+    h = g.start("h", "sleep", str(WINDOW + 2), extra=("--hold",))
+    start_h = g.wait_event("start", "P-h")
+    w = g.run("w", "sleep:0.1")
+    _finish([h, w])
+    assert g.kinds("P-h") == ["queued", "start", "end"]
+    assert (start_h["cls"], start_h["hold"], start_h["slot"]) == ("heavy", True, 0)
+    assert g.wait_event("start", "P-w")["ts"] >= g.wait_event("end", "P-h")["ts"] - 0.05
+    assert "yield" not in [e["event"] for e in g.events()]
 
 
 def test_a_busy_holder_never_yields(gate):

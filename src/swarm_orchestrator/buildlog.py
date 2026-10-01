@@ -11,12 +11,15 @@ is a contract other tools read. Every line has exactly these keys::
      "wait_s": <float on start, else null>,
      "run_s": <float on end, yield and unyield, else null>,
      "exit": <int or null on end, else null>,
-     "idle_s": <float on yield and unyield, else null>}
+     "idle_s": <float on yield and unyield, else null>,
+     "hold": <true|false on start, else null>}
 
 - ``queued``: a heavy command joined the queue. ``pid`` is the waiting
   ``swarm build`` process (the build does not exist yet).
 - ``start``: it got slot ``slot``; ``pid`` is the build process itself (its whole
-  process tree holds the slot), ``wait_s`` how long it queued.
+  process tree holds the slot), ``wait_s`` how long it queued. ``hold`` is true
+  for a build started with ``swarm build --hold``: it keeps its slot however
+  idle it looks, and never gets a ``yield``.
 - ``bypass``: a light command (or any command while the gate is off) started
   without queueing; ``pid`` is the command's process, ``slot`` null.
 - ``end``: the command finished; ``run_s`` since its start, ``exit`` its exit code
@@ -78,7 +81,7 @@ def event(cfg: Config, kind: str, *, id: str, phase: str | None, pid: int,
           slot: int | None, cls: str, argv: list[str] | str, cwd: str,
           wait_s: float | None = None, run_s: float | None = None,
           exit: int | None = None, idle_s: float | None = None,
-          ts: float | None = None) -> None:
+          hold: bool | None = None, ts: float | None = None) -> None:
     """Append one event line. Never raises: the log must not break a build."""
     rec = {
         "ts": round(ts if ts is not None else time.time(), 3), "event": kind, "id": id,
@@ -88,6 +91,7 @@ def event(cfg: Config, kind: str, *, id: str, phase: str | None, pid: int,
         "run_s": round(run_s, 3) if run_s is not None else None,
         "exit": exit,
         "idle_s": round(idle_s, 3) if idle_s is not None else None,
+        "hold": hold,
     }
     line = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
     path = events_path(cfg)

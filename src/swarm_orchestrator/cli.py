@@ -1407,7 +1407,8 @@ def cmd_lesson(cfg: Config, phase: str, text: str, title: str) -> int:
 
 
 def cmd_build(cfg: Config, argv: list[str], *, status: bool = False, as_json: bool = False,
-              timeout: str | None = None, script: str | None = None) -> int:
+              timeout: str | None = None, script: str | None = None,
+              hold: bool = False) -> int:
     """Run a build command through the swarm-wide gate (see :mod:`buildsem`).
 
     A worker's cwd is a worktree, whose ``.swarm.toml`` may not be the project's:
@@ -1440,7 +1441,7 @@ def cmd_build(cfg: Config, argv: list[str], *, status: bool = False, as_json: bo
             return 2
     if script is not None:
         argv = ["bash", "-e", "-o", "pipefail", script, *argv]
-    return buildsem.run(cfg, argv, timeout=limit)
+    return buildsem.run(cfg, argv, timeout=limit, hold=hold)
 
 
 def _timeout_s(text: str) -> float | None:
@@ -2340,13 +2341,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "-f/--file or --manifest-path, a Cargo.toml / Makefile / bake file must exist.\n\n"
             "While queued it prints (stderr) its place, who holds each slot and for how\n"
             "long, and an estimated start; then 'queued Xs, starting' and 'ran Ys, exit N'.\n"
-            "The exit code is the command's (124 on --timeout)."),
+            "The exit code is the command's (124 on --timeout).\n\n"
+            "A build whose whole process tree does nothing for [build].idle_yield_s is set\n"
+            "aside: it keeps running, but the next build starts beside it. It is told so\n"
+            "on stderr, then and when it ends. --hold keeps the slot regardless."),
         epilog=(
             "several steps in one turn:\n"
             "  swarm build -- sh -c 'cargo clippy -- -D warnings && cargo nextest run'\n"
             "  swarm build --script gate.sh      (runs it with bash -e -o pipefail)\n"
             "stop a build that runs too long (the wait does not count):\n"
             "  swarm build --timeout 15m -- cargo nextest run\n"
+            "keep the machine to one command that looks idle while it measures:\n"
+            "  swarm build --hold -- ./measure.sh\n"
             "see the gate:  swarm build --status [--json]\n"
             "Time in the queue does not count toward --timeout, but it does count toward\n"
             "any timeout of whatever runs `swarm build`: killing a queued call loses its place."),
@@ -2358,9 +2364,13 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="stop the build this long after it STARTS (600, 90s, 10m, 1h30m)")
     bp.add_argument("--script", metavar="FILE",
                     help="run FILE with bash -e -o pipefail in one turn")
+    bp.add_argument("--hold", action="store_true",
+                    help="take a slot and keep it while the command runs, however idle it"
+                         " looks (a measurement that sleeps): no build starts beside it")
     bp.add_argument("argv", nargs=argparse.REMAINDER, help="the build command, e.g. cargo nextest run")
     bp.set_defaults(func=lambda cfg, a: cmd_build(cfg, a.argv, status=a.status, as_json=a.json,
-                                                  timeout=a.timeout, script=a.script))
+                                                  timeout=a.timeout, script=a.script,
+                                                  hold=a.hold))
 
     kpp = sub.add_parser(
         "keep", help="leave one process running after your session ends (list / stop them)",

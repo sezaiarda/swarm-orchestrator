@@ -370,7 +370,10 @@ flowchart TD
   `[build].idle_yield_s` (150 s) is set aside. It is never stopped; it just
   stops counting, so the next build starts beside it, and it counts again if it
   wakes up. At most `[build].idle_yield_max` are set aside at once. Commands
-  whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield.
+  whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield,
+  and neither does one started with `swarm build --hold` (a measurement that
+  must have the machine to itself). A command that was set aside is told so in
+  its own output.
 - **Light commands skip it:** `git`, `ls`, `cargo update`/`metadata`/`fmt`/`tree`,
   `docker buildx bake --print`, python scripts that start no processes. Unknown
   commands count as heavy; `[build].heavy`/`light` add patterns.

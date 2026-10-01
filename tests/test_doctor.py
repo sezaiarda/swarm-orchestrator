@@ -330,6 +330,92 @@ def test_a_landing_slot_is_not_probed(cfg, monkeypatch):
     assert doctor._check_panes(cfg, st, doctor._dead_panes(cfg, st)).status == OK
 
 
+# -- a claimed slot waits for its worker --------------------------------------
+def test_a_claimed_slot_whose_worker_has_not_started_is_not_a_dead_worker(cfg, monkeypatch):
+    """What the owner saw: a freed slot was claimed for the next phase, and for
+    the seconds its mirror took to build the pane still ran the parked ``sleep``."""
+    log(cfg, (4, "CLAIM P4 slot=3"))
+    cmds = {"%1": "claude", "%2": "claude", "%3": "claude", "%4": "sleep"}
+    pane, watchdog = landing(cfg, monkeypatch, cmds)
+    assert pane.status == OK
+    assert pane.detail == "4 busy slot(s): 3 running claude, 1 starting (P4)"
+    assert watchdog.status == OK  # with no watchdog, a dead worker here would fail
+    assert doctor.exit_code([pane, watchdog]) == 0
+
+
+def test_a_claim_that_never_launched_is_a_dead_worker_past_the_bound(cfg, monkeypatch):
+    log(cfg, (doctor._START_GRACE_S + 60, "CLAIM P1 slot=0"))
+    pane, watchdog = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == FAIL
+    assert "slot 0 (P1) pane %1 runs 'sleep'" in pane.detail
+    assert "never launched" in pane.detail
+    assert pane.fix_hint.startswith("swarm free P1 ")
+    assert watchdog.status == FAIL
+
+
+def test_the_start_bound_outlasts_both_boot_waits_of_a_launch():
+    from swarm_orchestrator import launch
+
+    assert doctor._START_GRACE_S > 2 * launch.READY_TIMEOUT_S
+
+
+def test_a_launched_worker_whose_pane_is_parked_is_still_a_dead_worker(cfg, monkeypatch):
+    log(cfg, (20, "CLAIM P1 slot=0"), (12, "LAUNCH P1 slot=0"))
+    pane, watchdog = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == FAIL and "slot 0 (P1) pane %1 runs 'sleep'" in pane.detail
+    assert "never launched" not in pane.detail
+    assert watchdog.status == FAIL
+
+
+def test_a_launch_of_an_earlier_attempt_does_not_end_the_wait(cfg, monkeypatch):
+    """A retried phase: the log holds the last attempt's ``LAUNCH`` before the
+    new claim."""
+    log(cfg, (3600, "CLAIM P1 slot=0"), (3590, "LAUNCH P1 slot=0"), (5, "CLAIM P1 slot=1"))
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == OK and "1 starting (P1)" in pane.detail
+
+
+def test_another_phases_launch_does_not_end_the_wait(cfg, monkeypatch):
+    log(cfg, (5, "CLAIM P1 slot=0"), (2, "LAUNCH P10 slot=1"), (1, "LAUNCH-FAIL P1x slot=1"))
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == OK and "1 starting (P1)" in pane.detail
+
+
+def test_a_starting_slot_is_not_probed(cfg, monkeypatch):
+    """Its pane runs the placeholder, then a shell, then the booting worker."""
+    cfg.driver = "tmux"
+    monkeypatch.setattr(doctor, "_pane_cmd", lambda pane: pytest.fail("probed a starting pane"))
+    log(cfg, (30, "CLAIM P1 slot=0"))
+    st = set_state(cfg, slots=1)
+    busy(st, 0, "P1", pane_id="%1")
+    st = save(cfg, st)
+    assert doctor._check_panes(cfg, st, doctor._dead_panes(cfg, st)).status == OK
+
+
+def test_working_landing_and_starting_slots_are_counted_apart(cfg, monkeypatch):
+    log(cfg, (5, "CLAIM P3 slot=2"))
+    cmds = {"%1": "sleep", "%2": "claude", "%3": "sleep"}
+    pane, _ = landing(cfg, monkeypatch, cmds, **queued("P1"))
+    assert pane.status == OK
+    assert pane.detail == "3 busy slot(s): 1 running claude, 1 landing (P1), 1 starting (P3)"
+
+
+def test_a_dead_worker_beside_a_starting_phase_is_the_one_named(cfg, monkeypatch):
+    log(cfg, (5, "CLAIM P1 slot=0"))
+    pane, watchdog = landing(cfg, monkeypatch, {"%1": "sleep", "%2": "bash"})
+    assert pane.status == FAIL
+    assert "(P2)" in pane.detail and "(P1)" not in pane.detail
+    assert pane.fix_hint.startswith("swarm free P2 ")
+    assert watchdog.status == FAIL and "1 busy slot(s)" in watchdog.detail
+
+
+def test_an_unreadable_pane_beside_a_starting_phase_still_names_it(cfg, monkeypatch):
+    log(cfg, (5, "CLAIM P1 slot=0"))
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep", "%2": "?"})
+    assert pane.status == OK
+    assert "1 pane(s) unreadable" in pane.detail and "1 starting (P1)" in pane.detail
+
+
 # -- the lost-/prime signature ----------------------------------------------
 def worktree(tmp_path: Path, *, dirty: bool) -> Path:
     wt = tmp_path / "wt" / "P1"
@@ -381,6 +467,31 @@ def test_a_busy_slot_with_written_work_is_fine(cfg, tmp_path):
 
 def test_a_fresh_launch_gets_its_grace(cfg, tmp_path):
     assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=60).status == OK
+
+
+def unlaunched(cfg, wt: Path, *entries: tuple[float, str]) -> Check:
+    """``activity`` over a log written oldest first, as the supervisor writes it."""
+    cfg.git_main_branch = "main"
+    log(cfg, *entries)
+    st = set_state(cfg)
+    busy(st, 0, "P1", worktree=str(wt))
+    return doctor._check_activity(cfg, save(cfg, st))
+
+
+def test_a_retried_phase_that_is_starting_is_not_a_lost_prime(cfg, tmp_path):
+    """Its fresh mirror holds no work yet, and the only ``LAUNCH`` on record is
+    the last attempt's."""
+    wt = worktree(tmp_path, dirty=False)
+    assert unlaunched(cfg, wt, (3600, "LAUNCH P1 slot=0"), (5, "CLAIM P1 slot=1")).status == OK
+
+
+def test_a_claim_with_no_launch_ages_from_the_claim(cfg, tmp_path):
+    """A worker adopted after its supervisor died mid-launch has no ``LAUNCH``
+    line of its own: the claim is when its slot's time started."""
+    wt = worktree(tmp_path, dirty=False)
+    check = unlaunched(cfg, wt, (2 * 3600, "LAUNCH P1 slot=0"), (30 * 60, "CLAIM P1 slot=1"))
+    assert check.status == FAIL
+    assert "P1 (30m, no commits, no dirty files)" in check.detail
 
 
 def test_a_worktree_git_cannot_read_is_not_reported(cfg, tmp_path):

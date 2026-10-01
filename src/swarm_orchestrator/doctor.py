@@ -49,6 +49,7 @@ from . import caps
 from . import gc as gc_mod
 from . import gitq
 from . import keep as keep_mod
+from . import launch as launch_mod
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import opqueue
@@ -74,6 +75,11 @@ _RANK = {OK: 0, WARN: 1, FAIL: 2}
 # hours; a watcher polling every half hour needs two ticks to notice.
 # 20 minutes is well past any plausible cold start and still catches it early.
 _IDLE_GRACE_S = 20 * 60
+# How long a claimed slot may wait for its worker before the claim reads as a
+# launch that died. A launch claims the slot, builds the phase's mirror, then
+# awaits the boot at most twice (``launch.READY_TIMEOUT_S`` each) and sends the
+# command. The mirror has no limit of its own, so it gets as long as both boots.
+_START_GRACE_S = 4 * launch_mod.READY_TIMEOUT_S
 # A held integration freezes the entire queue — every slot drains and none refill.
 # It is worth an alert almost immediately.
 _BLOCKED_WARN_S = 5 * 60
@@ -322,11 +328,32 @@ def _log_ts(cfg: Config, prefix: str) -> float | None:
     what is happening, never when it started — so ages ("blocked for 4h") come
     from here. Reads the tail only; the log grows unbounded over a campaign.
     """
-    # The newest rotated file too, so a rotation a minute ago loses nothing.
-    lines = read_all(cfg.supervisor_log, keep=1).splitlines()[-4000:]
-    for line in reversed(lines):
+    for line in reversed(_log_tail(cfg)):
         ts, message = parse_ts(line)
         if message.startswith(prefix):
+            return ts
+    return None
+
+
+def _log_tail(cfg: Config) -> list[str]:
+    # The newest rotated file too, so a rotation a minute ago loses nothing.
+    return read_all(cfg.supervisor_log, keep=1).splitlines()[-4000:]
+
+
+def _unlaunched(cfg: Config, phase: str) -> float | None:
+    """When ``phase`` was last claimed, if no ``LAUNCH`` line follows that claim.
+
+    ``launch.launch_outcome`` logs ``CLAIM`` once the slot is the phase's and
+    ``LAUNCH`` once its worker has been sent its command. In between the slot
+    is busy while the mirror is built and the session boots, and its pane runs
+    the idle placeholder, then a shell, then the worker. ``None`` once
+    launched, and when the log's tail holds no claim.
+    """
+    for line in reversed(_log_tail(cfg)):
+        ts, message = parse_ts(line)
+        if message.startswith(f"LAUNCH {phase} "):
+            return None
+        if message.startswith(f"CLAIM {phase} "):
             return ts
     return None
 
@@ -527,6 +554,7 @@ class PaneProbe(NamedTuple):
     busy: int  # busy slots with a pane, landing ones included
     dead_free: list[str]  # free slots with nowhere to launch into
     landing: list[str]  # busy phases whose worker has reported
+    starting: list[str]  # busy phases claimed moments ago, their worker not launched yet
 
 
 def _landing(st: State) -> set[str]:
@@ -574,25 +602,35 @@ def _dead_panes(cfg: Config, st: State) -> PaneProbe:
 
     A busy slot whose worker has reported (:func:`_reported`) is not probed:
     its pane runs the same placeholder by design, and it is no dead worker.
+    Neither is one claimed within :data:`_START_GRACE_S` whose worker has not
+    been launched yet (:func:`_unlaunched`). Past that it is probed like any
+    other, so a launch that died is not hidden.
     """
     busy = [s for s in st.busy_slots() if s.pane_id]
     if cfg.driver != "tmux":
-        return PaneProbe([], 0, len(busy), [], [])
+        return PaneProbe([], 0, len(busy), [], [], [])
     dead: list[tuple[str, str]] = []
     dead_free: list[str] = []
     landing: list[str] = []
+    starting: list[str] = []
     unknown = 0
+    now = time.time()
     for slot in busy:
         if slot.phase and _reported(cfg, st, slot.phase):
             landing.append(slot.phase)
+            continue
+        claimed = _unlaunched(cfg, slot.phase) if slot.phase else None
+        if claimed is not None and now - claimed < _START_GRACE_S:
+            starting.append(slot.phase or "")
             continue
         cmd = _pane_cmd(slot.pane_id or "")
         if cmd == "?":
             unknown += 1
         elif cmd != "claude":
-            dead.append(
-                (slot.phase or "", f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}")
-            )
+            what = f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}"
+            if claimed is not None:
+                what += f", claimed {_human_age(now - claimed)} ago and never launched"
+            dead.append((slot.phase or "", what))
     for slot in st.slots:
         if slot.busy or slot.retiring:
             continue
@@ -604,7 +642,7 @@ def _dead_panes(cfg: Config, st: State) -> PaneProbe:
             unknown += 1
         elif cmd == "gone":
             dead_free.append(f"free slot {slot.id} pane {slot.pane_id} is gone")
-    return PaneProbe(dead, unknown, len(busy), dead_free, landing)
+    return PaneProbe(dead, unknown, len(busy), dead_free, landing, starting)
 
 
 def _check_panes(cfg: Config, st: State, probe: PaneProbe) -> Check:
@@ -613,7 +651,8 @@ def _check_panes(cfg: Config, st: State, probe: PaneProbe) -> Check:
 
     A worker that crashed or was killed never runs ``swarm done``, so its slot
     stays busy forever and the run can neither progress nor finish. A worker
-    that did report keeps its slot while its work lands, and is counted apart.
+    that did report keeps its slot while its work lands, and is counted apart;
+    so is a slot claimed moments ago, whose worker is still being started.
     """
     if cfg.driver != "tmux":
         return Check("slots.panes", OK, f"driver={cfg.driver}; no panes to check")
@@ -635,14 +674,20 @@ def _check_panes(cfg: Config, st: State, probe: PaneProbe) -> Check:
         )
     if not probe.busy:
         return Check("slots.panes", OK, "no busy slots")
-    working = probe.busy - len(probe.landing)
-    landing = f"{len(probe.landing)} landing ({', '.join(probe.landing)})"
+    working = probe.busy - len(probe.landing) - len(probe.starting)
+    apart = [
+        f"{len(phases)} {what} ({', '.join(phases)})"
+        for what, phases in (("landing", probe.landing), ("starting", probe.starting))
+        if phases
+    ]
     if probe.unknown:
         detail = f"{probe.busy} busy; {probe.unknown} pane(s) unreadable"
-        return Check("slots.panes", OK, f"{detail}; {landing}" if probe.landing else detail)
-    if probe.landing:
+        return Check("slots.panes", OK, "; ".join([detail, *apart]))
+    if apart:
         return Check(
-            "slots.panes", OK, f"{probe.busy} busy slot(s): {working} running claude, {landing}"
+            "slots.panes",
+            OK,
+            f"{probe.busy} busy slot(s): {working} running claude, {', '.join(apart)}",
         )
     return Check("slots.panes", OK, f"{probe.busy} busy slot(s), all running claude")
 
@@ -699,6 +744,10 @@ def _check_activity(cfg: Config, st: State) -> Check:
     A phase whose worker has reported (:func:`_reported`) is left out: once its
     branch is merged it has nothing ahead of main and nothing dirty, and it
     keeps its slot for a moment longer.
+
+    A slot's time counts from its claim while no ``LAUNCH`` follows it
+    (:func:`_unlaunched`): a phase that is starting again has a fresh, empty
+    mirror, and the only ``LAUNCH`` on record is an earlier attempt's.
     """
     busy = [
         s
@@ -711,7 +760,7 @@ def _check_activity(cfg: Config, st: State) -> Check:
     row_dirs = _row_dirs(cfg)
     idle: list[tuple[str, str]] = []
     for slot in busy:
-        started = _log_ts(cfg, f"LAUNCH {slot.phase} ")
+        started = _unlaunched(cfg, slot.phase or "") or _log_ts(cfg, f"LAUNCH {slot.phase} ")
         if started is None:
             try:
                 started = Path(slot.worktree or "").stat().st_mtime

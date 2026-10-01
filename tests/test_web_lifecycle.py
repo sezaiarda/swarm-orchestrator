@@ -320,3 +320,56 @@ def test_probe_calls_its_own_board_ours_while_it_is_still_starting(tmp_path, mon
             proc.kill()
             proc.wait(timeout=5)
         assert _wait(lambda: not _listening(port)), "the listener outlived its turn"
+
+
+@pytest.mark.skipif(shutil.which("ss") is None, reason="ss not available")
+def test_the_runs_own_dashboard_on_the_port_is_not_another_program(tmp_path, monkeypatch,
+                                                                    capsys):
+    """Under tmux the dashboard (``swarm tui``) serves the board itself, and a
+    dashboard still starting answers ``/healthz`` late. ``swarm up`` then said
+    "FAILED to start: port is held by another program (swarm (pid N))" about its
+    own dashboard. The run's dashboard on the port is the board; another run's
+    is not."""
+    from swarm_orchestrator import cli
+
+    port = _free_port()
+    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SWARM_WEB", "1")
+    monkeypatch.setenv("SWARM_WEB_PORT", str(port))
+    monkeypatch.setenv("SWARM_WEB_HOST", "127.0.0.1")
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = load(project_dir=str(project))
+
+    def dashboard_lookalike(state_dir: Path) -> subprocess.Popen:
+        # `swarm tui` as `up` starts it, on a listener that never answers.
+        return subprocess.Popen(
+            [sys.executable, "-c", _SILENT_LISTENER.replace("listen(5)", "listen(64)"),
+             "swarm_orchestrator", "tui", str(port)],
+            env={**os.environ, "SWARM_STATE_DIR": str(state_dir)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    proc = dashboard_lookalike(tmp_path / "another-run")
+    try:
+        assert _wait(lambda: _listening(port)), "the listener never bound"
+        state, detail = lifecycle.probe(cfg)
+        assert state == lifecycle.TAKEN and f"pid {proc.pid}" in detail
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+    assert _wait(lambda: not _listening(port)), "the listener outlived its turn"
+
+    proc = dashboard_lookalike(cfg.state_dir)
+    try:
+        assert _wait(lambda: _listening(port)), "the listener never bound"
+        assert lifecycle.probe(cfg) == (lifecycle.OURS, lifecycle.DASHBOARD)
+        assert "the dashboard is hosting it" in lifecycle.status_line(cfg)
+        cli._report_web_board(cfg, hosted=True)
+        out = capsys.readouterr()
+        assert out.out.strip() == (f"web board: http://127.0.0.1:{port}/"
+                                   " (the dashboard is hosting it)")
+        assert "FAILED" not in out.err and "another program" not in out.err
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)

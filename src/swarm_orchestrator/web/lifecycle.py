@@ -44,6 +44,9 @@ APP_ID = "swarm-web"
 OURS = "ours"
 TAKEN = "taken"
 CLOSED = "closed"
+#: The detail :func:`probe` gives with :data:`OURS` when the listener is this
+#: run's dashboard, which serves the board from its own process.
+DASHBOARD = "the dashboard is hosting it"
 #: Interfaces that are never the LAN: container bridges and virtual links. A
 #: phone cannot reach 172.17.0.1, and printing it as "the address" would send
 #: the owner to a dead URL first.
@@ -161,7 +164,8 @@ def probe(cfg, timeout: float = 0.5) -> tuple[str, str | None]:
     :func:`listening` does — a squatter that merely accepts the connection
     (another ``http.server``, say) must not read as our board. The second
     element of the pair is the occupant's ``command (pid N)`` for ``TAKEN``,
-    when :func:`_occupant` can say so cheaply; otherwise ``None``.
+    when :func:`_occupant` can say so cheaply, and :data:`DASHBOARD` for an
+    ``OURS`` that is this run's dashboard not answering yet; otherwise ``None``.
     """
     host = cfg.web_host if cfg.web_host not in ("", "0.0.0.0", "::") else "127.0.0.1"
     port = int(cfg.web_port)
@@ -180,6 +184,12 @@ def probe(cfg, timeout: float = 0.5) -> tuple[str, str | None]:
         # board of this project on the port is ours, whatever its answer speed.
         if pid is not None and _board_of(cfg, pid):
             return OURS, None
+        # Under tmux the dashboard serves the board from its own process, and a
+        # dashboard still painting its first screen answers late. Its command is
+        # ``swarm tui``, not ``swarm web``: without this the run's own dashboard
+        # was reported as "another program (swarm (pid N))" holding the port.
+        if pid is not None and _dashboard_of(cfg, pid):
+            return OURS, DASHBOARD
         return TAKEN, who
     if body.get("app") == APP_ID and body.get("project") == cfg.project_dir.name:
         return OURS, None
@@ -222,6 +232,23 @@ def _board_of(cfg, pid: int) -> bool:
         return False
 
 
+def _dashboard_of(cfg, pid: int) -> bool:
+    """Is ``pid`` this run's dashboard? ``swarm up`` starts it with the run's
+    ``SWARM_STATE_DIR``, and it serves the board itself
+    (:mod:`swarm_orchestrator.tui.webboard`)."""
+    try:
+        args = [a.decode(errors="replace")
+                for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
+        env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    if "tui" not in args or not any(
+        "swarm_orchestrator" in a or Path(a).name == "swarm" for a in args
+    ):
+        return False
+    return f"SWARM_STATE_DIR={cfg.state_dir}".encode() in env
+
+
 def status_line(cfg) -> str:
     """One line for ``swarm status``: where the board is, and whether it answers."""
     if not cfg.web_enabled:
@@ -229,7 +256,7 @@ def status_line(cfg) -> str:
     where = " ".join(urls(cfg))
     state, detail = probe(cfg)
     if state == OURS:
-        return f"web: {where} (listening)"
+        return f"web: {where} ({detail or 'listening'})"
     if state == TAKEN:
         who = f" ({detail})" if detail else " (pid unknown)"
         return (f"web: port :{cfg.web_port} is held by another program{who}, not the board — "

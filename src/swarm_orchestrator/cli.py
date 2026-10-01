@@ -250,7 +250,9 @@ def _report_web_board(cfg: Config, hosted: bool = False) -> None:
     a since-corrected ``status``/``doctor`` connect check ever disagreed."""
     state, detail = web_lifecycle.wait_probe(cfg, WEB_HOSTED_WAIT_S if hosted else 5.0)
     if state == web_lifecycle.OURS:
-        print(f"web board: {' '.join(web_lifecycle.urls(cfg))}")
+        # ``detail``: the dashboard holds the port and has not answered yet.
+        print(f"web board: {' '.join(web_lifecycle.urls(cfg))}"
+              + (f" ({detail})" if detail else ""))
         return
     if state == web_lifecycle.TAKEN:
         who = f" ({detail})" if detail else ""

@@ -346,9 +346,12 @@ class SwarmApp(App):
         so a hidden one loses nothing by being skipped — it is repainted on the
         way in by ``on_tabbed_content_tab_activated``.
         """
-        # A tick can land while the app is tearing its widgets down, and a
-        # query_one there raised NoMatches out of the timer: nothing to paint.
-        if not self.query("#tabs"):
+        # A tick can land while the app is shutting down. Widgets leave children
+        # first, so the tab set is still in the DOM after its panes are gone, and
+        # asking it for the active pane raised NoMatches out of the timer: nothing
+        # to paint. Only shutdown is excused: a pane missing while the app runs
+        # still raises.
+        if not self.is_running or not self.query("#tabs"):
             return
         self._guide_hint()
         try:

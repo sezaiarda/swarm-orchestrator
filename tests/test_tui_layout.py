@@ -211,3 +211,68 @@ def test_enter_on_a_feed_row_opens_that_phase_in_history(seeded, monkeypatch, ca
 
     got = _boot(seeded, (120, 40), steps, monkeypatch, capfd)
     assert got == {"tab": "history", "phase": "P0"}
+
+
+def test_a_tick_while_the_tabs_are_torn_down_paints_nothing_and_does_not_raise(
+        seeded, monkeypatch, capfd):
+    """Shutdown removes widgets children first, so the tab set outlives its panes.
+
+    A refresh tick that landed in that moment asked for the active pane and
+    raised NoMatches out of the timer, which failed whichever test was closing
+    its app. The tick is fired here by hand at exactly that moment: the unmount
+    of the tab set's own switcher, whose panes are gone while the tab set is
+    still in the DOM.
+    """
+    from textual.css.query import NoMatches
+    from textual.widgets import ContentSwitcher, TabbedContent
+
+    seen: list[dict] = []
+
+    def tick_now(switcher) -> None:
+        if getattr(switcher.parent, "id", None) != "tabs":
+            return
+        app = switcher.app
+        state = {"tabs": bool(app.query("#tabs")), "active": None, "pane_gone": False,
+                 "raised": None}
+        try:
+            tabs = app.query_one("#tabs", TabbedContent)
+            state["active"] = tabs.active
+            tabs.active_pane
+        except NoMatches:
+            state["pane_gone"] = True
+        try:
+            app._tick()
+        except Exception as exc:  # noqa: BLE001 - what the timer would have raised
+            state["raised"] = repr(exc)
+        seen.append(state)
+
+    monkeypatch.setattr(ContentSwitcher, "on_unmount", tick_now, raising=False)
+
+    async def steps(app, pilot, got):
+        app.action_tab("history")
+        await pilot.pause()
+        got["tab"] = app.query_one("#tabs").active
+
+    got = _boot(seeded, (120, 40), steps, monkeypatch, capfd)
+    assert got == {"tab": "history"}
+    # The moment was really reached: the tab set there, its active pane not.
+    assert seen == [{"tabs": True, "active": "history", "pane_gone": True, "raised": None}]
+
+
+def test_a_tick_still_raises_for_a_pane_missing_while_the_app_runs(seeded, monkeypatch, capfd):
+    """Only shutdown is excused: an active tab with no pane behind it is a real fault."""
+    from textual.css.query import NoMatches
+    from textual.widgets import TabbedContent
+
+    async def steps(app, pilot, got):
+        tabs = app.query_one("#tabs", TabbedContent)
+        tabs.set_reactive(TabbedContent.active, "no-such-pane")  # no watcher, no validation
+        try:
+            with pytest.raises(NoMatches):
+                app._tick()
+            got["raised"] = True
+        finally:
+            tabs.set_reactive(TabbedContent.active, "home")
+
+    got = _boot(seeded, (120, 40), steps, monkeypatch, capfd)
+    assert got == {"raised": True}

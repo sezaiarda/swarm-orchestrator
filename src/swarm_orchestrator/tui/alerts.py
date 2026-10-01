@@ -23,6 +23,7 @@ from rich.markup import escape
 from .. import telegram
 from ..drain import line as drain_line
 from ..pauseat import line as pause_line
+from .. import restart as restart_mod
 from .data import fmt_clock, fmt_duration, fmt_stamp, held_merge, open_drops
 from .shell import STALE_BAD_S, STALE_WARN_S
 from .theme import BAD, BRIGHT, GLYPH, MUTED, OK, SOFT, WARN, YOU, paint
@@ -88,6 +89,14 @@ def problems(dash, now: float | None = None) -> list[tuple[str, str]]:
         parts.append((f"quiet for {fmt_duration(age)}", WARN))
     if snap.ok and snap.pause_at:
         parts.append((pause_line(snap.pause_at, now), WARN))
+    plan = getattr(dash, "restart", None) or {}
+    if snap.ok and plan:
+        # Planned or under way is a hold the owner (or a session) set; a failed
+        # one is a fault, and says how the swarm was left.
+        text = restart_mod.line(
+            plan, *restart_mod.counts_of(getattr(dash, "_state", None) or {}), now)
+        if text:
+            parts.append((escape(text), BAD if plan.get("stage") == restart_mod.FAILED else WARN))
     return parts
 
 

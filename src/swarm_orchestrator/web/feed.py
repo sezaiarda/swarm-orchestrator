@@ -57,7 +57,7 @@ FORCE_S = 20.0
 
 #: Dash sources whose change always rebuilds; the rest are the slow ones.
 _FAST = {"state", "log", "notifications", "done", "recaps", "notes", "operator", "run",
-         "ledger", "overseer", "keep", "eta"}
+         "ledger", "overseer", "keep", "eta", "restart"}
 
 
 class Feed:

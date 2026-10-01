@@ -96,6 +96,8 @@ DESTRUCTIVE: dict[str, tuple[str | None, str]] = {
     "operator-done": (None, "settles the job and ends its operator session"),
     "gc": ("--yes", "deletes files from disk"),
     "keep": ("--stop", "stops a process a session kept running for the owner, and forgets it"),
+    "restart": ("--full", "drains, then stops and starts the swarm again in a new tmux"
+                          " session; without --full only the supervisor is replaced"),
     "reset": (None, "closes the open run and starts a fresh one — ETA and usage count from "
                     "now; the closed run keeps its summary under `swarm usage`"),
 }

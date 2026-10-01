@@ -38,6 +38,7 @@ from statistics import median
 
 from .. import bigpic, ledger, opqueue, statuses
 from ..drain import line as drain_line
+from .. import restart as restart_mod
 from ..overseer import starvation_map
 from ..tui import books as books_mod
 from ..tui.campaign import campaign_of
@@ -446,6 +447,16 @@ def _at(ts: float) -> float | None:
     return ts if ts != float("inf") else None
 
 
+def _restart(dash, now: float) -> dict:
+    """The ``swarm restart`` plan for the header: its line (clock time only, so
+    a quiet board does not change as time passes) and how far it has got."""
+    plan = getattr(dash, "restart", None) or {}
+    text = restart_mod.line(
+        plan, *restart_mod.counts_of(getattr(dash, "_state", None) or {}), now,
+        relative=False) if plan else ""
+    return {"restart": text, "restart_stage": plan.get("stage", "") if text else ""}
+
+
 def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> dict:
     snap = dash.snapshot
     cols: dict[str, int] = {}
@@ -483,6 +494,7 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         "paused": bool(snap.paused),
         "usage_hold": snap.usage_hold,
         "drain": drain_line(snap.drain),
+        **_restart(dash, now),
         "finished": bool(snap.finished),
         "running": bool(snap.ok and snap.supervisor_alive),
         "state": snap.reason if not snap.ok else "",

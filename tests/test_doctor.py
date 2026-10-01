@@ -636,7 +636,7 @@ def test_run_checks_reads_in_a_fixed_order_and_never_raises(cfg, monkeypatch):
         "run.nudge", "run.stall", "owner.blocking", "ledger", "telegram.config",
         "telegram.sends", "disk.state", "disk.incremental", "disk.tmp", "sentinels",
         "recaps.history", "phases.failed", "operator", "prompts", "web.board", "telegram.bot",
-        "usage.caps", "keep", "build.gate", "resources.sampler", "resources.files",
+        "usage.caps", "keep", "restart", "build.gate", "resources.sampler", "resources.files",
         "resources.idle-build",
     ]
 

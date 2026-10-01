@@ -559,12 +559,13 @@ function status(failed) {
   if (!h.running) { c = "var(--mu2)"; txt = h.state ? "Stopped" : "Stopped"; live = false; }
   else if (h.finished) { txt = "Finished"; live = false; }
   else if (h.drain) { c = "var(--owner)"; txt = "Draining"; }
+  else if (h.restart) { c = h.restart_stage === "failed" ? "var(--failed)" : "var(--owner)"; txt = h.restart_stage === "planned" ? "Restart planned" : h.restart_stage === "failed" ? "Restart failed" : "Restarting"; }
   else if (h.paused) { c = "var(--owner)"; txt = "Paused"; live = false; }
   else if (h.usage_hold) { c = "var(--owner)"; txt = "Held by usage cap"; live = false; }
   if (failed || Date.now() - S.lastOk > 20000) { c = "var(--failed)"; txt = "Board unreachable"; live = false; }
   st.className = "state" + (live ? " live" : ""); st.style.setProperty("--c", c);
   st.innerHTML = `<span class="dot"></span><span>${esc(txt)}</span>`;
-  st.title = h.drain || h.usage_hold || h.state || "";
+  st.title = h.drain || h.restart || h.usage_hold || h.state || "";
   $("#slots").textContent = `${h.slots.busy} of ${h.slots.total} workers busy`;
   $("#upd").textContent = "updated " + rel(b.generated_at);
   $("#proj").textContent = b.project || "swarm";

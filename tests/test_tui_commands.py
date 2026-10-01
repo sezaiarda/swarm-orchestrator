@@ -92,8 +92,12 @@ def test_the_destructive_set_names_only_real_commands():
 def test_the_destructive_set_is_exactly_the_commands_that_lose_work():
     assert set(cm.DESTRUCTIVE) == {
         "down", "finish", "free", "skip", "done", "retry", "integrate",
-        "operator-done", "gc", "reset", "keep",
+        "operator-done", "gc", "reset", "keep", "restart",
     }
+    # A plain restart replaces only the supervisor; a full one ends the session.
+    assert cm.destructive_reason("restart", []) is None
+    assert cm.destructive_reason("restart", ["--at", "03:00"]) is None
+    assert "new tmux" in cm.destructive_reason("restart", ["--full", "--keep-questions"])
     for harmless in ("status", "why", "report", "doctor", "pause", "resume",
                      "layout", "reload", "launch", "check", "context", "note"):
         assert cm.destructive_reason(harmless, []) is None, harmless

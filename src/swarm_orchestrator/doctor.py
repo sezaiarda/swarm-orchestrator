@@ -51,6 +51,7 @@ from . import keep as keep_mod
 from . import ledger as ledger_mod
 from . import opqueue
 from . import pushowed
+from . import restart as restart_mod
 from . import state as state_mod
 from . import statuses
 from . import telegram, tgbot
@@ -425,6 +426,15 @@ def _check_supervisor(cfg: Config, st: State) -> list[Check]:
     holds = _pid_holds_fifo(pid, cfg.fifo_path) if alive else None
     checks: list[Check] = []
 
+    plan = restart_mod.load(cfg)
+    if not alive and plan.get("stage") in (restart_mod.STOPPING, restart_mod.RESTARTING) \
+            and _pid_alive(plan.get("runner_pid")):
+        # `swarm restart` is between two supervisors: it holds the FIFO itself,
+        # so no poke is lost, and the next supervisor is a moment away.
+        why = "a restart is replacing the supervisor right now"
+        return [Check("supervisor.pid", OK, why), Check("supervisor.fifo", OK, why),
+                Check("supervisor.stray", OK, why)]
+
     if st.finished and not st.pending():
         # `finished` is the supervisor's own exit flag: it stops the loop right
         # after setting it, so a dead pid here is the DESIGNED end state, not a
@@ -449,7 +459,8 @@ def _check_supervisor(cfg: Config, st: State) -> list[Check]:
                 FAIL,
                 f"supervisor pid {pid} is gone with work still in flight — "
                 "`swarm done` pokes hit ENXIO and vanish (sentinels survive)",
-                "swarm down && swarm up",
+                "swarm restart  # starts a supervisor that takes the run over as it is:"
+                " workers and parked sessions stay (`swarm down && swarm up` closes them)",
             )
         )
     else:
@@ -1429,6 +1440,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_tgbot(cfg, st))
     checks.append(_check_usage(cfg, st))
     checks.append(_check_kept(cfg))
+    checks.append(_check_restart(cfg, st))
     checks.append(_check_build_gate(cfg))
     checks.extend(_check_resources(cfg, st))
     return checks
@@ -1453,6 +1465,45 @@ def _check_resources(cfg: Config, st: State) -> list[Check]:
     alive = bool(st.supervisor_pid) and _pid_alive(st.supervisor_pid)
     return [Check(name, status, detail, fix)
             for name, status, detail, fix in resources_view.doctor_checks(cfg, alive)]
+
+
+def _check_restart(cfg: Config, st: State, now: float | None = None) -> Check:
+    """A restart that is planned, under way or failed — and a supervisor that
+    runs older code than is installed, which is what a restart is for.
+
+    The CLI is an editable install, so every command runs the code on disk; the
+    supervisor runs what was there when it started."""
+    now = time.time() if now is None else now
+    plan = restart_mod.load(cfg)
+    stage = plan.get("stage")
+    text = restart_mod.line(plan, *restart_mod.counts(st), now)
+    pid = st.supervisor_pid if _pid_alive(st.supervisor_pid) else None
+    if stage == restart_mod.FAILED and text:
+        return Check("restart", WARN, text, "swarm restart")
+    if stage == restart_mod.PLANNED:
+        if plan.get("timer") == "supervisor":
+            fires = restart_mod.capable(cfg, pid, "restart-at")
+        else:
+            fires = _pid_alive(plan.get("runner_pid"))
+        if not fires:
+            return Check(
+                "restart", WARN,
+                text + " — but what was to start it is gone, so it will not happen",
+                "swarm restart --at <HH:MM>  # plan it again",
+            )
+        return Check("restart", OK, text)
+    if restart_mod.active(plan):
+        return Check("restart", OK, text)
+    behind = restart_mod.stale_code(cfg, pid)
+    if behind is not None and not st.finished:
+        return Check(
+            "restart", WARN,
+            f"the supervisor (pid {pid}) started {_human_age(behind)} before the installed"
+            " code last changed: it and the dashboard run the older code",
+            "swarm restart  # replaces only the supervisor; workers and questions are untouched",
+        )
+    return Check("restart", OK, "none planned; the supervisor runs the installed code"
+                 if pid else "none planned")
 
 
 def _check_kept(cfg: Config, now: float | None = None) -> Check:

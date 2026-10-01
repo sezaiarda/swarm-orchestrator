@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .. import bigpic, opqueue, ovrecord
 from .. import pace as pace_mod
+from .. import restart as restart_mod
 from .. import runs as runs_mod
 from .. import state as state_mod
 from .. import telegram
@@ -153,6 +154,8 @@ class Dash:
         self.campaign_what: dict[str, str] = {}
         #: ``swarm keep`` records, alive or dead, by name — the shells tab.
         self.kept: list = []
+        #: The ``swarm restart`` plan (``restart.json``), ``{}`` when there is none.
+        self.restart: dict = {}
         self._kept_at = 0.0
         #: The big-picture pass in a few words, for the headline.
         self.big_picture = ""
@@ -300,6 +303,9 @@ class Dash:
         now = time.time()
         if self._poll_kept(now):
             changed.add("keep")
+        if self._changed("restart", restart_mod.plan_path(self.cfg)):
+            self.restart = restart_mod.load(self.cfg)
+            changed.add("restart")
         if self._changed("bigpic", bigpic.memory_path(self.cfg)):
             self._bigpic = bigpic.load(self.cfg)
         text = bigpic.short_text(self._bigpic, now)

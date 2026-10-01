@@ -493,8 +493,10 @@ terminal.
   next usage cap), Phase books (every campaign with its finish range, and a
   status board), Graph (the `needs:` graph laid out left to right: what blocks
   what, the critical path, pan and zoom), Usage (both windows over time with
-  their caps and a projection, and the runs), Activity (finishes,
-  notifications, Overseer passes). A row's full sheet opens from anywhere
+  their caps and a projection, and the runs), Resources (what `swarm
+  resources` prints: the host now, the running and queued builds, history
+  charts with every build marked on them, the builds table and the capacity
+  scenarios), Activity (finishes, notifications, Overseer passes). A row's full sheet opens from anywhere
   (`#<tab>&phase=<id>`).
 - **Light:** it polls only while the page is visible, and an unchanged answer is
   a 304.

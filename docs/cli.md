@@ -5,6 +5,13 @@ exact flags.
 
 `swarm [--config PATH] [--project-dir DIR] <command>`. Every command takes `-h`.
 
+The project is `--project-dir`; without it, the project of the session the
+command runs in (`SWARM_PROJECT`, set for every worker, operator job and
+Overseer pass), and outside a session the current directory. A session's
+command therefore answers for its project from a mirror, a component repo
+inside one or any other checkout. To check the files of the folder you are in
+from inside a session (a mirror's edited prompt, say), pass `--project-dir .`.
+
 ## Run control
 
 | command | what it does |

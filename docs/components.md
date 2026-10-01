@@ -78,10 +78,14 @@ Each worker's environment carries:
 
 - `SWARM_PHASE`, `SWARM_SESSION_ID=worker:<phase>` and `SWARM_STATE_DIR`
   (everything it starts dies with it: see [Processes](#processes-everything-dies-with-its-session-swarm-keep-is-the-exception));
+- `SWARM_PROJECT`, the canonical project. The session's `swarm` commands read
+  the settings and the ledger from it, whatever folder they are run from: a
+  component repo has no `.swarm.toml`, and a mirror's ledger is the copy
+  branched at launch. An explicit `--project-dir` wins;
 - a private `TMPDIR` on disk under `<state>/tmp/<phase>`;
 - `CARGO_INCREMENTAL=0`;
-- under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN`, `SWARM_PROJECT`
-  and the build-gate limits.
+- under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN` and the
+  build-gate limits.
 
 The folder-trust dialog is accepted ahead of time for every new mirror. The prompt
 is typed in (pasted, for a slash command), then checked: it must actually appear
@@ -1163,15 +1167,46 @@ or its LAN addresses when Tailscale is not running.
   reach (or its reset). A sudden big jump in a reading, which is another
   account's counter, breaks the line rather than drawing a drop. Below it, the
   runs.
+- **Resources:** what `swarm resources` prints, for a browser. *Host now*: CPU,
+  load, MemAvailable, anon, page cache, swap, disk headroom and its parts, the
+  state dir, worktrees and build caches with their growth, pressure (PSI) for
+  CPU, memory and IO, each running build with its cores and memory, the build
+  queue in the order it would start with each wait, and every session's cores
+  and memory. *History* over 1 h, 6 h, 24 h, 7 d or 30 d: builds running and
+  queued, CPU, MemAvailable, anon, memory and IO pressure, disk write. Every
+  point is a bucket drawn as its lowest-to-highest band with the average on top,
+  so a one-second burst is still there at 30 days; the builds are shaded columns
+  behind every chart, and hovering names the build under the pointer. *Builds*:
+  the finished builds of the same window, sortable by any column and filtered by
+  phase. *Capacity*: the scenarios `swarm resources` works out (as configured,
+  2 builds, 8 workers, both, more jobs) with their arithmetic and its notes
+  (too little data, pressure already seen during builds). The Overview carries
+  one line of it.
 - **Activity:** recent finishes with their recaps, notifications, Overseer
   passes, and what `swarm keep` left running.
 - **Row sheet:** the ledger row, recap, notes, dependencies, operator jobs and
   attempts. Deep links use `#<tab>&phase=<id>` (the old `#phase=<id>` still works).
 
 Endpoints: `/api/board`, `/api/graph?mode=open|all&book=<name>`, `/api/usage`,
-`/api/phase/<id>`, `/api/search?q=`, all gzip + ETag. The page polls them only
+`/api/phase/<id>`, `/api/search?q=`, `/api/resources`,
+`/api/resources/history?window=1h|6h|24h|7d|30d`,
+`/api/resources/builds?window=&sort=&dir=&phase=&limit=`,
+`/api/resources/capacity`, all gzip + ETag. The page polls them only
 while it is visible, only the tab on screen asks for its data, and an unchanged
 answer is a 304. (`/events`, Server-Sent Events, is still served.)
+
+The Resources tab costs nothing while nobody has it open, and little when
+somebody does. The sampler's history (`meters/resources.jsonl`, tens of megabytes
+within a day) is read once, on the first request; after that only the lines
+appended since are read, and each is folded on arrival into a fixed 336 to 360
+buckets per window, so a request is answered from memory. The finished builds
+are kept the same way, and sorted and filtered on the server, so the page holds
+one screen of them. Capacity needs the month's samples: it is worked out at most
+every ten minutes, from rows streamed off the files, with the same function
+`swarm resources` calls. A build's command line is shown with this machine's
+paths shortened (`<state>`, `<project>`, `~`), cut to 96 characters and scrubbed
+like every other payload; its working directory is reduced to its place inside
+the worktree.
 
 It is plain `http.server`, GET and HEAD only, and no URL path ever maps to a file.
 Every payload is scrubbed of credential-shaped strings. It listens on every

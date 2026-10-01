@@ -283,6 +283,66 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
 .tbl td.r,.tbl th.r{text-align:right}
 .tscroll{overflow-x:auto}
 
+/* Resources -------------------------------------------------------------------- */
+.rtiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px}
+.rtile{background:var(--bg2);border:1px solid var(--ln);border-radius:var(--r2);padding:12px 14px;min-width:0}
+.rtile .lab{color:var(--mu);font-size:12.5px}
+.rtile b{display:block;font:650 21px/1.3 var(--disp);letter-spacing:-.01em;font-variant-numeric:normal;white-space:nowrap}
+.rtile b small{font-size:.62em;color:var(--mu);font-weight:600;margin-left:3px}
+.rtile .sub{color:var(--mu);font-size:12.5px;line-height:1.35}
+.rtile .gauge{height:4px;margin-top:9px}
+.rnote{color:var(--mu);font-size:13px;margin-top:14px}
+.rnote b{color:var(--tx2);font-weight:600}
+.rnote details{display:inline-block;vertical-align:top}
+.rnote summary{display:inline;cursor:pointer;color:var(--run)}
+.rcols{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:26px;margin-top:22px}
+.rsub h3{font-size:13px;color:var(--mu);font-weight:550;margin-bottom:4px}
+.ritem{padding:9px 0;border-top:1px solid var(--ln);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 14px;align-items:baseline}
+.ritem:first-of-type{border-top:0}
+.ritem .cmd,.tbl td.cmd{font-family:var(--mono);font-size:12px;color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ritem .cmd{grid-column:1/-1}
+.ritem .fig{color:var(--tx2);font-size:13px;white-space:nowrap}
+.ritem .more{grid-column:1/-1;margin:0;padding:0;border:0;text-align:left;color:var(--mu);font-size:12.5px}
+.rgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-bottom:20px;transition:opacity .15s}
+.rgrid.wait{opacity:.5}
+.rchart{padding:15px 18px 10px}
+.rchart.wide{grid-column:1/-1}
+.rc-h{display:flex;align-items:baseline;gap:6px 14px;margin-bottom:8px;flex-wrap:wrap}
+.rc-h h3{font:650 14px/1.3 var(--disp)}
+.rc-h .ukey{margin:0}
+.rc-h .aside{margin-left:auto;color:var(--mu);font-size:12.5px;white-space:nowrap}
+.rc-h .aside b{color:var(--tx2);font-weight:600}
+.chart .band{fill:rgba(90,169,255,.17)}
+.chart .mx{fill:none;stroke:rgba(90,169,255,.6);stroke-width:1;stroke-linejoin:round}
+.chart .l2{fill:none;stroke:var(--owner);stroke-width:2;stroke-linejoin:round}
+.chart .sp{fill:rgba(195,202,216,.055)}
+.chart .sp.alt{fill:rgba(195,202,216,.11)}
+.chart .lane{fill:var(--mu2)}
+.chart .lane.bad{fill:var(--failed)}
+.chart .lane.live{fill:var(--run)}
+.chart .ref{stroke:var(--mu2);stroke-width:1}
+.tip.multi{text-align:left;line-height:1.5;transform:translate(-50%,-100%);max-width:min(460px,92vw);white-space:normal;z-index:3}
+.tip.multi b{color:var(--tx);font-weight:600}
+.tip.multi .k{display:inline-block;width:12px;height:0;border-top:2px solid var(--c);vertical-align:middle;margin-right:6px}
+.tip.multi .bl{color:var(--mu);display:block;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tbl th button{font-weight:550;color:var(--mu);white-space:nowrap}
+.tbl th button:hover{color:var(--tx2)}
+.tbl th[aria-sort] button{color:var(--tx)}
+.tbl td.cmd{max-width:270px}
+.tbl td .tag{margin-left:6px}
+.scen{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(0,1.5fr) minmax(0,1fr);gap:4px 18px;align-items:center;padding:12px 0;border-top:1px solid var(--ln)}
+.scen:first-of-type{border-top:0}
+.scen .nm{font-weight:600}
+.scen .gauge{margin-top:6px}
+.scen .math{grid-column:1/-1;font-family:var(--mono);font-size:12px;color:var(--mu);overflow-wrap:anywhere}
+.scen .mu{font-size:13px}
+.hostline{grid-column:1/-1;display:flex;align-items:baseline;gap:8px 18px;flex-wrap:wrap;padding:14px 22px}
+.hostline[hidden]{display:none}
+.hostline h2{font:650 15px/1.3 var(--disp)}
+.hostline .bits{color:var(--mu);font-size:13.5px;display:flex;gap:4px 18px;flex-wrap:wrap}
+.hostline .bits b{color:var(--tx);font-weight:600}
+.hostline .linkish{margin-left:auto}
+
 /* Activity --------------------------------------------------------------------- */
 .feed{max-width:880px;margin:0 auto}
 .act{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:20px;align-items:start}
@@ -362,6 +422,13 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
   .facts{gap:16px}
   .fitem{grid-template-columns:minmax(0,1fr)}
   .sheet{width:100vw;border-left:0}
+  .rcols{grid-template-columns:minmax(0,1fr);gap:18px}
+  .rgrid{grid-template-columns:minmax(0,1fr)}
+  .rtiles{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .rtile b{font-size:18px}
+  .scen{grid-template-columns:minmax(0,1fr)}
+  .hostline{padding:12px 16px}
+  .btabs .tab{font-size:10.5px}
   .kan{scroll-snap-type:x mandatory}
   .col{flex-basis:84vw}
 }
@@ -392,11 +459,13 @@ const TABS = [
   ["books", "Phase books", '<path d="M4 5h6a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4zM20 5h-6a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h6z"/>'],
   ["graph", "Graph", '<circle cx="5" cy="6" r="2.2"/><circle cx="5" cy="18" r="2.2"/><circle cx="19" cy="12" r="2.2"/><path d="M7.2 6.5c5 .5 5 5 9.6 5.3M7.2 17.5c5-.5 5-5 9.6-5.3"/>'],
   ["usage", "Usage", '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'],
+  ["resources", "Resources", '<rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>'],
   ["activity", "Activity", '<path d="M4 6h16M4 12h10M4 18h13"/>'],
 ];
 const S = {tab: "overview", board: null, graph: null, usage: null, et: {}, skew: 0,
   lastOk: 0, books: {mode: "open", view: "books", q: ""}, act: "finished",
   g: {mode: "open", book: "", q: "", hits: null, sel: null, vb: null, key: ""},
+  res: {now: null, hist: null, table: null, tableUrl: "", cap: null, win: "24h", sort: "ended", dir: "desc", phase: "", limit: 50},
   shut: {done: true, excluded: true}, showAll: {}, infoOpen: false, sheet: null};
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -475,14 +544,14 @@ async function pollUsage() {
   if (S.tab !== "usage" && S.tab !== "overview") return;
   try { const u = await get("/api/usage", "usage"); if (u) { S.usage = u; render(true); } } catch (e) {}
 }
-const EVERY = {board: 5000, graph: 12000, usage: 30000};
+const EVERY = {board: 5000, graph: 12000, usage: 30000, res: 5000, reshist: 15000, restable: 30000, rescap: 120000};
 const timers = {};
 function loop(name, fn) {
   clearTimeout(timers[name]);
   const tick = async () => { if (!document.hidden) await fn(); timers[name] = setTimeout(tick, EVERY[name]); };
   tick();
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { pollBoard(); pollGraph(); pollUsage(); } });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { pollBoard(); pollGraph(); pollUsage(); pollRes(); pollResHist(); pollResTable(); pollResCap(); } });
 function status(failed) {
   const b = S.board; if (!b) return;
   const h = b.header, st = $("#state");
@@ -530,6 +599,8 @@ function route() {
   if (changed || !$("#main").dataset.tab || $("#main").dataset.tab !== tab) { render(false); window.scrollTo(0, 0); }
   if (tab === "graph") pollGraph();
   if (tab === "usage" || tab === "overview") pollUsage();
+  if (tab === "resources" || tab === "overview") pollRes();
+  if (tab === "resources") { pollResHist(); pollResTable(); pollResCap(); }
   if (sheet) openSheet(sheet); else closeSheet();
 }
 window.addEventListener("hashchange", route);
@@ -554,12 +625,17 @@ function render(live) {
     else graphMeta();
     return;
   }
+  if (S.tab === "resources") {
+    if (m.dataset.tab !== "resources") { m.className = ""; m.innerHTML = resShell(); m.dataset.tab = "resources"; paintRes(); }
+    if (S.sheet && live) refreshSheet();
+    return;
+  }
   m.className = ""; m.dataset.tab = S.tab;
   const keep = {y: window.scrollY, focus: document.activeElement && document.activeElement.id};
   const kx = $(".kan") ? $(".kan").scrollLeft : 0;
   m.innerHTML = S.tab === "books" ? booksView() : S.tab === "usage" ? usageView() : S.tab === "activity" ? activityView() : overviewView();
   if (S.tab === "usage") drawCharts();
-  if (S.tab === "overview") drawBand();
+  if (S.tab === "overview") { drawBand(); paintHostLine(); }
   if (S.tab === "activity" && !live) window.scrollTo(0, 0);
   if (live) { window.scrollTo(0, keep.y); if ($(".kan")) $(".kan").scrollLeft = kx; }
   if (keep.focus) { const el = document.getElementById(keep.focus); if (el) { el.focus({preventScroll: true}); if (el.setSelectionRange && el.value) el.setSelectionRange(el.value.length, el.value.length); } }
@@ -616,6 +692,7 @@ function overviewView() {
   out += running.length ? `<div class="runs-list">${running.map(runItem).join("")}</div>` : `<p class="empty">No worker is building right now.</p>`;
   out += `</section>`;
   out += `<section class="panel"><div class="sec-h"><h2>Usage</h2><button class="linkish" data-tab="usage">See the charts</button></div>${capSentence(h.next_cap, e)}<div class="meters">${meters()}</div></section>`;
+  out += `<section class="panel hostline" id="hostline" hidden></section>`;
   const books = openBooks().slice(0, 8);
   out += `<section class="panel" style="grid-column:1/-1"><div class="sec-h"><h2>Phase books in progress</h2><span class="aside hm">${openBooks().length} of ${b.campaigns.length} still open, soonest first</span><button class="linkish" data-tab="books">All phase books</button></div><div class="blist">${books.map(bookRow).join("") || '<p class="empty">Every phase book is finished.</p>'}</div></section>`;
   return out + "</div>";
@@ -854,7 +931,301 @@ function chart(svg, w) {
   };
   svg.onpointerleave = () => { tip.hidden = true; hl.setAttribute("visibility", "hidden"); };
 }
-let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (S.tab === "usage") drawCharts(); if (S.tab === "overview") drawBand(); if (S.tab === "activity") render(true); if (S.tab === "graph") { fitViewBox(); } }, 120); });
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { if (S.tab === "usage") drawCharts(); if (S.tab === "overview") drawBand(); if (S.tab === "activity") render(true); if (S.tab === "graph") { fitViewBox(); } if (S.tab === "resources") drawResCharts(); }, 120); });
+
+// Resources ----------------------------------------------------------------------
+// The host, the builds and the sessions: what `swarm resources` prints. Four views,
+// each polled and painted on its own, so a new sample never redraws the charts.
+const RWIN = [["1h", "1 h"], ["6h", "6 h"], ["24h", "24 h"], ["7d", "7 d"], ["30d", "30 d"]];
+const RWINTXT = {"1h": "the last hour", "6h": "the last 6 hours", "24h": "the last 24 hours", "7d": "the last 7 days", "30d": "the last 30 days"};
+const RCHARTS = [
+  {k: "builds", title: "Builds running and queued", unit: "", wide: true, steps: true, lines: [["nb", "running", "ln"], ["queued", "queued", "l2"]]},
+  {k: "cpu", title: "CPU", unit: "%", band: "cpu", top: 100},
+  {k: "avail", title: "MemAvailable", unit: "G", band: "avail_mb", div: 1024, ram: true},
+  {k: "anon", title: "Anon memory", unit: "G", band: "anon_mb", div: 1024, ram: true, budget: true},
+  {k: "pmem", title: "Memory pressure", unit: "%", floor: 10, lines: [["psi_mem", "some", "ln"], ["psi_memf", "full", "l2"]]},
+  {k: "pio", title: "IO pressure", unit: "%", floor: 10, lines: [["psi_io", "some", "ln"], ["psi_iof", "full", "l2"]]},
+  {k: "wr", title: "Disk write", unit: "MB/s", band: "wr_mbs", floor: 10},
+];
+const RCOLS = [["ended", "Ended", ""], ["phase", "Phase", ""], ["run_s", "Run", "r"], ["wait_s", "Wait", "r"], ["cpu_s", "CPU s", "r hm"], ["avg_cores", "Avg cores", "r"], ["peak_cores", "Peak cores", "r hm"], ["peak_anon_mb", "Peak anon", "r"], ["min_avail_mb", "Min avail", "r hm"], ["psi_memf", "PSI mem", "r hm"], ["psi_iof", "PSI io", "r"], ["exit", "Exit", "r"], ["cmd", "Command", ""]];
+const gb = (mb) => mb == null ? "—" : (mb / 1024).toFixed(1) + " G";
+const fx = (v, d = 1) => v == null || !isFinite(v) ? "—" : (+v).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const big = (v, unit) => `${v}<small>${unit}</small>`;
+const tone = (p) => p >= 90 ? "var(--failed)" : p >= 70 ? "var(--owner)" : "var(--run)";
+const bar = (p) => p == null ? "" : `<div class="gauge" style="--c:${tone(p)}"><i style="width:${Math.max(0, Math.min(100, p)).toFixed(1)}%"></i></div>`;
+const tile = (lab, val, sub, g) => `<div class="rtile"><div class="lab">${lab}</div><b>${val}</b>${sub ? `<div class="sub">${sub}</div>` : ""}${g || ""}</div>`;
+const phaseBtn = (p) => p ? `<button class="id" data-phase="${esc(p)}">${esc(p)}</button>` : '<span class="mu">no phase</span>';
+async function pollRes() {
+  if (S.tab !== "resources" && S.tab !== "overview") return;
+  try { const d = await get("/api/resources", "res"); if (d) { S.res.now = d; if (S.tab === "resources") paintResNow(); else paintHostLine(); } } catch (e) {}
+}
+// A view the page holds for other parameters must be fetched whole, whatever its ETag says.
+async function resGet(url, key, fresh) {
+  let d = await get(url, key);
+  if (!d && !fresh) { S.et[key] = null; d = await get(url, key); }
+  return d;
+}
+async function pollResHist() {
+  if (S.tab !== "resources") return;
+  const w = S.res.win;
+  try { const d = await resGet("/api/resources/history?window=" + w, "reshist:" + w, S.res.hist && S.res.hist.window === w); if (d && d.window === S.res.win) { S.res.hist = d; drawResCharts(); } } catch (e) {}
+}
+function resTableUrl() { const r = S.res; return `/api/resources/builds?window=${r.win}&sort=${r.sort}&dir=${r.dir}&limit=${r.limit}${r.phase ? "&phase=" + encodeURIComponent(r.phase) : ""}`; }
+async function pollResTable() {
+  if (S.tab !== "resources") return;
+  const url = resTableUrl();
+  try { const d = await resGet(url, "restable:" + url, S.res.tableUrl === url); if (d && url === resTableUrl()) { S.res.table = d; S.res.tableUrl = url; paintResTable(); } } catch (e) {}
+}
+async function pollResCap() {
+  if (S.tab !== "resources") return;
+  try { const d = await get("/api/resources/capacity", "rescap"); if (d) { S.res.cap = d; paintResCap(); if (S.res.hist) drawResCharts(); } } catch (e) {}
+}
+function resShell() {
+  const seg = RWIN.map(([k, l]) => `<button data-rwin="${k}" aria-pressed="${S.res.win === k}">${l}</button>`).join("");
+  const key = (lines) => `<span class="ukey">${lines.map(([, lab, cls]) => `<span><i style="--c:var(${cls === "l2" ? "--owner" : "--run"})"></i>${lab}</span>`).join("")}</span>`;
+  const charts = RCHARTS.map(c => `<section class="panel rchart${c.wide ? " wide" : ""}"><div class="rc-h"><h3>${c.title}</h3>${c.lines ? key(c.lines) : ""}<span class="aside" data-rstat="${c.k}"></span></div><div style="position:relative"><svg class="chart" data-rc="${c.k}" role="img" aria-label="${c.title} over time"></svg></div></section>`).join("");
+  return `<section class="panel" id="res-now" style="margin-bottom:20px"></section>
+<div class="bar-tools"><div class="seg" role="group" aria-label="History window">${seg}</div><span class="mu" id="res-res" style="font-size:13px"></span></div>
+<div class="rgrid" id="res-charts">${charts}</div>
+<section class="panel" style="margin-bottom:20px"><div class="sec-h"><h2>Builds</h2><span class="aside" id="res-bsum"></span></div>
+<div class="bar-tools" style="margin-bottom:10px"><input class="search" id="rq" type="search" placeholder="Filter by phase" value="${esc(S.res.phase)}" autocomplete="off" aria-label="Filter builds by phase" list="rphases"><datalist id="rphases"></datalist></div>
+<div id="res-table"></div></section>
+<section class="panel" id="res-cap"></section>`;
+}
+function paintRes() { paintResNow(); drawResCharts(); paintResTable(); paintResCap(); }
+function workerLabel(l) {
+  const m = /^(worker|operator):(.+)$/.exec(l || "");
+  return m ? `<span class="mu">${m[1]}</span> ${phaseBtn(m[2])}` : esc(l || "—");
+}
+function paintResNow() {
+  const el = $("#res-now"); if (!el) return;
+  const n = S.res.now;
+  if (!n) { el.innerHTML = '<p class="empty">Loading the host…</p>'; return; }
+  const s = n.sample;
+  const head = (aside) => `<div class="sec-h"><h2>Host now</h2><span class="aside">${aside}</span></div>`;
+  if (!s) { el.innerHTML = head("") + `<p class="empty">${n.enabled ? "No samples yet. The supervisor's sampler writes them while the swarm is up." : "Resource tracking is off ([resources] enabled = false)."}</p>`; return; }
+  const st = s.static || {}, h = s.host || {}, psi = h.psi || {}, d = s.disk || {}, ncpu = st.ncpu || 1;
+  const used = st.mem_total_mb && h.avail_mb != null ? 100 * (1 - h.avail_mb / st.mem_total_mb) : null;
+  const swap = st.swap_total_mb && h.swap_mb != null ? 100 * h.swap_mb / st.swap_total_mb : null;
+  const pair = (a, b) => a == null ? "—" : big(`${fx(a)} / ${fx(b)}`, "%");
+  let tiles = tile("CPU", h.cpu == null ? "—" : big(fx(h.cpu, 0), "%"), h.cpu == null ? "" : `${fx(h.cpu * ncpu / 100)} of ${ncpu} cores`, bar(h.cpu));
+  tiles += tile("Load", fx(h.load, 2), "1-minute average");
+  tiles += tile("MemAvailable", h.avail_mb == null ? "—" : big(fx(h.avail_mb / 1024), "G"), `of ${gb(st.mem_total_mb)} RAM`, bar(used));
+  tiles += tile("Anon", h.anon_mb == null ? "—" : big(fx(h.anon_mb / 1024), "G"), "what programs hold");
+  tiles += tile("Page cache", h.cache_mb == null ? "—" : big(fx(h.cache_mb / 1024), "G"), "given back when needed");
+  tiles += tile("Swap used", h.swap_mb == null ? "—" : big(fx(h.swap_mb / 1024), "G"), `of ${gb(st.swap_total_mb)}`, bar(swap));
+  if (d.headroom_gb != null) tiles += tile("Disk headroom", big(fx(d.headroom_gb, 0), "G"), d.wsl ? `vhdx slack ${fx(d.slack_gb, 0)} G + Windows drive free ${fx(d.host_free_gb, 0)} G` : "free on the disk");
+  tiles += tile("Disk IO", h.wr_mbs == null ? "—" : big(fx(h.wr_mbs), "MB/s"), `written, ${fx(h.rd_mbs)} MB/s read`);
+  tiles += tile("CPU pressure", psi.cpu == null ? "—" : big(fx(psi.cpu), "%"), "some tasks stalled");
+  tiles += tile("Memory pressure", pair(psi.mem, psi.memf), "some / full");
+  tiles += tile("IO pressure", pair(psi.io, psi.iof), "some / full");
+  const dirs = s.dirs;
+  let dline = "";
+  if (dirs) {
+    const one = (k, name) => `${name} <b>${fx(dirs[k + "_gb"])} G</b>${dirs[k + "_growth_gb_h"] != null ? ` (${dirs[k + "_growth_gb_h"] >= 0 ? "+" : ""}${fx(dirs[k + "_growth_gb_h"], 2)} G/h)` : ""}`;
+    const caches = Object.entries(dirs.cache || {}).filter(x => x[1] != null).sort((a, b) => b[1] - a[1]);
+    dline = `<p class="rnote">${one("state", "State dir")} · ${one("wt", "worktrees")} · ${one("cache", "build caches")} · measured ${esc(rel(dirs.ts))}${caches.length ? ` · <details><summary>by repo</summary> ${caches.map(([k, v]) => `${esc(k)} ${fx(v)} G`).join(", ")}</details>` : ""}</p>`;
+  }
+  const g = n.gate || {}, idle = new Set(s.idle || []);
+  const usual = Object.fromEntries((g.slots || []).filter(x => x.id).map(x => [x.id, x.usual_s]));
+  let builds = (s.builds || []).map(b => `<div class="ritem"><span>${b.slot != null ? `<span class="mu">slot ${esc(b.slot)}</span> ` : ""}${phaseBtn(b.phase)}${idle.has(b.id) || b.idle ? ` <span class="tag warn" title="It holds its slot at under 1% of a core">idle${s.idle_s ? " for " + dur(s.idle_s) + "+" : ""}</span>` : ""}${b.yielded ? ' <span class="tag">yielded</span>' : ""}</span>
+<span class="fig">running <span data-since="${b.since || ""}">${dur(b.since ? now() - b.since : null)}</span>${usual[b.id] ? `<span class="mu">, usually ~${dur(usual[b.id])}</span>` : ""}</span>
+<span class="fig" style="grid-column:1/-1;white-space:normal"><b>${fx(b.cores, 2)}</b> cores · anon <b>${gb(b.anon_mb)}</b> <span class="mu">(peak ${gb(b.peak_anon_mb)})</span> · ${fx(b.cpu_s, 0)} CPU s · ${esc(b.procs)} procs <span class="mu">· pid ${esc(b.pid)}</span></span>
+<span class="cmd" title="${esc(b.cmd)}">${esc(b.cmd)}</span></div>`).join("");
+  if (!builds) builds = '<p class="empty">No build holds a slot.</p>';
+  const q = g.queue || [];
+  let queue = q.map((t, i) => `<div class="ritem"><span><span class="mu">${i + 1}.</span> ${phaseBtn(t.phase)}${t.stale ? ' <span class="tag warn" title="Its waiter stopped polling, so it is passed over">not polling</span>' : ""}${t.passed ? ` <span class="tag" title="Short builds went ahead of it">passed ${t.passed}×</span>` : ""}</span>
+<span class="fig">waiting <span data-since="${t.queued_at || ""}">${dur(t.queued_at ? now() - t.queued_at : null)}</span></span>
+<span class="fig mu" style="grid-column:1/-1;white-space:normal">${t.starts_at ? `starts ${esc(rel(t.starts_at))}` : "start not timed"}${t.usual_s ? `, usually runs ~${dur(t.usual_s)}` : ", no history for this command yet"}</span>
+<span class="cmd" title="${esc(t.cmd)}">${esc(t.cmd)}</span></div>`).join("");
+  if (!q.length) queue = `<p class="empty">${s.queued ? `${s.queued} waiting (the sampler's count; the gate lists none right now).` : g.on === false ? "The build gate is off." : "Nothing waits for a slot."}</p>`;
+  const row = (lab, w, note) => w ? `<tr><td>${lab}${note ? ` <span class="mu hm">${note}</span>` : ""}</td><td class="r">${fx(w.cores, 2)}</td><td class="r">${gb(w.anon_mb)}</td><td class="r hm">${gb(w.rss_mb)}</td><td class="r hm">${esc(w.procs ?? "—")}</td></tr>` : "";
+  const ws = (s.workers || []).slice().sort((a, b) => String(a.label).localeCompare(String(b.label)));
+  const sessions = `<div class="tscroll"><table class="tbl"><thead><tr><th>Session</th><th class="r">Cores</th><th class="r">Anon</th><th class="r hm">RSS</th><th class="r hm">Procs</th></tr></thead><tbody>${ws.map(w => row(workerLabel(w.label), w)).join("")}${row("swarm itself", s.infra)}${row("owner console", s.console, "yours, not the swarm's")}${ws.length || s.infra || s.console ? "" : '<tr><td colspan="5" class="mu">No session is running.</td></tr>'}</tbody></table></div>`;
+  const o = s.sampler || {};
+  const aside = n.stale ? `<span class="stale">The sampler is not running: last sample ${esc(rel(s.ts))}</span>` : `sampled <span id="res-age">${esc(rel(s.ts))}</span>`;
+  el.innerHTML = head(aside) + `<div class="rtiles">${tiles}</div>${dline}
+<div class="rcols"><div class="rsub"><h3>Builds: ${(s.builds || []).length} running${g.max_concurrent != null ? ` of ${g.max_concurrent} at a time` : ""}</h3>${builds}
+<h3 style="margin-top:16px">Queue: ${q.length || s.queued || 0} waiting</h3>${queue}</div>
+<div class="rsub"><h3>Sessions: ${ws.length}</h3>${sessions}
+<p class="rnote">The sampler costs ${fx(o.pct_core, 2)}% of one core and writes about ${fx((o.bytes_per_day || 0) / 1048576, 0)} MiB a day.</p></div></div>`;
+}
+function paintHostLine() {
+  const el = $("#hostline"); if (!el) return;
+  const n = S.res.now, s = n && n.sample;
+  if (!s) { el.hidden = true; return; }
+  const h = s.host || {}, st = s.static || {}, d = s.disk || {}, psi = h.psi || {};
+  const bits = [];
+  if (h.cpu != null) bits.push(`CPU <b>${fx(h.cpu, 0)}%</b>`);
+  if (h.avail_mb != null) bits.push(`memory <b>${gb(h.avail_mb)}</b> available of ${gb(st.mem_total_mb)}`);
+  if (d.headroom_gb != null) bits.push(`disk headroom <b>${fx(d.headroom_gb, 0)} G</b>`);
+  if (psi.iof != null) bits.push(`IO pressure <b>${fx(psi.iof)}%</b>`);
+  bits.push(`<b>${(s.builds || []).length}</b> building, <b>${((n.gate || {}).queue || []).length || s.queued || 0}</b> queued`);
+  el.hidden = false;
+  el.innerHTML = `<h2>Host</h2><span class="bits">${n.stale ? `<span class="stale">last sample ${esc(rel(s.ts))}</span>` : ""}${bits.map(b => `<span>${b}</span>`).join("")}</span><button class="linkish" data-tab="resources">Resources</button>`;
+}
+
+// Charts: one figure a chart, every bucket its min-max band so a burst shows.
+function niceStep(v) { const p = Math.pow(10, Math.floor(Math.log10(v || 1))), m = v / p; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p; }
+// Runs of sampled buckets; a hole shorter than `gap` buckets is drawn through.
+function runsOf(arr, gap) {
+  const out = []; let cur = null, last = -1e9;
+  arr.forEach((v, i) => { if (v == null) return; if (cur && i - last <= gap) cur.push(i); else out.push(cur = [i]); last = i; });
+  return out;
+}
+let RHOVER = [];
+function drawResCharts() {
+  const d = S.res.hist, box = $("#res-charts"); if (!box) return;
+  box.classList.toggle("wait", !d || d.window !== S.res.win);
+  if (!d) return;
+  RHOVER = [];
+  for (const c of RCHARTS) { const svg = $(`svg[data-rc="${c.k}"]`); if (svg) rchart(svg, c, d); }
+  const mins = d.step / 60;
+  $("#res-res").textContent = `Each point is ${d.step < 60 ? d.step + " s" : mins < 60 ? mins + " min" : mins / 60 + " h"}: the band runs from its lowest to its highest sample, the line is its average. Shaded columns are builds.`;
+}
+function rchart(svg, c, d) {
+  const W = svg.parentNode.clientWidth || 600, H = 168, L = 44, R = 10, T = 12, B = 30;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.height = H + "px";
+  const n = d.n, t0 = d.t0, t1 = t0 + n * d.step, div = c.div || 1, ram = ((d.static || {}).mem_total_mb || 0) / 1024;
+  const X = (t) => L + (W - L - R) * (t - t0) / (t1 - t0), xi = (i) => X(t0 + (i + .5) * d.step), bw = (W - L - R) / n;
+  const ser = d.series, col = (m, how) => m === "queued" ? d.queued : ((ser[m] || {})[how] || []);
+  const cols = c.band ? [col(c.band, "min"), col(c.band, "avg"), col(c.band, "max")] : c.lines.map(([m]) => col(m, "max"));
+  let top = 0; for (const a of cols) for (const v of a) if (v != null && v / div > top) top = v / div;
+  let ymax = c.top || (c.ram && ram ? ram : Math.max(top, c.floor || 1));
+  const stepY = c.steps ? Math.max(1, Math.ceil(niceStep(ymax / 3.2))) : niceStep(ymax / 3.2);
+  if (!c.top && !(c.ram && ram)) ymax = Math.ceil(ymax / stepY - 1e-9) * stepY;
+  const Y = (v) => T + (H - T - B) * (1 - Math.min(v, ymax) / ymax), y0 = Y(0);
+  const lab = (v) => fx(v, v % 1 ? 1 : 0) + (c.unit === "%" ? "%" : "");
+  let h = "";
+  // builds: a shaded column each, and a mark in the lane under the plot
+  (d.spans || []).forEach((s, i) => {
+    const x = X(s.a), w = Math.max(1.5, X(s.b) - x);
+    h += `<rect class="sp${i % 2 ? " alt" : ""}" x="${x.toFixed(1)}" y="${T}" width="${w.toFixed(1)}" height="${H - T - B}"/><rect class="lane${s.bad === s.n ? " bad" : s.live ? " live" : ""}" x="${x.toFixed(1)}" y="${y0 + 2}" width="${Math.max(1.5, w - 1).toFixed(1)}" height="3"/>`;
+  });
+  for (let v = 0; v <= ymax + 1e-9; v += stepY) h += `<line class="grid" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 7}" y="${Y(v) + 4}" text-anchor="end">${lab(v)}</text>`;
+  if (c.ram && ram) h += `<line class="lim" x1="${L}" x2="${W - R}" y1="${Y(ram)}" y2="${Y(ram)}"/><text x="${W - R}" y="${Y(ram) - 4}" text-anchor="end">${fx(ram)} G RAM</text>`;
+  if (c.budget && ram && S.res.cap && S.res.cap.mem_budget) { const y = Y(ram * S.res.cap.mem_budget); h += `<line class="ref" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${W - R}" y="${y + 13}" text-anchor="end">capacity budget, ${Math.round(100 * S.res.cap.mem_budget)}% of RAM</text>`; }
+  // time ticks, on local-time boundaries
+  const span = t1 - t0, fit = Math.max(2, Math.floor((W - L - R) / 76));
+  const tick = [600, 1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400, 2 * 86400, 5 * 86400, 7 * 86400].find(s => span / s <= fit) || 10 * 86400;
+  const off = new Date(t0 * 1000).getTimezoneOffset() * 60;
+  for (let t = Math.ceil((t0 - off) / tick) * tick + off; t < t1; t += tick) {
+    if (X(t) < L + 14 || X(t) > W - R - 14) continue;
+    const dd = new Date(t * 1000), midnight = !dd.getHours() && !dd.getMinutes();
+    const txt = tick >= 86400 || (span > 86400 && midnight) ? dd.toLocaleDateString([], span > 8 * 86400 ? {month: "short", day: "numeric"} : {weekday: "short", day: "numeric"}) : hhmm(t);
+    h += `<text x="${X(t).toFixed(1)}" y="${H - 6}" text-anchor="middle">${esc(txt)}</text>`;
+  }
+  const gap = Math.max(2, Math.ceil(45 / d.step));
+  const pts = (arr, idx) => idx.map(i => `${xi(i).toFixed(1)},${Y(arr[i] / div).toFixed(1)}`).join(" ");
+  if (c.band) {
+    const [lo, av, hi] = cols;
+    for (const run of runsOf(av, gap)) {
+      if (run.length === 1) { const i = run[0]; h += `<rect class="band" x="${(xi(i) - bw / 2).toFixed(1)}" y="${Y(hi[i] / div).toFixed(1)}" width="${Math.max(1.5, bw).toFixed(1)}" height="${Math.max(1.5, Y(lo[i] / div) - Y(hi[i] / div)).toFixed(1)}"/>`; continue; }
+      h += `<polygon class="band" points="${pts(hi, run)} ${pts(lo, run.slice().reverse())}"/><polyline class="mx" points="${pts(c.k === "avail" ? lo : hi, run)}"/><polyline class="ln" points="${pts(av, run)}"/>`;
+    }
+  } else {
+    c.lines.forEach(([m, , cls], li) => {
+      const arr = cols[li];
+      for (const run of runsOf(arr, gap)) {
+        let p = "";
+        if (c.steps) for (const i of run) p += `${(xi(i) - bw / 2).toFixed(1)},${Y(arr[i]).toFixed(1)} ${(xi(i) + bw / 2).toFixed(1)},${Y(arr[i]).toFixed(1)} `;
+        else if (run.length === 1) p = `${(xi(run[0]) - bw / 2).toFixed(1)},${Y(arr[run[0]]).toFixed(1)} ${(xi(run[0]) + bw / 2).toFixed(1)},${Y(arr[run[0]]).toFixed(1)}`;
+        else p = pts(arr, run);
+        h += `<polyline class="${cls}" points="${p.trim()}"/>`;
+      }
+    });
+  }
+  h += `<line class="hover-l" x1="0" x2="0" y1="${T}" y2="${y0}" visibility="hidden"/>`;
+  svg.innerHTML = h;
+  // The window's own figures, beside the title.
+  const stat = $(`[data-rstat="${c.k}"]`), all = (m) => (ser[m] || {}).all, u = c.unit === "%" ? "%" : c.unit ? " " + c.unit : "", f = (v) => fx(v / div, c.unit === "G" || v / div < 100 ? 1 : 0);
+  let txt = "no samples in this window";
+  if (c.band && all(c.band)) { const a = all(c.band); txt = c.k === "avail" ? `lowest <b>${f(a[0])}${u}</b> · average ${f(a[1])}${u}` : `average ${f(a[1])}${u} · peak <b>${f(a[2])}${u}</b>`; }
+  else if (c.k === "builds" && all("nb")) txt = `at most <b>${esc(all("nb")[2])}</b> running, <b>${Math.max(0, ...d.queued.map(v => v || 0))}</b> queued`;
+  else if (c.lines && all(c.lines[1][0])) { const a = all(c.lines[1][0]); txt = `full: average ${f(a[1])}% · peak <b>${f(a[2])}%</b>`; }
+  stat.innerHTML = txt;
+  // Hover: one crosshair on every chart, the bucket's figures and its builds on this one.
+  let tip = $(".tip", svg.parentNode);
+  if (!tip) { tip = document.createElement("div"); tip.className = "tip multi"; tip.hidden = true; svg.parentNode.appendChild(tip); }
+  const hl = $(".hover-l", svg);
+  RHOVER.push((i) => { if (i == null) { hl.setAttribute("visibility", "hidden"); return; } hl.setAttribute("x1", xi(i)); hl.setAttribute("x2", xi(i)); hl.setAttribute("visibility", "visible"); });
+  svg.onpointermove = (ev) => {
+    const r = svg.getBoundingClientRect(), px = (ev.clientX - r.left) * W / r.width;
+    const i = Math.floor((px - L) / bw);
+    if (i < 0 || i >= n) { tip.hidden = true; RHOVER.forEach(fn => fn(null)); return; }
+    RHOVER.forEach(fn => fn(i));
+    const a = t0 + i * d.step, b = a + d.step;
+    let rows = `<b>${esc(d.step < 60 ? when(a) + ":" + String(Math.floor(a % 60)).padStart(2, "0") : d.step <= 300 ? when(a) : when(a) + " to " + (d.step >= 86400 ? when(b) : hhmm(b)))}</b>`;
+    if (c.band) { const [lo, av, hi] = cols; rows += av[i] == null ? "<br>no sample" : `<br><span class="k" style="--c:var(--run)"></span>average <b>${f(av[i])}${u}</b> · low ${f(lo[i])}${u} · high ${f(hi[i])}${u}`; }
+    else c.lines.forEach(([m, name, cls], li) => { const v = cols[li][i]; rows += `<br><span class="k" style="--c:var(${cls === "l2" ? "--owner" : "--run"})"></span>${name} <b>${v == null ? "—" : c.steps ? v : f(v) + u}</b>${c.steps ? "" : " at most"}`; });
+    const at = (d.spans || []).filter(s => s.a < b && s.b > a);
+    for (const s of at.slice(0, 3)) rows += `<span class="bl">${s.n > 1 ? `${s.n} builds${s.bad ? `, ${s.bad} failed` : ""}: ${esc(s.phases.join(", ") || "no phase")}` : `build ${esc(s.phases[0] || "(no phase)")}${s.bad ? ", failed" : s.live ? ", running" : ""} ${esc(s.cmd || "")}`}</span>`;
+    if (at.length > 3) rows += `<span class="bl">and ${at.length - 3} more</span>`;
+    tip.innerHTML = rows; tip.hidden = false;
+    const half = Math.min(230, r.width / 2);
+    tip.style.left = Math.max(half, Math.min(r.width - half, xi(i) * r.width / W)) + "px"; tip.style.top = "4px";
+  };
+  svg.onpointerleave = () => { tip.hidden = true; RHOVER.forEach(fn => fn(null)); };
+}
+
+function paintResTable() {
+  const el = $("#res-table"); if (!el) return;
+  const t = S.res.table;
+  if (!t) { el.innerHTML = '<p class="empty">Loading the builds…</p>'; return; }
+  const sum = t.sum || {};
+  $("#res-bsum").innerHTML = `${t.matched}${t.matched !== t.total ? ` of ${t.total}` : ""} finished in ${esc(RWINTXT[t.window] || "everything recorded")} · ran ${dur(sum.run_s)} · queued ${dur(sum.wait_s)}${sum.failed ? ` · ${sum.failed} failed` : ""}`;
+  const dl = $("#rphases"); if (dl) dl.innerHTML = (t.phases || []).slice(0, 120).map(([p]) => `<option value="${esc(p)}"></option>`).join("");
+  const th = RCOLS.map(([k, l, cls]) => `<th class="${cls}"${t.sort === k ? ` aria-sort="${t.dir === "desc" ? "descending" : "ascending"}"` : ""}><button data-rsort="${k}" title="Sort by ${esc(l.toLowerCase())}">${l}${t.sort === k ? (t.dir === "desc" ? " ↓" : " ↑") : ""}</button></th>`).join("");
+  const rows = t.rows.map(r => {
+    const ex = r.exit == null ? '<span class="tag warn" title="It died without an exit code">killed</span>' : r.exit === 0 ? "0" : `<span class="tag bad">${esc(r.exit)}</span>`;
+    const marks = (r.yielded_s ? `<span class="tag" title="It gave its slot up while idle">yielded ${dur(r.yielded_s)}</span>` : "") + (r.idle ? '<span class="tag warn" title="It held its slot at under 1% of a core">idle</span>' : "") + (r.partial ? '<span class="tag" title="First seen already running: its early part is missing">partial</span>' : "");
+    return `<tr><td>${esc(when(r.ended))}</td><td>${phaseBtn(r.phase)}${marks}</td><td class="r">${dur(r.run_s)}</td><td class="r">${r.wait_s == null ? "—" : dur(r.wait_s)}</td><td class="r hm">${fx(r.cpu_s, 0)}</td><td class="r">${fx(r.avg_cores, 2)}</td><td class="r hm">${fx(r.peak_cores, 1)}</td><td class="r">${gb(r.peak_anon_mb)}</td><td class="r hm">${gb(r.min_avail_mb)}</td><td class="r hm">${r.psi_memf == null ? "—" : fx(r.psi_memf) + "%"}</td><td class="r">${r.psi_iof == null ? "—" : fx(r.psi_iof) + "%"}</td><td class="r">${ex}</td><td class="cmd" title="${esc(r.cmd)}${r.where ? " (in " + esc(r.where) + ")" : ""}">${esc(r.cmd)}</td></tr>`;
+  }).join("");
+  const more = t.matched > t.rows.length ? `<p class="rnote">The first ${t.rows.length} of ${t.matched} in this order. ${t.limit < 500 ? '<button class="linkish" data-rmore="1">Show up to 500</button>' : "Filter by phase or pick a shorter window to see the rest."}</p>` : "";
+  el.innerHTML = `<div class="tscroll"><table class="tbl"><thead><tr>${th}</tr></thead><tbody>${rows || `<tr><td colspan="${RCOLS.length}" class="mu">${t.total ? "No build of that phase in this window." : "No build finished in this window."}</td></tr>`}</tbody></table></div>${more}
+<p class="rnote">Avg and peak cores, peak anon and the pressures are the build's whole process tree and the host while it ran. PSI is the highest share of a second that every task was stalled.</p>`;
+}
+function paintResCap() {
+  const el = $("#res-cap"); if (!el) return;
+  const c = S.res.cap;
+  if (!c) { el.innerHTML = '<div class="sec-h"><h2>Capacity</h2></div><p class="empty">Working it out from the month\'s samples…</p>'; return; }
+  const b = c.builds, s = c.sessions, h = c.host || {}, cf = c.config || {};
+  const d2 = (v) => v == null ? "?" : v < 120 ? Math.round(v) + "s" : Math.round(v / 60) + "m";
+  const g = (mb) => mb == null ? "?" : (mb / 1024).toFixed(1) + " G";
+  const nn = (v) => v == null ? "?" : fx(v, Math.abs(v) >= 100 ? 0 : v < 1 ? 2 : 1);
+  const fit = (p, ok) => p == null ? "" : `<div class="gauge" style="--c:var(${ok ? "--done" : "--failed"})"><i style="width:${Math.max(0, Math.min(100, p)).toFixed(1)}%"></i></div>`;
+  const scen = c.scenarios.map(x => {
+    const pm = x.budget_mb ? 100 * x.need_mb / x.budget_mb : null, pc = 100 * x.need_cores / (x.ncpu || 1);
+    const mem = x.fits_mem == null ? '<span class="tag">memory unknown</span>' : x.fits_mem ? '<span class="tag ok">memory fits</span>' : '<span class="tag bad">memory does not fit</span>';
+    const cpu = x.fits_cpu ? '<span class="tag ok">CPU fits</span>' : '<span class="tag bad">CPU over</span>';
+    return `<div class="scen"><div><div class="nm">${esc(x.name === "now" ? "As configured now" : x.name)}</div><div class="mu">${esc(x.builds)} build${x.builds === 1 ? "" : "s"} at a time, ${esc(x.workers)} workers${x.jobs ? `, ${esc(x.jobs)} jobs` : ""}</div>${x.thin ? '<span class="tag warn">too little data</span>' : ""}</div>
+<div><div>${mem} <span class="mu">needs ${g(x.need_mb)} of the ${g(x.budget_mb)} budget</span></div>${fit(pm, x.fits_mem)}</div>
+<div><div>${cpu} <span class="mu">needs ${nn(x.need_cores)} of ${esc(x.ncpu)} cores</span></div>${fit(pc, x.fits_cpu)}</div>
+<div class="math">${esc(x.math)}</div></div>`;
+  }).join("");
+  const notes = (c.notes || []).map(t => `<div class="note ${/^too thin/.test(t) ? "owner_decision" : "risk"}">${esc(t.replace(/^too thin: /, "too little data: ").replace(/^./, ch => ch.toUpperCase()))}</div>`).join("");
+  el.innerHTML = `<div class="sec-h"><h2>Capacity</h2><span class="aside">would more builds or more workers fit, at the 95th percentile of the last ${Math.round(c.days)} days</span></div>
+<dl class="kv" style="grid-template-columns:150px minmax(0,1fr)"><dt>This host</dt><dd>${esc(h.ncpu ?? "?")} cores, ${g(h.mem_total_mb)} RAM, ${g(h.swap_total_mb)} swap. Configured: ${esc(cf.max_concurrent)} build${cf.max_concurrent === 1 ? "" : "s"} at a time, ${esc(cf.jobs)} jobs each, ${esc(cf.max_workers)} workers.</dd>
+<dt>A heavy build</dt><dd>${esc(b.n)} measured. Peak anon: median ${g(b.peak_anon_mb.p50)}, p95 <b>${g(b.peak_anon_mb.p95)}</b>, highest ${g(b.peak_anon_mb.max)}. Cores: average p95 <b>${nn(b.avg_cores.p95)}</b>, peak p95 ${nn(b.peak_cores.p95)}. Median run ${d2(b.run_s.p50)}. Lowest MemAvailable seen during one: ${g(b.min_avail_mb)}.</dd>
+<dt>A worker</dt><dd>${esc(s.worker_hours)} h of samples, its builds left out. Anon p95 <b>${g(s.worker_anon_mb.p95)}</b>, cores p95 <b>${nn(s.worker_cores.p95)}</b>.</dd>
+<dt>Everything else</dt><dd>Anon p95 <b>${g(s.other_anon_mb.p95)}</b>: your own programs, the supervisor and the dashboards.</dd></dl>
+<p class="rnote" style="margin:0 0 6px">A scenario fits when the anon memory it needs stays within ${Math.round(100 * c.mem_budget)}% of RAM (page cache is left out, the rest is its room) and the cores it needs within the cores there are. More jobs scale a build's memory linearly, which is an upper bound.</p>
+${scen}${notes ? `<div style="margin-top:12px">${notes}</div>` : ""}`;
+}
+let rqTimer;
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-rwin],[data-rsort],[data-rmore]"); if (!t) return;
+  const r = S.res;
+  if (t.dataset.rwin) { r.win = t.dataset.rwin; $$("[data-rwin]").forEach(b => b.setAttribute("aria-pressed", b.dataset.rwin === r.win)); drawResCharts(); pollResHist(); }
+  else if (t.dataset.rsort) { const k = t.dataset.rsort; if (r.sort === k) r.dir = r.dir === "desc" ? "asc" : "desc"; else { r.sort = k; r.dir = k === "phase" || k === "cmd" ? "asc" : "desc"; } }
+  else r.limit = 500;
+  pollResTable();
+});
+document.addEventListener("input", (e) => {
+  if (e.target.id !== "rq") return;
+  const v = e.target.value.replace(/[^A-Za-z0-9._\/:-]/g, "").slice(0, 80);
+  clearTimeout(rqTimer); rqTimer = setTimeout(() => { S.res.phase = v; pollResTable(); }, 250);
+});
 
 // Activity -----------------------------------------------------------------------
 function activityView() {
@@ -1267,7 +1638,7 @@ setInterval(() => {
 // Old deep links (#phase=<id>) still open the row.
 if (/^#phase=/.test(location.hash)) location.replace("#overview&" + location.hash.slice(1));
 paintNav();
-pollBoard().then(() => { route(); loop("board", pollBoard); loop("usage", pollUsage); loop("graph", pollGraph); });
+pollBoard().then(() => { route(); loop("board", pollBoard); loop("usage", pollUsage); loop("graph", pollGraph); loop("res", pollRes); loop("reshist", pollResHist); loop("restable", pollResTable); loop("rescap", pollResCap); });
 </script>
 </body>
 </html>

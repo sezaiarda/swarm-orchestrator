@@ -282,10 +282,10 @@ class Config:
     # The delay lives in the worker's own `swarm done`, so the single-threaded
     # supervisor loop never blocks on it.
     done_grace_s: int = _k(
-        "worker", "done_grace_s", 0, NEXT, env="SWARM_DONE_GRACE", minimum=0,
+        "worker", "done_grace_s", 0, HOT, env="SWARM_DONE_GRACE", minimum=0,
         doc="seconds a worker holds its slot after `done`",
-        why="`swarm done` runs in the worker's cwd — its worktree mirror — so it"
-            " reads the .swarm.toml copy branched at launch, not this one")
+        why="read by each worker's own `swarm done` when it runs, from the"
+            " project's file (not its mirror's copy)")
     park_after: int = _k(
         "worker", "park_after", 120, HOT, env="SWARM_PARK_AFTER", minimum=0,
         gate="park-shift",
@@ -360,8 +360,8 @@ class Config:
     telegram_notify: str = _k(
         "telegram", "notify", str(_REPO_NOTIFY), HOT,
         doc="script that sends the swarm's own Telegram pings",
-        why="the supervisor resolves the notifier per ping; note that a running"
-            " worker's own `swarm done` ping uses the copy in its worktree mirror")
+        why="the supervisor resolves the notifier per ping, and so does a"
+            " session's own `swarm done`, from the project's file")
     telegram_commands: bool = _k(
         "telegram", "commands", True, RESTART, env="SWARM_TG_COMMANDS",
         doc="answer /usage and /help sent to the swarm bot",
@@ -373,8 +373,8 @@ class Config:
         parse=lambda v: _choice(v, PINGS, PINGS_DEFAULT),
         doc="necessary = only what needs you; all = every ping",
         why="every ping reads it when it is sent; a worker's own `swarm done` and"
-            " `swarm waiting`, and an operator's `operator-done`, read the copy in"
-            " their worktree mirror, so theirs changes from the next launch")
+            " `swarm waiting`, and an operator's `operator-done`, read the"
+            " project's file too")
     telegram_push_owed_grace_s: int = _k(
         "telegram", "push_owed_grace_s", 3600, HOT, env="SWARM_PUSH_OWED_GRACE", minimum=0,
         doc="an owed push pings after this long (s)",
@@ -576,11 +576,10 @@ class Config:
     # Positive opt-in: the only thing between a test suite and an autonomous
     # session holding the owner's authority. Off, the queue is never written.
     operator_enabled: bool = _k(
-        "operator", "enabled", False, NEXT, env="SWARM_OPERATOR",
+        "operator", "enabled", False, HOT, env="SWARM_OPERATOR",
         doc="arm autonomous sessions for `operator` finishes",
-        why="the gate is read by the worker's own `swarm done`, which runs in its"
-            " worktree mirror — so it reads the .swarm.toml copy branched at"
-            " launch, not this one")
+        why="the gate is read by each worker's own `swarm done` when it runs,"
+            " from the project's file (not its mirror's copy)")
     operator_cmd: str = _k(
         "operator", "cmd", "", NEXT, env="SWARM_OPERATOR_CMD",
         doc='command an operator session runs; "" = built-in',
@@ -594,10 +593,10 @@ class Config:
     # An alias, never a dated build: triage runs unattended, and a pinned
     # snapshot's retirement would silently send every hand-off to `later`.
     operator_triage_model: str = _k(
-        "operator", "triage_model", "haiku", NEXT,
+        "operator", "triage_model", "haiku", HOT,
         doc="model that decides now vs later",
-        why="triage is spawned by the worker's `swarm done` from its worktree"
-            " mirror, so it reads the branched .swarm.toml copy")
+        why="triage is spawned by the worker's `swarm done`, which reads the"
+            " project's file when it runs")
     # With the backlog deep and lanes on, a slot no launchable phase wants never
     # comes, so a `later` job had no other way out: live-box rolls waited
     # a long time. The session takes no worker slot, so this costs no build.
@@ -606,13 +605,12 @@ class Config:
         doc="seconds a `later` job waits at most; 0 = no cap",
         why="read by the supervisor's queue sweep on every wake")
     operator_notify: str = _k(
-        "operator", "notify", OPERATOR_NOTIFY_DEFAULT, NEXT, env="SWARM_OPERATOR_NOTIFY",
+        "operator", "notify", OPERATOR_NOTIFY_DEFAULT, HOT, env="SWARM_OPERATOR_NOTIFY",
         choices=OPERATOR_NOTIFY,
         parse=lambda v: _choice(v, OPERATOR_NOTIFY, OPERATOR_NOTIFY_DEFAULT),
         doc="which operator outcomes ping you",
-        why="read by the session's own `swarm operator-done`, which under worktree"
-            " isolation runs in its mirror and reads the .swarm.toml copy branched"
-            " when the job opened; the next job reads this one")
+        why="read by the session's own `swarm operator-done` when it runs, from"
+            " the project's file (not its mirror's copy)")
 
     # -- [overseer] -------------------------------------------------------
     overseer_enabled: bool = _k(
@@ -872,6 +870,24 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     values = {name: s.read(data.get(s.table, {}), pdir)
               for name, s in SETTINGS.items() if s.table != CLI}
     return Config(project_dir=pdir, **values)
+
+
+def session_project() -> Path | None:
+    """The project a launched session belongs to (``SWARM_PROJECT``), or None.
+
+    A session's cwd is wherever its work is: its mirror, a component repo inside
+    the mirror, a checkout of an external repo. None of those is the project: a
+    component repo has no ``.swarm.toml`` at all, and a mirror's ledger is the
+    copy branched at launch. ``SWARM_STATE_DIR`` already points the session at
+    the project's run state, so the ``swarm`` command reads the settings and the
+    ledger from here too rather than pair that state with another folder's.
+    None outside a session, or when the named directory is gone.
+    """
+    named = os.environ.get("SWARM_PROJECT")
+    if not named:
+        return None
+    path = Path(named).expanduser()
+    return path.resolve() if path.is_dir() else None
 
 
 def claude_version() -> str:

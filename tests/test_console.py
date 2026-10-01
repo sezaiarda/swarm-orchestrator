@@ -259,7 +259,8 @@ def test_up_puts_the_console_between_the_dashboard_and_the_overseer(live):
     # It starts at once, as a new conversation whose id the swarm chose and kept.
     assert _wait(lambda: len(_starts(cfg)) == 1)
     assert _starts(cfg) == [f"new {console.session_id(cfg)}"]
-    assert "env phase=unset session=unset" in _log(cfg)
+    # The fake writes its environment line after the start line, so wait for it.
+    assert _wait(lambda: "env phase=unset session=unset" in _log(cfg))
     # Not a slot: untagged, in no slot record, and every slot still free.
     pane = _pane(cfg)
     assert tmux.list_panes_with_slot(windows["console"]) == [(pane, "")]

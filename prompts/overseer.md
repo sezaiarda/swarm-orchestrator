@@ -77,6 +77,15 @@ Go through the digest and ask, in this order:
   with `swarm record <phase> note "<text>"`. Never append notes to a row, never
   tick one by hand, and never write the phase history or lessons files: the swarm
   writes those.
+- **A landing that is being checked, and your writes.** From `LANE-CHECK-START`
+  in the supervisor log until that phase merges, a commit to the same repo's main
+  that changes a file outside `[lanes] commons` (a branch of yours that lands
+  there) makes the check run again: `LANE-MAIN-MOVED <phase> <repo> main gained N
+  file(s)`. Ledger writes (a note, a record, a follow-up, a reshape) touch only
+  commons and keep the green check: `LANE-CHECK-KEPT`. A supervisor started
+  before this rule logs a bare `LANE-MAIN-MOVED <phase> <repo>` and runs the
+  check again after every write, ledger writes included: while you see that
+  form, hold every write that can wait until the landing has merged.
 - **Hand work to the operator:** `swarm operator-add "<brief>" [--phase <id>]` for
   deploys, post-deploy checks, provisioning and cross-repo chores. Write the brief
   so a capable colleague can act on it alone: what, where, and how to tell it

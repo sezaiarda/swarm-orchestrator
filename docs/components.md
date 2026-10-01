@@ -412,6 +412,16 @@ runs there (`swarm _lane-check`, detached) against the sibling lanes that landed
 Green lands the tested tree; red or a text conflict holds the queue and opens the
 resolver on the worktree.
 
+A check takes minutes and the ledger writer commits to main every few minutes,
+so main has often moved again by the time a check is green. The green check
+stands when everything main gained since the tested merge is `[lanes] commons`:
+main is merged into the worktree once more, without a second check, and the
+phase lands (`LANE-CHECK-KEPT` in the supervisor log). If main gained any other
+file, the pair is tested again (`LANE-MAIN-MOVED <phase> <repo> main gained N
+file(s)`). A conflict at the unchecked merge goes to the resolver on the
+worktree, and what the resolver wrote is checked before it lands. To see how
+often checks are repeated, count both lines in the supervisor log.
+
 A merge can end four ways:
 
 | outcome | meaning | what happens |
@@ -667,8 +677,8 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
   itself (a measurement), rerun it with …--hold…`) and again as its last line
   when the command ends, with how long builds may have run beside it. So
   whoever reads the output afterwards knows the run was not alone. (The
-  landing's lane check holds its slot inside the swarm's own process and
-  prints nothing: its log is not a worker's.)
+  landing's lane check, when it takes a slot, holds it inside the swarm's own
+  process and prints nothing: its log is not a worker's.)
 - *The caps.* At most `[build].idle_yield_max` (default 2) holders are set aside
   at once; a further idle holder keeps counting and the queue waits, as it does
   with `idle_yield_s = 0`. The seats bound the builds alive at
@@ -877,7 +887,12 @@ Workers are told to wrap their gates in it (`swarm build cargo nextest run`), an
 to give those commands a generous timeout, since they may queue. Automatic gc
 takes every build slot (exclusively) before it deletes anything, so it never
 runs while any build is alive, set aside or not. The landing's lane check
-queues like any other build.
+queues like any other build, and like any other build it does not queue when
+its command is light: by the built-in rules, or because the project names it in
+`[build].light`. That is for a check that compiles nothing (a lint-only gate
+that takes half a minute should not wait ten behind a compile); its log starts
+with `# light command (...): not queued for a build slot`, and the build event
+log records it as a `bypass`.
 
 **Sizing.** `[build].jobs` and `max_concurrent` describe the host the swarm runs
 on. Derive them from that machine's cores and memory (one build's peak memory

@@ -286,9 +286,10 @@ def _lane_activity(cfg: Config, phase: str, row_dirs: dict[str, list[str]], sinc
     at ``~/.cache/swarm-lanes/<phase>`` on ``lane/<phase>`` and lands that branch
     in the repo itself, then removes the worktree. Its work is the worktree's
     dirty files, the branch's commits ahead of the repo's checked-out branch, and,
-    once landed, the commits since launch whose message cites the phase — so the
-    row's own ``swarm doctor`` proof after landing still sees it. ``0`` for a row
-    whose ``dir:`` names no ``[lanes] external`` repo.
+    once landed, the landings of that branch since launch (``_landings``) and the
+    commits since launch whose message cites the phase — so the row's own
+    ``swarm doctor`` proof after landing still sees it. ``0`` for a row whose
+    ``dir:`` names no ``[lanes] external`` repo.
     """
     total = 0
     lane = _LANE_ROOT / phase
@@ -300,8 +301,33 @@ def _lane_activity(cfg: Config, phase: str, row_dirs: dict[str, list[str]], sinc
         if lane.is_dir():
             total += _git_lines(lane, "status", "--porcelain") or 0
         total += _git_lines(repo, "log", "--oneline", f"HEAD..lane/{phase}") or 0
+        total += _landings(repo, phase, since)
         total += _cited_commits(repo, phase, since)
     return total
+
+
+def _landings(repo: Path, phase: str, since: float) -> int:
+    """Times ``repo``'s checked-out branch took in ``lane/<phase>`` since ``since``.
+
+    Read off the checkout's own reflog (``merge lane/<phase>: Fast-forward``),
+    because nothing else names the row once it has landed: the branch is no
+    longer ahead, its worktree is clean and then gone, and a public repo refuses
+    a work-item id in a commit message. A merge that moved nothing writes no
+    entry, and another row's landing names another branch.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "log", "-g", f"--since=@{int(since)}", "--format=%gs", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if out.returncode != 0:
+        return 0
+    landed = re.compile(rf"merge (?:refs/heads/)?lane/{re.escape(phase)}:")
+    return sum(1 for subject in out.stdout.splitlines() if landed.match(subject))
 
 
 def _cited_commits(repo: Path, phase: str, since: float) -> int:

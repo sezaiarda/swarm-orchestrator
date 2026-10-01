@@ -501,8 +501,12 @@ def test_a_worktree_git_cannot_read_is_not_reported(cfg, tmp_path):
 
 
 # -- an external-repo row works outside its mirror ------------
-def git(path: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+def git(path: Path, *args: str, ago: float | None = None) -> None:
+    """``ago`` back-dates what the command writes, its reflog entry included."""
+    env = None
+    if ago is not None:
+        env = {**os.environ, "GIT_COMMITTER_DATE": f"@{int(time.time() - ago)} +0000"}
+    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, env=env)
 
 
 @pytest.fixture
@@ -549,6 +553,55 @@ def test_a_landed_external_row_counts_its_cited_commit(cfg, tmp_path, lane):
 
 def test_a_longer_id_is_not_a_citation(cfg, tmp_path, lane):
     git(lane[0], "commit", "-q", "--allow-empty", "-m", "lanes: other work (P10)")
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == FAIL
+
+
+def land(repo: Path, phase: str, *, ago: float | None = None) -> None:
+    """``lane/<phase>`` gains a commit whose message names no id, as a public
+    repo's commit-msg hook demands, and is fast-forwarded into ``repo``."""
+    wt = repo.parent / "lanes" / phase
+    if not wt.is_dir():
+        git(repo, "worktree", "add", "-q", "-b", f"lane/{phase}", str(wt))
+    git(wt, "commit", "-q", "--allow-empty", "-m", "doctor: the work")
+    git(repo, "merge", "-q", "--ff-only", f"lane/{phase}", ago=ago)
+
+
+def test_a_landed_external_row_counts_without_an_id_in_its_message(cfg, tmp_path, lane):
+    """Seen on a live run: right after the fast-forward the lane worktree is
+    clean, the branch is no longer ahead and no message cites the row."""
+    land(lane[0], "P1")
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == OK
+
+
+def test_a_landing_outlives_its_lane_worktree_and_branch(cfg, tmp_path, lane):
+    repo, wt = lane
+    land(repo, "P1")
+    git(repo, "worktree", "remove", str(wt))
+    git(repo, "branch", "-q", "-d", "lane/P1")
+    assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == OK
+
+
+def test_another_rows_landing_is_not_this_rows_work(cfg, tmp_path, lane):
+    """The repo gained a commit since the launch, and P1's untouched lane
+    worktree is still a lost prime."""
+    land(lane[0], "P10")
+    check = activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60)
+    assert check.status == FAIL and "P1 (30m, no commits, no dirty files)" in check.detail
+
+
+def test_an_external_row_with_no_lane_worktree_and_nothing_landed_is_a_lost_prime(
+    cfg, tmp_path, lane
+):
+    repo, wt = lane
+    git(repo, "worktree", "remove", str(wt))
+    git(repo, "branch", "-q", "-d", "lane/P1")
+    land(repo, "P10")
+    check = activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60)
+    assert check.status == FAIL and "P1 (30m, no commits, no dirty files)" in check.detail
+
+
+def test_a_landing_from_before_the_launch_is_not_this_attempts_work(cfg, tmp_path, lane):
+    land(lane[0], "P1", ago=2 * 3600)
     assert activity(cfg, worktree(tmp_path, dirty=False), launched_ago=30 * 60).status == FAIL
 
 

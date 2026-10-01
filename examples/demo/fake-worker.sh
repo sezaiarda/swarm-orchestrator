@@ -19,19 +19,53 @@
 #   SWARM_PHASE         phase id (set by the launcher)
 set -u
 
-# Optional: simulate claude's workspace-trust dialog before the banner. It
-# RE-PROMPTS once (models a dialog that lingers / renders late), and only a bare
-# Enter dismisses it -- so a launcher that latches after one dismissal, or that
-# declares readiness while the dialog is up, gets stuck here and never boots.
-if [ "${FAKE_WORKER_TRUST:-0}" = "1" ]; then
-    for _ in 1 2; do
+# Optional: simulate claude's folder-trust dialog before the banner, with a
+# cursor that works as claude's does: Up and Down move it (the list wraps),
+# Enter takes the answer under it, and any answer but the trusting one ends the
+# session with exit 1, as does Esc. It ASKS TWICE (models a dialog that lingers
+# or re-prompts) -- so a launcher that latches after one answer, or that declares
+# readiness while the dialog is up, gets stuck here and never boots.
+#   FAKE_WORKER_TRUST=1  the earlier wording: the cursor starts on "Yes, proceed"
+#   FAKE_WORKER_TRUST=2  Claude Code 2.1.286's: the cursor starts on "No, exit"
+trust_dialog() {
+    local -a opts
+    local cur=0 key rest i
+    if [ "$1" = "2" ]; then
+        opts=("No, exit" "Yes, I trust this folder")
+    else
+        opts=("1. Yes, proceed" "2. No, exit")
+    fi
+    while :; do
         printf '\033[2J\033[H'   # redraw the screen (as claude's TUI does)
-        echo "╭─ Do you trust the files in this folder? ──────╮"
-        echo "│  1. Yes, proceed        2. No, exit           │"
-        echo "╰───────────────────────────────────────────────╯"
-        while IFS= read -r _l; do [ -z "$_l" ] && break; done
+        if [ "$1" = "2" ]; then
+            echo " Accessing workspace:"
+            echo
+            echo " Quick safety check: Is this a project you created or one you trust?"
+        else
+            echo " Do you trust the files in this folder?"
+        fi
+        echo
+        for i in "${!opts[@]}"; do
+            if [ "$i" = "$cur" ]; then echo " ❯ ${opts[$i]}"; else echo "   ${opts[$i]}"; fi
+        done
+        echo
+        echo " Enter to confirm · Esc to cancel"
+        IFS= read -rsn1 key || exit 1
+        case "$key" in
+            "")
+                case "${opts[$cur]}" in *Yes*) return 0 ;; *) exit 1 ;; esac ;;
+            $'\033')
+                IFS= read -rsn2 -t 0.2 rest || exit 1   # a bare Esc cancels
+                case "$rest" in
+                    "[A" | "OA") cur=$(((cur + ${#opts[@]} - 1) % ${#opts[@]})) ;;
+                    "[B" | "OB") cur=$(((cur + 1) % ${#opts[@]})) ;;
+                esac ;;
+        esac
     done
-    printf '\033[2J\033[H'       # dialog gone once dismissed
+}
+if [ "${FAKE_WORKER_TRUST:-0}" != "0" ]; then
+    for _ in 1 2; do trust_dialog "$FAKE_WORKER_TRUST"; done
+    printf '\033[2J\033[H'       # dialog gone once answered
 fi
 
 echo "${SWARM_READY_MARKER:-fake-ready-marker}"

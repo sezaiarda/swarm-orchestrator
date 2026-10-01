@@ -184,9 +184,18 @@ Each worker's environment carries:
 - under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN` and the
   build-gate limits.
 
-The folder-trust dialog is accepted ahead of time for every new mirror. The prompt
-is typed in (pasted, for a slash command), then checked: it must actually appear
-above the input box before the launch counts.
+The folder-trust dialog is accepted ahead of time for every new mirror. If it
+appears anyway, in a worker's pane or any other session's, the wait for the
+session to boot answers it: it reads the answers and the cursor from the pane,
+walks the cursor to the answer that trusts the folder one Up or Down at a time,
+and presses Enter only once two looks in a row show the cursor there (logged
+`TRUST-ACCEPT`). Enter takes whatever the cursor is on, and since Claude Code
+2.1.286 the cursor starts on "No, exit", so nothing is pressed when the cursor
+or the trusting answer cannot be read; the wait then ends in
+`READY-TIMEOUT … folder-trust dialog not answered: <why>`.
+
+The prompt is typed in (pasted, for a slash command), then checked: it must
+actually appear above the input box before the launch counts.
 
 Every send, to a worker or to any other session, empties the input box first.
 One Ctrl-U removes a single screen row, so the box is read back and the key

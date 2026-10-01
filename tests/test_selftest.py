@@ -97,24 +97,39 @@ def test_worker_launch_readiness_sendkeys_and_done(monkeypatch, tmp_path):
         session_mod.teardown(cfg)
 
 
-def test_worker_survives_the_folder_trust_dialog(monkeypatch, tmp_path):
-    """A real claude in a fresh worktree pops "Do you trust the files in this
-    folder?". The fake reproduces it (and re-prompts once). Readiness detection
-    must dismiss it reactively and still submit /prime — so the worker reaches
-    `done` rather than sitting on the dialog. A launcher that dismisses only once
-    (or treats the dialog as ready) would hang here and time out."""
-    monkeypatch.setenv("FAKE_WORKER_TRUST", "1")
+@pytest.mark.parametrize("wording", ["1", "2"], ids=["earlier", "claude-2.1.286"])
+def test_worker_survives_the_folder_trust_dialog(monkeypatch, tmp_path, wording):
+    """A real claude in a fresh worktree asks whether the folder is trusted:
+    earlier "Do you trust the files in this folder?" with the cursor on "Yes,
+    proceed", since Claude Code 2.1.286 "... a project you created or one you
+    trust?" with the cursor on "No, exit". The fake draws either, works its
+    cursor with real keys, exits on any answer but the trusting one, and asks
+    twice. Readiness detection must choose the trust answer and still submit
+    /prime, so the worker reaches `done` rather than sitting on the dialog. A
+    launcher that answers only once, treats the dialog as ready, or presses a
+    bare Enter on the newer one would hang or die here."""
+    monkeypatch.setenv("FAKE_WORKER_TRUST", wording)
     monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(tmp_path / "claude.json"))  # never the real one
-    cfg = _cfg(monkeypatch, tmp_path, "trust")
+    cfg = _cfg(monkeypatch, tmp_path, f"trust{wording}")
     log = Log(cfg.supervisor_log)
     try:
         session_mod.setup(cfg)
+        # A pane gets its environment from the tmux server, which only takes
+        # this process's when this test started it. On a machine where a server
+        # already runs the fake would never draw the dialog, and the test would
+        # pass having tested nothing.
+        tmux.run(["set-environment", "-t", cfg.session, "FAKE_WORKER_TRUST", wording], check=True)
         assert launch_mod.launch(cfg, "P0", log) is True
         sentinel = cfg.done_dir / "P0.ok"
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and not sentinel.is_file():
             time.sleep(0.1)
         assert sentinel.is_file(), "worker stuck at the folder-trust dialog"
+        answers = [
+            line for line in cfg.supervisor_log.read_text(encoding="utf-8").splitlines()
+            if "TRUST-ACCEPT" in line
+        ]
+        assert len(answers) == 2, "the fake asks twice, and each must be answered"
     finally:
         log.close()
         session_mod.teardown(cfg)

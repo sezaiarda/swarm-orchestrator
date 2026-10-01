@@ -16,6 +16,7 @@ import dataclasses
 import errno
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -66,9 +67,28 @@ DEP_SATISFYING = statuses.SATISFIES_DEPS
 # it just does not dispatch.
 MIN_RECAP_CHARS = 20
 MIN_RECAP_WORDS = 4
-# Substrings that identify claude's workspace-trust dialog (matched
-# case-insensitively against joined pane text, so wrapping never hides them).
-TRUST_MARKERS = ("do you trust", "trust the files", "trust the authors")
+# Substrings that identify claude's folder-trust dialog, matched
+# case-insensitively against the pane with every run of whitespace collapsed:
+# claude wraps the question in its own renderer, which a joined capture does not
+# undo. The first three are the earlier wording ("Do you trust the files in this
+# folder?"); the last two are Claude Code 2.1.286's ("Is this a project you
+# created or one you trust?", "Yes, I trust this folder").
+TRUST_MARKERS = (
+    "do you trust",
+    "trust the files",
+    "trust the authors",
+    "one you trust",
+    "i trust this folder",
+)
+# One answer of that dialog: an optional frame, the cursor if it is on this row,
+# an optional number, then a label that starts with Yes or No.
+_TRUST_OPTION = re.compile(
+    r"^[\s│|]*(?P<cursor>[❯>])?\s*(?:\d+\.\s*)?(?P<label>(?:yes|no)\b[^│|]*)", re.IGNORECASE
+)
+# How long a key sent to the dialog is given to show before another is sent. The
+# list wraps, so a second Down on a pane that had not repainted yet would put
+# the cursor back on the answer that exits.
+TRUST_KEY_PATIENCE_S = 5.0
 
 
 def _claude_config_path() -> Path:
@@ -716,32 +736,126 @@ def _launch_tmux(
 
 
 def _trust_prompt_showing(text: str) -> bool:
-    low = text.lower()
+    low = _collapse(text).lower()
     return any(m in low for m in TRUST_MARKERS)
 
 
+@dataclass(frozen=True)
+class TrustDialog:
+    """claude's folder-trust dialog as read from a pane: its answers top to
+    bottom, the one the cursor is on and the one that trusts the folder. Either
+    index is ``None`` when the pane does not say which single row it is."""
+
+    options: tuple[str, ...]
+    cursor: int | None
+    trust: int | None
+
+
+def read_trust_dialog(text: str) -> TrustDialog | None:
+    """The folder-trust dialog showing in ``text``, or ``None`` when there is
+    none. The answer that trusts is the one starting with "Yes" ("Yes, I trust
+    this folder", earlier "Yes, proceed")."""
+    if not _trust_prompt_showing(text):
+        return None
+    options: list[str] = []
+    marked: list[int] = []
+    for row in text.splitlines():
+        found = _TRUST_OPTION.match(row)
+        if found is None:
+            continue
+        if found["cursor"]:
+            marked.append(len(options))
+        options.append(_collapse(found["label"]))
+    yes = [i for i, label in enumerate(options) if label.lower().startswith("yes")]
+    return TrustDialog(
+        tuple(options),
+        marked[0] if len(marked) == 1 else None,
+        yes[0] if len(yes) == 1 else None,
+    )
+
+
+class _TrustAnswer:
+    """Answers the folder-trust dialog across the looks of :func:`await_ready`.
+
+    Enter takes whatever the cursor is on, and since Claude Code 2.1.286 the
+    cursor starts on "No, exit", so no key is sent on a guess: the cursor is
+    walked to the trust answer one Up or Down at a time, and Enter goes out
+    only after two looks in a row, with no key between them, read the cursor
+    there. ``why`` says what the last look left undone, for the timeout line.
+    """
+
+    def __init__(self, pane: str, log: Log) -> None:
+        self.pane = pane
+        self.log = log
+        self.why = ""
+        self._sent_at: float | None = None
+        self._sent_from: int | None = None
+        self._confirmed = False
+
+    def _send(self, key: str, cursor: int) -> None:
+        tmux.run(["send-keys", "-t", self.pane, key], check=True)
+        self._sent_at = time.monotonic()
+        self._sent_from = cursor
+        self._confirmed = False
+
+    def step(self, dialog: TrustDialog) -> None:
+        """One look at the dialog: at most one key."""
+        shown = list(dialog.options)
+        if dialog.trust is None:
+            self._confirmed = False
+            self.why = f"no single answer that trusts the folder among {shown}"
+            return
+        if dialog.cursor is None:
+            self._confirmed = False
+            self.why = f"the cursor was not found on any of {shown}"
+            return
+        if (
+            self._sent_at is not None
+            and dialog.cursor == self._sent_from
+            and time.monotonic() - self._sent_at < TRUST_KEY_PATIENCE_S
+        ):
+            return  # the last key has not shown yet; a second one could undo it
+        trust = dialog.options[dialog.trust]
+        if dialog.cursor != dialog.trust:
+            key = "Down" if dialog.trust > dialog.cursor else "Up"
+            self.why = f"{key} from {dialog.options[dialog.cursor]!r} did not reach {trust!r}"
+            self._send(key, dialog.cursor)
+        elif not self._confirmed:
+            self._confirmed = True
+            self.why = f"the cursor did not stay on {trust!r}"
+        else:
+            self.why = f"Enter on {trust!r} did not close it"
+            self._send("Enter", dialog.cursor)
+            self.log.line(f"TRUST-ACCEPT pane={self.pane} {trust!r}")
+
+
 def await_ready(cfg: Config, pane: str, log: Log) -> bool:
-    """Wait until claude has booted (its version banner shows), dismissing the
+    """Wait until claude has booted (its version banner shows), answering the
     folder-trust dialog if it appears. Shared by worker, master, and resolver
     pane launches. Returns False on timeout (a launch failure to the caller).
 
-    The trust dialog is checked on **every** poll (not latched) and re-accepted
-    with Enter each time it shows, and readiness is never declared while it is up
-    — so a dialog that renders late, re-prompts, or wraps can't be mistaken for a
-    ready pane. (Belt-and-suspenders: :func:`pretrust_dir` normally stops the
-    dialog from ever appearing.)"""
+    The trust dialog is looked for on **every** poll (not latched) and answered
+    each time it shows, and readiness is never declared while it is up, so a
+    dialog that renders late, re-prompts, or wraps can't be mistaken for a ready
+    pane. A dialog still up at the deadline is named in the timeout line.
+    (Belt-and-suspenders: :func:`pretrust_dir` normally stops the dialog from
+    ever appearing.)"""
     needle = ready_needle(cfg)
+    trust = _TrustAnswer(pane, log)
+    dialog = None
     deadline = time.monotonic() + READY_TIMEOUT_S
     while time.monotonic() < deadline:
         text = tmux.capture_joined(pane)
-        if _trust_prompt_showing(text):
-            tmux.send_enter(pane)  # accept (default = trust); re-sent if it lingers
-            time.sleep(POLL_INTERVAL_S)
-            continue  # never 'ready' while the dialog is up
-        if needle in text:
+        dialog = read_trust_dialog(text)
+        if dialog is not None:
+            trust.step(dialog)  # never 'ready' while the dialog is up
+        elif needle in text:
             return True
         time.sleep(POLL_INTERVAL_S)
-    log.line(f"READY-TIMEOUT pane={pane}")
+    if dialog is not None:
+        log.line(f"READY-TIMEOUT pane={pane} folder-trust dialog not answered: {trust.why}")
+    else:
+        log.line(f"READY-TIMEOUT pane={pane}")
     return False
 
 

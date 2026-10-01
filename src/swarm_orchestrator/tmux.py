@@ -496,6 +496,59 @@ def _box_holds(pane_id: str, head: str) -> bool:
     return _flat(head) in box or _FOLDED.search(box) is not None
 
 
+#: One colour-and-attribute sequence in a capture taken with ``-e``.
+_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def _faint(faint: bool, codes: str) -> bool:
+    """Whether text is rendered faint after one SGR sequence: ``2`` turns it on,
+    ``22`` and a reset turn it off. A colour's own arguments (``38;5;2``) are
+    skipped, or a palette index would read as an attribute."""
+    items = codes.split(";")
+    i = 0
+    while i < len(items):
+        code = items[i]
+        if code in ("38", "48", "58"):
+            i += {"5": 3, "2": 5}.get(items[i + 1] if i + 1 < len(items) else "", 1)
+            continue
+        if code == "2":
+            faint = True
+        elif code in ("", "0", "22"):
+            faint = False
+        i += 1
+    return faint
+
+
+def _box_text(pane_id: str) -> str | None:
+    """What claude's input box holds right now, row by row; None with no box.
+
+    The box runs from the last ``❯`` down to its lower edge, a row of ``─``; the
+    status lines under that edge are not input. Faint text is left out: an empty
+    box shows a hint there (``Try "how do I log an error?"``) that no key
+    removes, and read as input it would make an empty box look full forever.
+    Typed text and a folded paste are never faint. Rows are kept apart, blank
+    ones too, because a key that removes only a line break still changed the
+    box."""
+    raw = run(["capture-pane", "-p", "-e", "-t", pane_id]).stdout
+    shown = typed = ""
+    faint, pos = False, 0
+    for seq in [*_SGR.finditer(raw), None]:
+        chunk = raw[pos : seq.start() if seq else len(raw)]
+        shown += chunk
+        typed += re.sub(r"[^\n]", " ", chunk) if faint else chunk
+        if seq:
+            faint, pos = _faint(faint, seq.group(1)), seq.end()
+    idx = shown.rfind("❯")
+    if idx < 0:
+        return None
+    rows = []
+    for full, kept in zip(shown[idx + 1 :].split("\n"), typed[idx + 1 :].split("\n")):
+        if full.strip() and not full.strip().strip("─"):
+            break
+        rows.append(kept.replace("\xa0", " ").rstrip())
+    return "\n".join(rows)
+
+
 def _transcript(pane_id: str) -> str:
     """The flattened pane text ABOVE the input box — where a submitted message
     lands. With no box painted the whole pane counts, so a needle there can only
@@ -525,6 +578,7 @@ DELIVERED = "delivered"  # the text was seen rendered ABOVE the input box
 NO_BOX = "no-box"  # the pane never renders claude's ❯ box
 UNCONFIRMED = "unconfirmed"  # the box let go of the text, nothing proved a submit
 NOT_DELIVERED = "not-delivered"  # the text is still sitting in the box
+BOX_NOT_CLEARED = "box-not-cleared"  # the box kept what it held; nothing was typed
 SUBMIT_OK = (DELIVERED, NO_BOX)
 
 # How long typed keystrokes get to render before Enter goes out. The one number
@@ -545,14 +599,65 @@ def _settle_default(settle: float | None) -> float:
         return DEFAULT_SETTLE
 
 
-def clear_box(pane_id: str) -> None:
-    """Wipe the input line before typing into it (``C-u``).
+#: The keys that empty the box, one screen row a press: ``C-u`` takes the row in
+#: front of the cursor, ``C-k`` the row behind it.
+_CLEAR_KEYS = ("C-u", "C-k")
+#: The most keys one :func:`clear_box` sends after its first ``C-u``. A box is a
+#: few rows; this only ends a box that something else keeps filling.
+CLEAR_PRESSES = 64
+#: How long one key gets to repaint the box before it counts as changing nothing.
+CLEAR_WAIT = 1.0
 
-    A no-op on an empty box and the cheapest possible defence against stray
-    bytes: a terminal query reply lands in the box as ordinary input, and text
-    typed after one is no longer at column 0 — which submits ``/prime ...`` as
-    plain chat instead of as a slash command."""
+
+def _press(pane_id: str, key: str, held: str) -> str | None:
+    """Send one clearing key and return what the box holds once it repainted
+    (``held`` again when the key changed nothing within :data:`CLEAR_WAIT`)."""
+    run(["send-keys", "-t", pane_id, key])
+    seen: list[str | None] = [held]
+
+    def moved() -> bool:
+        seen[0] = _box_text(pane_id)
+        return seen[0] != held
+
+    _poll(moved, CLEAR_WAIT)
+    return seen[0]
+
+
+def clear_box(pane_id: str) -> bool:
+    """Empty the input box before typing into it; False if it would not empty.
+
+    One ``C-u`` goes out first, unconditionally: a no-op on an empty box and the
+    cheapest possible defence against stray bytes: a terminal query reply lands
+    in the box as ordinary input, and text typed after one is no longer at
+    column 0 — which submits ``/prime ...`` as plain chat instead of as a slash
+    command. On an empty box that is all that is sent.
+
+    That one key is not the whole clear, though: ``C-u`` removes the screen row
+    in front of the cursor, not the input. A line wider than the pane (every
+    pointer line the swarm types, on a narrow pane) lost its last row and kept
+    the rest, and the next message was typed behind it and submitted with it. So
+    the box is read back and the key repeated while it still holds something;
+    once ``C-u`` stops changing it (the cursor is at the start, text behind it)
+    ``C-k`` takes over. Bounded by :data:`CLEAR_PRESSES`, and a box neither key
+    changes any more (a dialog has the pane, not the input) ends it at once.
+
+    True also when the pane renders no box at all: there is nothing to read,
+    and the keys typed next are that pane's whole delivery."""
     run(["send-keys", "-t", pane_id, "C-u"], check=True)
+    held = _box_text(pane_id)
+    key = stalled = 0
+    for _ in range(CLEAR_PRESSES):
+        if not (held or "").strip():
+            return True
+        now = _press(pane_id, _CLEAR_KEYS[key], held)
+        if now != held:
+            held, stalled = now, 0
+            continue
+        stalled += 1
+        if stalled == len(_CLEAR_KEYS):
+            return False
+        key = (key + 1) % len(_CLEAR_KEYS)
+    return not (held or "").strip()
 
 
 def _paste(pane_id: str, text: str) -> bool:
@@ -584,8 +689,7 @@ def _enter(pane_id: str) -> None:
 
 
 def _fill(pane_id: str, text: str, head: str, settle: float) -> bool:
-    """Clear the input line, put ``text`` in it, and report whether it showed."""
-    clear_box(pane_id)
+    """Put ``text`` in the (cleared) input box and report whether it showed."""
     _type(pane_id, text)
     landed = _poll(lambda: _box_holds(pane_id, head), settle)
     if landed:
@@ -627,9 +731,13 @@ def send_submit_ex(
 ) -> str:
     """Type ``text`` into a pane, submit it, and report what was PROVEN.
 
-    Returns :data:`DELIVERED`, :data:`NO_BOX`, :data:`UNCONFIRMED` or
-    :data:`NOT_DELIVERED`; see those constants for what each licenses the caller
-    to do.
+    Returns :data:`DELIVERED`, :data:`NO_BOX`, :data:`UNCONFIRMED`,
+    :data:`NOT_DELIVERED` or :data:`BOX_NOT_CLEARED`; see those constants for
+    what each licenses the caller to do.
+
+    The box is emptied first (:func:`clear_box`). A box that will not empty gets
+    nothing typed into it: text typed behind what it holds is submitted with it,
+    as one message.
 
     Exactly one path re-types the prompt, and it is this case: the pane had
     no input box at all when the keystrokes arrived,
@@ -641,6 +749,8 @@ def send_submit_ex(
     settle = _settle_default(settle)
     head = text[:40]
     had_box = _has_box(pane_id)
+    if not clear_box(pane_id):
+        return BOX_NOT_CLEARED
     if not _fill(pane_id, text, head, settle) and not had_box:
         # Nothing showed in a box, and there was no box to show it in when the
         # text went out: either this pane never renders one (a plain shell, the
@@ -654,6 +764,8 @@ def send_submit_ex(
             return DELIVERED
         if not _poll(lambda: _has_box(pane_id), box_wait):
             return NO_BOX
+        if not clear_box(pane_id):
+            return BOX_NOT_CLEARED
         _fill(pane_id, text, head, settle)  # box exists now; the first send was lost
     return _submit(pane_id, head, tries)
 

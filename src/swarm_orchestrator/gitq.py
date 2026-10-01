@@ -21,7 +21,10 @@ Nothing a worker made is ever destroyed. Before a worktree or branch holding
 work that is not on main goes, its uncommitted edits are committed onto the
 branch and the tip is kept under :data:`ATTIC` (``swarm gc`` prunes old ones).
 An interrupted phase is not removed at all: :func:`set_aside` keeps its mirror
-and its next launch resumes on the same branch.
+and its next launch resumes on the same branch. A phase that finished ``later``
+(it waits for a date) has its tip kept under :data:`LATER` instead of the attic
+(:func:`keep_later`), and its next launch starts with that work merged onto the
+day's main.
 
 Statuses: :data:`MERGED` (all repos clean, pushed, pruned), :data:`CONFLICT` (a
 repo left mid-merge for a resolver), :data:`DIRTY` (a repo's canonical tree had
@@ -78,6 +81,11 @@ _PUSH_ATTEMPTS = 5
 #: Not a branch, so reconcile, launch and branch listings never see it.
 ATTIC = "refs/swarm-attic"
 ATTIC_STAMP = "%Y%m%dT%H%M%SZ"
+#: Where the work of a phase that finished ``later`` waits for its date:
+#: ``refs/swarm-later/<phase>``, one per repo. Its next launch merges it into
+#: the new branch and removes it, so ``swarm gc`` never prunes it.
+LATER = "refs/swarm-later"
+_LATER_MESSAGE = "swarm: {phase}'s work from before its date, brought onto {main}"
 _WIP_MESSAGE = "swarm: unfinished work on {phase}, saved before its worktree was set aside"
 
 # git env that makes remote ops fail fast instead of blocking on an interactive
@@ -378,6 +386,11 @@ def _archive(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
     if not _unmerged(repo, main, branch):
         return True
     tip = _git(repo, "rev-parse", "--verify", "--quiet", branch, check=False).stdout.strip()
+    return _to_attic(repo, phase, tip, log, f"not on {main}")
+
+
+def _to_attic(repo: Path, phase: str, tip: str, log: Log, why: str) -> bool:
+    """Write ``tip`` under :data:`ATTIC` for ``phase``; False when git refused."""
     stamp = time.strftime(ATTIC_STAMP, time.gmtime())
     ref, n = f"{ATTIC}/{phase}/{stamp}", 1
     while _ref_exists(repo, ref):
@@ -385,19 +398,87 @@ def _archive(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
         ref = f"{ATTIC}/{phase}/{stamp}-{n}"
     made = _git(repo, "update-ref", ref, tip, check=False) if tip else None
     if made is None or made.returncode != 0:
-        why = made.stderr.strip() if made is not None else "no tip"
-        log.line(f"ATTIC-FAILED {phase} {repo.name}: {why}")
+        reason = made.stderr.strip() if made is not None else "no tip"
+        log.line(f"ATTIC-FAILED {phase} {repo.name}: {reason}")
         return False
-    log.line(f"ATTIC {phase} {repo.name} {ref} (not on {main})")
+    log.line(f"ATTIC {phase} {repo.name} {ref} ({why})")
     return True
 
 
-def _gc(cfg: Config, repo: Path, phase: str, log: Log) -> None:
+def later_ref(phase: str) -> str:
+    """The ref a ``later`` finish of ``phase`` is kept under, in each repo."""
+    return f"{LATER}/{phase}"
+
+
+def _tip(repo: Path, ref: str) -> str:
+    return _git(repo, "rev-parse", "--verify", "--quiet", ref, check=False).stdout.strip()
+
+
+def _contains(repo: Path, tip: str, commit: str) -> bool:
+    """``commit`` is ``tip`` or one of its ancestors."""
+    return _git(repo, "merge-base", "--is-ancestor", commit, tip, check=False).returncode == 0
+
+
+def _keep_later(cfg: Config, repo: Path, phase: str, log: Log) -> bool:
+    """Move ``swarm/<phase>``'s tip to :func:`later_ref` if it holds commits the
+    repo's main lacks. Caller holds the repo lock. True when deleting the branch
+    now loses nothing. Work an earlier ``later`` left there and this tip does not
+    contain goes to the attic first."""
+    branch, ref = f"swarm/{phase}", later_ref(phase)
+    main = _repo_main(cfg, repo)
+    if not _branch_exists(repo, branch) or not _unmerged(repo, main, branch):
+        return True
+    tip, old = _tip(repo, branch), _tip(repo, ref)
+    if old and not _contains(repo, tip, old) and not _to_attic(
+        repo, phase, old, log, "an earlier `later` finish"
+    ):
+        return False
+    made = _git(repo, "update-ref", ref, tip, check=False) if tip else None
+    if made is None or made.returncode != 0:
+        why = made.stderr.strip() if made is not None else "no tip"
+        log.line(f"LATER-KEEP-FAILED {phase} {repo.name}: {why}")
+        return False
+    log.line(f"LATER-KEPT {phase} {repo.name} {ref} (not on {main})")
+    return True
+
+
+def _restore_later(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> None:
+    """Bring the work a ``later`` finish left under :func:`later_ref` into the
+    phase's fresh worktree, then drop the ref. Caller holds the repo lock.
+
+    The branch was just made from today's main, so the work is merged into it:
+    the worker starts with what it committed *and* everything that landed since.
+    If the two no longer merge cleanly the branch is put back exactly where the
+    work left it, like an interrupted attempt that is resumed, and the landing
+    meets the conflict the way it does for any branch that fell behind. Either
+    way the work is on ``swarm/<phase>`` afterwards, which the usual rules keep.
+    """
+    ref = later_ref(phase)
+    tip = _tip(repo, ref)
+    if not tip:
+        return
+    wt = _wt_for(cfg, repo, phase)
+    merged = _git(
+        wt, "merge", "--no-edit", "--no-verify", "-q",
+        "-m", _LATER_MESSAGE.format(phase=phase, main=main), tip, check=False,
+    )
+    if merged.returncode == 0:
+        how = f"onto {main}"
+    else:
+        _git(wt, "merge", "--abort", check=False)
+        _git(wt, "reset", "--hard", "-q", tip)
+        how = f"as it was: it no longer merges onto {main} cleanly"
+    _git(repo, "update-ref", "-d", ref, check=False)
+    log.line(f"LATER-RESTORED {phase} {repo.name} {how}")
+
+
+def _gc(cfg: Config, repo: Path, phase: str, log: Log, *, later: bool = False) -> None:
     """Remove one repo's ``swarm/<phase>`` worktree then delete its branch.
 
     Caller holds the repo lock. Uniform across umbrella and components (every
     repo has a per-phase worktree now). Work not on main is saved first
-    (:func:`_save_wip`, :func:`_archive`); if it cannot be, nothing is removed.
+    (:func:`_save_wip`, then :func:`_archive`, or :func:`_keep_later` when
+    ``later``); if it cannot be, nothing is removed.
 
     **Never raises.** This is housekeeping that runs *after* a merge has already
     succeeded, so its failure must not fail the integration: a `worktree remove`
@@ -409,7 +490,8 @@ def _gc(cfg: Config, repo: Path, phase: str, log: Log) -> None:
     branch = f"swarm/{phase}"
     wt = _wt_for(cfg, repo, phase)
     try:
-        if not (_save_wip(cfg, repo, phase, log) and _archive(cfg, repo, phase, log)):
+        keep = _keep_later if later else _archive
+        if not (_save_wip(cfg, repo, phase, log) and keep(cfg, repo, phase, log)):
             log.line(f"WORKTREE-GC-KEPT {phase} {repo.name}: its work could not be saved")
             return
         if wt.exists():
@@ -473,6 +555,42 @@ def discard(cfg: Config, phase: str, log: Log) -> None:
             _gc(cfg, repo, phase, log)
     _rmtree_mirror(cfg, phase)
     log.line(f"WORKTREE-DISCARD {phase}")
+
+
+def keep_later(cfg: Config, phase: str, log: Log) -> None:
+    """Drop the mirror of a phase that finished ``later``, keeping its work for
+    its date: like :func:`discard`, except that what main lacks goes under
+    :func:`later_ref` (uncommitted edits as a commit first), where the phase's
+    next :func:`worktree_add` finds it."""
+    if _mirror_dir(cfg, phase) is None:
+        log.line(f"WORKTREE-DISCARD-REFUSED {phase!r} not a mirror name")
+        return
+    for repo, _main in _repos(cfg):
+        with repo_lock(cfg, repo):
+            _gc(cfg, repo, phase, log, later=True)
+    _rmtree_mirror(cfg, phase)
+    log.line(f"WORKTREE-KEPT-FOR-DATE {phase}")
+
+
+def kept_later(cfg: Config) -> set[str]:
+    """Phases with work under :data:`LATER` in any repo."""
+    phases: set[str] = set()
+    for repo, _main in _repos(cfg):
+        out = _git(repo, "for-each-ref", "--format=%(refname)", LATER, check=False)
+        phases |= {ref[len(LATER) + 1:] for ref in out.stdout.split()}
+    return phases
+
+
+def _unkeep_later(cfg: Config, phase: str, log: Log) -> None:
+    """A row closed some other way no longer waits for its kept work: it goes
+    to the attic, so a rerun of the row never starts from it."""
+    for repo, main in _repos(cfg):
+        with repo_lock(cfg, repo):
+            tip = _tip(repo, later_ref(phase))
+            if not tip:
+                continue
+            if _contains(repo, main, tip) or _to_attic(repo, phase, tip, log, "its row is closed"):
+                _git(repo, "update-ref", "-d", later_ref(phase), check=False)
 
 
 def set_aside(cfg: Config, phase: str, log: Log) -> bool:
@@ -624,6 +742,7 @@ def _add_one(cfg: Config, repo: Path, main: str, phase: str, log: Log) -> None:
         wt.parent.mkdir(parents=True, exist_ok=True)
         _git(repo, "worktree", "add", str(wt), "-b", branch, base)
         _link_target_cache(cfg, wt, repo, log)
+        _restore_later(cfg, repo, main, phase, log)
 
 
 def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
@@ -638,6 +757,8 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
     ``main`` unless ``origin/<main>`` strictly fast-forwards it — so unpushed
     owner commits are never dropped from the mirror. A leftover from a prior
     attempt that holds work is resumed as it is; an empty one is GC'd first.
+    Work a ``later`` finish left for this launch is merged into the new branch
+    (:func:`_restore_later`).
 
     All or nothing: if any repo fails, the phase's mirror is set aside
     (:func:`set_aside`: discarded unless an earlier attempt's work is in it) and
@@ -1288,6 +1409,7 @@ def reconcile(
     done_phases: dict[str, str],
     log: Log,
     operator: dict[str, str] | None = None,
+    later: set[str] | frozenset[str] = frozenset(),
 ) -> ReconcileResult:
     """Reconcile leftover ``swarm/*`` branches at ``swarm up`` (sentinel-driven).
 
@@ -1315,6 +1437,11 @@ def reconcile(
     as it is. Without it every such
     mirror reads as an interrupted phase and is discarded — commits and all. A
     live job's mirror is kept for its next attempt; a finished job's is landed.
+
+    ``later`` are the phases that finished ``later`` and wait for a date. One
+    whose branch is still here reported while no supervisor ran: its work is
+    kept for its date (:func:`keep_later`), not sent to the attic. Work kept for
+    a phase since recorded done some other way goes to the attic.
     """
     sentinels = sentinel_done(cfg)
     operator = operator or {}
@@ -1335,6 +1462,9 @@ def reconcile(
             log.line(f"RECONCILE-DISCARD {phase} empty operator mirror")
         elif job == "keep":
             log.line(f"RECONCILE-KEEP {phase} operator-job")
+        elif phase in later and sentinels.get(phase) not in DONE_INTEGRATE:
+            keep_later(cfg, phase, log)
+            log.line(f"RECONCILE-KEPT-FOR-DATE {phase}")
         elif phase in done_phases:
             discard(cfg, phase, log)
             log.line(f"RECONCILE-GC {phase} already-recorded")
@@ -1361,6 +1491,9 @@ def reconcile(
             log.line(f"RECONCILE-KEEP {phase} interrupted; its next launch resumes it")
         else:
             log.line(f"RECONCILE-DISCARD {phase} interrupted with nothing to keep")
+    for phase in sorted(kept_later(cfg) - set(later)):
+        if done_phases.get(phase, statuses.FAIL) != statuses.FAIL:
+            _unkeep_later(cfg, phase, log)
     return ReconcileResult(
         integrated=integrated,
         held=held,

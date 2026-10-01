@@ -18,12 +18,12 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-import time
 from pathlib import Path
 
 from . import lanes as lanes_mod
 from . import launch as launch_mod
 from . import ledger as ledger_mod
+from . import ledgerw
 from . import resolver, telegram, tmux
 from .config import Config, ready_needle
 from .logutil import Log
@@ -84,8 +84,9 @@ def build_context(cfg: Config, st: State) -> dict:
         | set(st.waiting)
         | st.integrating()
     )
-    # A row that finished `later` waits in the ledger for its `after:` date.
-    deferred = ledger_mod.load_deferred(ledger_path, time.strftime("%Y-%m-%d", time.gmtime()))
+    # A row that finished `later` waits for its `after:` date: in the ledger,
+    # or still in the report queue when the ledger could not be written yet.
+    deferred = ledgerw.dated(cfg)
     excluded = set(cfg.exclude) | set(deferred)
     # A row ticked `[x]` with no record of ours counts as landed (a view only;
     # `done` below stays the swarm's own records).

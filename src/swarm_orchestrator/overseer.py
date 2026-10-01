@@ -14,7 +14,8 @@ sees on every wake (:meth:`Policy.observe`) and asks whether a pass is due
 
 Triggers
 --------
-*Events* — a phase finishing ``fail``; an integration hold no resolver is handling
+*Events* — a phase finishing ``fail`` (a ``later`` is not one: it waits for its
+date, :func:`ledgerw.dated`); an integration hold no resolver is handling
 (below); a newly owed push; a
 cheap doctor check turning FAIL; a phase waiting or parked on the owner for longer
 than ``[overseer] owner_wait_s`` (once per phase); starvation — free slots and
@@ -54,7 +55,7 @@ import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from . import statuses
+from . import ledgerw, statuses
 from .config import Config
 from .logutil import Log
 
@@ -269,11 +270,14 @@ class Policy:
             return []  # first look: baseline, never a flood of history
         out: list[str] = []
         new = [p for p, s in done.items() if seen.get(p) != s]
+        waits = ledgerw.dated(self.cfg) if statuses.FAIL in (done[p] for p in new) else {}
         for phase in new:
             status = done[phase]
             if status in _COUNTED:
                 self.mem.finished_since += 1
             if status == statuses.FAIL:
+                if phase in waits or ledgerw.later_date(self.cfg, phase):
+                    continue  # finished `later`: it waits for a date, nothing failed
                 out += self._want(f"{FAIL}:{phase}", f"{phase} finished fail", False, now)
         return out
 
@@ -452,7 +456,7 @@ class Policy:
 
 # -- the starvation map (pure) ----------------------------------------------
 #: Root-blocker kinds, in the order the map lists ties.
-BLOCKER_KINDS = ("failed", "excluded", "parked", "building", "unknown", "ready")
+BLOCKER_KINDS = ("failed", "excluded", "dated", "parked", "building", "unknown", "ready")
 
 
 @dataclass
@@ -475,13 +479,15 @@ def starvation_map(
     in_flight: dict[str, str],
     *,
     examples: int = 5,
+    dated: set[str] | frozenset[str] = frozenset(),
 ) -> dict:
     """Which roots hold the open backlog back, and how much of it each holds.
 
     This is the analysis the owner used to do by hand when the swarm starved:
     walk every open, non-excluded phase down its unmet dependencies to the node
-    where waiting *ends* — something excluded, failed, parked on the owner,
-    building, not in the ledger at all, or ready but not launched — and count,
+    where waiting *ends* — something excluded, failed, waiting for its date
+    (``dated``), parked on the owner, building, not in the ledger at all, or
+    ready but not launched — and count,
     per such root, how many backlog phases stand behind it transitively.
 
     ``in_flight`` maps phase -> ``"building"`` (a slot, the merge queue, a
@@ -506,6 +512,8 @@ def starvation_map(
             return "unknown"
         if p in excluded:
             return "excluded"
+        if p in dated:
+            return "dated"  # the swarm starts it on its day; it has not failed
         if p in done:
             return "failed"
         state = in_flight.get(p)

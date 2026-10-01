@@ -1025,35 +1025,79 @@ def _hold_relaned(cfg: Config, relaned: dict[str, tuple[list[str], list[str]]],
             log.line(f"LANE-RESHAPED {phase} {' '.join(before)} -> {' '.join(st.lanes[phase])}"[:600])
 
 
-def release_due(cfg: Config, log: Log) -> list[str]:
-    """Put back in play each ``later`` phase whose date has come.
+def later_date(cfg: Config, phase: str) -> str:
+    """The date ``phase``'s queued ``later`` report names; "" when its report
+    is not a ``later``, carries no valid date, or is not queued."""
+    return _later_date(_read(_qdir(cfg) / f"{phase}.json"))
 
-    A ``later`` finishes like a ``fail`` (nothing lands) and its row carries the
-    date; until then the launcher leaves it alone (:func:`deferred`). Once the
-    date is here, its failure record is cleared the way ``swarm retry`` clears
-    one, so the next free slot picks it up.
+
+def _later_date(report: dict) -> str:
+    out = report.get("outcome") or {}
+    after = out.get("after") or ""
+    return after if out.get("outcome") == statuses.LATER and _DATE.match(after) else ""
+
+
+def dated(cfg: Config) -> dict[str, str]:
+    """``{phase: date}`` for every open row that waits for a date still ahead.
+
+    The ledger's own ``after:`` dates (:func:`ledger.deferred`), plus each
+    ``later`` finish whose report the ledger has not taken yet (its checkout was
+    busy): that row waits for its date from the moment its worker said so, not
+    from the moment the row could be written.
+    """
+    day = today()
+    out = ledger_mod.load_deferred(cfg.project_dir / cfg.ledger, day)
+    for key, report in pending(cfg).items():
+        after = _later_date(report) if key != NOW else ""
+        if after > day:
+            out.setdefault(key, after)
+    return out
+
+
+def not_failed(done: dict[str, str], waits: dict[str, str]) -> dict[str, str]:
+    """``done`` without the failure record of a row that waits for its date.
+
+    A ``later`` is recorded ``fail`` only so that nothing relaunches it before
+    the ledger carries its date (:func:`release_dated` then drops the record).
+    Whatever reports on the run reads the done map through this, so the row is
+    never counted or listed as failed in between. A view, never written back.
+    """
+    return {p: s for p, s in done.items() if not (s == statuses.FAIL and p in waits)}
+
+
+def release_dated(cfg: Config, log: Log) -> list[str]:
+    """Hand each ``later`` phase from its failure record to its date.
+
+    A ``later`` finishes like a ``fail`` (nothing lands), and that record is
+    what keeps the launcher off it until its row carries the date. From then on
+    the date does (:func:`ledger.deferred`), so the record and its sentinel are
+    dropped: the row waits for a date, it has not failed, and on its date it is
+    ready with nothing left to clear. Returns the phases released.
     """
     from . import state as state_mod
 
-    text = _ledger_text(cfg)
-    lines = text.split("\n")
+    lines = _ledger_text(cfg).split("\n")
     day = today()
-    due = []
+    rows = {}
     for pid, (s, _e) in row_spans(lines).items():
         head = split_head(lines[s])
         if head and head.box == " " and head.status.startswith("later") \
-                and _DATE.match(head.after or "") and head.after <= day:
-            due.append(pid)
+                and _DATE.match(head.after or ""):
+            rows[pid] = head.after
     released = []
-    if not due:
-        return released
+    recorded = state_mod.read(cfg).done
+    if not any(recorded.get(pid) == statuses.FAIL for pid in rows):
+        return released  # the usual sweep: nothing to write, so no lock taken
     with state_mod.transaction(cfg) as st:
-        for pid in due:
+        for pid in rows:
             if st.done.get(pid) == statuses.FAIL:
                 st.done.pop(pid)
                 released.append(pid)
     for pid in released:
         for status in statuses.ALL:
             (cfg.done_dir / f"{pid}.{status}").unlink(missing_ok=True)
-        log.line(f"LATER-DUE {pid} back in play")
+        if rows[pid] > day:
+            log.line(f"LATER-WAITS {pid} until {rows[pid]}")
+        else:
+            log.line(f"LATER-DUE {pid} its date has come")
     return released

@@ -158,6 +158,9 @@ class Supervisor:
         # phase -> (consecutive failed launches, time of the last one)
         self._launch_fails: dict[str, tuple[int, float]] = {}
         self._retried: set[str] = set()  # back-off expiries already acted on
+        # Rows whose date was still ahead at the last look (:meth:`_release_dated`);
+        # None until the first, which only takes the baseline.
+        self._dated: set[str] | None = None
         # True while the init master's bootstrap pass runs: the worker command it
         # patches has to be committed before the first worktree branches off main.
         self._bootstrapping = False
@@ -1146,7 +1149,9 @@ class Supervisor:
         integrating runs (``ok`` and ``needs-owner`` — see
         :data:`gitq.DONE_INTEGRATE`) enqueue the phase and pump the merge-queue;
         ``needs-owner`` lands identically to ``ok`` here (its owner ping already
-        fired worker-side). A ``fail`` drops the phase's branch(es) and advances —
+        fired worker-side). A ``fail`` drops the phase's branch(es) and advances
+        (a ``later`` with a date has its work kept for that date instead,
+        :func:`gitq.keep_later`) —
         UNLESS the phase is already integrating (blocked or queued after having
         reported success): a late, contradictory ``fail`` must not yank a branch
         out from under a live merge or free a parked slot, so it is ignored.
@@ -1176,7 +1181,11 @@ class Supervisor:
             if integrating:
                 self.log.line(f"DONE-FAIL-IGNORED {phase} integrating")
                 return
-            gitq.discard(self.cfg, phase, self.log)  # failed build: roll back branches
+            if ledgerw.later_date(self.cfg, phase):
+                # It waits for a date: its work is in the tree again that day.
+                gitq.keep_later(self.cfg, phase, self.log)
+            else:
+                gitq.discard(self.cfg, phase, self.log)  # failed build: roll back branches
             self._advance_done(phase, status)
             return
         with state_mod.transaction(self.cfg) as st:
@@ -1222,6 +1231,29 @@ class Supervisor:
         except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
             self.log.line(f"LEDGER-ERROR {exc!r}")
             return False
+
+    def _release_dated(self) -> bool:
+        """Keep the ``later`` rows on their dates: drop the failure record of
+        each one whose row carries its date (:func:`ledgerw.release_dated`), and
+        run the launcher when a date that was ahead at the last look has come.
+        True when the done map or the ready set changed. Never raises."""
+        try:
+            released = ledgerw.release_dated(self.cfg, self.log)
+            ahead = set(ledgerw.dated(self.cfg))
+        except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
+            self.log.line(f"LATER-ERROR {exc!r}")
+            return False
+        was, self._dated = self._dated, ahead
+        come = sorted((was or set()) - ahead)
+        if come:
+            ready = set(master_mod.build_context(self.cfg, state_mod.read(self.cfg))["ready"])
+            come = [p for p in come if p in ready]  # not a row closed meanwhile
+        for phase in come:
+            self.log.line(f"LATER-DUE {phase} its date has come")
+        if come or any(p not in ahead for p in released):
+            self._touch()
+            self._fill_slots("a `later` phase's date has come")
+        return bool(come or released)
 
     def _pump_integrations(self) -> None:
         """Drain ``integ_queue`` head-first while nothing is blocked.
@@ -1710,10 +1742,8 @@ class Supervisor:
         # Reports the checkout could not take earlier, and `later` rows whose
         # date has come.
         self._flush_ledger(dict(st.done))
-        if ledgerw.release_due(self.cfg, self.log):
+        if self._release_dated():
             st = state_mod.read(self.cfg)
-            self._touch()
-            self._fill_slots("a `later` phase's date has come")
         if idle < self.watchdog_s:
             return  # something moved recently -- leave a live swarm alone
         ready = [
@@ -2034,6 +2064,9 @@ class Supervisor:
         # The phase has landed (or been rolled back): its ledger tick, status and
         # history entry go on the target branch now, and only now.
         self._flush_ledger({phase: status})
+        # A `later` whose row now carries its date waits for that date, not on
+        # a failure record: nothing downstream may read it as failed.
+        self._release_dated()
         # After `mark_done`, never from `launch.done`: `swarm done` has to return
         # to its worker immediately, and under worktree isolation this point is
         # the first at which the work the session is briefed about is actually in
@@ -2308,7 +2341,8 @@ class Supervisor:
             return False
         path = self.cfg.project_dir / self.cfg.ledger
         graph = ledger_mod.load(path)
-        excluded = set(self.cfg.exclude)
+        # A row waiting for its date is not work the swarm is failing to start.
+        excluded = set(self.cfg.exclude) | set(ledgerw.dated(self.cfg))
         flying = ovdigest.in_flight(st)
         done = ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(path), flying)
         return bool(overseer_mod.backlog(graph, done, excluded, flying))

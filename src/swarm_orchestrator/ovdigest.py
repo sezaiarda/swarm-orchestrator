@@ -23,6 +23,7 @@ from pathlib import Path
 from . import doctor as doctor_mod
 from . import landing as landing_mod
 from . import ledger as ledger_mod
+from . import ledgerw
 from . import notes as notes_mod
 from . import opqueue
 from . import pushowed
@@ -133,12 +134,21 @@ def finished_since(cfg: Config, st: State, since: float) -> list[dict]:
     return out
 
 
-def failures(cfg: Config, st: State) -> list[dict]:
+def failures(cfg: Config, st: State, waits: dict[str, str] | None = None) -> list[dict]:
+    """The failed phases and their notes. A phase that finished ``later`` is
+    not one (``waits``, :func:`ledgerw.dated`): it is listed by :func:`dated`."""
+    done = ledgerw.not_failed(st.done, ledgerw.dated(cfg) if waits is None else waits)
     out = []
-    for phase in sorted(p for p, s in st.done.items() if s == statuses.FAIL)[:MAX_FAILURES]:
+    for phase in sorted(p for p, s in done.items() if s == statuses.FAIL)[:MAX_FAILURES]:
         _, note = recap_mod.sentinel(cfg, phase)
         out.append({"phase": phase, "note": note})
     return out
+
+
+def dated(waits: dict[str, str]) -> list[dict]:
+    """Open rows waiting for a date, soonest first: the swarm starts each on
+    its day, so none of them is a failure or a job for a pass."""
+    return [{"phase": p, "until": d} for p, d in sorted(waits.items(), key=lambda kv: kv[::-1])]
 
 
 def _workers(keys) -> list[str]:
@@ -246,7 +256,7 @@ def build(
     ctx = build_context(cfg, st)
     graph = ledger_mod.load(cfg.project_dir / cfg.ledger)
     counts: dict[str, int] = {}
-    for status in st.done.values():
+    for status in ledgerw.not_failed(st.done, ledgerw.dated(cfg)).values():
         counts[status] = counts.get(status, 0) + 1
     context = {
         "free_slots": ctx["free_slots"],
@@ -276,7 +286,8 @@ def build(
     done = ledger_mod.with_ticked(
         st.done, ledger_mod.load_ticked(cfg.project_dir / cfg.ledger), flying
     )
-    starve = starvation_map(graph, done, set(cfg.exclude), flying)
+    waits = ledgerw.dated(cfg)
+    starve = starvation_map(graph, done, set(cfg.exclude), flying, dated=set(waits))
     starve["blockers"] = lane_blockers(starve["blockers"], ctx["lanes"].get("waits") or {})
     mine = ledger_mod.owner_rows(graph, done, set(cfg.exclude), set(flying))
     starve["blockers"] = starve["blockers"][:MAX_BLOCKERS]
@@ -295,7 +306,8 @@ def build(
         "context": context,
         "operator": operator_summary(cfg, st, since),
         "finished": finished_since(cfg, st, since),
-        "failures": failures(cfg, st),
+        "failures": failures(cfg, st, waits),
+        "dated": dated(waits),
         "owner": owner_questions(cfg, st, now),
         # Rows only the owner can do, ready, holding other rows up: the owner
         # was pinged about each and sees them under "Needs you".
@@ -393,6 +405,12 @@ def render(d: dict) -> str:
 
     out += ["", f"## Failed phases ({len(d['failures'])})"]
     out += [f"- {f['phase']}: {f['note'] or '(no note)'}" for f in d["failures"]] or ["- none"]
+
+    waits = d.get("dated") or []
+    out += ["", f"## Waiting for a date ({len(waits)})"]
+    out += ["The swarm starts each on its day, with the work it had committed. None of"
+            " them failed: do not retry or reshape one for being here."] if waits else []
+    out += [f"- {w['phase']}: until {w['until']}" for w in waits] or ["- none"]
 
     out += ["", "## Waiting on the owner"]
     out += [

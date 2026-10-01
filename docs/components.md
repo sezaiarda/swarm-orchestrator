@@ -691,6 +691,94 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
   leaves a ticket that is pruned; a killed measurer leaves figures the next one
   checks again before using them.
 
+**Pairing rules.** `max_concurrent = 2` on its own lets any two heavy builds
+run side by side. Where the disk is what builds strain (two builds can be fine,
+two builds in one tree or a build beside an image build are not), set
+`[build].pair = "distinct-repo"` and the gate also checks *which* builds are
+alive before it starts one. `"any"`, the default, checks nothing.
+
+- *Never two builds in one repository.* A build starts only if it shares no
+  repo with any build alive. Its repo is the one its working directory is in,
+  under the name the swarm already uses for it: its path inside the project
+  (`lib`; `.` for the project's own repo), which is its lane and the directory
+  of its shared build cache (`[build].cache`). A phase's mirror has the
+  project's layout, so `<state>/wt/<phase>/lib` is `lib` for every phase; any
+  other checkout is traced through its git common directory, so every worktree
+  of a repo is that repo. A repo outside the project is named by its lane if
+  `[lanes].external` declares it, else by its path. The
+  repos the command itself names count too (a `cd` target, a
+  `--manifest-path`, a `-C` directory, a script's own place: what pre-flight
+  checks): `cargo test --manifest-path lib/Cargo.toml` from the project root
+  builds in `.` and in `lib`. What a script does once it runs is not seen.
+- *Some builds run alone*, both ways: such a build waits until no other build
+  is alive, and nothing starts while it runs. They are:
+  - a command `[build].alone` names. A pattern is a command prefix whose words
+    are globs, like `heavy` and `light`, matched against every simple command
+    in what is run (through the same wrappers and scripts), and it counts where
+    that command is heavy. The default is the container clients (`docker`,
+    `docker-compose`, `docker-buildx`, `podman`, `podman-compose`, `buildah`,
+    `nerdctl`, `buildctl`), so `docker build`, `docker buildx bake`,
+    `docker compose build`/`up`, `docker run` run alone and `docker ps`,
+    `docker compose down` or `bake --print` do not. An image build does its
+    work in a daemon, outside the build's process tree and straight onto the
+    disk;
+  - a `swarm build --hold`;
+  - a build whose repo cannot be told (its working directory is in no git
+    checkout).
+- *A script that cannot be read.* Three cases, from most to least known:
+  1. a script the classifier reads to the end is judged command by command, as
+     above;
+  2. a script that is there but is not read to the end (`$(…)`, a heredoc, a
+     function, `case`, `eval`, python that starts processes) runs alone if its
+     text names one of those programs anywhere outside a comment;
+  3. what shows no text at all (a binary, `make`, a script that calls another,
+     a program taken from a variable) starts as an ordinary build, and is
+     watched. Its own `swarm build` looks at the build's process tree every
+     2 s, and whoever is about to start beside a running build looks at that
+     build's processes first. A process that matches (by its real command line:
+     `docker buildx bake …`, not `docker ps`) marks the build alone from then
+     on, for the rest of its run: an `alone` event, a line on the command's
+     stderr, `buildsem/pair.json`. Nothing new starts beside it, also after
+     that process has gone. **Not covered:** a build that was already running
+     beside it keeps running; that one overlap is what a late discovery costs.
+     A script known to build images belongs in `[build].alone`
+     (`alone = ["docker", …, "bash ci/bake.sh"]`).
+- *Who counts.* Every build alive on a seat, including one set aside as idle.
+  Idle yield frees a slot, not a repo: a set-aside holder may wake up, and then
+  it works in its repo again. So beside an idle holder only a build in another
+  repo starts, and a build that runs alone waits for it to end. When a
+  set-aside holder does wake, the builds working may exceed `max_concurrent`
+  (see *Idle yield*), but they are still in different repos and none of them
+  runs alone. Only a build whose own `swarm build` saw its command end, with a
+  process it left behind still on the seat, no longer counts for these rules.
+  A build started by a `swarm build` from before these rules says nothing of
+  its repo, so nothing starts beside it. A process left by a build whose
+  `swarm build` was killed keeps the repo until it is gone (`--status` names
+  it).
+- *The queue.* A waiter the rules hold back does not hold up the ones they
+  allow: the turn goes to the oldest waiter that may start (or a short one
+  behind it). That passing comes out of the same budget as *short builds
+  first*: each waiter is passed at most `[build].overtake` times in all,
+  whatever the reason, and once it has been, nothing starts before it. A
+  waiter that runs alone is never passed once it is the oldest in line, so a
+  stream of builds that could each pair with the one running does not starve
+  it: they wait, the running build ends, it runs. So a waiter starts after at
+  most the waiters older than it plus `overtake` younger ones; with
+  `overtake = 0` the queue is first come, first served, and the second slot is
+  used only when the two oldest waiters may pair. Each time a rule-held waiter
+  is passed, a `passed` event says by whom and why.
+- *What it says.* The waiting line and `--status` give the reason in the same
+  words: `same repo as slot 0 (lib)`,
+  ``waits to run alone (`docker build` is in [build].alone)``,
+  `slot 1 runs alone (started with --hold)`,
+  ``slot 0 runs alone (`docker buildx bake` seen running in it)``. `--status` shows each
+  holder's repo and whether it runs alone; `start` and `queued` events carry
+  `repo`, `alone` and `why`.
+- *Crashes.* The rules are read from the seat records of the builds whose seat
+  lock is held, under `queue.lock`, each time a waiter looks for its turn:
+  a killed holder's seat is free, so it holds no repo; a killed waiter's ticket
+  is pruned, so it holds nobody back.
+
 **Light commands skip the gate.** The command is read the way the shell would
 run it. Wrappers are looked through (`env`, `timeout`, `nice`, `flock FILE cmd`,
 `xargs`, `uv run`, `bunx`…), `sh -c` scripts and `#!` shell scripts are split into
@@ -742,21 +830,27 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 {"ts": 1790000000.123, "event": "start", "id": "3f2a9c01be44", "phase": "P-1",
  "pid": 4242, "slot": 0, "cls": "heavy", "argv": "cargo nextest run",
  "cwd": "/…/wt/P-1/lib", "wait_s": 12.5, "run_s": null, "exit": null,
- "idle_s": null, "hold": false}
+ "idle_s": null, "hold": false, "repo": "lib", "alone": false, "why": null,
+ "by": null}
 ```
 
 | event | when | `pid` | notes |
 |---|---|---|---|
-| `queued` | a heavy command joined the queue | the waiting `swarm build` | |
-| `start` | it got slot `slot` | the build process | `wait_s` = time queued; `hold` = started with `--hold` (null on every other event) |
+| `queued` | a heavy command joined the queue | the waiting `swarm build` | `alone`, and `why` when it is |
+| `start` | it got slot `slot` | the build process | `wait_s` = time queued; `hold` = started with `--hold` (null on every other event); `alone` = the pairing rules made it run with no build beside it (`why` says why; always false under `pair = "any"`) |
 | `bypass` | a light command (or any, gate off) started unqueued | the command's process | `slot` null |
 | `end` | it finished | as in its `start`/`bypass` | `run_s`; `exit` (signal N → 128+N, `--timeout` → 124) |
 | `preflight_fail` | refused before queueing; nothing ran | `swarm build` | |
 | `yield` | a running build was set aside as idle; it keeps running | as in its `start` | `idle_s` = how long its tree was quiet; `run_s` = how long it had run |
 | `unyield` | a set-aside build is working again and counts again | as in its `start` | `idle_s` = how long it was set aside |
+| `passed` | a pairing rule held this waiter back and a younger one started ahead of it | the waiting `swarm build` | `why` = the rule (`same repo as slot 0 (lib)`); `by` = the `id` of the build that started |
+| `alone` | a running build was found to hold a command that runs alone; nothing starts beside it from now on | as in its `start` | `why` = what was seen; `run_s` = how long it had run |
 
 `phase` is `$SWARM_PHASE` (null outside a worker); `argv` is at most 300
-characters. `yield` and `unyield` carry the `id`, `pid` and `slot` of the build
+characters. `repo` is the repository a queued build works in, by the swarm's
+name for it (see *Pairing rules*; logged under `pair = "any"` too), on every
+event of that build; it is null when the working directory is in no git
+checkout, and for a light command. `yield` and `unyield` carry the `id`, `pid` and `slot` of the build
 they are about and are written by whoever measured it; a build that ends while
 set aside gets no `unyield` (its `end` closes the stretch), and a `yield` after
 a build's `end` is a process that build left behind, set aside in its turn. A
@@ -773,7 +867,11 @@ running 12m`; `yielded` in `--json`, and every build alive under `builds`), a
 build that ended while one of its processes still holds the slot is marked so,
 and a recent build that was set aside says for how long. A slot that is busy
 with no current record is gc, an older `swarm build` or a process such a build
-left behind; `--status` names the pids holding it open.
+left behind; `--status` names the pids holding it open. Under the pairing rules
+each holder's line ends with its repo and, if so, `runs alone (why)`, a waiter
+the rules hold back says `held back: …`, and `--json` carries `pair`, `alone`
+(the patterns), `repo`/`alone` on each holder and `repo`/`alone`/`blocked` on
+each waiter.
 
 Workers are told to wrap their gates in it (`swarm build cargo nextest run`), and
 to give those commands a generous timeout, since they may queue. Automatic gc

@@ -374,6 +374,15 @@ flowchart TD
   and neither does one started with `swarm build --hold` (a measurement that
   must have the machine to itself). A command that was set aside is told so in
   its own output.
+- **Pairing rules (opt-in):** with `[build].pair = "distinct-repo"` two builds
+  run side by side only if they are in different repositories (a repo is the
+  same repo from every worktree and mirror of it), and an image build
+  (`[build].alone`, by default the container clients), a `--hold` or a build
+  in no git checkout runs with no build beside it: it waits for the gate to
+  empty and nothing starts while it runs. A script that turns out to call
+  `docker build` is alone from that moment. A waiter the rules hold back is
+  passed by one they allow, at most `overtake` times; `swarm build --status`
+  says why each waiter waits.
 - **Light commands skip it:** `git`, `ls`, `cargo update`/`metadata`/`fmt`/`tree`,
   `docker buildx bake --print`, python scripts that start no processes. Unknown
   commands count as heavy; `[build].heavy`/`light` add patterns.
@@ -867,7 +876,8 @@ project path, so two projects with the same folder name never share state.
 | `git/<repo>.lock`, `buildsem/slot<N>`, `buildsem/seat<K>` | Per-repo integration locks; build-gate slots (shared by the builds on them, taken whole by gc) and seats (one per build alive, with its record). |
 | `buildsem/queue/`, `queue.json`, `queue.lock` | The build gate's waiting tickets, sequence and overtake counts. |
 | `buildsem/idle.json` | The waiters' running measurement of each holder: when it went quiet, and whether it is set aside as idle. |
-| `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail`, and `yield`/`unyield` for an idle holder set aside or counted again (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
+| `buildsem/pair.json` | Under `[build].pair = "distinct-repo"`: the running builds found to hold a command that runs alone (a script that turned out to build an image). |
+| `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail`, `yield`/`unyield` for an idle holder set aside or counted again, and `passed`/`alone` under the pairing rules (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
 | `console.json`, `console.lock` | The owner console's conversation id (what the next start resumes), and the lock that keeps two opens from racing. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |

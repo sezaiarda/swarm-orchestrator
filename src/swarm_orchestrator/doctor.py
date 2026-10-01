@@ -1318,15 +1318,27 @@ def _check_failed(cfg: Config, st: State) -> Check:
     downstream of them can ever become ready again on its own. A ``later``
     finish that waits for its date is not one (:func:`ledgerw.not_failed`).
 
-    Nor, once the swarm has seen it, is a failed phase whose row was closed
-    since (:func:`ledgerw.release_closed`). One whose row is ticked and still
-    listed here is a row the swarm does not read as closed: it still says
-    failed, or its tick is not committed on the target branch."""
+    Nor, once the supervisor has swept, is a failed phase whose row was closed
+    since (:func:`ledgerw.release_closed`): until then it is listed as on its
+    way out. A ticked row that is not is one the swarm does not read as
+    closed: it still says failed, or its tick is not committed on the target
+    branch."""
     done = ledgerw.not_failed(st.done, ledgerw.dated(cfg))
     failed = sorted(p for p, s in done.items() if s == "fail")
     if not failed:
         return Check("phases.failed", OK, "no failed phases")
-    ticked = sorted(set(failed) & ledger_mod.load_ticked(cfg.project_dir / cfg.ledger))
+    closing = ledgerw.closable(cfg, st)
+    ticked = sorted(set(failed) & ledger_mod.load_ticked(cfg.project_dir / cfg.ledger) - closing)
+    if closing and not ticked:
+        return Check(
+            "phases.failed",
+            WARN,
+            f"{len(failed)} phase(s) recorded fail: {failed} — dependents stay blocked;"
+            f" closed in the ledger since, the record goes at the supervisor's next"
+            f" sweep: {sorted(closing)}",
+            "nothing to do while a supervisor runs the installed code (it sweeps on every"
+            " watchdog tick); if this stays: swarm restart",
+        )
     if ticked:
         return Check(
             "phases.failed",

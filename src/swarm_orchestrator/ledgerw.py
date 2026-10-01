@@ -1125,20 +1125,11 @@ def release_closed(cfg: Config, log: Log) -> list[str]:
     """
     from . import state as state_mod
 
-    failed = {p for p, s in state_mod.read(cfg).done.items() if s == statuses.FAIL}
-    if not failed:
-        return []  # the usual sweep: no git, no lock
-    text = gitq.committed_text(cfg, cfg.ledger)
-    rows = (closed_rows(text) if text else set()) & failed
-    rows -= reported(cfg)
-    if not rows:
-        return []
+    if not closable(cfg, state_mod.read(cfg)):
+        return []  # the usual sweep: nothing to write, so no lock taken
     released = []
     with state_mod.transaction(cfg) as st:
-        flying = {*st.claimed_phases(), *st.integrating()}
-        for pid in sorted(rows - flying):
-            if st.done.get(pid) != statuses.FAIL:
-                continue
+        for pid in sorted(closable(cfg, st)):
             # The sentinel first: a record left without it is retired by the
             # next sweep, a sentinel left without its record only by `swarm up`.
             (cfg.done_dir / f"{pid}.{statuses.FAIL}").unlink(missing_ok=True)
@@ -1147,6 +1138,17 @@ def release_closed(cfg: Config, log: Log) -> list[str]:
     for pid in released:
         log.line(f"FAIL-CLOSED {pid} its row is closed in the ledger: the failure record is retired")
     return released
+
+
+def closable(cfg: Config, st) -> set[str]:
+    """The failure records in ``st`` that :func:`release_closed` retires: what
+    it does, and what doctor says is on its way."""
+    failed = {p for p, s in st.done.items() if s == statuses.FAIL}
+    if not failed:
+        return set()  # the usual sweep: no git
+    text = gitq.committed_text(cfg, cfg.ledger)
+    rows = (closed_rows(text) if text else set()) & failed
+    return rows - reported(cfg) - {*st.claimed_phases(), *st.integrating()}
 
 
 def release_dated(cfg: Config, log: Log) -> list[str]:

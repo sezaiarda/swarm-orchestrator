@@ -328,6 +328,24 @@ def test_the_forecast_does_not_list_a_closed_row_as_stuck(ws, how):
 
 
 # -- the stale record: the watchdog, and the next `swarm up` -------------------
+def test_until_the_sweep_doctor_says_the_record_is_on_its_way_out(ws):
+    """A supervisor on older code, or the minutes before its next tick."""
+    cfg, project, sup = ws
+    _fail(cfg, sup)
+    _tick_by_hand(project)
+
+    check = _check(cfg, "phases.failed")
+    assert check.status == doctor.WARN
+    assert "closed in the ledger since" in check.detail and "['a-W2']" in check.detail
+    assert "swarm record" not in check.fix_hint and "swarm restart" in check.fix_hint
+    assert ledgerw.closable(cfg, state_mod.read(cfg)) == {"a-W2"}
+
+    sup._watchdog_tick()
+    assert _check(cfg, "phases.failed").status == doctor.OK
+    assert ledgerw.closable(cfg, state_mod.read(cfg)) == set()
+
+
+
 def test_the_watchdog_retires_a_stale_failure_and_runs_the_launcher(ws, monkeypatch):
     cfg, project, sup = ws
     _fail(cfg, sup)

@@ -516,7 +516,10 @@ report is held and the watchdog retries it; nothing is lost across a restart.
     done while its worker was still on it) and stays a failure. An edit that is
     not committed, or sits on another branch, may still be taken back; a
     retired record cannot. doctor's `phases.failed` names a failed phase whose
-    box is ticked all the same, with the command that closes it.
+    box is ticked all the same, with the command that closes it; one whose row
+    is closed and only waits for the supervisor's next sweep
+    (`ledgerw.closable`) it lists as on its way out, with nothing to do unless
+    the supervisor runs older code.
   - *Landed record (`ok`, `operator`), row still open:* the record wins. The
     work is merged and an open box cannot take that back, so the phase counts
     as done, releases its dependents and is never launched again on its own.

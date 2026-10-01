@@ -91,6 +91,13 @@ The folder-trust dialog is accepted ahead of time for every new mirror. The prom
 is typed in (pasted, for a slash command), then checked: it must actually appear
 above the input box before the launch counts.
 
+Every send, to a worker or to any other session, empties the input box first.
+One Ctrl-U removes a single screen row, so the box is read back and the key
+repeated (Ctrl-K for text behind the cursor) until it is empty; the faint hint
+an empty box shows does not count as text. A box that will not empty, which is
+what a dialog holding the pane looks like, gets nothing typed into it: the send
+fails as `box-not-cleared` rather than run two messages together.
+
 **What they decide:** everything inside their phase. The project's own worker
 command (patched by the init pass) is their directive. It tells them to:
 

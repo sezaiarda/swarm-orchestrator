@@ -26,6 +26,13 @@ def _ok(stdout: str = ""):
     return SimpleNamespace(stdout=stdout, returncode=0)
 
 
+#: Claude Code 2.1.286's folder-trust question: a ``❯`` that is not the input box.
+_DIALOG = (
+    " Quick safety check: Is this a project you created or one you trust?\n"
+    " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel"
+)
+
+
 class _Clock:
     """Deterministic stand-in for ``time``: sleeping just moves the clock, so
     polls complete instantly and always run the same number of iterations."""
@@ -51,6 +58,17 @@ class _FakeClaude:
     discards them. ``fold`` is the length past which one chunk of input is shown
     in the box as ``[Pasted text #N]`` instead of as its text (about 800
     characters on the real TUI); submitted, it renders in full above the box.
+
+    The box is drawn as the real one is: ``❯``, the text wrapped at ``width``
+    columns, a lower edge of ``─`` and a status line under it. The two clearing
+    keys work a screen ROW at a time, as measured on Claude Code 2.1.286:
+    ``C-u`` removes the row in front of the cursor, ``C-k`` the row behind it,
+    and neither touches the other side. ``hint`` is the faint suggestion an
+    empty box shows (only a capture with ``-e`` can tell it from typed text),
+    ``dialog`` puts a selection dialog in the pane instead of the box (its own
+    ``❯``, no key changes it), ``lag`` is how many captures still show the old
+    box after a clearing key, and ``refill`` has somebody else typing into the
+    box after every clearing key.
     """
 
     def __init__(
@@ -63,12 +81,26 @@ class _FakeClaude:
         swallow: int = 0,
         echo: bool = True,
         fold: int = 0,
+        width: int = 80,
+        hint: str = "",
+        dialog: bool = False,
+        lag: int = 0,
+        refill: bool = False,
     ) -> None:
         self.calls: list[list[str]] = []
         self.typed: list[str] = []  # every payload we TRIED to put in the box
         self.buffers: dict[str, str] = {}
         self.transcript: list[str] = []
         self.contents = stray
+        self.cursor = len(stray)
+        self.width = width
+        self.hint = hint
+        self.dialog = dialog
+        self.lag = lag
+        self.lagging = 0
+        self.before_key = ("", 0)  # what the box showed before the last clearing key
+        self.refill = refill
+        self.kills = 0
         self.box = box
         self.box_after = box_after
         self.paint = paint
@@ -84,7 +116,7 @@ class _FakeClaude:
         args = list(args)
         self.calls.append(args)
         if args[0] == "capture-pane":
-            return self._capture()
+            return self._capture("-e" in args)
         if args[0] == "send-keys":
             return self._keys(args)
         if args[0] == "load-buffer":
@@ -99,32 +131,78 @@ class _FakeClaude:
     def _box_up(self) -> bool:
         return self.box and self.captures >= self.box_after
 
-    def _capture(self):
+    def _capture(self, colour: bool = False):
         self.captures += 1
         body = "\n".join(self.transcript)
+        if self.dialog:
+            return _ok(f"{body}\n{_DIALOG}")
         if not self._box_up():
             return _ok(body)
-        shown = f"[Pasted text #{self.folded}]" if self.folded else self.contents
+        contents, folded = self.contents, self.folded
+        if self.lagging > 0:
+            self.lagging -= 1
+            contents, folded = self.before_key
+        if folded:
+            shown = f"[Pasted text #{folded}]"
+        elif contents:
+            rows = [contents[i : i + self.width] for i in range(0, len(contents), self.width)]
+            shown = "\n  ".join(rows)
+        else:
+            shown = f"\x1b[2m{self.hint}\x1b[0m" if colour else self.hint
         if self.pending > 0:
             self.pending -= 1
             shown = ""
-        return _ok(f"{body}\n❯ {shown}" if body else f"❯ {shown}")
+        edge = "─" * self.width
+        if colour:
+            box = (
+                f"\x1b[39m❯\xa0{shown}\n\x1b[38;5;244m{edge}\n"
+                "\x1b[39m  \x1b[38;5;180mOpus 5.5\x1b[38;5;2m  2%\x1b[39m"
+            )
+        else:
+            box = f"❯\xa0{shown}\n{edge}\n  Opus 5.5  2%"
+        return _ok(f"{body}\n{box}" if body else box)
 
     def _keys(self, args):
         if "-l" in args:
             self._put(args[-1])
-        elif args[-1] == "C-u":
-            self.contents = ""
-            self.folded = 0
+        elif args[-1] in ("C-u", "C-k"):
+            self._kill(args[-1])
         elif args[-1] == "Enter":
             self._enter()
         return _ok()
 
+    def hold(self, text: str, cursor: int | None = None) -> None:
+        """Leave ``text`` in the box, the cursor at its end unless told where."""
+        self.contents = text
+        self.cursor = len(text) if cursor is None else cursor
+
+    def _kill(self, key: str) -> None:
+        """One clearing key: a screen row on one side of the cursor."""
+        if self.dialog or not self._box_up():
+            return
+        self.kills += 1
+        self.before_key = (self.contents, self.folded)
+        self.lagging = self.lag
+        cur = self.cursor
+        if self.folded:  # a folded paste is one row, whatever its length
+            self.contents, self.folded, cur = "", 0, 0
+        elif key == "C-u":
+            start = (cur - 1) // self.width * self.width if cur else 0
+            self.contents = self.contents[:start] + self.contents[cur:]
+            cur = start
+        else:
+            end = (cur // self.width + 1) * self.width
+            self.contents = self.contents[:cur] + self.contents[end:]
+        if self.refill:
+            self.contents += f"more{self.kills} "
+        self.cursor = cur
+
     def _put(self, text: str) -> None:
         self.typed.append(text)
-        if not self._box_up():
+        if self.dialog or not self._box_up():
             return  # no box yet: claude drops the keystrokes on the floor
-        self.contents += text
+        self.contents = self.contents[: self.cursor] + text + self.contents[self.cursor :]
+        self.cursor += len(text)
         self.pending = self.paint
         if self.fold and len(text) > self.fold:
             self.pastes += 1
@@ -134,11 +212,12 @@ class _FakeClaude:
         if self.swallow > 0:
             self.swallow -= 1
             return
-        if not self._box_up() or not self.contents:
+        if self.dialog or not self._box_up() or not self.contents:
             return
         if self.echo:
             self.transcript.append(f"> {self.contents}")
         self.contents = ""
+        self.cursor = 0
         self.folded = 0
         self.pending = 0
 
@@ -323,6 +402,147 @@ def test_box_is_cleared_before_typing(pane):
     assert clear < typed
 
 
+# -- emptying the box before typing ---------------------------------------
+# One C-u removes one screen row, not the input. Measured on Claude Code 2.1.286
+# at 180 columns: a ten-row line lost a row a press and needed ten. A pointer
+# line is wider than a narrow pane, so one left in the box after a lost send
+# kept its first rows, and the next message was typed behind them and submitted
+# with them as one.
+_POINTER = "Read the file /state/operator/brief.md and follow it exactly. " * 4
+
+
+def _clears(fake: _FakeClaude) -> list[str]:
+    return [c[-1] for c in fake.calls if c[0] == "send-keys" and c[-1] in ("C-u", "C-k")]
+
+
+def test_clear_box_empties_a_box_of_nine_rows(pane):
+    fake = pane(width=80)
+    fake.hold("x" * 700)  # nine rows of 80
+
+    cleared = tmux.clear_box("%1")
+
+    assert fake.contents == ""
+    assert cleared is True
+    assert _clears(fake) == ["C-u"] * 9
+
+
+def test_a_line_left_in_the_box_is_not_submitted_with_the_next_message(pane):
+    """The harm itself: an earlier send ended NOT_DELIVERED, its line still in
+    the box, and the next injection into that pane ran the two together."""
+    fake = pane(width=80, swallow=4)
+    assert tmux.send_submit_ex("%1", _POINTER) == tmux.NOT_DELIVERED
+    assert fake.contents == _POINTER
+
+    assert tmux.send_submit_ex("%1", "second message here") == tmux.DELIVERED
+    assert fake.transcript == ["> second message here"]
+
+
+@pytest.mark.parametrize("cursor", [0, 130, 240])
+def test_text_behind_the_cursor_is_cleared_too(pane, cursor):
+    """C-u never removes what is behind the cursor; with the cursor moved off
+    the end, C-u alone leaves the box full however often it is pressed."""
+    fake = pane(width=80)
+    fake.hold("y" * 300, cursor=cursor)
+
+    cleared = tmux.clear_box("%1")
+
+    assert fake.contents == ""
+    assert cleared is True
+    assert "C-k" in _clears(fake)
+
+
+def test_an_empty_box_gets_one_ctrl_u_and_nothing_more(pane):
+    fake = pane()
+
+    assert tmux.clear_box("%1") is True
+    assert _clears(fake) == ["C-u"]
+
+
+def test_stray_bytes_are_cleared_by_the_one_ctrl_u(pane):
+    fake = pane(stray="10;1c")
+
+    assert tmux.clear_box("%1") is True
+    assert _clears(fake) == ["C-u"]
+
+
+def test_a_faint_hint_is_an_empty_box(pane):
+    """A fresh session's empty box shows a suggestion no key removes. Read as
+    input it would refuse every send into a new session."""
+    fake = pane(hint='Try "how do I log an error?"')
+    assert 'Try "how do I log an error?"' in tmux.capture("%1")
+
+    assert tmux.clear_box("%1") is True
+    assert _clears(fake) == ["C-u"]
+    assert tmux.send_submit_ex("%1", "hello world") == tmux.DELIVERED
+    assert fake.transcript == ["> hello world"]
+
+
+def test_the_status_line_under_the_box_is_not_input(pane):
+    pane()
+
+    assert "Opus 5.5" in tmux.capture("%1")
+    assert tmux._box_text("%1").strip() == ""
+
+
+def test_a_boxless_pane_gets_one_ctrl_u(pane):
+    fake = pane(box=False)
+
+    assert tmux.clear_box("%1") is True
+    assert _clears(fake) == ["C-u"]
+
+
+def test_a_slow_repaint_is_not_a_key_that_does_nothing(pane):
+    """The capture straight after a key can still show the box as it was."""
+    fake = pane(width=80, lag=3)
+    fake.hold("x" * 700)
+
+    cleared = tmux.clear_box("%1")
+
+    assert fake.contents == ""
+    assert cleared is True
+
+
+def test_a_box_that_will_not_empty_gets_nothing_typed(pane):
+    """A dialog has the pane: its ``❯`` is a menu cursor and no key changes it.
+    Typing a message there and pressing Enter answers the dialog."""
+    fake = pane(dialog=True)
+
+    assert tmux.clear_box("%1") is False
+    assert len(_clears(fake)) == 3  # the first C-u, then each key once more
+
+    assert tmux.send_submit_ex("%1", "hello world") == tmux.BOX_NOT_CLEARED
+    assert fake.typed == []
+    assert _enters(fake) == []
+
+
+def test_clearing_is_bounded(pane):
+    """Somebody else typing into the box: it changes at every key and never
+    empties. The clear gives up instead of pressing for ever."""
+    fake = pane(width=80, refill=True)
+    fake.hold("x" * 200)
+
+    assert tmux.clear_box("%1") is False
+    assert len(_clears(fake)) == 1 + tmux.CLEAR_PRESSES
+
+
+@pytest.mark.parametrize(
+    "codes, before, after",
+    [
+        ("2", False, True),
+        ("1;2", False, True),
+        ("0", True, False),
+        ("", True, False),
+        ("22", True, False),
+        ("39", True, True),
+        ("38;5;2", False, False),  # palette colour 2, not the faint attribute
+        ("38;2;2;2;2", False, False),  # an RGB colour
+        ("38;5;2;2", False, True),
+    ],
+)
+def test_faint_follows_the_attribute_not_a_colour_argument(codes, before, after):
+    assert tmux._faint(before, codes) is after
+
+
 @pytest.mark.parametrize(
     "text, pasted",
     [
@@ -373,6 +593,7 @@ def test_paste_falls_back_to_typing(pane, monkeypatch):
         (tmux.NO_BOX, True),
         (tmux.UNCONFIRMED, False),
         (tmux.NOT_DELIVERED, False),
+        (tmux.BOX_NOT_CLEARED, False),
     ],
 )
 def test_send_submit_bool_mapping(monkeypatch, result, ok):

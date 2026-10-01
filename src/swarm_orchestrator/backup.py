@@ -16,10 +16,13 @@ reported, and ``--no-verify``: a repo's pre-push checks judge work bound for mai
 and a backup is not that. A remote backup whose work is now on main is deleted,
 and an attic backup goes when gc prunes its local ref (:func:`drop_attic`).
 A failure is logged and reported, never raised: a backup must not block anything.
+Each pass's outcome is kept in ``<state>/backup.json`` (:func:`last`) for
+``swarm doctor``, which says when uncommitted work could not be snapshotted.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -46,6 +49,11 @@ DOWN_BUDGET_S = 300.0
 
 _WIP_MESSAGE = "swarm: backup of uncommitted work on {phase}"
 
+#: The last pass's outcome, in the state dir, for ``swarm doctor``.
+RECORD = "backup.json"
+#: At most this many names are kept per list in it; the counts stay exact.
+RECORD_KEEP = 20
+
 
 @dataclass
 class Result:
@@ -54,11 +62,16 @@ class Result:
     pushed: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    #: Uncommitted work no snapshot could be made of, and why. Each is counted in
+    #: ``failed`` too: it did not reach origin, whatever else the pass pushed.
+    snapshots: dict[str, str] = field(default_factory=dict)
 
     def line(self) -> str:
         parts = [f"{len(self.pushed)} pushed", f"{len(self.deleted)} deleted"]
         if self.failed:
-            parts.append(f"{len(self.failed)} failed")
+            n = len(self.snapshots)
+            parts.append(f"{len(self.failed)} failed"
+                         + (f" ({n} snapshot{'s' if n != 1 else ''})" if n else ""))
         return ", ".join(parts)
 
 
@@ -116,38 +129,72 @@ def _nested(cfg: Config, repo: Path) -> list[str]:
     return out
 
 
+def _excludes(cfg: Config, repo: Path, wt: Path) -> list[str]:
+    """Pathspecs that keep the nested repos out of a snapshot of ``repo``.
+
+    A nested repo that ``repo``'s own ignore rules cover gets none. ``add -A``
+    skips an ignored path anyway, and git refuses a pathspec that names one (or
+    a path under one), inside ``:(exclude)`` too: "The following paths are
+    ignored by one of your .gitignore files", exit 1. An umbrella that
+    gitignores its component repos lost every snapshot to that.
+    """
+    return [f":(exclude){p}" for p in _nested(cfg, repo)
+            if _git(wt, "check-ignore", "-q", "--", p).returncode != 0]
+
+
+def _why(step: str, proc: subprocess.CompletedProcess) -> str:
+    """``step`` and what git said about it, on one line."""
+    said = " ".join((proc.stderr or proc.stdout or "").split())
+    return f"{step}: {said or f'exit {proc.returncode}'}"[:200]
+
+
+def _snapshot(cfg: Config, repo: Path, phase: str) -> tuple[str | None, str | None]:
+    """``(commit, None)``; ``(None, None)`` when there is nothing to save; or
+    ``(None, why)`` when there is, or may be, and no snapshot could be made."""
+    wt = gitq._wt_for(cfg, repo, phase)
+    if not (wt / ".git").exists():
+        return None, None
+    spec = ["--", ".", *_excludes(cfg, repo, wt)]
+    status = _git(wt, "status", "--porcelain", *spec)
+    if status.returncode != 0:
+        return None, _why("status", status)
+    if not status.stdout.strip():
+        return None, None
+    head = _out(wt, "rev-parse", "--verify", "HEAD")
+    if not head:
+        return None, "rev-parse: no commit to put the snapshot on"
+    index = _out(wt, "rev-parse", "--path-format=absolute", "--git-path", "index")
+    with tempfile.TemporaryDirectory(prefix="swarm-backup-") as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        steps = [("add", "-A", *spec), ("write-tree",)]
+        if index and Path(index).is_file():
+            shutil.copyfile(index, env["GIT_INDEX_FILE"])  # its stat cache: fast add
+        else:
+            steps.insert(0, ("read-tree", "HEAD"))
+        for step in steps:
+            done = _git(wt, *step, env=env)
+            if done.returncode != 0:
+                return None, _why(step[0], done)
+    tree = done.stdout.strip()
+    if tree == _out(wt, "rev-parse", "HEAD^{tree}"):
+        return None, None
+    made = _git(wt, "commit-tree", tree, "-p", head, "-m", _WIP_MESSAGE.format(phase=phase))
+    if made.returncode != 0:
+        return None, _why("commit-tree", made)
+    return made.stdout.strip(), None
+
+
 def snapshot(cfg: Config, repo: Path, phase: str, log: Log) -> str | None:
     """A commit of ``phase``'s uncommitted work in ``repo``, or None when clean.
 
     Built in a copy of the worktree's index (``GIT_INDEX_FILE``): ``add -A``,
     ``write-tree``, then ``commit-tree`` with the branch head as parent. The
-    worker's own index, files and branch are left exactly as they were.
+    worker's own index, files and branch are left exactly as they were. None
+    also when it could not be made, which is logged (``BACKUP-SNAPSHOT-FAILED``).
     """
-    wt = gitq._wt_for(cfg, repo, phase)
-    if not (wt / ".git").exists():
-        return None
-    spec = ["--", ".", *(f":(exclude){p}" for p in _nested(cfg, repo))]
-    changes = _out(wt, "status", "--porcelain", *spec)
-    head = _out(wt, "rev-parse", "--verify", "HEAD")
-    if not changes or not head:
-        return None
-    index = _out(wt, "rev-parse", "--path-format=absolute", "--git-path", "index")
-    with tempfile.TemporaryDirectory(prefix="swarm-backup-") as tmp:
-        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        if index and Path(index).is_file():
-            shutil.copyfile(index, env["GIT_INDEX_FILE"])  # its stat cache: fast add
-        elif _git(wt, "read-tree", "HEAD", env=env).returncode != 0:
-            return None
-        added = _git(wt, "add", "-A", *spec, env=env)
-        tree = _out(wt, "write-tree", env=env) if added.returncode == 0 else None
-    if tree is None:
-        log.line(f"BACKUP-SNAPSHOT-FAILED {phase} {repo.name}: {added.stderr.strip()[:200]}")
-        return None
-    if tree == _out(wt, "rev-parse", "HEAD^{tree}"):
-        return None
-    commit = _out(wt, "commit-tree", tree, "-p", head, "-m", _WIP_MESSAGE.format(phase=phase))
-    if commit is None:
-        log.line(f"BACKUP-SNAPSHOT-FAILED {phase} {repo.name}: commit-tree")
+    commit, why = _snapshot(cfg, repo, phase)
+    if why:
+        log.line(f"BACKUP-SNAPSHOT-FAILED {phase} {repo.name}: {why}")
     return commit
 
 
@@ -180,16 +227,22 @@ def drop_attic(repo: Path, ref: str, log: Log) -> None:
                  f"{gitq._push_reason(proc.stdout, proc.stderr)}")
 
 
-def _wanted(cfg: Config, repo: Path, main: str, log: Log) -> dict[str, str]:
-    """``{remote ref: sha}`` this repo's backup should hold right now."""
+def _wanted(cfg: Config, repo: Path, main: str, log: Log, res: Result) -> dict[str, str]:
+    """``{remote ref: sha}`` this repo's backup should hold right now. A snapshot
+    that could not be made is entered in ``res``: those edits were not copied."""
     want: dict[str, str] = {}
     for ref, sha in _refs(repo, "refs/heads/swarm/").items():
         phase = ref[len(BRANCH):]
         if not _on_main(repo, main, sha):
             want[ref] = sha
-        snap = snapshot(cfg, repo, phase, log)
+        snap, why = _snapshot(cfg, repo, phase)
         if snap:
             want[WIP + phase] = snap
+        elif why:
+            name = f"{repo.name}:swarm-wip/{phase}"
+            res.snapshots[name] = why
+            res.failed.append(f"{name} (no snapshot)")
+            log.line(f"BACKUP-SNAPSHOT-FAILED {phase} {repo.name}: {why}")
     for ref, sha in _refs(repo, ATTIC_REFS).items():
         want[_attic_branch(ref)] = sha
     return want
@@ -215,7 +268,7 @@ def _push_repo(cfg: Config, repo: Path, main: str, log: Log, res: Result) -> Non
         res.failed.append(f"{repo.name}: origin unreachable")
         log.line(f"BACKUP-FAILED {repo.name} ls-remote")
         return
-    want = _wanted(cfg, repo, main, log)
+    want = _wanted(cfg, repo, main, log, res)
     specs: list[str] = []
     leases: list[str] = []
     for ref, sha in want.items():
@@ -267,6 +320,7 @@ def run(cfg: Config, log: Log, budget_s: float | None = None) -> Result:
     except (gitq.GitError, OSError) as exc:
         log.line(f"BACKUP-FAILED {exc}")
         res.failed.append(str(exc))
+        _record(cfg, res, log)
         return res
     for repo, main in repos:
         if deadline is not None and time.monotonic() > deadline:
@@ -280,4 +334,42 @@ def run(cfg: Config, log: Log, budget_s: float | None = None) -> Result:
     if res.pushed or res.deleted or res.failed:
         log.line(f"BACKUP {res.line()}"
                  + (f" failed={' '.join(res.failed[:10])}" if res.failed else ""))
+    _record(cfg, res, log)
     return res
+
+
+def last(cfg: Config) -> dict | None:
+    """What the last pass did, as :func:`_record` wrote it; None when no pass has
+    been recorded (or the record does not read)."""
+    try:
+        data = json.loads((cfg.state_dir / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _record(cfg: Config, res: Result, log: Log) -> None:
+    """Keep the pass's outcome for ``swarm doctor``, which runs in another
+    process and long after the log line has scrolled away. Failed snapshots carry
+    how many passes running they have failed, and since when."""
+    now = time.time()
+    prior = last(cfg) or {}
+    data = {
+        "ts": now,
+        "pushed": len(res.pushed),
+        "deleted": len(res.deleted),
+        "failed": res.failed[:RECORD_KEEP],
+        "failed_n": len(res.failed),
+        "snapshots": dict(list(res.snapshots.items())[:RECORD_KEEP]),
+        "snapshots_n": len(res.snapshots),
+        "unsaved_passes": int(prior.get("unsaved_passes") or 0) + 1 if res.snapshots else 0,
+        "unsaved_since": (prior.get("unsaved_since") or now) if res.snapshots else None,
+    }
+    path = cfg.state_dir / RECORD
+    tmp = path.with_name(f"{RECORD}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError) as exc:
+        log.line(f"BACKUP-RECORD-FAILED {exc!r}")

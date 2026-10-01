@@ -560,7 +560,10 @@ same way.
 
 Unmerged mirrors are pushed to origin as backups (`[backup]`): the branch, a
 snapshot of uncommitted edits, and kept attic refs. gc deletes an attic backup
-when it drops the local ref.
+when it drops the local ref. The umbrella's snapshot leaves the component repos
+out, whether or not the umbrella gitignores them. Each pass records its outcome
+in `<state>/backup.json`; `swarm doctor`'s `backup` check reports a snapshot
+that failed, so unsaved work cannot hide behind the refs that did push.
 
 On `swarm up`, leftover `swarm/*` branches are reconciled from the durable
 sentinels, never from branch shape:

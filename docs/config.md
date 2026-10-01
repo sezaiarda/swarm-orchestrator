@@ -302,6 +302,15 @@ hooks. A backup whose work has reached main is deleted on the next pass, and an
 attic backup when gc drops its local ref (`[gc].attic_days`). A
 failure is logged (`BACKUP` in `supervisor.log`) and never holds anything up.
 
+A snapshot leaves out the component repos nested in the repo it is taken of: each
+has its own backup. A snapshot that cannot be made is logged per phase
+(`BACKUP-SNAPSHOT-FAILED <phase> <repo>: <git's reason>`) and counted in the
+pass's summary line (`BACKUP 5 pushed, 0 deleted, 2 failed (2 snapshots)`), in
+what `swarm down` prints, and by `swarm doctor`: its `backup` check reads the
+last pass from `<state>/backup.json` and is a WARN after one pass that left
+uncommitted work unsaved, a FAIL after two running, and a WARN for a ref that
+would not push.
+
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `every_s` | `1800` | `SWARM_BACKUP_EVERY` | hot | A pass this often, on a supervisor thread, the first one a full interval after start-up. `0` turns the periodic pass off. |

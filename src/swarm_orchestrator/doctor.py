@@ -43,6 +43,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import backup as backup_mod
 from . import caps
 from . import gc as gc_mod
 from . import gitq
@@ -703,6 +704,59 @@ def _check_push_owed(st: State) -> Check:
     )
 
 
+def _check_backup(cfg: Config, now: float | None = None) -> Check:
+    """What the last backup pass could not copy to origin.
+
+    A worker's uncommitted edits reach origin as a snapshot commit. A snapshot
+    that fails leaves one log line, and the pass still reports what it pushed for
+    everyone else, so the run reads as backed up. One bad pass is a WARN (a git
+    call that timed out under load heals on the next); two running is a FAIL. A
+    ref that would not push is a WARN: the next pass retries it.
+    """
+    if cfg.git_isolation != "worktree":
+        return Check("backup", OK, "off (no worktree isolation, so nothing is mirrored)")
+    rec = backup_mod.last(cfg)
+    if rec is None:
+        return Check("backup", OK, "no pass recorded yet")
+    now = time.time() if now is None else now
+    try:
+        age = _human_age(now - float(rec["ts"]))
+        summary = f"last pass {age} ago: {int(rec['pushed'])} pushed, {int(rec['deleted'])} deleted"
+        snaps = dict(rec.get("snapshots") or {})
+        failed = [str(f) for f in rec.get("failed") or []]
+        n_snaps = int(rec.get("snapshots_n") or len(snaps))
+        n_failed = int(rec.get("failed_n") or len(failed))
+        passes = int(rec.get("unsaved_passes") or 1)
+        since = rec.get("unsaved_since")
+        since_age = _human_age(now - float(since)) if since else "unknown"
+    except (KeyError, TypeError, ValueError):
+        return Check("backup", WARN, f"{cfg.state_dir / backup_mod.RECORD} does not read",
+                     "the next backup pass rewrites it")
+    if snaps:
+        names = ", ".join(sorted(snaps)[:5]) + (" …" if n_snaps > 5 else "")
+        return Check(
+            "backup",
+            FAIL if passes >= 2 else WARN,
+            f"uncommitted work was not backed up: {n_snaps} snapshot"
+            f"{'s' if n_snaps != 1 else ''} failed ({names}), {passes} pass"
+            f"{'es' if passes != 1 else ''} running, first {since_age} ago; "
+            f"{next(iter(snaps.values()))}; {summary}",
+            "the BACKUP-SNAPSHOT-FAILED lines in supervisor.log give git's reason per"
+            " phase; until it is fixed, only what a worker commits on its branch is"
+            " backed up",
+        )
+    if failed:
+        return Check(
+            "backup",
+            WARN,
+            f"{summary}, {n_failed} failed: " + "; ".join(failed[:5])
+            + (" …" if n_failed > 5 else ""),
+            "the BACKUP-FAILED and BACKUP-PUSH-FAILED lines in supervisor.log say why;"
+            " the next pass retries",
+        )
+    return Check("backup", OK, summary)
+
+
 def _check_finish_race(st: State, ready: list[str]) -> Check:
     """``finished`` while phases are still ready — the FINISH-WITH-READY race."""
     if st.finished and ready:
@@ -1358,6 +1412,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_activity(cfg, st))
     checks.append(_check_integration(cfg, st))
     checks.append(_check_push_owed(st))
+    checks.append(_check_backup(cfg))
     checks.append(_check_finish_race(st, ready))
     checks.append(_check_nudge(st, ready, free))
     checks.append(_check_stall(cfg, st))

@@ -142,8 +142,32 @@ def test_a_start_whose_process_died_without_an_end_is_ended(env):
     s.step(T0)
     fake.remove(900)  # SIGKILLed: no "end" ever comes
     s.step(T0 + 1)
+    assert summaries(cfg) == [] and s.book.busy()  # the gate's end may still be on its way
+    s.step(T0 + 1 + builds.END_GRACE_S)
     [row] = summaries(cfg)
     assert row["ended_by"] == "gone" and row["exit"] is None and row["samples"] == 1
+    assert row["ended"] == T0  # when it was last seen, not when the wait ran out
+
+
+def test_the_exit_code_survives_an_end_written_after_the_process_is_gone(env):
+    """The gate writes ``end`` a moment after the build's process exits. A sample
+    landing in between used to retire the build as "gone" and lose its exit code
+    (``swarm resources`` showed ``None`` for a build that exited 100)."""
+    cfg, fake, pings = env
+    fake.add(900, started=T0 - 1, comm="cargo")
+    event(cfg, ts=T0 - 1, event="start", id="x1", pid=900, slot=0, cls="heavy", argv="cargo t")
+    s = make_sampler(cfg, fake, pings)
+    s.step(T0)
+    fake.remove(900)  # the process is gone...
+    s.step(T0 + 1)  # ...and this sample sees that before the gate has logged the end
+    assert summaries(cfg) == []
+    event(cfg, ts=T0 + 1.02, event="end", id="x1", pid=900, slot=0, cls="heavy",
+          run_s=2.02, exit=100)
+    s.step(T0 + 2)
+    [row] = summaries(cfg)
+    assert (row["ended_by"], row["exit"], row["run_s"]) == ("end", 100, 2.02)
+    text = view.render(view.collect(cfg, now=T0 + 3))
+    assert " 100  cargo t" in text and "None" not in text
 
 
 def test_a_reused_pid_is_not_mistaken_for_the_build(env):
@@ -152,7 +176,7 @@ def test_a_reused_pid_is_not_mistaken_for_the_build(env):
     event(cfg, ts=T0 - 600, event="start", id="old", pid=900, slot=0, cls="heavy")
     s = make_sampler(cfg, fake, pings)
     s.step(T0)
-    s.step(T0 + 1)
+    s.step(T0 + builds.END_GRACE_S)
     [row] = summaries(cfg)
     assert row["ended_by"] == "gone" and row["samples"] == 0
 
@@ -324,6 +348,89 @@ def test_status_and_doctor_surface_an_idle_holder(env, monkeypatch):
     stale = {r[0]: r for r in view.doctor_checks(cfg, supervisor_alive=True, now=T0 + 3600)}
     assert stale["resources.sampler"][1] == doctor.WARN
     assert stale["resources.idle-build"][1] == doctor.OK  # a stale snapshot proves nothing
+
+
+def _seat_record(cfg, seat: int, **rec) -> None:
+    (cfg.buildsem_dir / f"seat{seat}").write_text(
+        json.dumps({"v": 1, "ended": None, "seat": seat, **rec}))
+
+
+def test_a_yielded_build_is_summarised_and_its_warning_says_the_slot_was_released(env):
+    """The gate set the idle holder aside (``yield`` in its log). The warning
+    still comes, but it says the slot was released; the summary row carries how
+    long the build was set aside, across a wake-up, and the table shows it."""
+    cfg, fake, pings = env
+    fake.add(900, started=T0 - 1, own=100, argv="bash wait.sh", env=worker_env(cfg, "P4"))
+    fake.add(901, started=T0 + 200, own=100, argv="cargo test", env=worker_env(cfg, "P5"))
+    base = {"cls": "heavy", "slot": 0}
+    event(cfg, ts=T0 - 1, event="start", id="idle", pid=900, argv="bash wait.sh", **base)
+    _seat_record(cfg, 0, id="idle", slot=0, phase="P4", argv="bash wait.sh")
+    s = make_sampler(cfg, fake, pings)
+    s.step(T0)
+    event(cfg, ts=T0 + 150, event="yield", id="idle", pid=900, idle_s=150.0, **base)
+    event(cfg, ts=T0 + 200, event="start", id="beside", pid=901, argv="cargo test", **base)
+    # the slot file now names the build that started beside it; its seat still names it
+    _holder_record(cfg, 0, id="beside", phase="P5", argv="cargo test", seat=1)
+    _seat_record(cfg, 1, id="beside", slot=0, phase="P5", argv="cargo test")
+    for t in (210, 400, 620):
+        fake.cpu(901, own=100 + t * 100)
+        s.step(T0 + t)
+    assert [k for k, _ in pings] == ["idle-build:idle"]
+    assert "released its slot 7 min ago" in pings[0][1] and "start beside it" in pings[0][1]
+    assert "queue behind it" not in pings[0][1] and "Nothing was stopped" in pings[0][1]
+    snap = store.read_now(cfg.state_dir)
+    [row] = snap["idle_holders"]
+    assert row["id"] == "idle" and row["yielded"] and row["yielded_s"] == 470.0
+    [line] = [x for x in view.status_lines(cfg, now=T0 + 621) if x.startswith("IDLE BUILD")]
+    assert "slot released: builds start beside it" in line
+    rows = {r[0]: r for r in view.doctor_checks(cfg, supervisor_alive=True, now=T0 + 621)}
+    assert rows["resources.idle-build"][1] == doctor.WARN
+    assert "slot released" in rows["resources.idle-build"][2]
+    assert "YIELDED 8m (slot released)" in view.render(view.collect(cfg, now=T0 + 621))
+
+    # it wakes for a while, is set aside again, and ends while set aside
+    event(cfg, ts=T0 + 700, event="unyield", id="idle", pid=900, idle_s=550.0, **base)
+    event(cfg, ts=T0 + 900, event="yield", id="idle", pid=900, idle_s=150.0, **base)
+    event(cfg, ts=T0 + 1000, event="end", id="idle", pid=900, run_s=1001.0, exit=0, **base)
+    event(cfg, ts=T0 + 1000, event="end", id="beside", pid=901, run_s=800.0, exit=0, **base)
+    fake.remove(900)
+    fake.remove(901)
+    s.step(T0 + 1001)
+    by = {r["id"]: r for r in summaries(cfg)}
+    assert by["idle"]["yielded_s"] == 650.0  # 150..700 and 900..1000
+    assert by["beside"]["yielded_s"] == 0.0
+    text = view.render(view.collect(cfg, now=T0 + 1002))
+    assert "yielded: 1 build(s) sat idle and were set aside by the gate, 11m in all" in text
+    head = next(line for line in text.splitlines() if "anon pk" in line)
+    listed = [line for line in text.splitlines() if line.endswith("bash wait.sh")]
+    assert head.index("yielded") <= listed[0].index("11m") < head.index("cpu s")
+
+
+def test_the_warning_for_a_holder_that_never_yields_says_why(env):
+    cfg, fake, pings = env
+    fake.add(900, started=T0 - 1, own=100, argv="docker build .")
+    event(cfg, ts=T0 - 1, event="start", id="d1", pid=900, slot=0, cls="heavy",
+          argv="docker build .")
+    _seat_record(cfg, 0, id="d1", slot=0, phase="P6", argv="docker build .",
+                 noyield="docker hands its work to a daemon")
+    s = make_sampler(cfg, fake, pings)
+    for t in (0, 300, 610):
+        s.step(T0 + t)
+    assert "it never yields its slot (docker hands its work to a daemon)" in pings[0][1]
+    [line] = [x for x in view.status_lines(cfg, now=T0 + 611) if x.startswith("IDLE BUILD")]
+    assert "slot kept (docker hands its work to a daemon)" in line
+
+
+def test_a_seat_that_went_to_another_build_means_the_end_was_missed(env):
+    cfg, fake, pings = env
+    fake.add(900, started=T0 - 1, own=100, argv="sleep 9999")
+    event(cfg, ts=T0 - 1, event="start", id="old", pid=900, slot=0, cls="heavy", argv="x")
+    _seat_record(cfg, 0, id="newer", slot=0, phase="P9", argv="cargo build")
+    _holder_record(cfg, 0, id="newer", phase="P9", argv="cargo build", seat=0)
+    s = make_sampler(cfg, fake, pings)
+    for t in (0, 300, 610):
+        s.step(T0 + t)
+    assert pings == [] and not store.read_now(cfg.state_dir)["idle_holders"]
 
 
 # -- sessions -------------------------------------------------------------------------

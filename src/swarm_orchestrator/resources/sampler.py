@@ -17,7 +17,10 @@ measured (``time.thread_time``), plus the ``du`` children's, and published in
 
 It never raises into the supervisor: a failed sample is logged (rate-limited)
 and the next one tried. It never signals anything either: an idle holder is
-reported, not killed.
+reported, not killed. Whether an idle holder still keeps other builds waiting
+is the gate's business, not this thread's: the gate sets it aside by its own
+measurement (:mod:`swarm_orchestrator.buildidle`) and says so in its event log,
+and the report here repeats what the gate did.
 """
 
 from __future__ import annotations
@@ -322,34 +325,55 @@ class Sampler:
 
 
 def gate_holds(cfg: Config, b: builds_mod.Build) -> bool:
-    """Does the build gate agree that ``b`` holds its slot? Its holder record
-    (the start of ``buildsem/slotN``) is the gate's own word: one naming another
-    build, or saying the build ended, means the sampler missed the ``end`` and
-    ``b`` holds nothing (:attr:`Build.released`). A matching record's phase and
-    command replace the sampler's. No record (a gate that writes none, a bare
-    ``flock``) leaves the sampler's view as it is."""
+    """Does the build gate agree that ``b`` is still a holder? The gate's own
+    record is its word: the seat file naming ``b`` (``buildsem/seatK``), or, for
+    a gate from before seats, the start of ``buildsem/slotN``. A record saying
+    the build ended, or no record naming it where one names another build, means
+    the sampler missed the ``end`` and ``b`` holds nothing
+    (:attr:`Build.released`). A matching record's phase and command replace the
+    sampler's. No record at all (a gate that writes none, a bare ``flock``)
+    leaves the sampler's view as it is."""
     if b.source != "events" or b.slot is None:
         return True
-    try:
-        rec = buildsem.read_record(buildsem._slot_path(cfg, int(b.slot)))
-    except (TypeError, ValueError):
-        return True
-    if not rec or rec.get("v") != 1:
-        return True
-    if rec.get("ended") or rec.get("id") != b.id:
+    own = None
+    for k in buildsem._seat_indices(cfg):
+        rec = buildsem.read_record(buildsem._seat_path(cfg, k))
+        if rec and rec.get("v") == 1 and rec.get("id") == b.id:
+            own = rec
+            break
+    if own is None:
+        try:
+            rec = buildsem.read_record(buildsem._slot_path(cfg, int(b.slot)))
+        except (TypeError, ValueError):
+            return True
+        if not rec or rec.get("v") != 1:
+            return True
+        if rec.get("id") != b.id or "seat" in rec:  # its seat went to another build
+            b.released = True
+            return False
+        own = rec
+    if own.get("ended"):
         b.released = True
         return False
-    b.phase = rec.get("phase") or b.phase
-    b.argv = rec.get("argv") or b.argv
+    b.phase = own.get("phase") or b.phase
+    b.argv = own.get("argv") or b.argv
+    b.noyield = own.get("noyield")
     return True
 
 
 def idle_message(b: builds_mod.Build, now: float, idle_s: float) -> str:
     what = (b.argv or "a build").split()
     short = " ".join(what[:4]) + (" …" if len(what) > 4 else "")
+    if b.yielded_at is not None:
+        effect = (f" The gate released its slot {int((now - b.yielded_at) // 60)} min ago:"
+                  " other builds start beside it.")
+    elif b.noyield:
+        effect = f" Other builds queue behind it: it never yields its slot ({b.noyield})."
+    else:
+        effect = " Other builds queue behind it."
     return (
         f"swarm: a build has held a build slot for {int((now - b.started) // 60)} min"
         f" and used under 1% of a core for the last {int(idle_s // 60)} min"
-        f" ({short}, phase {b.phase or '?'}, pid {b.pid}). Other builds queue behind it."
+        f" ({short}, phase {b.phase or '?'}, pid {b.pid}).{effect}"
         " Nothing was stopped; `swarm build --status` and `swarm resources` show it."
     )

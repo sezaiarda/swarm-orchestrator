@@ -5,8 +5,12 @@ Two sources, in order of preference:
 1. **The gate's event log**, ``<state>/buildsem/events.jsonl``: one JSON object
    per line — ``queued``, ``start`` (with the pid that runs the build, its slot,
    class, argv, cwd and how long it waited), ``end`` (run time and exit code),
-   ``bypass`` and ``preflight_fail``. A build killed with SIGKILL never writes
-   its ``end``, so a ``start`` whose process is gone counts as ended.
+   ``bypass``, ``preflight_fail``, and ``yield``/``unyield`` (the gate set an
+   idle build aside, or counts it again). A build killed with SIGKILL never
+   writes its ``end``, so a ``start`` whose process has been gone for
+   :data:`END_GRACE_S` counts as ended; before that the ``end`` may simply not
+   have been written yet (the gate writes it a moment after the process exits),
+   and retiring the build at once would lose its exit code.
 2. **The slot's lock holder**, when there is no event log: each slot is a
    ``flock`` on ``buildsem/slotN``, and ``/proc/locks`` names the pid holding
    it (matched on the slot file's device and inode). That pid is the build.
@@ -34,6 +38,8 @@ TAIL_BYTES = 1 << 20
 #: A build running this long with its whole tree under :data:`IDLE_CORES` of CPU
 #: is an idle holder: it keeps every other build queued while doing nothing.
 IDLE_CORES = 0.01
+#: How long a build whose process is gone is kept waiting for the gate's ``end``.
+END_GRACE_S = 5.0
 _PSI = ("cpu", "mem", "memf", "io", "iof")
 
 
@@ -155,6 +161,10 @@ class Build:
     last_ts: float | None = None
     idle_flagged: bool = False
     released: bool = False  # the gate's record names another build, or says it ended
+    yielded_at: float | None = None  # set aside by the gate as idle, since then
+    yielded_s: float = 0.0  # set aside in all, stretches already over
+    noyield: str | None = None  # why the gate never sets it aside
+    gone_at: float | None = None  # its process was first seen gone, no ``end`` yet
     # the end, once known
     ended: float | None = None
     run_s: float | None = None
@@ -206,6 +216,11 @@ class Build:
             return False  # not watched long enough (sampler restarted, say)
         return self.cpu_s - old_cpu < IDLE_CORES * (now - old_ts)
 
+    def yielded_for(self, now: float) -> float:
+        """Seconds it has been set aside as idle, the running stretch included."""
+        more = max(0.0, now - self.yielded_at) if self.yielded_at is not None else 0.0
+        return self.yielded_s + more
+
     def summary(self) -> dict:
         end = self.ended if self.ended is not None else self.last_ts or self.started
         run = self.run_s if self.run_s is not None else max(0.0, end - self.started)
@@ -221,6 +236,7 @@ class Build:
             "psi_max": {k: self.psi_max[k] for k in _PSI if k in self.psi_max},
             "rd_mb": _r(self.rd / 2**20), "wr_mb": _r(self.wr / 2**20),
             "samples": self.samples, "idle_flagged": self.idle_flagged,
+            "yielded_s": _r(self.yielded_for(end)),
         }
 
     def now_row(self, now: float, idle_s: float) -> dict:
@@ -230,7 +246,8 @@ class Build:
             "cores": round(self.cores, 2), "anon_mb": round(self.anon_mb, 1),
             "peak_anon_mb": round(self.peak_anon_mb, 1), "cpu_s": round(self.cpu_s, 1),
             "procs": len(self.tree), "idle": self.idle_for(now, idle_s) and not self.released,
-            "source": self.source,
+            "source": self.source, "yielded": self.yielded_at is not None,
+            "yielded_s": round(self.yielded_for(now), 1), "noyield": self.noyield,
         }
 
 
@@ -299,6 +316,16 @@ class BuildBook:
             if ev.get("cls", "heavy") != "heavy" or bid in self.done_ids or bid in self.active:
                 return
             self._start_from_event(ev, bid, now, table)
+        elif kind in ("yield", "unyield"):
+            b = self.active.get(bid)
+            ts = _num(ev.get("ts")) or now
+            if b is None:
+                return
+            if kind == "yield" and b.yielded_at is None:
+                b.yielded_at = ts
+            elif kind == "unyield" and b.yielded_at is not None:
+                b.yielded_s += max(0.0, ts - b.yielded_at)
+                b.yielded_at = None
         elif kind == "end":
             self.queued.pop(bid, None)
             b = self.active.get(bid)
@@ -381,6 +408,11 @@ class BuildBook:
                 b.observe(now, use, host_row, fresh, idle_s)
                 continue
             if b.ended is None:
+                if b.source == "events" and (b.gone_at is None
+                                             or now - b.gone_at < END_GRACE_S):
+                    b.gone_at = now if b.gone_at is None else b.gone_at
+                    b.tree, b.cores = set(), 0.0
+                    continue  # the gate's ``end`` (with the exit code) is on its way
                 b.ended, b.ended_by = (b.last_ts or now), "gone"
             self._retire(bid)
 

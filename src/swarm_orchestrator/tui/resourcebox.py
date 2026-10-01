@@ -50,7 +50,9 @@ def box_lines(snap: dict | None, now: float) -> list[str]:
     for b in builds:
         text = (f"slot {b.get('slot')} {escape(str(b.get('phase') or '?'))} {b['age_s'] / 60:.0f}m"
                 f" · {b['cores']:.1f} cores · {_g(b['anon_mb'])} anon")
-        if b.get("idle"):
+        if b.get("yielded"):  # the gate set it aside: nothing queues behind it
+            lines.append(paint(text + " · idle, slot released", WARN))
+        elif b.get("idle"):
             lines.append(paint(text + " · IDLE holder", BAD))
         else:
             lines.append(text)

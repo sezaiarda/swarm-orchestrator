@@ -66,8 +66,17 @@ def status_lines(cfg: Config, now: float | None = None) -> list[str]:
     for b in snap.get("idle_holders") or []:
         out.append(f"IDLE BUILD HOLDER: pid {b['pid']} ({b.get('phase') or '?'}) has held"
                    f" slot {b.get('slot')} for {b['age_s'] / 60:.0f} min at under 1% of a"
-                   f" core: {b.get('argv', '')[:80]}")
+                   f" core{_released(b)}: {b.get('argv', '')[:80]}")
     return out
+
+
+def _released(b: dict) -> str:
+    """What the gate did about an idle holder (a snapshot's build row)."""
+    if b.get("yielded"):
+        return ", slot released: builds start beside it"
+    if b.get("noyield"):
+        return f", slot kept ({b['noyield']})"
+    return ""
 
 
 def doctor_checks(cfg: Config, supervisor_alive: bool, now: float | None = None) -> list[tuple[str, str, str, str | None]]:
@@ -105,10 +114,12 @@ def doctor_checks(cfg: Config, supervisor_alive: bool, now: float | None = None)
     if idle:
         detail = "; ".join(
             f"pid {b['pid']} ({b.get('phase') or '?'}, slot {b.get('slot')}) held"
-            f" {b['age_s'] / 60:.0f} min at <1% of a core: {b.get('argv', '')[:60]}"
+            f" {b['age_s'] / 60:.0f} min at <1% of a core{_released(b)}:"
+            f" {b.get('argv', '')[:60]}"
             for b in idle)
         rows.append(("resources.idle-build", "warn", detail,
-                     "look at the build (it may wait on input or a lock); nothing was killed"))
+                     "look at the build (it may wait on input or a lock); nothing was"
+                     " killed, and a released slot keeps no other build waiting"))
     else:
         rows.append(("resources.idle-build", "ok", "no build holds a slot idle", None))
     return rows
@@ -179,10 +190,15 @@ def collect(cfg: Config, hours: float = 24.0, days: float = 30.0, now: float | N
     cap = capacity.analyse(build_rows, month, static, cfg.build_max_concurrent,
                            cfg.build_jobs, cfg.max_workers)
     worst = sorted(build_rows, key=lambda r: -(r.get("peak_anon_mb") or 0))[:10]
+    aside = sorted((r for r in build_rows if r.get("yielded_s")),
+                   key=lambda r: -r["yielded_s"])
     return {
         "now": snap, "age_s": age, "stale": snap is None or (age or 0) > STALE_S,
         "series": day_series(day, now, hours), "hours": hours,
-        "builds": {"count": len(build_rows), "worst": worst},
+        "builds": {"count": len(build_rows), "worst": worst,
+                   "yielded": {"count": len(aside),
+                               "total_s": round(sum(r["yielded_s"] for r in aside), 1),
+                               "longest": aside[:5]}},
         "dirs": store.dirs_rows(cfg.state_dir, now - hours * 3600)[-1:],
         "capacity": cap, "files": store.sizes(cfg.state_dir),
     }
@@ -257,6 +273,8 @@ def _now_lines(snap: dict) -> list[str]:
                f" (source: {snap.get('source')})")
     for b in builds:
         flag = "  IDLE" if b.get("idle") else ""
+        if b.get("yielded"):
+            flag = f"  YIELDED {_dur(b.get('yielded_s'))} (slot released)"
         out.append(f"    slot {b.get('slot')} pid {b['pid']} {b.get('phase') or '?'}"
                    f" {b['age_s'] / 60:.1f} min · {b['cores']:.2f} cores · anon"
                    f" {_gb(b['anon_mb'])} (peak {_gb(b['peak_anon_mb'])}) · {b['procs']} procs"
@@ -285,18 +303,32 @@ def _builds_lines(b: dict) -> list[str]:
     if not b["worst"]:
         out.append("  none recorded yet")
         return out
-    out.append(f"  {'ended':<11} {'phase':<12} {'run':>6} {'cpu s':>7} {'avg':>5} {'peak':>5}"
-               f" {'anon pk':>8} {'min avail':>9} {'psi m/io':>9} {'exit':>4}  command")
-    for r in b["worst"]:
-        psi = r.get("psi_max") or {}
-        ended = time.strftime("%m-%d %H:%M", time.localtime(r.get("ended") or 0))
-        out.append(
-            f"  {ended:<11} {str(r.get('phase') or '?')[:12]:<12} {_dur(r.get('run_s')):>6}"
-            f" {_num(r.get('cpu_s')):>7} {_num(r.get('avg_cores')):>5} {_num(r.get('peak_cores')):>5}"
-            f" {_gb(r.get('peak_anon_mb')):>8} {_gb(r.get('min_avail_mb')):>9}"
-            f" {_num(psi.get('memf')) + '/' + _num(psi.get('iof')):>9} {str(r.get('exit')):>4}"
-            f"  {str(r.get('argv') or '')[:40]}")
+    head = (f"  {'ended':<11} {'phase':<12} {'run':>6} {'yielded':>7} {'cpu s':>7} {'avg':>5}"
+            f" {'peak':>5} {'anon pk':>8} {'min avail':>9} {'psi m/io':>9} {'exit':>4}  command")
+    out.append(head)
+    out.extend(_build_row(r) for r in b["worst"])
+    aside = b.get("yielded") or {}
+    if aside.get("count"):
+        out.append(f"  yielded: {aside['count']} build(s) sat idle and were set aside by the"
+                   f" gate, {_dur(aside['total_s'])} in all (their slot went to the next"
+                   " build); longest:")
+        out.append(head)
+        out.extend(_build_row(r) for r in aside["longest"])
     return out
+
+
+def _build_row(r: dict) -> str:
+    psi = r.get("psi_max") or {}
+    ended = time.strftime("%m-%d %H:%M", time.localtime(r.get("ended") or 0))
+    code = "?" if r.get("exit") is None else str(r["exit"])  # no ``end``: killed, unrecorded
+    aside = _dur(r["yielded_s"]) if r.get("yielded_s") else "-"
+    return (
+        f"  {ended:<11} {str(r.get('phase') or '?')[:12]:<12} {_dur(r.get('run_s')):>6}"
+        f" {aside:>7}"
+        f" {_num(r.get('cpu_s')):>7} {_num(r.get('avg_cores')):>5} {_num(r.get('peak_cores')):>5}"
+        f" {_gb(r.get('peak_anon_mb')):>8} {_gb(r.get('min_avail_mb')):>9}"
+        f" {_num(psi.get('memf')) + '/' + _num(psi.get('iof')):>9} {code:>4}"
+        f"  {str(r.get('argv') or '')[:40]}")
 
 
 def _dur(s: float | None) -> str:

@@ -29,6 +29,7 @@ repository layout: it drives one repo or an umbrella of many, configured by one
 - [Configuration](#configuration)
 - [Runtime state](#runtime-state)
 - [Tests](#tests)
+- [Contributing](#contributing)
 - [Design principles](#design-principles)
 
 ## What it can do
@@ -926,6 +927,25 @@ fake scripts need bash (`read -t`).
 - the bot's `/usage` answer and its command listener (`test_tgbot.py`), and the
   usage caps (`test_caps.py`);
 - units for every other module.
+
+## Contributing
+
+This repository is public. Run this once in your clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It turns on the tracked `commit-msg` hook (`.githooks/commit-msg`, Python 3
+standard library). The hook refuses a commit message that contains a work-item
+id of some other, private project: a word, a hyphen, one capital letter and
+digits, like the ids in a phase ledger. Sessions that work on such a project
+tend to start a message with the id of the row they are on, and a pushed
+message cannot be taken back. Describe the change; leave the work-item id out.
+Made-up ids from test descriptions are refused too: a message does not need
+one. For text that only looks like one, commit with `ALLOW_WORK_ID=1` set.
+Words such as `utf-8`, `sha-256`, `x86-64` or `P50-P85` pass.
+`tests/test_commit_msg_hook.py` holds the accept/reject table.
 
 ## Design principles
 

@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""commit-msg hook: keep internal work-item ids out of this public history.
+
+Sessions that work on a private project sometimes commit here and start the
+message with that project's own work-item id. Those ids belong to its ledger,
+not to a public repository, and a pushed commit message cannot be taken back.
+So a message that contains one is refused, and says how to fix it.
+
+Set up once per clone:  git config core.hooksPath .githooks
+Rare legitimate case (text that only looks like one):  ALLOW_WORK_ID=1 git commit ...
+
+Python 3 standard library only. ``tests/test_commit_msg_hook.py`` holds the
+accept/reject table.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+
+#: The shape of a work-item id: a word, a hyphen, ONE capital letter, digits
+#: and at most one lowercase letter after them: ``word-F12``, ``word-W3``,
+#: ``word-P0``, ``word-W4a``. The word has two letters or more and only its
+#: first may be a capital, so ``utf-8``, ``sha-256``, ``x86-64``, ``python-3``
+#: and ``v1-2`` (no capital after the hyphen) and a percentile range like
+#: ``P50-P85`` (no word before it) are not ids.
+WORK_ID = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"[A-Za-z][0-9]*[a-z][a-z0-9]*-[A-Z][0-9]+[a-z]?"
+    r"(?![A-Za-z0-9_])"
+)
+
+#: Everything below this line of a ``git commit -v`` message is the diff.
+SCISSORS = "# ------------------------ >8 ------------------------"
+ESCAPE = "ALLOW_WORK_ID"
+
+
+def body(text: str) -> list[tuple[int, str]]:
+    """The lines git will keep, numbered: no comment lines, nothing below the scissors."""
+    kept = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.rstrip() == SCISSORS:
+            break
+        if not line.startswith("#"):
+            kept.append((number, line))
+    return kept
+
+
+def work_ids(text: str) -> list[tuple[int, str]]:
+    """``(line number, id)`` for every work-item id in a commit message."""
+    return [(number, match.group(0))
+            for number, line in body(text) for match in WORK_ID.finditer(line)]
+
+
+def refusal(found: list[tuple[int, str]]) -> str:
+    named = ", ".join(f"{ident} (line {number})" for number, ident in found)
+    return (
+        f"commit-msg: this message contains a work-item id: {named}\n"
+        "  This repository is public, and such an id belongs to a private\n"
+        "  project's ledger: it must not be published.\n"
+        "  Fix: describe the change; leave the work-item id out. Your text is\n"
+        "  kept in .git/COMMIT_EDITMSG.\n"
+        f"  If it only looks like one, commit again with {ESCAPE}=1 set.\n"
+    )
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        sys.stderr.write("usage: commit-msg <file holding the commit message>\n")
+        return 2
+    if os.environ.get(ESCAPE, "").strip().lower() not in ("", "0", "false", "no"):
+        return 0
+    try:
+        with open(argv[1], encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        sys.stderr.write(f"commit-msg: cannot read {argv[1]}: {exc}\n")
+        return 2
+    found = work_ids(text)
+    if not found:
+        return 0
+    sys.stderr.write(refusal(found))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -42,6 +42,7 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from . import backup as backup_mod
 from . import caps
@@ -517,9 +518,49 @@ def _check_supervisor(cfg: Config, st: State) -> list[Check]:
     return checks
 
 
-def _dead_panes(cfg: Config, st: State) -> tuple[list[str], int, int, list[str]]:
-    """``(dead busy panes, unreadable count, busy count, dead free panes)`` —
-    probed once.
+class PaneProbe(NamedTuple):
+    """What one pass over the slots' panes found (:func:`_dead_panes`)."""
+
+    dead: list[tuple[str, str]]  # (phase, what its pane runs) per dead worker
+    unknown: int  # panes tmux could not be asked about
+    busy: int  # busy slots with a pane, landing ones included
+    dead_free: list[str]  # free slots with nowhere to launch into
+    landing: list[str]  # busy phases whose worker has reported
+
+
+def _landing(st: State) -> set[str]:
+    """Phases whose finished work is on its way to main: queued or held for
+    merging, or holding a landing lock. Their status reaches the ``done`` map
+    when they land."""
+    return st.integrating() | set(st.landing)
+
+
+def _reported(cfg: Config, st: State, phase: str) -> bool:
+    """``phase``'s worker has run ``swarm done`` in this attempt.
+
+    The supervisor then puts the slot's pane back on ``sleep`` and keeps the
+    slot until the work has landed (:meth:`Supervisor._end_worker`), which is
+    minutes while a landing check runs. A sentinel counts only when written
+    since the phase was last claimed, the supervisor's own rule
+    (``_unread_report``): one left by an earlier attempt says nothing about
+    the worker running now.
+    """
+    if phase in _landing(st):
+        return True
+    written: list[float] = []
+    for status in _SENTINEL_STATUSES:
+        try:
+            written.append((cfg.done_dir / f"{phase}.{status}").stat().st_mtime)
+        except OSError:
+            continue
+    if not written:
+        return False
+    claimed = _log_ts(cfg, f"CLAIM {phase} ")
+    return claimed is not None and max(written) >= claimed - 1.0
+
+
+def _dead_panes(cfg: Config, st: State) -> PaneProbe:
+    """Every slot's pane, probed once.
 
     Shared by :func:`_check_panes` and :func:`_check_watchdog` so a swarm with
     four busy slots costs four ``tmux`` calls, not eight.
@@ -529,19 +570,28 @@ def _dead_panes(cfg: Config, st: State) -> tuple[list[str], int, int, list[str]]
     and then every launch that picks it fails ``no-pane``: that is what a
     ``swarm reload`` growing ``max_workers`` left behind before it created panes.
     A free pane only has to exist; it runs the ``sleep`` placeholder, not claude.
+
+    A busy slot whose worker has reported (:func:`_reported`) is not probed:
+    its pane runs the same placeholder by design, and it is no dead worker.
     """
     busy = [s for s in st.busy_slots() if s.pane_id]
     if cfg.driver != "tmux":
-        return [], 0, len(busy), []
-    dead: list[str] = []
+        return PaneProbe([], 0, len(busy), [], [])
+    dead: list[tuple[str, str]] = []
     dead_free: list[str] = []
+    landing: list[str] = []
     unknown = 0
     for slot in busy:
+        if slot.phase and _reported(cfg, st, slot.phase):
+            landing.append(slot.phase)
+            continue
         cmd = _pane_cmd(slot.pane_id or "")
         if cmd == "?":
             unknown += 1
         elif cmd != "claude":
-            dead.append(f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}")
+            dead.append(
+                (slot.phase or "", f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}")
+            )
     for slot in st.slots:
         if slot.busy or slot.retiring:
             continue
@@ -553,44 +603,50 @@ def _dead_panes(cfg: Config, st: State) -> tuple[list[str], int, int, list[str]]
             unknown += 1
         elif cmd == "gone":
             dead_free.append(f"free slot {slot.id} pane {slot.pane_id} is gone")
-    return dead, unknown, len(busy), dead_free
+    return PaneProbe(dead, unknown, len(busy), dead_free, landing)
 
 
-def _check_panes(
-    cfg: Config, st: State, probe: tuple[list[str], int, int, list[str]]
-) -> Check:
+def _check_panes(cfg: Config, st: State, probe: PaneProbe) -> Check:
     """Every busy slot's pane still exists and still runs ``claude``, and every
     free slot still has a pane to launch into.
 
     A worker that crashed or was killed never runs ``swarm done``, so its slot
-    stays busy forever and the run can neither progress nor finish.
+    stays busy forever and the run can neither progress nor finish. A worker
+    that did report keeps its slot while its work lands, and is counted apart.
     """
-    dead, unknown, busy, dead_free = probe
     if cfg.driver != "tmux":
         return Check("slots.panes", OK, f"driver={cfg.driver}; no panes to check")
-    if dead:
-        phase = next((s.phase for s in st.busy_slots() if s.phase), "<phase>")
+    if probe.dead:
+        phase = probe.dead[0][0] or "<phase>"
         return Check(
             "slots.panes",
             FAIL,
-            "worker died without `swarm done`: " + "; ".join(dead + dead_free),
+            "worker died without `swarm done`: "
+            + "; ".join([what for _, what in probe.dead] + probe.dead_free),
             f"swarm free {phase}  # then relaunch it",
         )
-    if dead_free:
+    if probe.dead_free:
         return Check(
             "slots.panes",
             FAIL,
-            "slot(s) with nowhere to launch a worker: " + "; ".join(dead_free),
+            "slot(s) with nowhere to launch a worker: " + "; ".join(probe.dead_free),
             "swarm down && swarm up  # rebuilds every slot's pane",
         )
-    if not busy:
+    if not probe.busy:
         return Check("slots.panes", OK, "no busy slots")
-    if unknown:
-        return Check("slots.panes", OK, f"{busy} busy; {unknown} pane(s) unreadable")
-    return Check("slots.panes", OK, f"{busy} busy slot(s), all running claude")
+    working = probe.busy - len(probe.landing)
+    landing = f"{len(probe.landing)} landing ({', '.join(probe.landing)})"
+    if probe.unknown:
+        detail = f"{probe.busy} busy; {probe.unknown} pane(s) unreadable"
+        return Check("slots.panes", OK, f"{detail}; {landing}" if probe.landing else detail)
+    if probe.landing:
+        return Check(
+            "slots.panes", OK, f"{probe.busy} busy slot(s): {working} running claude, {landing}"
+        )
+    return Check("slots.panes", OK, f"{probe.busy} busy slot(s), all running claude")
 
 
-def _check_watchdog(cfg: Config, probe: tuple[list[str], int, int, list[str]]) -> Check:
+def _check_watchdog(cfg: Config, probe: PaneProbe) -> Check:
     """Whether anything will ever *reclaim* a slot whose worker died.
 
     ``[swarm].watchdog_s = 0`` restores the purely event-driven supervisor, which
@@ -602,7 +658,7 @@ def _check_watchdog(cfg: Config, probe: tuple[list[str], int, int, list[str]]) -
     nothing else in the tool looks at.
     """
     watchdog = int(getattr(cfg, "watchdog_s", 0) or 0)
-    dead = probe[0]  # busy slots only: the watchdog reaps workers, not free panes
+    dead = probe.dead  # busy slots only: the watchdog reaps workers, not free panes
     if watchdog and dead:
         return Check(
             "run.watchdog",
@@ -638,13 +694,21 @@ def _check_activity(cfg: Config, st: State) -> Check:
 
     A row whose ``dir:`` is an external repo writes nowhere in its mirror, so
     its lane worktree and branch count too (``_lane_activity``).
+
+    A phase whose worker has reported (:func:`_reported`) is left out: once its
+    branch is merged it has nothing ahead of main and nothing dirty, and it
+    keeps its slot for a moment longer.
     """
-    busy = [s for s in st.busy_slots() if s.phase and s.worktree]
+    busy = [
+        s
+        for s in st.busy_slots()
+        if s.phase and s.worktree and not _reported(cfg, st, s.phase)
+    ]
     if not busy:
         return Check("slots.activity", OK, "no busy slots with worktrees")
     now = time.time()
     row_dirs = _row_dirs(cfg)
-    idle: list[str] = []
+    idle: list[tuple[str, str]] = []
     for slot in busy:
         started = _log_ts(cfg, f"LAUNCH {slot.phase} ")
         if started is None:
@@ -659,14 +723,14 @@ def _check_activity(cfg: Config, st: State) -> Check:
         if work == 0:
             work = _lane_activity(cfg, slot.phase or "", row_dirs, started)
         if work == 0:
-            idle.append(f"{slot.phase} ({_human_age(age)}, no commits, no dirty files)")
+            idle.append((slot.phase, f"{_human_age(age)}, no commits, no dirty files"))
     if idle:
-        first = busy[0].phase
+        first = idle[0][0]
         return Check(
             "slots.activity",
             FAIL,
             "busy slot(s) with zero worktree activity — check the pane for an "
-            "empty prompt box: " + "; ".join(idle),
+            "empty prompt box: " + "; ".join(f"{p} ({what})" for p, what in idle),
             f"tmux send-keys -t <pane> -l -- '/prime {first}' && "
             "tmux send-keys -t <pane> Enter",
         )
@@ -1163,6 +1227,9 @@ def _check_sentinels(cfg: Config, st: State) -> Check:
     the worker itself wrote; the map is what the dashboard and every report show.
     When they disagree, phases the owner was asked to review are presented as
     clean successes.
+
+    A phase that is landing has its sentinel and no entry in the map yet: the
+    map is written when it lands, so it is counted apart and is not missing.
     """
     sentinels = _sentinels(cfg)
     if not sentinels:
@@ -1172,7 +1239,8 @@ def _check_sentinels(cfg: Config, st: State) -> Check:
         for p, s in sorted(sentinels.items())
         if p in st.done and st.done[p] != s
     ]
-    missing = sorted(p for p in sentinels if p not in st.done)
+    landing = sorted(p for p in _landing(st) if p in sentinels and p not in st.done)
+    missing = sorted(p for p in sentinels if p not in st.done and p not in landing)
     if mismatched:
         return Check(
             "sentinels",
@@ -1187,6 +1255,13 @@ def _check_sentinels(cfg: Config, st: State) -> Check:
             WARN,
             f"{len(missing)} sentinel(s) not reflected in state: {missing[:5]}",
             "swarm up  # rehydrates the done map from sentinels",
+        )
+    if landing:
+        return Check(
+            "sentinels",
+            OK,
+            f"{len(sentinels) - len(landing)} sentinel(s) agree with state; "
+            f"{len(landing)} landing: {landing[:5]}",
         )
     return Check("sentinels", OK, f"{len(sentinels)} sentinel(s) agree with state")
 

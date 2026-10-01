@@ -226,6 +226,110 @@ def test_panes_are_not_probed_off_tmux(cfg, monkeypatch):
     assert doctor._check_panes(cfg, st, probe).status == OK
 
 
+# -- a finished phase keeps its slot while it lands --------------------------
+def landing(cfg, monkeypatch, cmds: dict[str, str], watchdog: int = 0, **kw):
+    """``panes`` over a prepared state: slot ``i`` runs phase ``P<i+1>`` in the
+    ``i``-th pane of ``cmds``; ``kw`` are the state's own fields."""
+    cfg.driver = "tmux"
+    cfg.watchdog_s = watchdog
+    monkeypatch.setattr(doctor, "_pane_cmd", lambda pane: cmds[pane])
+    st = set_state(cfg, slots=len(cmds), **kw)
+    for i, pane in enumerate(cmds):
+        busy(st, i, f"P{i + 1}", pane_id=pane)
+    st = save(cfg, st)
+    probe = doctor._dead_panes(cfg, st)
+    return doctor._check_panes(cfg, st, probe), doctor._check_watchdog(cfg, probe)
+
+
+def queued(*phases: str) -> dict:
+    return {"integ_queue": list(phases), "integ_status": {p: "ok" for p in phases}}
+
+
+def sentinel_at(cfg, name: str, ago: float) -> None:
+    sentinel(cfg, name)
+    stamp = time.time() - ago
+    os.utime(cfg.done_dir / name, (stamp, stamp))
+
+
+def test_a_finished_phase_waiting_on_its_landing_check_is_not_a_dead_worker(cfg, monkeypatch):
+    """What the owner saw: the worker had reported, its slot was parked on
+    ``sleep`` while the landing check ran, and doctor exited 1 for those minutes."""
+    sentinel(cfg, "P1.operator")
+    pane, watchdog = landing(cfg, monkeypatch, {"%1": "sleep"}, **queued("P1"))
+    assert pane.status == OK and "P1" in pane.detail and "landing" in pane.detail
+    assert watchdog.status == OK  # with no watchdog, a dead worker here would fail
+    st = state_mod.read(cfg)
+    assert doctor.exit_code(
+        [pane, watchdog, doctor._check_sentinels(cfg, st), doctor._check_integration(cfg, st)]
+    ) == 0
+
+
+def test_a_parked_pane_with_no_report_is_still_a_dead_worker(cfg, monkeypatch):
+    pane, watchdog = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == FAIL and "slot 0 (P1) pane %1 runs 'sleep'" in pane.detail
+    assert watchdog.status == FAIL
+
+
+def test_a_phase_held_in_the_merge_queue_is_not_a_dead_worker(cfg, monkeypatch):
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep"}, integ_blocked="P1")
+    assert pane.status == OK
+
+
+def test_a_phase_holding_a_landing_lock_is_not_a_dead_worker(cfg, monkeypatch):
+    held = {"P1": {"/repo": {"stage": "testing"}}}
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep"}, landing=held)
+    assert pane.status == OK
+
+
+def test_a_report_the_supervisor_has_not_read_yet_is_not_a_dead_worker(cfg, monkeypatch):
+    """Between ``swarm done`` and the queue: the sentinel is the only sign."""
+    log(cfg, (600, "CLAIM P1 slot=0"))
+    sentinel_at(cfg, "P1.fail", ago=5)
+    pane, watchdog = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == OK and watchdog.status == OK
+
+
+def test_a_sentinel_from_an_earlier_attempt_does_not_hide_a_dead_worker(cfg, monkeypatch):
+    """A retried phase still has the last attempt's ``fail`` on disk."""
+    sentinel_at(cfg, "P1.fail", ago=3600)
+    log(cfg, (600, "CLAIM P1 slot=0"))
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == FAIL and "(P1)" in pane.detail
+
+
+def test_a_sentinel_with_no_claim_on_record_does_not_hide_a_dead_worker(cfg, monkeypatch):
+    """The supervisor's own rule: without a claim time the sentinel proves nothing."""
+    sentinel(cfg, "P1.ok")
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep"})
+    assert pane.status == FAIL
+
+
+def test_a_dead_worker_beside_a_landing_phase_is_the_one_named(cfg, monkeypatch):
+    """The fix line is pasted as written: it must never free the phase that is landing."""
+    pane, watchdog = landing(
+        cfg, monkeypatch, {"%1": "sleep", "%2": "claude", "%3": "bash"}, **queued("P1")
+    )
+    assert pane.status == FAIL
+    assert "(P3)" in pane.detail and "(P1)" not in pane.detail
+    assert pane.fix_hint.startswith("swarm free P3 ")
+    assert watchdog.status == FAIL and "1 busy slot(s)" in watchdog.detail
+
+
+def test_working_and_landing_slots_are_counted_apart(cfg, monkeypatch):
+    pane, _ = landing(cfg, monkeypatch, {"%1": "sleep", "%2": "claude"}, **queued("P1"))
+    assert pane.status == OK
+    assert "1 running claude" in pane.detail and "1 landing (P1)" in pane.detail
+
+
+def test_a_landing_slot_is_not_probed(cfg, monkeypatch):
+    cfg.driver = "tmux"
+    monkeypatch.setattr(doctor, "_pane_cmd", lambda pane: pytest.fail("probed a landing pane"))
+    st = set_state(cfg, slots=1, **queued("P1"))
+    busy(st, 0, "P1", pane_id="%1")
+    st = save(cfg, st)
+    assert doctor._check_panes(cfg, st, doctor._dead_panes(cfg, st)).status == OK
+
+
 # -- the lost-/prime signature ----------------------------------------------
 def worktree(tmp_path: Path, *, dirty: bool) -> Path:
     wt = tmp_path / "wt" / "P1"
@@ -236,10 +340,10 @@ def worktree(tmp_path: Path, *, dirty: bool) -> Path:
     return wt
 
 
-def activity(cfg, wt: Path, launched_ago: float) -> Check:
+def activity(cfg, wt: Path, launched_ago: float, **kw) -> Check:
     cfg.git_main_branch = "main"
     log(cfg, (launched_ago, "LAUNCH P1 slot=0"))
-    st = set_state(cfg)
+    st = set_state(cfg, **kw)
     busy(st, 0, "P1", worktree=str(wt))
     return doctor._check_activity(cfg, save(cfg, st))
 
@@ -249,6 +353,26 @@ def test_a_long_busy_slot_that_wrote_nothing_is_a_lost_prime(cfg, tmp_path):
     assert check.status == FAIL
     assert "P1 (30m, no commits, no dirty files)" in check.detail
     assert "/prime P1" in check.fix_hint
+
+
+def test_a_phase_whose_work_has_just_merged_is_not_a_lost_prime(cfg, tmp_path):
+    """Seen on a live run: between the merge and the slot coming free, a landing
+    phase has nothing ahead of main and nothing dirty."""
+    wt = worktree(tmp_path, dirty=False)
+    assert activity(cfg, wt, launched_ago=30 * 60, **queued("P1")).status == OK
+
+
+def test_the_lost_prime_fix_names_the_idle_phase(cfg, tmp_path):
+    cfg.git_main_branch = "main"
+    log(cfg, (30 * 60, "LAUNCH P1 slot=0"), (30 * 60, "LAUNCH P2 slot=1"))
+    st = set_state(cfg)
+    busy(st, 0, "P1", worktree=str(worktree(tmp_path, dirty=True)))
+    idle = tmp_path / "wt" / "P2"
+    idle.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(idle)], check=True)
+    busy(st, 1, "P2", worktree=str(idle))
+    check = doctor._check_activity(cfg, save(cfg, st))
+    assert check.status == FAIL and "/prime P2" in check.fix_hint
 
 
 def test_a_busy_slot_with_written_work_is_fine(cfg, tmp_path):
@@ -546,6 +670,28 @@ def test_a_sentinel_missing_from_state_warns(cfg):
     sentinel(cfg, "P2.ok")
     check = doctor._check_sentinels(cfg, set_state(cfg))
     assert check.status == WARN and "swarm up" in check.fix_hint
+
+
+def test_a_landing_phase_is_not_a_sentinel_missing_from_state(cfg):
+    """Its status is written when it lands; `swarm up` is the wrong advice meanwhile."""
+    sentinel(cfg, "P0.ok")
+    sentinel(cfg, "P1.operator")
+    st = set_state(cfg, done={"P0": "ok"}, integ_queue=["P1"], integ_status={"P1": "operator"})
+    check = doctor._check_sentinels(cfg, st)
+    assert check.status == OK and "1 landing" in check.detail
+
+
+def test_a_held_phase_is_not_a_sentinel_missing_from_state(cfg):
+    sentinel(cfg, "P1.ok")
+    check = doctor._check_sentinels(cfg, set_state(cfg, integ_blocked="P1"))
+    assert check.status == OK
+
+
+def test_a_missing_sentinel_beside_a_landing_one_still_warns(cfg):
+    sentinel(cfg, "P1.ok")
+    sentinel(cfg, "P2.ok")
+    check = doctor._check_sentinels(cfg, set_state(cfg, integ_queue=["P1"]))
+    assert check.status == WARN and "['P2']" in check.detail
 
 
 def test_a_forced_recap_replacement_warns_and_names_the_phase(cfg):

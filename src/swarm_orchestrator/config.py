@@ -433,6 +433,17 @@ class Config:
         doc="short builds that may pass a long one; 0 = FIFO",
         why="each waiter reads it when it joins the queue; the queue follows the"
             " value its current waiters were started with")
+    # 150 s: in measured runs the quiet stretches inside builds that went on to
+    # do real work ended within about a minute (between compile and test, behind
+    # a lock); holds that never worked again ran for many minutes.
+    build_idle_yield_s: int = _k(
+        "build", "idle_yield_s", 150, HOT, env="SWARM_BUILD_IDLE_YIELD_S", minimum=0,
+        doc="holder idle this long (s) frees its slot; 0 = off",
+        why="every waiting `swarm build` reads it when it measures the holders")
+    build_idle_yield_max: int = _k(
+        "build", "idle_yield_max", 2, HOT, env="SWARM_BUILD_IDLE_YIELD_MAX", minimum=0,
+        doc="most idle holders set aside at once",
+        why="every waiting `swarm build` reads it when it measures the holders")
 
     # -- [gc] -------------------------------------------------------------
     # Nothing else prunes the build caches. Every 15 minutes, because a busy run

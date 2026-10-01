@@ -1,8 +1,10 @@
 """What the build gate is doing now: ``swarm build --status``, the waiting
 line a queued ``swarm build`` prints, and the one line in ``swarm status``.
 
-Read-only: slot occupancy comes from ``/proc/locks`` (no lock is taken to look),
-the queue from the ticket files, history from ``events.jsonl``.
+Read-only: who holds what comes from ``/proc/locks`` (no lock is taken to look),
+the queue from the ticket files, history from ``events.jsonl``, and which
+holders are set aside as idle from the waiters' last measurement
+(``buildsem/idle.json``, see :mod:`buildidle`).
 """
 
 from __future__ import annotations
@@ -12,13 +14,15 @@ import os
 import time
 from pathlib import Path
 
-from . import buildlog, buildsem
+from . import buildidle, buildlog, buildsem
 from .buildlog import fmt_s, short_cmd
 from .config import Config
 
 
-def _locked_inodes() -> set[int] | None:
-    """Inodes with a granted flock, from ``/proc/locks`` (``None`` if unreadable)."""
+def _locked_inodes(write_only: bool = False) -> set[int] | None:
+    """Inodes with a granted flock, from ``/proc/locks`` (``None`` if unreadable).
+    ``write_only``: exclusive locks only. A build holds its seat exclusively and
+    its slot shared; a waiter's momentary probe is shared."""
     try:
         text = Path("/proc/locks").read_text()
     except OSError:
@@ -28,6 +32,8 @@ def _locked_inodes() -> set[int] | None:
         parts = line.split()
         if len(parts) < 6 or parts[1] == "->" or parts[1] != "FLOCK":
             continue
+        if write_only and parts[3] != "WRITE":
+            continue
         try:
             out.add(int(parts[5].rsplit(":", 1)[1]))
         except (IndexError, ValueError):
@@ -36,6 +42,7 @@ def _locked_inodes() -> set[int] | None:
 
 
 def slot_busy(path: Path, locked: set[int] | None) -> bool:
+    """Is an exclusive lock held on ``path``?"""
     try:
         ino = path.stat().st_ino
     except OSError:
@@ -74,28 +81,71 @@ def _openers(path: Path) -> list[int]:
     return out
 
 
+def builds(cfg: Config, now: float) -> list[dict]:
+    """Every build alive on a seat, oldest first: ``state`` is ``active``,
+    ``yielded`` (set aside as idle; it does not count) or ``left`` (the build
+    ended but a process it started still holds its seat)."""
+    locked = _locked_inodes(write_only=True)
+    st = buildidle.load(cfg)
+    out = []
+    for k in buildsem._seat_indices(cfg):
+        path = buildsem._seat_path(cfg, k)
+        if not slot_busy(path, locked):
+            continue
+        rec = buildsem.read_record(path) or {}
+        start = rec.get("start_ts") or now
+        entry: dict = {"seat": k, "slot": rec.get("slot"), "id": rec.get("id"),
+                       "phase": rec.get("phase"), "argv": rec.get("argv", ""),
+                       "cwd": rec.get("cwd", ""), "pid": rec.get("pid") or rec.get("gate_pid"),
+                       "running_s": now - start, "pred_s": rec.get("pred_s"),
+                       "state": "left" if rec.get("ended") or not rec else "active"}
+        entry.update(buildidle.describe(cfg, st, rec, now))
+        if "yielded_s" in entry:
+            entry["state"] = "yielded"
+        if entry["state"] == "left":
+            entry["ended_s"] = now - rec["ended"] if rec.get("ended") else None
+        out.append(entry)
+    return sorted(out, key=lambda e: -e["running_s"])
+
+
 def holders(cfg: Config, hist: buildlog.History, now: float,
-            find_openers: bool = False) -> list[dict]:
-    locked = _locked_inodes()
+            find_openers: bool = False, alive: list[dict] | None = None) -> list[dict]:
+    """One entry per slot: the build that counts on it (``busy``), else free. A
+    slot held exclusively with no seat behind it is someone from outside: gc, an
+    older ``swarm build``, or a process such a build left behind."""
+    alive = builds(cfg, now) if alive is None else alive
+    locked = _locked_inodes(write_only=True)
     out = []
     for i in range(cfg.build_max_concurrent):
         path = buildsem._slot_path(cfg, i)
-        busy = slot_busy(path, locked)
-        rec = buildsem.read_record(path) if busy else None
-        entry: dict = {"slot": i, "busy": busy}
-        if rec and not rec.get("ended") and rec.get("v") == 1:
-            start = rec.get("start_ts") or now
-            pred = rec.get("pred_s")
-            entry.update(id=rec.get("id"), phase=rec.get("phase"), argv=rec.get("argv", ""),
-                         cwd=rec.get("cwd", ""), pid=rec.get("pid") or rec.get("gate_pid"),
-                         running_s=now - start, pred_s=pred)
-        elif busy:
-            entry["unknown"] = True
-            if rec and rec.get("ended"):
-                entry["after"] = {"id": rec.get("id"), "phase": rec.get("phase"),
-                                  "argv": rec.get("argv", ""), "ended_s": now - rec["ended"]}
-            if find_openers:
-                entry["pids"] = _openers(path)
+        counted = [b for b in alive if b["slot"] == i and b["state"] != "yielded"]
+        entry: dict = {"slot": i, "busy": bool(counted)}
+        if counted:
+            first = counted[-1]  # the newest: the one a waiter is behind
+            entry.update({k: first.get(k) for k in ("id", "phase", "argv", "cwd", "pid",
+                                                    "running_s", "pred_s", "seat")})
+            for key in ("quiet_s", "noyield", "busy_why"):
+                if key in first:
+                    entry[key] = first[key]
+            if first["state"] == "left":
+                entry["left"] = True
+        elif slot_busy(path, locked):
+            rec = buildsem.read_record(path)
+            entry["busy"] = True
+            if rec and not rec.get("ended") and rec.get("v") == 1 and "seat" not in rec:
+                start = rec.get("start_ts") or now
+                entry.update(id=rec.get("id"), phase=rec.get("phase"),
+                             argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
+                             pid=rec.get("pid") or rec.get("gate_pid"),
+                             running_s=now - start, pred_s=rec.get("pred_s"))
+            else:
+                entry["unknown"] = True
+                if rec and rec.get("ended"):
+                    entry["after"] = {"id": rec.get("id"), "phase": rec.get("phase"),
+                                      "argv": rec.get("argv", ""),
+                                      "ended_s": now - rec["ended"]}
+                if find_openers:
+                    entry["pids"] = _openers(path)
         out.append(entry)
     return out
 
@@ -103,7 +153,7 @@ def holders(cfg: Config, hist: buildlog.History, now: float,
 def _remaining(h: dict, hist: buildlog.History) -> float:
     if not h["busy"]:
         return 0.0
-    if h.get("unknown"):
+    if h.get("unknown") or h.get("left"):
         return hist.default / 2
     pred = h.get("pred_s") or hist.default
     left = pred - h["running_s"]
@@ -121,12 +171,12 @@ def etas(order: list[dict], slots: list[dict], hist: buildlog.History) -> dict[s
     return out
 
 
-def _holder_text(h: dict) -> str:
+def _holder_text(h: dict, yield_s: int = 0) -> str:
     if not h["busy"]:
         return f"slot {h['slot']}: free"
     if h.get("unknown"):
         after = h.get("after")
-        text = f"slot {h['slot']}: busy, no current record (an older swarm build, or a"
+        text = f"slot {h['slot']}: busy, no current record (gc, an older swarm build, or a"
         text += " process a build left behind"
         if after:
             text += f" — the last build here, {after.get('phase') or '-'}"
@@ -136,8 +186,23 @@ def _holder_text(h: dict) -> str:
             text += f"; held open by pid {', '.join(map(str, pids[:5]))}"
         return text + ")"
     usual = f" (usually ~{fmt_s(h['pred_s'])})" if h.get("pred_s") else ""
-    return (f"slot {h['slot']}: {h.get('phase') or '-'} `{short_cmd(h['argv'], 50)}`"
+    text = (f"slot {h['slot']}: {h.get('phase') or '-'} `{short_cmd(h['argv'], 50)}`"
             f" running {fmt_s(h['running_s'])}{usual}")
+    if h.get("left"):
+        text += ", ended, but a process it started still holds the slot"
+    if h.get("noyield"):
+        text += f", never yields ({h['noyield']})"
+    elif yield_s and (h.get("quiet_s") or 0) >= min(30.0, yield_s / 2):
+        text += f", idle {fmt_s(h['quiet_s'])} (yields its slot at {fmt_s(yield_s)})"
+    return text
+
+
+def _yielded_text(b: dict) -> str:
+    text = (f"yielded: {b.get('phase') or '-'} `{short_cmd(b['argv'], 50)}` yielded after"
+            f" {fmt_s(b.get('idle_s'))} idle, still running {fmt_s(b['running_s'])}")
+    if (b.get("sampled_s") or 0) > 6 * buildidle.SAMPLE_S:
+        text += f" (last measured {fmt_s(b['sampled_s'])} ago)"
+    return text
 
 
 def queue_line(cfg: Config, meta: dict, view: buildsem.View,
@@ -148,9 +213,12 @@ def queue_line(cfg: Config, meta: dict, view: buildsem.View,
     order = buildsem.service_order(view.tickets, view.counts, cfg.build_overtake,
                                    cfg.build_short_s)
     pos = next((n for n, t in enumerate(order, 1) if t["id"] == meta["id"]), len(order))
-    slots = holders(cfg, hist, now)
+    alive = builds(cfg, now)
+    slots = holders(cfg, hist, now, alive=alive)
     eta = etas(order, slots, hist).get(meta["id"])
-    held = "; ".join(_holder_text(h) for h in slots)
+    yield_s = cfg.build_idle_yield_s if buildidle.enabled(cfg) else 0
+    held = "; ".join([_holder_text(h, yield_s) for h in slots]
+                     + [_yielded_text(b) for b in alive if b["state"] == "yielded"])
     how = "" if meta.get("pred_s") else ", rough: no history for this command yet"
     usual = f" usually runs ~{fmt_s(meta['pred_s'])};" if meta.get("pred_s") else ""
     return (f"queued {fmt_s(now - meta['queued_ts'])} — #{pos} of {len(order)} for"
@@ -170,6 +238,11 @@ def recent(events: list[dict], n: int) -> list[dict]:
         kind = e.get("event")
         if kind in ("start", "bypass"):
             row.update(wait_s=e.get("wait_s"), start_ts=e.get("ts"))
+        if kind == "yield":
+            row["yielded_ts"] = e.get("ts")
+        elif kind in ("unyield", "end") and row.get("yielded_ts"):
+            row["yielded_s"] = (row.get("yielded_s") or 0.0) + max(
+                0.0, (e.get("ts") or 0.0) - row.pop("yielded_ts"))
         row.update(phase=e.get("phase"), cls=e.get("cls"), argv=e.get("argv", ""),
                    slot=e.get("slot") if e.get("slot") is not None else row.get("slot"))
         if kind == "end":
@@ -185,7 +258,8 @@ def snapshot(cfg: Config, n_recent: int = 10) -> dict:
     now = time.time()
     events = buildlog.read_events(cfg)
     hist = buildlog.History(cfg, events)
-    slots = holders(cfg, hist, now, find_openers=True)
+    alive = builds(cfg, now)
+    slots = holders(cfg, hist, now, find_openers=True, alive=alive)
     tickets = buildsem.live_tickets(cfg, prune=False)
     ids = {t["id"] for t in tickets}
     counts = {k: v for k, v in (buildsem._read_q(cfg).get("overtaken") or {}).items()
@@ -197,9 +271,14 @@ def snapshot(cfg: Config, n_recent: int = 10) -> dict:
               "pred_s": t.get("pred_s"), "passed": counts.get(t["id"], 0),
               "stale": not t.get("fresh", True), "starts_in_s": when.get(t["id"])}
              for t in order]
+    on = buildidle.enabled(cfg)
     return {"max_concurrent": cfg.build_max_concurrent, "overtake": cfg.build_overtake,
-            "short_s": cfg.build_short_s, "slots": slots, "queue": queue,
-            "recent": recent(events, n_recent)}
+            "short_s": cfg.build_short_s,
+            "idle_yield_s": cfg.build_idle_yield_s if on else 0,
+            "idle_yield_max": cfg.build_idle_yield_max if on else 0,
+            "slots": slots, "builds": alive,
+            "yielded": [b for b in alive if b["state"] == "yielded"],
+            "queue": queue, "recent": recent(events, n_recent)}
 
 
 def render(snap: dict) -> str:
@@ -207,15 +286,30 @@ def render(snap: dict) -> str:
     rule = ("plain FIFO" if not snap["overtake"] else
             f"a build that usually takes ≤{snap['short_s']}s may pass a long one,"
             f" each long one at most {snap['overtake']}×")
+    aside = snap.get("yielded") or []
     lines = [f"build gate: {snap['max_concurrent']} slot(s), {busy} busy,"
-             f" {len(snap['queue'])} waiting ({rule})"]
+             + (f" {len(aside)} yielded," if aside else "")
+             + f" {len(snap['queue'])} waiting ({rule})"]
     if not snap["max_concurrent"]:
         lines[0] = "build gate: off ([build].max_concurrent = 0)"
+    yield_s = snap.get("idle_yield_s") or 0
+    shown = set()
     for h in snap["slots"]:
-        text = _holder_text(h)
+        text = _holder_text(h, yield_s)
         if h.get("pid") and not h.get("unknown"):
             text += f" — pid {h['pid']}"
         lines.append("  " + text)
+        shown.add(h.get("id"))
+    for b in snap.get("builds") or []:
+        if b["state"] == "yielded":
+            lines.append(f"  {_yielded_text(b)} — pid {b['pid']} (does not count: the next"
+                         " build starts beside it; nothing was stopped)")
+        elif b.get("id") not in shown:  # a second build counting on one slot: one woke up
+            lines.append("  " + _holder_text(dict(b, busy=True), yield_s)
+                         + f" — pid {b['pid']} (was yielded, working again)")
+    if yield_s:
+        lines.append(f"  a holder idle for {fmt_s(yield_s)} yields its slot (at most"
+                     f" {snap.get('idle_yield_max')} at once); it keeps running")
     if snap["queue"]:
         lines.append("queue, in the order they would start:")
     for n, t in enumerate(snap["queue"], 1):
@@ -234,8 +328,9 @@ def render(snap: dict) -> str:
             continue
         code = "killed, unrecorded" if r.get("exit") is None else f"exit {r['exit']}"
         wait = f"queued {fmt_s(r['wait_s'])}, " if r.get("cls") == "heavy" else "light, "
-        lines.append(f"  {when} {r.get('phase') or '-'} {wait}ran {fmt_s(r.get('run_s'))},"
-                     f" {code} `{short_cmd(r['argv'], 50)}`")
+        aside = f" (yielded {fmt_s(r['yielded_s'])} of it)" if r.get("yielded_s") else ""
+        lines.append(f"  {when} {r.get('phase') or '-'} {wait}ran {fmt_s(r.get('run_s'))}"
+                     f"{aside}, {code} `{short_cmd(r['argv'], 50)}`")
     return "\n".join(lines)
 
 
@@ -245,13 +340,17 @@ def summary_line(cfg: Config) -> str | None:
         return None
     now = time.time()
     hist = buildlog.History(cfg, [])
-    slots = holders(cfg, hist, now)
+    alive = builds(cfg, now)
+    slots = holders(cfg, hist, now, alive=alive)
     tickets = buildsem.live_tickets(cfg, prune=False)
     busy = [h for h in slots if h["busy"]]
     who = ", ".join(
         f"{h.get('phase') or '-'} `{short_cmd(h.get('argv', ''), 30)}` {fmt_s(h['running_s'])}"
         if not h.get("unknown") else "unrecorded holder" for h in busy)
     line = f"build gate: {len(busy)}/{len(slots)} busy" + (f" ({who})" if who else "")
+    aside = [b for b in alive if b["state"] == "yielded"]
+    if aside:
+        line += f", {len(aside)} idle holder(s) yielded"
     if tickets:
         oldest = max(now - (t.get("queued_ts") or now) for t in tickets)
         line += f", {len(tickets)} waiting (longest {fmt_s(oldest)})"

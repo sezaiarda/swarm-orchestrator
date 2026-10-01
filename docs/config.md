@@ -191,11 +191,22 @@ check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
 | `light` | `[]` | `SWARM_BUILD_LIGHT` | hot | Command patterns that never queue (`"bun run lint*"`). Only for commands that do no compile, test, bundle or image work. |
 | `short_s` | `60` | `SWARM_BUILD_SHORT_S` | hot | A command whose last runs took at most this long (median, from the gate's log) counts as short and may go ahead of long ones. |
 | `overtake` | `2` | `SWARM_BUILD_OVERTAKE` | hot | How many short builds may go ahead of one long build that is waiting. `0` is plain first-come, first-served. |
+| `idle_yield_s` | `150` | `SWARM_BUILD_IDLE_YIELD_S` | hot | A build that holds a slot while its whole process tree does nothing (under 5% of a core and next to no disk IO) for this long is set aside: it keeps running, but stops counting against `max_concurrent`, so the next waiting build starts beside it. If it starts working again it counts again. Commands whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield. `0` turns this off. |
+| `idle_yield_max` | `2` | `SWARM_BUILD_IDLE_YIELD_MAX` | hot | The most idle holders set aside at once; a further idle holder keeps its slot and the queue waits, as it would with `idle_yield_s = 0`. The builds alive at one time never exceed `max_concurrent` plus this. `0` also turns idle yield off. |
 
 `jobs` and `max_concurrent` describe the machine the swarm runs on. Derive them
 from that host's cores and memory (roughly: one build's peak memory times
 `max_concurrent` must fit with room to spare, and `jobs` times `max_concurrent`
 should not exceed the cores); never copy them from another machine's file.
+
+`idle_yield_s` trades waiting for overlap. A set-aside build that wakes up runs
+beside whatever started in its place until one of them ends, so for that time
+more than `max_concurrent` builds work at once. Size memory for
+`max_concurrent + idle_yield_max` builds alive, or lower `idle_yield_max`. The
+default window is well above the pauses a working build has (between compile
+and test, behind a lock) and well below the holds worth freeing (a script
+waiting out a 20-minute timeout); a tool that sits silent for minutes before
+it starts real work will yield and then wake, which a longer window avoids.
 
 ## `[operator]`
 

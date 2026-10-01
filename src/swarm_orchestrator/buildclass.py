@@ -88,6 +88,15 @@ HEAVY_NAMES = frozenset("""
     eval
 """.split())
 
+# Programs that hand their work to a daemon or server: the client sits at 0% CPU
+# while another process tree, outside the build's own, compiles or runs.
+DAEMON_CLIENTS = frozenset("""
+    docker docker-compose docker-buildx buildctl buildah podman podman-compose nerdctl
+    kubectl kind minikube skaffold tilt
+    sccache bazel bazelisk buck buck2 pants gradle gradlew mvnd nix nix-build nix-shell
+    distcc icecc dmypy systemd-run
+""".split())
+
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 # Once any other step has run, a later path may have been created by it.
 _READONLY = frozenset({
@@ -953,4 +962,23 @@ def preflight(verdict: Verdict, path: str | None = None) -> str | None:
             return f"no {req.what} in {base} or above"
         elif req.kind == "script":
             return f"no script {first!r} in {req.what}, and no such file or program"
+    return None
+
+
+def daemon_side(verdict: Verdict) -> str | None:
+    """Why this command's work may run outside its own process tree, or ``None``.
+
+    ``docker build``, ``docker buildx bake`` and ``docker compose build`` work in
+    the docker daemon; ``sccache``, ``bazel``, ``gradle`` and ``nix`` in a server of
+    their own. Such a client at 0% CPU is waiting, not idle, so the gate never
+    takes it for an idle holder (:mod:`buildidle`). Read from the same steps the
+    classifier found, so every wrapper and script it looks through counts; a
+    step that only prints or inspects (``docker ps``, ``bake --print``) does not.
+    """
+    for step in verdict.steps:
+        if step.cls != HEAVY or not step.argv:
+            continue
+        name = os.path.basename(step.argv[0])
+        if name in DAEMON_CLIENTS:
+            return f"{name} hands its work to a daemon"
     return None

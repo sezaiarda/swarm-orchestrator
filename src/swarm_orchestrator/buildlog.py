@@ -3,12 +3,15 @@
 ``<state>/buildsem/events.jsonl`` is append-only, one JSON object per line, and
 is a contract other tools read. Every line has exactly these keys::
 
-    {"ts": <unix float>, "event": "queued"|"start"|"end"|"bypass"|"preflight_fail",
+    {"ts": <unix float>,
+     "event": "queued"|"start"|"end"|"bypass"|"preflight_fail"|"yield"|"unyield",
      "id": "<one per swarm build call>", "phase": <$SWARM_PHASE or null>,
      "pid": <int>, "slot": <int or null>, "cls": "heavy"|"light",
      "argv": "<command, at most 300 chars>", "cwd": "<path>",
-     "wait_s": <float on start, else null>, "run_s": <float on end, else null>,
-     "exit": <int or null on end, else null>}
+     "wait_s": <float on start, else null>,
+     "run_s": <float on end, yield and unyield, else null>,
+     "exit": <int or null on end, else null>,
+     "idle_s": <float on yield and unyield, else null>}
 
 - ``queued``: a heavy command joined the queue. ``pid`` is the waiting
   ``swarm build`` process (the build does not exist yet).
@@ -23,6 +26,14 @@ is a contract other tools read. Every line has exactly these keys::
   up to when that was noticed.
 - ``preflight_fail``: the command was refused before queueing (missing program,
   directory or file); nothing ran.
+- ``yield``: a running build was set aside as idle (:mod:`buildidle`): it keeps
+  running but no longer counts against ``max_concurrent``. Same ``id``, ``pid``
+  and ``slot`` as its ``start``; ``idle_s`` is how long its whole process tree
+  had been quiet, ``run_s`` how long it had run. Written by the waiter that
+  measured it.
+- ``unyield``: a set-aside build is working again and counts again; ``idle_s``
+  is how long it was set aside. A build that ends while set aside gets no
+  ``unyield``: its ``end`` closes the stretch.
 
 A ``queued`` with no ``start`` for the same ``id`` gave up (killed) while
 waiting. A ``start`` with no ``end`` whose ``pid`` is gone died unrecorded; the
@@ -66,7 +77,8 @@ def argv_text(argv: list[str] | str) -> str:
 def event(cfg: Config, kind: str, *, id: str, phase: str | None, pid: int,
           slot: int | None, cls: str, argv: list[str] | str, cwd: str,
           wait_s: float | None = None, run_s: float | None = None,
-          exit: int | None = None, ts: float | None = None) -> None:
+          exit: int | None = None, idle_s: float | None = None,
+          ts: float | None = None) -> None:
     """Append one event line. Never raises: the log must not break a build."""
     rec = {
         "ts": round(ts if ts is not None else time.time(), 3), "event": kind, "id": id,
@@ -75,6 +87,7 @@ def event(cfg: Config, kind: str, *, id: str, phase: str | None, pid: int,
         "wait_s": round(wait_s, 3) if wait_s is not None else None,
         "run_s": round(run_s, 3) if run_s is not None else None,
         "exit": exit,
+        "idle_s": round(idle_s, 3) if idle_s is not None else None,
     }
     line = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
     path = events_path(cfg)

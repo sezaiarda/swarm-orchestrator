@@ -6,12 +6,31 @@ core. On a memory-capped host that is how a box thrashes (or worse). ``swarm
 build <cmd...>`` lets at most ``[build].max_concurrent`` heavy builds run at
 once; the rest wait their turn.
 
-**Slots.** One ``flock`` per slot, ``<state>/buildsem/slotN``. The lock is taken
-on a file descriptor the build process *inherits*, so the build's whole process
-tree holds the slot: however the build ends -- exit, crash, SIGKILL -- the slot
-frees when the last process holding it is gone. No daemon, no counter to leak.
-An older ``swarm build`` (before the queue existed) takes these same slot locks,
-so old and new callers can never together exceed ``max_concurrent``.
+**Slots and seats.** A build holds two ``flock``s, both on file descriptors
+the build process *inherits*, so its whole process tree holds them: however the
+build ends -- exit, crash, SIGKILL -- they free when the last process holding
+them is gone. No daemon, no counter to leak.
+
+- A **seat**, ``<state>/buildsem/seatK``, exclusively: one per build alive.
+  There are ``max_concurrent + idle_yield_max`` of them, so the kernel itself
+  caps the builds the gate can have alive. The seat file holds the build's
+  record (id, phase, pid, command, start), which ``--status`` and the waiting
+  line show; whether the lock is held is whether the build is alive.
+- A **slot**, ``<state>/buildsem/slotN`` (``N < max_concurrent``), *shared*.
+  Anything that wants a slot to itself takes it exclusively and so waits for
+  every build on it: ``swarm gc`` (which takes every slot before it deletes
+  build output) and a ``swarm build`` from before seats existed. Old and new
+  callers together therefore still never exceed the cap, and gc never runs
+  while any build is alive, set aside or not.
+
+**Idle yield.** A holder whose whole process tree has done nothing for
+``[build].idle_yield_s`` is *set aside*: it is not stopped or signalled, it
+just stops counting against ``max_concurrent``, and the next waiter starts
+beside it on the same slot. If it wakes up it counts again from that moment
+(the build beside it keeps running; no new one starts while the builds that
+count fill the slots). At most ``[build].idle_yield_max`` holders are set aside
+at once. The waiters measure, and a set-aside holder's own ``swarm build``
+keeps watching it while nobody waits; see :mod:`buildidle`.
 
 **The queue.** Waiters take a ticket: ``<state>/buildsem/queue/<seq>-<id>.json``,
 numbered under ``queue.lock`` and flocked by its waiter for as long as it waits.
@@ -30,7 +49,8 @@ starves. ``overtake = 0`` is plain FIFO.
 
 **What it says.** On stderr: the queue position, who holds each slot and for how
 long, and an ETA from past run times, on joining and every 45 s; "queued Xs,
-starting" when it starts; "ran Ys, exit N" when done. Every call is logged to
+starting" when it starts (and beside which idle holder, if one made room);
+"ran Ys, exit N" when done. Every call is logged to
 ``events.jsonl`` (see :mod:`buildlog`), and ``swarm build --status`` shows the
 gate now.
 
@@ -59,7 +79,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from . import buildclass, buildlog, procs
+from . import buildclass, buildidle, buildlog, procs
 from .config import Config
 
 _POLL_S = 0.5  # a waiter whose turn it is not yet
@@ -67,7 +87,7 @@ _TURN_POLL_S = 0.1  # the waiter whose turn it is, watching for a free slot
 _REPORT_S = 45.0
 _STALE_S = 15.0  # a ticket not refreshed this long is passed over
 _KILL_GRACE_S = 10.0
-HELD_ENV = "SWARM_BUILD_HELD"  # "<slot>:<id>" inside a build that holds a slot
+HELD_ENV = "SWARM_BUILD_HELD"  # "<slot>:<id>:<seat>" inside a build that holds a slot
 
 
 def _say(msg: str) -> None:
@@ -78,13 +98,41 @@ def _slot_path(cfg: Config, i: int) -> Path:
     return cfg.buildsem_dir / f"slot{i}"
 
 
+def _seat_path(cfg: Config, k: int) -> Path:
+    return cfg.buildsem_dir / f"seat{k}"
+
+
 def _queue_dir(cfg: Config) -> Path:
     return cfg.buildsem_dir / "queue"
 
 
+def seats(cfg: Config) -> int:
+    """How many builds the gate may have alive at once: the slots, plus the idle
+    holders that may be set aside beside them."""
+    if cfg.build_max_concurrent < 1:
+        return 0
+    extra = cfg.build_idle_yield_max if buildidle.enabled(cfg) else 0
+    return cfg.build_max_concurrent + extra
+
+
+def _seat_indices(cfg: Config) -> list[int]:
+    """Every seat that may hold a build: this config's, and any other on disk
+    (a holder started under a larger ``max_concurrent`` still counts)."""
+    found = set(range(seats(cfg)))
+    try:
+        for p in cfg.buildsem_dir.iterdir():
+            if p.name.startswith("seat") and p.name[4:].isdigit():
+                found.add(int(p.name[4:]))
+    except OSError:
+        pass
+    return sorted(found)
+
+
 # -- slots ----------------------------------------------------------------
 def _try_slots(cfg: Config) -> tuple[int, int] | None:
-    """One non-blocking sweep for a free slot: ``(index, locked fd)`` or ``None``.
+    """One non-blocking sweep for a slot nobody is on, taken *exclusively*:
+    ``(index, locked fd)`` or ``None``. This is how a ``swarm build`` from before
+    seats took its slot; it fails while any build shares the slot.
     The fd stays open on purpose -- the flock lives on it."""
     cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
     for i in range(cfg.build_max_concurrent):
@@ -99,7 +147,7 @@ def _try_slots(cfg: Config) -> tuple[int, int] | None:
 
 
 def _try_once(cfg: Config) -> int | None:
-    """A free slot's held fd, or ``None`` (no queue: gc and tests)."""
+    """A whole slot's held fd, or ``None`` (no queue: an old caller, tests)."""
     got = _try_slots(cfg)
     return got[1] if got else None
 
@@ -127,14 +175,41 @@ def _write_record(fd: int, rec: dict) -> None:
         pass
 
 
-def _mark_ended(cfg: Config, i: int, rec: dict, ts: float) -> None:
+def _mark_ended(path: Path, rec: dict, ts: float) -> None:
     rec = dict(rec, ended=ts)
     try:
-        fd = os.open(_slot_path(cfg, i), os.O_RDWR)
+        fd = os.open(path, os.O_RDWR)
     except OSError:
         return
     try:
         _write_record(fd, rec)
+    finally:
+        os.close(fd)
+
+
+def _end_slot_copy(cfg: Config, rec: dict, ts: float) -> None:
+    """The slot file carries a copy of the record of the last build that started
+    on it (older readers look there). Mark it ended only while it is still this
+    build's: a build that started beside this one has since replaced it."""
+    slot = rec.get("slot")
+    if not isinstance(slot, int):
+        return
+    cur = read_record(_slot_path(cfg, slot))
+    if cur and cur.get("id") == rec.get("id") and not cur.get("ended"):
+        _mark_ended(_slot_path(cfg, slot), cur, ts)
+
+
+def _locked(path: Path) -> bool:
+    """Is an exclusive ``flock`` held on ``path`` (a momentary shared probe)?"""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
     finally:
         os.close(fd)
 
@@ -145,33 +220,73 @@ def _holder_alive(rec: dict) -> bool:
                 or (isinstance(gate, int) and procs.same(gate, rec.get("gate_start"))))
 
 
+def _synthetic_end(cfg: Config, rec: dict, slot: int | None, now: float) -> None:
+    start = rec.get("start_ts") or now
+    buildlog.event(cfg, "end", id=rec.get("id", "?"), phase=rec.get("phase"),
+                   pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=slot,
+                   cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
+                   run_s=now - start, exit=None, ts=now)
+
+
 def reap_records(cfg: Config, only: int | None = None, force: bool = False) -> None:
     """Write the ``end`` a dead holder never wrote (``exit`` null). Call under
-    ``queue.lock`` so two noticers cannot both write it."""
+    ``queue.lock`` so two noticers cannot both write it. A seat's holder is dead
+    when its lock is free or both its processes are gone; ``only``/``force`` name
+    a slot just found free, for a record a build from before seats left there."""
     now = time.time()
+    if only is None:
+        for k in _seat_indices(cfg):
+            path = _seat_path(cfg, k)
+            rec = read_record(path)
+            if not rec or rec.get("ended") or rec.get("v") != 1:
+                continue
+            if _locked(path) and _holder_alive(rec):
+                continue
+            slot = rec.get("slot") if isinstance(rec.get("slot"), int) else None
+            copy = read_record(_slot_path(cfg, slot)) if slot is not None else None
+            if not (copy and copy.get("id") == rec.get("id") and copy.get("ended")):
+                _synthetic_end(cfg, rec, slot, now)  # unless an older reaper already did
+            _mark_ended(path, rec, now)
+            _end_slot_copy(cfg, rec, now)
     idx = [only] if only is not None else range(cfg.build_max_concurrent)
     for i in idx:
         rec = read_record(_slot_path(cfg, i))
         if not rec or rec.get("ended") or rec.get("v") != 1:
             continue
+        if "seat" in rec:  # a copy: the seat pass above writes that build's end
+            if force:
+                _mark_ended(_slot_path(cfg, i), rec, now)
+            continue
         if not force and _holder_alive(rec):
             continue
-        start = rec.get("start_ts") or now
-        buildlog.event(cfg, "end", id=rec.get("id", "?"), phase=rec.get("phase"),
-                       pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=i,
-                       cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
-                       run_s=now - start, exit=None, ts=now)
-        _mark_ended(cfg, i, rec, now)
+        _synthetic_end(cfg, rec, i, now)
+        _mark_ended(_slot_path(cfg, i), rec, now)
 
 
 # -- the queue ------------------------------------------------------------
 @contextmanager
-def _qlock(cfg: Config) -> Iterator[None]:
+def _qlock(cfg: Config, wait_s: float | None = None) -> Iterator[bool]:
+    """Hold ``queue.lock`` for the block. A waiter blocks for it. A running
+    build's own ``swarm build`` must never hang behind it (a stopped process may
+    hold it): with ``wait_s`` it gives up after that long and yields ``False``."""
     cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
     fd = os.open(cfg.buildsem_dir / "queue.lock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        got = True
+        if wait_s is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + wait_s
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        got = False
+                        break
+                    time.sleep(0.02)
+        yield got
     finally:
         os.close(fd)
 
@@ -325,9 +440,120 @@ class View:
     my_turn: bool = False
 
 
+@dataclass
+class Claim:
+    """What a build holds once it starts: its seat (exclusive) and a slot (shared)."""
+
+    slot: int
+    slot_fd: int
+    seat: int
+    seat_fd: int
+    beside: list[dict] = field(default_factory=list)  # the idle holders that made room
+    alone: bool = True  # nobody else is on its slot
+
+    @property
+    def fds(self) -> tuple[int, int]:
+        return (self.slot_fd, self.seat_fd)
+
+    def close(self) -> None:
+        for fd in self.fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def live_holders(cfg: Config) -> list[dict]:
+    """The record of every build alive on a seat, with ``seat`` and
+    ``seat_path``. A seat whose lock is held but whose record is unreadable is a
+    holder all the same (``id`` missing). Probes with a momentary shared lock."""
+    out = []
+    for k in _seat_indices(cfg):
+        path = _seat_path(cfg, k)
+        if _locked(path):
+            out.append(dict(read_record(path) or {}, seat=k, seat_path=path))
+    return out
+
+
+def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False) -> dict:
+    """Measure the holders if due, and log who was set aside or woke up."""
+    st, changes = buildidle.update(cfg, holders, now, force=force)
+    for c in changes:
+        rec = c.rec
+        buildlog.event(cfg, c.kind, id=rec.get("id", "?"), phase=rec.get("phase"),
+                       pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=rec.get("slot"),
+                       cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
+                       run_s=now - (rec.get("start_ts") or now), idle_s=c.idle_s, ts=now)
+    return st
+
+
+def _free_seat(cfg: Config) -> tuple[int, int] | None:
+    """A seat nobody holds, locked: ``(index, fd)``; ``None`` when the builds
+    alive already number ``max_concurrent + idle_yield_max``."""
+    for k in range(seats(cfg)):
+        fd = os.open(_seat_path(cfg, k), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue
+        return k, fd
+    return None
+
+
+def _claim(cfg: Config) -> Claim | None:
+    """Take a seat and a slot if a build may start now. Under ``queue.lock``.
+
+    May start: fewer than ``max_concurrent`` builds *count* (alive and not set
+    aside, plus whoever holds a slot exclusively: gc, an older ``swarm build``),
+    a slot has no counted build on it, and a seat is free. A slot with nobody on
+    it is preferred to one whose holders are all set aside."""
+    now = time.time()
+    cap = cfg.build_max_concurrent
+    holders = live_holders(cfg)
+    st = _idle_pass(cfg, holders, now)
+    aside = buildidle.set_aside(cfg, st, holders, now)
+    if len(holders) - len(aside) >= cap:
+        return None
+    if aside and now - float(st.get("ts") or 0.0) > buildidle.fresh_s(cfg):
+        # About to start beside a holder taken for idle: look again, now.
+        st = _idle_pass(cfg, holders, now, force=True)
+        aside = buildidle.set_aside(cfg, st, holders, now)
+    ids = {h["id"] for h in aside}
+    counted = [h for h in holders if h.get("id") not in ids]
+    busy = {h.get("slot") for h in counted}
+    alive = {h.get("slot") for h in holders}
+    free: list[tuple[int, int]] = []
+    foreign = 0
+    for i in range(cap):
+        fd = os.open(_slot_path(cfg, i), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            foreign += 1
+            continue
+        if i in busy:
+            os.close(fd)
+        else:
+            free.append((i, fd))
+    free.sort(key=lambda g: (g[0] in alive, g[0]))
+    seat = _free_seat(cfg) if free and len(counted) + foreign < cap else None
+    if seat is None:
+        for _, fd in free:
+            os.close(fd)
+        return None
+    for _, fd in free[1:]:
+        os.close(fd)
+    relied = len(holders) + foreign >= cap  # only the set-aside ones made room
+    return Claim(free[0][0], free[0][1], seat[0], seat[1], aside if relied else [],
+                 alone=free[0][0] not in alive)
+
+
 def _try_turn(cfg: Config, t: Ticket, overtake: int,
-              short_s: int) -> tuple[tuple[int, int] | None, View]:
-    """If it is ``t``'s turn and a slot is free, take it (and leave the queue)."""
+              short_s: int) -> tuple[Claim | None, View]:
+    """If it is ``t``'s turn and a build may start, take a seat and a slot (and
+    leave the queue). Every waiter that polls also keeps the holders measured."""
     try:
         os.utime(t.fd)  # still here: keep the ticket fresh
     except OSError:
@@ -340,8 +566,10 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
         chosen = select(tickets, counts, overtake, short_s)
         view = View(tickets, counts, chosen is not None and chosen["id"] == t.meta["id"])
         if not view.my_turn:
+            if buildidle.enabled(cfg):
+                _idle_pass(cfg, live_holders(cfg), time.time())
             return None, view
-        got = _try_slots(cfg)
+        got = _claim(cfg)
         if got is None:
             return None, view
         for m in tickets:
@@ -349,25 +577,32 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
                 counts[m["id"]] = counts.get(m["id"], 0) + 1
         q["overtaken"] = counts
         _write_q(cfg, q)
-        reap_records(cfg, only=got[0], force=True)  # the slot was free: its old holder is gone
-        _write_record(got[1], _record(t.meta, None, None))
+        reap_records(cfg)  # this seat's last holder is gone: write the end it never did
+        if got.alone:  # and so is whoever left a record on this slot
+            reap_records(cfg, only=got.slot, force=True)
+        rec = _record(t.meta, None, None, got)
+        _write_record(got.seat_fd, rec)
+        _write_record(got.slot_fd, rec)
         _drop(t)
     return got, view
 
 
-def _record(meta: dict, pid: int | None, start_ts: float | None) -> dict:
+def _record(meta: dict, pid: int | None, start_ts: float | None,
+            claim: Claim | None = None) -> dict:
     return {
         "v": 1, "id": meta["id"], "phase": meta.get("phase"), "argv": meta.get("argv", ""),
         "cwd": meta.get("cwd", ""), "pred_s": meta.get("pred_s"),
         "queued_ts": meta.get("queued_ts"), "start_ts": start_ts or time.time(),
         "gate_pid": os.getpid(), "gate_start": procs.start_ticks(os.getpid()),
         "pid": pid, "pid_start": procs.start_ticks(pid) if pid else None, "ended": None,
+        "slot": claim.slot if claim else None, "seat": claim.seat if claim else None,
+        "noyield": meta.get("noyield"),
     }
 
 
 def _wait_turn(cfg: Config, t: Ticket, hist: buildlog.History | None,
-               announce: bool) -> tuple[int, int]:
-    """Poll until it is ``t``'s turn and a slot is free; report while waiting."""
+               announce: bool) -> Claim:
+    """Poll until it is ``t``'s turn and a build may start; report while waiting."""
     overtake, short_s = cfg.build_overtake, cfg.build_short_s
     next_report = 0.0
     while True:
@@ -442,7 +677,32 @@ def _signal_tree(members: list[tuple[int, int | None]], sig: int) -> None:
                 pass
 
 
-def _wait_child(proc: subprocess.Popen, timeout: float | None, start: float) -> int:
+def _own_yield_watch(cfg: Config, bid: str):
+    """What a holder's own ``swarm build`` does once a second while it waits for
+    its build: nothing, unless the build is set aside. Then it keeps the holders
+    measured at the usual rate when no waiter does, so a set-aside build that
+    wakes up is counted (and logged) when it happens, not when the next waiter
+    arrives. The waiters do not depend on it: a dead gate changes nothing."""
+    every = buildidle.sample_every(cfg)
+    due = [0.0]
+
+    def tick() -> None:
+        now = time.time()
+        if now < due[0]:
+            return
+        due[0] = now + every
+        entry = buildidle.load(cfg)["h"].get(bid)
+        if not entry or not entry.get("yielded"):
+            return
+        with _qlock(cfg, wait_s=0.0) as got:
+            if got:
+                _idle_pass(cfg, live_holders(cfg), time.time())
+
+    return tick if buildidle.enabled(cfg) else None
+
+
+def _wait_child(proc: subprocess.Popen, timeout: float | None, start: float,
+                tick=None) -> int:
     received: list[int] = []
 
     def forward(signum, _frame):
@@ -457,6 +717,11 @@ def _wait_child(proc: subprocess.Popen, timeout: float | None, start: float) -> 
                 break
             except subprocess.TimeoutExpired:
                 pass
+            if tick is not None:
+                try:
+                    tick()
+                except Exception:  # noqa: BLE001 -- measuring must never end a build
+                    tick = None
             if timeout is not None and time.time() - start >= timeout:
                 _say(f"--timeout {buildlog.fmt_s(timeout)} reached (counted from the start)"
                      " — stopping the build")
@@ -492,42 +757,62 @@ class _Call:
                        argv=self.argv, cwd=self.cwd, **kw)
 
 
-def _run_child(cfg: Config, call: _Call, *, held: tuple[int, int] | None,
+def _finish(cfg: Config, claim: Claim, rec: dict, now: float) -> None:
+    """The build is over: say so in its seat's record and the slot's copy. The
+    lock only keeps the copy from being rewritten under a build that is starting
+    on the same slot; without it the records are written all the same."""
+    with _qlock(cfg, wait_s=2.0):
+        _write_record(claim.seat_fd, dict(rec, ended=now))
+        _end_slot_copy(cfg, rec, now)
+
+
+def _beside_text(beside: list[dict]) -> str:
+    if not beside:
+        return ""
+    h = beside[0]
+    more = f" and {len(beside) - 1} more" if len(beside) > 1 else ""
+    return (f" — beside {h.get('phase') or '-'} `{buildlog.short_cmd(h.get('argv', ''), 40)}`"
+            f"{more}, idle {buildlog.fmt_s(h.get('idle_s'))}: its slot was yielded")
+
+
+def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
                meta: dict | None, wait_s: float, timeout: float | None) -> int:
     env = _build_env(cfg, call.argv)
-    slot = held[0] if held else None
+    slot = held.slot if held else None
     if held:
-        env[HELD_ENV] = f"{slot}:{call.id}"
+        env[HELD_ENV] = f"{slot}:{call.id}:{held.seat}"
     try:
-        proc = subprocess.Popen(call.argv, env=env, pass_fds=(held[1],) if held else (),
+        proc = subprocess.Popen(call.argv, env=env, pass_fds=held.fds if held else (),
                                 preexec_fn=_die_with_parent())
     except OSError as exc:
         _say(f"cannot run {call.argv[0]!r}: {exc}")
         now = time.time()
         if held:
-            _write_record(held[1], dict(_record(meta or {"id": call.id}, None, now), ended=now))
+            _finish(cfg, held, _record(meta or {"id": call.id}, None, now, held), now)
         call.log(cfg, "start" if held else "bypass", pid=os.getpid(), slot=slot,
                  wait_s=wait_s)
         call.log(cfg, "end", pid=os.getpid(), slot=slot, run_s=0.0, exit=127)
         if held:
-            os.close(held[1])
+            held.close()
         return 127
     start = time.time()
     rec = None
     if held:
-        rec = _record(meta or {"id": call.id}, proc.pid, start)
-        _write_record(held[1], rec)
+        rec = _record(meta or {"id": call.id}, proc.pid, start, held)
+        _write_record(held.seat_fd, rec)
+        _write_record(held.slot_fd, rec)
         waited = "no wait" if wait_s < 1 else f"queued {buildlog.fmt_s(wait_s)}"
-        _say(f"{waited}, starting on slot {slot}: {buildlog.short_cmd(call.text)}")
+        _say(f"{waited}, starting on slot {slot}: {buildlog.short_cmd(call.text)}"
+             f"{_beside_text(held.beside)}")
     call.log(cfg, "start" if held else "bypass", pid=proc.pid, slot=slot, wait_s=wait_s)
-    code = _wait_child(proc, timeout, start)
+    code = _wait_child(proc, timeout, start, _own_yield_watch(cfg, call.id) if held else None)
     now = time.time()
     if held:
-        _write_record(held[1], dict(rec, ended=now))
+        _finish(cfg, held, rec, now)
     call.log(cfg, "end", pid=proc.pid, slot=slot, run_s=now - start, exit=code, ts=now)
     if held:
         _say(f"ran {buildlog.fmt_s(now - start)}, exit {code} (queued {buildlog.fmt_s(wait_s)})")
-        os.close(held[1])  # the slot frees once the build's leftovers are gone too
+        held.close()  # the seat and slot free once the build's leftovers are gone too
     return code
 
 
@@ -537,11 +822,12 @@ def _phase(cfg: Config) -> str | None:
 
 def _inside_held(cfg: Config) -> bool:
     """Are we running inside a build that already holds a slot (nested call)?"""
-    held = os.environ.get(HELD_ENV, "")
-    slot, _, bid = held.partition(":")
+    slot, _, rest = os.environ.get(HELD_ENV, "").partition(":")
+    bid, _, seat = rest.partition(":")
     if not slot.isdigit() or not bid:
         return False
-    rec = read_record(_slot_path(cfg, int(slot)))
+    path = _seat_path(cfg, int(seat)) if seat.isdigit() else _slot_path(cfg, int(slot))
+    rec = read_record(path)
     return bool(rec and rec.get("id") == bid and not rec.get("ended"))
 
 
@@ -576,7 +862,8 @@ def run(cfg: Config, argv: list[str], timeout: float | None = None) -> int:
         hist = buildlog.History(cfg)
         queued = time.time()
         meta = {"id": call.id, "phase": call.phase, "pid": os.getpid(), "argv": call.text,
-                "cwd": cwd, "queued_ts": queued, "pred_s": hist.predict(argv, cwd)}
+                "cwd": cwd, "queued_ts": queued, "pred_s": hist.predict(argv, cwd),
+                "noyield": buildclass.daemon_side(verdict)}
         ticket = _enqueue(cfg, meta)
         call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued)
         held = _wait_turn(cfg, ticket, hist, announce=True)
@@ -598,7 +885,7 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
          phase: str | None = None) -> Iterator[Held]:
     """Hold one build slot for the body, in this process, queueing like any
     ``swarm build``: for a build the swarm runs itself and waits on (a landing's
-    lane check). The fd is not inherited, so a daemon the build leaves behind
+    lane check). The fds are not inherited, so a daemon the build leaves behind
     cannot keep the slot. Set ``.exit`` on the yielded object to log it."""
     held = Held()
     if cfg.build_max_concurrent < 1:
@@ -607,24 +894,31 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
     text = buildlog.argv_text(argv)
     hist = buildlog.History(cfg)
     queued = time.time()
+    try:
+        shell = ["sh", "-c", argv] if isinstance(argv, str) else list(argv)
+        noyield = buildclass.daemon_side(buildclass.classify(shell, str(cwd) or None))
+    except Exception:  # noqa: BLE001 -- a classifier bug must not stop a build
+        noyield = None
     meta = {"id": uuid.uuid4().hex[:12], "phase": phase, "pid": os.getpid(), "argv": text,
-            "cwd": str(cwd), "queued_ts": queued, "pred_s": hist.predict(text, str(cwd))}
+            "cwd": str(cwd), "queued_ts": queued, "pred_s": hist.predict(text, str(cwd)),
+            "noyield": noyield}
     call = _Call(meta["id"], phase, text, str(cwd), buildclass.HEAVY)
     ticket = _enqueue(cfg, meta)
     call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued)
-    i, fd = _wait_turn(cfg, ticket, hist, announce=False)
+    claim = _wait_turn(cfg, ticket, hist, announce=False)
     start = time.time()
-    rec = _record(ticket.meta, os.getpid(), start)
-    _write_record(fd, rec)
-    call.log(cfg, "start", pid=os.getpid(), slot=i, wait_s=start - queued)
+    rec = _record(ticket.meta, os.getpid(), start, claim)
+    _write_record(claim.seat_fd, rec)
+    _write_record(claim.slot_fd, rec)
+    call.log(cfg, "start", pid=os.getpid(), slot=claim.slot, wait_s=start - queued)
     try:
         yield held
     finally:
         now = time.time()
-        _write_record(fd, dict(rec, ended=now))
-        call.log(cfg, "end", pid=os.getpid(), slot=i, run_s=now - start, exit=held.exit,
-                 ts=now)
-        os.close(fd)
+        _finish(cfg, claim, rec, now)
+        call.log(cfg, "end", pid=os.getpid(), slot=claim.slot, run_s=now - start,
+                 exit=held.exit, ts=now)
+        claim.close()
 
 
 def _exec(cfg: Config, argv: list[str]) -> int:

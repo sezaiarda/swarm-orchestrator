@@ -9,6 +9,15 @@ dependency and a board is not a reason to grow one. The endpoints, all GET:
 ``/api/search?q=``    ids of rows whose full ledger text matches (the phone holds titles only)
 ``/api/graph``        the phase graph, laid out: ``?mode=open|all&book=<name>`` (gzip + ETag)
 ``/api/usage``        both usage windows over time, their caps, projection and runs (gzip + ETag)
+``/api/resources``    the host, the builds running and the build queue, now (gzip + ETag)
+``/api/resources/history?window=1h|6h|24h|7d|30d``
+                      one window of host history in a few hundred min/avg/max
+                      buckets, with the builds that ran in it (gzip + ETag)
+``/api/resources/builds?window=&sort=&dir=asc|desc&phase=&limit=``
+                      the finished builds, filtered and sorted here (gzip + ETag)
+``/api/resources/capacity``
+                      what ``swarm resources`` works out: would more builds or
+                      workers fit (gzip + ETag)
 ``/events``           Server-Sent Events: the board's version whenever it moves,
                       and a comment every :data:`HEARTBEAT_S` so a phone's
                       connection (and any proxy on the way) stays open
@@ -41,6 +50,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import graph as graph_mod
 from . import lifecycle
+from . import reshist, resview
 from .feed import Feed
 
 PAGE = Path(__file__).resolve().parent / "static" / "index.html"
@@ -146,6 +156,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._cached(*self.server.feed.graph(mode, book))
             elif path == "/api/usage":
                 self._cached(*self.server.feed.usage())
+            elif path == "/api/resources":
+                self._cached(*self.server.feed.resources.now(self.server.feed.cfg))
+            elif path.startswith("/api/resources/"):
+                self._resources(path[len("/api/resources/"):],
+                                parse_qs(urlsplit(self.path).query))
             elif path == "/events":
                 self._events()
             elif path == "/healthz":
@@ -166,6 +181,35 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         self._send(200, body, "application/json; charset=utf-8", {"ETag": etag}, gz=gz)
+
+    def _resources(self, what: str, qs: dict) -> None:
+        """The Resources tab's other views; anything off their menus is a 400."""
+        feed = self.server.feed
+
+        def arg(name: str, default: str) -> str:
+            return qs.get(name, [default])[0][:80]
+
+        if what == "capacity":
+            self._cached(*feed.resources.capacity(feed.cfg))
+        elif what == "history":
+            window = arg("window", reshist.DEFAULT_WINDOW)
+            if window not in reshist.WINDOWS:
+                self._json(400, {"error": "bad window"})
+                return
+            self._cached(*feed.resources.window(feed.cfg, window))
+        elif what == "builds":
+            window, sort = arg("window", resview.ALL), arg("sort", "ended")
+            order, phase, limit = arg("dir", "desc"), arg("phase", ""), arg("limit", "")
+            if (window not in resview.TABLE_WINDOWS or sort not in resview.SORTS
+                    or order not in ("asc", "desc") or not resview.PHASE_RE.match(phase)
+                    or (limit and not limit.isdigit())):
+                self._json(400, {"error": "bad view"})
+                return
+            count = min(max(int(limit), 1), resview.MAX_LIMIT) if limit else resview.LIMIT
+            self._cached(*feed.resources.table(feed.cfg, window=window, sort=sort,
+                                               desc=order == "desc", phase=phase, limit=count))
+        else:
+            self._json(404, {"error": "not found"})
 
     def _phase(self, pid: str) -> None:
         if not _ID_RE.match(pid) or ".." in pid:

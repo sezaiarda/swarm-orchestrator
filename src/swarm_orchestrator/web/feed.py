@@ -39,7 +39,7 @@ from .. import recap as recap_mod
 from ..tui.dash import Dash
 from ..tui.data import read_state
 from . import board as board_mod
-from . import campaigns, detail, graph as graph_mod, rows as rows_mod, usagechart
+from . import campaigns, detail, graph as graph_mod, resview, rows as rows_mod, usagechart
 from .redact import deep
 
 #: Seconds between polls of the run's files when the board owns its dash
@@ -92,6 +92,9 @@ class Feed:
         self._views: dict[tuple, tuple] = {}
         self._views_lock = threading.Lock()
         self.layouts = graph_mod.Layouts()
+        #: The Resources tab's views; they read the sampler's files, not the dash,
+        #: and only when a client asks.
+        self.resources = resview.Resources(cfg.state_dir)
 
     # -- change detection ---------------------------------------------------
     def _moved(self, key: str, path: Path) -> bool:

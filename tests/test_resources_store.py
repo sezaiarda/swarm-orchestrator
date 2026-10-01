@@ -153,6 +153,15 @@ def test_thin_data_is_said_plainly():
     assert any("h of worker samples" in n for n in out["notes"])
 
 
+def test_the_pairing_mode_is_noted_beside_the_two_builds_scenario():
+    rows = [build_row(3000, 4.0) for _ in range(6)]
+    plain = capacity.analyse(rows, worker_rows(2), HOST, 2, 6, 4)
+    assert plain["config"]["pair"] == "any" and not any("pair" in n for n in plain["notes"])
+    out = capacity.analyse(rows, worker_rows(2), HOST, 2, 6, 4, "distinct-repo")
+    assert out["config"]["pair"] == "distinct-repo"
+    assert any("[build].pair = distinct-repo" in n and "runs alone" in n for n in out["notes"])
+
+
 def test_pressure_during_builds_is_called_out():
     rows = [build_row(3000, 4.0, psi_max={"memf": 12.0, "iof": 40.0}) for _ in range(6)]
     notes = capacity.analyse(rows, worker_rows(2), HOST, 1, 6, 4)["notes"]

@@ -28,6 +28,7 @@ import time
 
 from . import keep as keep_mod
 from . import procs
+from . import restart as restart_mod
 from . import state as state_mod
 from . import tmux
 from .config import Config
@@ -104,16 +105,7 @@ def setup(cfg: Config) -> dict[str, str]:
         base += size
 
     if cfg.tui_autostart:
-        # cd first: tmux.new_session takes no -c, so window 0 inherits whatever
-        # cwd `swarm up` ran from. The dashboard resolves its project from cwd,
-        # so under `swarm up --project-dir /elsewhere` it would read the wrong
-        # .swarm.toml and the wrong ledger -- SWARM_STATE_DIR pins the state dir
-        # but says nothing about which project it belongs to.
-        tmux.respawn_pane(
-            dash_pane,
-            f"cd {shlex.quote(str(cfg.project_dir))} && exec {cfg.tui_cmd}",
-            env={"SWARM_STATE_DIR": str(cfg.state_dir)},
-        )
+        start_dashboard(cfg, dash_pane)
 
     with state_mod.transaction(cfg) as st:
         st.windows = windows
@@ -128,6 +120,22 @@ def setup(cfg: Config) -> dict[str, str]:
 
         console_mod.start_keeper(cfg, tmux.list_panes(console_win)[0])
     return windows
+
+
+def start_dashboard(cfg: Config, dash_pane: str) -> None:
+    """Run the dashboard in ``dash_pane``, replacing whatever runs there:
+    ``swarm up`` starts it, ``swarm restart`` starts it again on the new code.
+
+    cd first: tmux.new_session takes no -c, so window 0 inherits whatever cwd
+    `swarm up` ran from. The dashboard resolves its project from cwd, so under
+    `swarm up --project-dir /elsewhere` it would read the wrong .swarm.toml and
+    the wrong ledger -- SWARM_STATE_DIR pins the state dir but says nothing
+    about which project it belongs to."""
+    tmux.respawn_pane(
+        dash_pane,
+        f"cd {shlex.quote(str(cfg.project_dir))} && exec {cfg.tui_cmd}",
+        env={"SWARM_STATE_DIR": str(cfg.state_dir)},
+    )
 
 
 def _worker_window_index(name: str) -> int:
@@ -264,13 +272,19 @@ def session_processes(
 
     Never: this process or its ancestors (a ``down`` typed from inside the session
     must not signal its own shell first), nor anything ``swarm keep`` holds, nor
-    what that started — the one sanctioned way to outlive a session.
+    what that started — the one sanctioned way to outlive a session — nor a
+    session a restart is carrying across (:func:`restart.carry_out`), which
+    waits on the owner and must come out the other side alive.
     """
     table = procs.table()
     found = {p for p in roots if p in table} | _marked(cfg, table, markers)
     found = _descendants(table, found)
     kept = _descendants(table, keep_mod.live_pids(cfg) & set(table))
     found -= kept
+    carried = restart_mod.kept_markers(cfg)
+    if carried:
+        found -= _descendants(
+            table, _marked(cfg, table, carried) | (restart_mod.kept_roots(cfg) & set(table)))
     pid = os.getpid()
     while pid > 1:
         found.discard(pid)

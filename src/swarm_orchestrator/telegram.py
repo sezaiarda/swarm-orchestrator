@@ -54,6 +54,7 @@ KINDS = (
     "blocked",  # supervisor: blocked phases of one burst, one ping grouped by reason
     "drain",  # supervisor: `swarm down --drain` finished waiting and is stopping the swarm
     "idle-build",  # resources.sampler: a build holds a slot with its tree idle
+    "restart",  # restart: a `swarm restart` did not happen, or did not come back up
     "other",  # unclassified (the default)
 )
 

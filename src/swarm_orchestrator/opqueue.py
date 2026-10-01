@@ -718,6 +718,22 @@ def set_triage(
     return item
 
 
+def restore(cfg: Config, data: dict) -> Item | None:
+    """Put back the item of a job whose session a restart carried across alive.
+
+    ``swarm up`` has just re-queued it as a job whose session died with the run
+    (:func:`reconcile`); this one's did not, so it is ``waiting`` again, under
+    the new run, with the lease it held."""
+    try:
+        item = Item.from_dict(data)
+    except (TypeError, ValueError):
+        return None
+    item.run_id = run_id(cfg)
+    with _locked(cfg):
+        _write(cfg, item)
+    return item
+
+
 # -- recovery -------------------------------------------------------------
 def reconcile(cfg: Config, log=None) -> list[str]:
     """Rebuild the queue from what is durable. Returns what changed, for a log.

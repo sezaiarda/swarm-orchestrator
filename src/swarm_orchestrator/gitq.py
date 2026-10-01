@@ -1308,9 +1308,11 @@ def reconcile(
     and ``discard``s the completed work outright. Surfacing the hold is what lets
     the caller block/park/notify instead of silently destroying it.
 
-    ``operator`` (``{mirror: "keep" | "integrate"}``, from
+    ``operator`` (``{mirror: "keep" | "integrate" | "live"}``, from
     :func:`operator.mirror_plan`) covers the one kind of ``swarm/*`` branch that
-    has no sentinel by design: an operator job's mirror. Without it every such
+    has no sentinel by design: an operator job's mirror. ``"live"`` is any mirror
+    whose session is still running (a restart carried it across): left exactly
+    as it is. Without it every such
     mirror reads as an interrupted phase and is discarded — commits and all. A
     live job's mirror is kept for its next attempt; a finished job's is landed.
     """
@@ -1323,7 +1325,10 @@ def reconcile(
     pushes: dict[str, dict[Path, PushResult]] = {}
     for phase in sorted(_all_swarm_phases(cfg)):
         job = operator.get(phase)
-        if job == "keep" and _mirror_empty(cfg, phase):
+        if job == "live":
+            # A session a restart carried across is working in it right now.
+            log.line(f"RECONCILE-LIVE {phase} its session came through the restart")
+        elif job == "keep" and _mirror_empty(cfg, phase):
             # Kept so a retry finds the commits an attempt already made; with
             # none, keeping it only hands the next attempt a stale base.
             discard(cfg, phase, log)

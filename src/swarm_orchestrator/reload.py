@@ -57,9 +57,11 @@ so those fields are reported explicitly as :data:`ENV` naming the variable.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import time
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from .config import HOT, NEXT, RESTART, SETTINGS, Config, Setting
@@ -433,6 +435,43 @@ def plan(old_cfg: Config, new_cfg: Config, facts: Facts) -> ReloadPlan:
     """:func:`diff` plus :func:`hold_over` — the whole verdict in one object."""
     changes = diff(old_cfg, new_cfg, facts)
     return ReloadPlan(changes=changes, cfg=hold_over(new_cfg, changes), facts=facts)
+
+
+def snapshot_cfg(cfg: Config) -> Config | None:
+    """The config the running supervisor is actually using, or None.
+
+    Written by the supervisor at startup and after every reload. It matters
+    because ``load()`` layers SWARM_* env overrides from *that* process's
+    environment: a CLI re-reading the file would compute the wrong "before" for
+    every overridden field, and once the file has been edited it cannot see the
+    old values at all. A supervisor that takes a run over (``swarm restart``)
+    reads it for the same reason: what the last one ran on is its "before".
+    """
+    path = cfg.state_dir / "config.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    kwargs = {}
+    for f in dataclasses.fields(Config):
+        if not f.init:
+            continue
+        name = f.name
+        if name not in raw:
+            # A setting added after this supervisor started: it runs on the
+            # default, so that is its "before".
+            setting = SETTINGS.get(name)
+            if setting is None:
+                return None
+            d = setting.default
+            kwargs[name] = d(cfg.project_dir) if callable(d) else d
+            continue
+        val = raw[name]
+        kwargs[name] = Path(val) if name in ("project_dir",) and isinstance(val, str) else val
+    try:
+        return Config(**kwargs)
+    except (TypeError, ValueError):
+        return None
 
 
 # -- rendering ------------------------------------------------------------

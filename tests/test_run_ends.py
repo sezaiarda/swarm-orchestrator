@@ -104,7 +104,7 @@ def test_init_state_without_a_log_writes_nothing(cfg):
 def test_swarm_up_passes_its_log_to_init_state():
     import inspect
 
-    assert "init_state(cfg, log=log)" in inspect.getsource(cli.cmd_up)
+    assert "init_state(cfg, log=log" in inspect.getsource(cli.cmd_up)
 
 
 class _R:

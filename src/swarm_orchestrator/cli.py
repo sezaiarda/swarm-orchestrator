@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from pathlib import Path
 
 from . import caps
@@ -41,6 +41,7 @@ from . import procs
 from . import pushowed
 from . import recap as recap_mod
 from . import reload as reload_mod
+from . import restart as restart_mod
 from . import report as report_mod
 from . import why as why_mod
 from . import gitq
@@ -59,7 +60,7 @@ from . import todo as todo_mod
 from . import usage as usage_mod
 from .resources import view as resources_view
 from .web import lifecycle as web_lifecycle
-from .config import SETTINGS, Config, load, session_project
+from .config import Config, load, session_project
 from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
@@ -207,8 +208,10 @@ def _reconcile_orphans(cfg: Config) -> None:
 
 def _mirror_plan(cfg: Config) -> dict[str, str]:
     """Every ``swarm/*`` branch that has no sentinel by design and must not be
-    discarded as an interrupted phase: operator jobs' and Overseer passes'."""
-    return {**operator_mod.mirror_plan(cfg), **ovrecord.mirror_plan(cfg)}
+    discarded as an interrupted phase: operator jobs' and Overseer passes', and
+    the mirror of any session a restart carried across alive (left as it is)."""
+    return {**operator_mod.mirror_plan(cfg), **ovrecord.mirror_plan(cfg),
+            **{name: "live" for name in restart_mod.kept_mirrors(cfg)}}
 
 
 def _attach(cfg: Config) -> None:
@@ -299,9 +302,14 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
             file=sys.stderr,
         )
         return 1
+    # A restart planned before this `up` is moot: the code on disk loads now.
+    planned = restart_mod.load(cfg)
+    if planned.get("stage") == restart_mod.PLANNED:
+        restart_mod.update(cfg, planned["id"], stage=restart_mod.CANCELLED,
+                           detail="a `swarm up` came first", ended_at=time.time())
     log = Log(cfg.supervisor_log)
     try:
-        state_mod.init_state(cfg, log=log)
+        state_mod.init_state(cfg, log=log, carried=restart_mod.kept_phases(cfg))
         _start_run(cfg, "up")
         # Every up, whatever the isolation: it is what re-queues a hand-off whose
         # sentinel outlived its item — and the swarm also runs with isolation "none".
@@ -316,6 +324,15 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         os.mkfifo(cfg.fifo_path)
     if cfg.driver == "tmux":
         session_mod.setup(cfg)
+    # Sessions a full restart carried across, still waiting on the owner: back
+    # into the run before the supervisor starts, so nothing launches over them.
+    log = Log(cfg.supervisor_log)
+    try:
+        carried = restart_mod.carry_in(cfg, log)
+    finally:
+        log.close()
+    if carried:
+        print(f"kept across the restart, still waiting on you: {', '.join(carried)}")
     proc = subprocess.Popen(
         [sys.executable, "-m", "swarm_orchestrator", "_supervise"],
         cwd=str(cfg.project_dir),
@@ -371,8 +388,8 @@ def cmd_telegram_bot(cfg: Config, pidfile: str | None) -> int:
     return tgbot.serve(cfg, pidfile)
 
 
-def cmd_supervise(cfg: Config) -> int:
-    sup_mod.main(cfg)
+def cmd_supervise(cfg: Config, adopt: bool = False) -> int:
+    sup_mod.main(cfg, adopt=adopt)
     return 0
 
 
@@ -380,14 +397,17 @@ def _our_supervisor(cfg: Config, pid: int) -> bool:
     """Whether ``pid`` is this project's supervisor and not a process that has
     since been given the same number. The pid recorded in state outlives the
     supervisor, and ``down`` escalates to SIGKILL."""
-    args = procs.cmdline(pid)
-    if "_supervise" not in args or not any("swarm" in a for a in args):
-        return False
-    return procs.cwd(pid) == cfg.project_dir.resolve()
+    return restart_mod.is_supervisor(cfg, pid)
 
 
 def cmd_down(cfg: Config) -> int:
     st = state_mod.read(cfg)
+    # A restart that has not begun its own down is over: the swarm is stopping.
+    plan = restart_mod.load(cfg)
+    if restart_mod.active(plan) and not (
+            plan.get("mode") == restart_mod.FULL and plan.get("stage") == restart_mod.RESTARTING):
+        restart_mod.update(cfg, plan["id"], stage=restart_mod.CANCELLED,
+                           detail="a `swarm down` came first", ended_at=time.time())
     _poke(cfg, "shutdown")
     pid = st.supervisor_pid
     if pid and procs.alive(pid) and not _our_supervisor(cfg, pid):
@@ -500,6 +520,16 @@ def cmd_drain(cfg: Config, then: str) -> int:
     tail = f", then run: {then}" if then else ""
     print(f"swarm draining — nothing new launches; it stops once the running work is finished{tail}")
     print("  `swarm status` says what it waits for; `swarm down --cancel` or `swarm resume` cancels")
+    asked = restart_mod.questions(cfg, state_mod.read(cfg))
+    if asked:
+        print(f"NOTE: the stop does not wait for the {len(asked)} session(s) waiting on you,"
+              " and it closes them: their work is kept, what they asked is not.",
+              file=sys.stderr)
+        for line in restart_mod.question_lines(asked):
+            print(line, file=sys.stderr)
+        print("  to restart without losing them: `swarm down --cancel`, then `swarm restart`"
+              " (nothing is stopped) or `swarm restart --full --keep-questions`",
+              file=sys.stderr)
     return 0
 
 
@@ -515,16 +545,207 @@ def cmd_drain_cancel(cfg: Config) -> int:
     if had.get("stopping_at"):
         print("too late: the drain finished and the swarm is already stopping", file=sys.stderr)
         return 1
+    _drop_draining_restart(cfg, had, "down --cancel")
     _poke(cfg, "drain")
     print("drain cancelled — " + ("the swarm is still paused" if paused else "launching resumes"))
     return 0
 
 
+def _drop_draining_restart(cfg: Config, drain: dict, by: str) -> None:
+    """A drain that was a full restart's has been cancelled: so is the restart."""
+    plan_id = drain.get("restart")
+    if plan_id and restart_mod.update(cfg, plan_id, stage=restart_mod.CANCELLED,
+                                      ended_at=time.time()) is not None:
+        _log_pause_schedule(cfg, f"RESTART-CANCELLED id={plan_id} by={by}")
+
+
 def cmd_drain_down(cfg: Config) -> int:
-    """The drain's last step, started detached by the supervisor: down, then the after-command."""
-    then = state_mod.read(cfg).drain.get("then") or ""
-    print(f"== {time.strftime('%Y-%m-%d %H:%M:%S')} drain finished: stopping the swarm")
-    return _down_then(cfg, then)
+    """The drain's last step, started detached by the supervisor: down, then the
+    after-command — or, for a full restart's drain, down and up again."""
+    drain = state_mod.read(cfg).drain
+    stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    if drain.get("restart"):
+        print(f"== {stamp} drain finished: restarting the swarm")
+        return restart_mod.finish_full(
+            cfg, drain["restart"], down=cmd_down, up=lambda c: cmd_up(c, attach=False))
+    print(f"== {stamp} drain finished: stopping the swarm")
+    return _down_then(cfg, drain.get("then") or "")
+
+
+# -- restart ---------------------------------------------------------------
+#: How long `swarm restart` follows a restart it started before it says it is
+#: still going and returns; the restart itself carries on, detached.
+RESTART_FOLLOW_S = 1200.0
+
+
+def _stale_restart(plan: dict) -> bool:
+    """An in-place restart whose helper is gone without settling the plan."""
+    if plan.get("stage") not in (restart_mod.STOPPING, restart_mod.RESTARTING):
+        return False
+    if plan.get("mode") != restart_mod.SUPERVISOR:
+        return False
+    pid = plan.get("runner_pid")
+    return not (pid and procs.alive(int(pid)))
+
+
+def cmd_restart(cfg: Config, delay: str | None = None, at: str | None = None,
+                cancel: bool = False, full: bool = False, policy: str | None = None,
+                follow: bool = True) -> int:
+    """Restart the supervisor in place (the default), or the whole swarm
+    (``--full``), now or later. Never drops a session that waits on the owner
+    unless told to. There is only ever one planned: a new one replaces it."""
+    if cancel:
+        return cmd_restart_cancel(cfg)
+    now = time.time()
+    try:
+        when = now + pauseat.parse_in(delay) if delay else pauseat.next_at(at, now) if at else now
+    except ValueError as exc:
+        print("swarm restart: " + str(exc).replace(
+            "for a pause now, run `swarm pause`", "for a restart now, run `swarm restart`"),
+            file=sys.stderr)
+        return 2
+    if policy and not full:
+        print("swarm restart: --wait-questions, --keep-questions and --force are for --full;"
+              " a plain restart replaces only the supervisor and never touches a session"
+              " that waits on you", file=sys.stderr)
+        return 2
+    scheduled = bool(delay or at)
+    mode = restart_mod.FULL if full else restart_mod.SUPERVISOR
+    policy = policy or restart_mod.REFUSE
+    st = state_mod.read(cfg)
+    prior = restart_mod.load(cfg)
+    if restart_mod.active(prior) and prior.get("stage") != restart_mod.PLANNED \
+            and not _stale_restart(prior):
+        print(f"a restart is already under way (asked by {prior.get('by')}): "
+              f"{restart_mod.line(prior, *restart_mod.counts(st), now)}", file=sys.stderr)
+        print("  `swarm restart --cancel` stops it where it can still be stopped",
+              file=sys.stderr)
+        return 1
+    asked = restart_mod.questions(cfg, st)
+    if full and asked and policy == restart_mod.REFUSE:
+        print(f"swarm restart --full: refused — {len(asked)} session(s) are waiting on you,"
+              " and a full restart closes them:", file=sys.stderr)
+        for line in restart_mod.question_lines(asked):
+            print(line, file=sys.stderr)
+        print("  nothing was changed. To go ahead:\n"
+              "    swarm restart                         replace only the supervisor: nothing"
+              " is closed (enough to load new code)\n"
+              "    swarm restart --full --wait-questions  drain, and wait until you have"
+              " answered them\n"
+              "    swarm restart --full --keep-questions  carry them across the restart,"
+              " alive and still asking\n"
+              "    swarm restart --full --force           close them (their work is kept,"
+              " the question is not)", file=sys.stderr)
+        return 1
+    running = _supervisor_running(cfg)
+    if scheduled and not running:
+        print("no supervisor is running, so there is nothing to restart later: `swarm"
+              " restart` picks a stopped swarm up now, `swarm up` starts one", file=sys.stderr)
+        return 1
+    plan = restart_mod.new_plan(cfg, mode, when, restart_mod.requester(cfg),
+                                questions=policy, now=now)
+    sup = restart_mod.live_supervisor(cfg, st)
+    by_supervisor = scheduled and restart_mod.capable(cfg, sup, "restart-at")
+    plan["timer"] = "supervisor" if by_supervisor else "runner"
+    restart_mod.save(cfg, plan)
+    replaced = (f" replaces={prior.get('id')}"
+                if prior.get("stage") == restart_mod.PLANNED else "")
+    _log_pause_schedule(
+        cfg, f"RESTART-PLANNED id={plan['id']} mode={mode} at={pauseat.stamp(when)}"
+             f" in={when - now:.0f}s by={plan['by']!r} questions={policy}{replaced}")
+    if by_supervisor:
+        _poke(cfg, "restart-scheduled")
+    else:
+        proc = restart_mod.spawn_runner(cfg, plan["id"], at=when if scheduled else None)
+        if proc is None:
+            restart_mod.update(cfg, plan["id"], stage=restart_mod.FAILED,
+                               detail="the restart helper could not be started",
+                               ended_at=time.time())
+            print("swarm restart: could not start the restart helper", file=sys.stderr)
+            return 1
+        restart_mod.update(cfg, plan["id"], runner_pid=proc.pid)
+    if scheduled:
+        print(restart_mod.line(plan, *restart_mod.counts(st), now))
+        if replaced:
+            print(f"  this replaces the restart that was planned for"
+                  f" {pauseat.when(float(prior.get('at') or now), now)}")
+        return 0
+    what = ("full restart: draining, then down and up" if full
+            else "restarting the supervisor in place — workers, parked sessions, the operator"
+                 " and your console are not touched")
+    print(f"{what} (asked by {plan['by']})")
+    if not follow:
+        print("  started, detached; `swarm status` says how it goes")
+        return 0
+    return _follow_restart(cfg, plan["id"], full)
+
+
+def _follow_restart(cfg: Config, plan_id: str, full: bool) -> int:
+    """Say how a restart this command started goes, until it is settled (a full
+    one: until its drain is under way, which can take hours)."""
+    deadline = time.monotonic() + RESTART_FOLLOW_S
+    said: list[str] = []
+    while True:
+        plan = restart_mod.load(cfg)
+        stage = plan.get("stage") if plan.get("id") == plan_id else restart_mod.CANCELLED
+        if stage == restart_mod.DONE:
+            print(f"restarted: {plan.get('detail')}")
+            return 0
+        if stage == restart_mod.FAILED:
+            print(f"restart FAILED: {plan.get('detail')}", file=sys.stderr)
+            return 1
+        if stage == restart_mod.CANCELLED:
+            print("restart cancelled")
+            return 1
+        if stage == restart_mod.DRAINING and full:
+            print("  draining now: it restarts once the running work is finished"
+                  " (`swarm status` says what it waits for; `swarm restart --cancel` stops it)")
+            return 0
+        waits = list(plan.get("waiting") or [])
+        if waits and waits != said:
+            said = waits
+            print(f"  waiting for a safe moment: {', '.join(waits)}")
+        if time.monotonic() >= deadline:
+            print("  still going; it carries on, detached — `swarm status` says how it goes")
+            return 0
+        time.sleep(0.2)
+
+
+def cmd_restart_cancel(cfg: Config) -> int:
+    plan = restart_mod.load(cfg)
+    if not restart_mod.active(plan):
+        print("no restart to cancel")
+        return 0
+    stage, plan_id = plan.get("stage"), plan["id"]
+    by = restart_mod.requester(cfg)
+    if stage == restart_mod.RESTARTING and not _stale_restart(plan):
+        print("too late: the restart is already happening", file=sys.stderr)
+        return 1
+    if stage == restart_mod.DRAINING:
+        with state_mod.transaction(cfg) as st:
+            mine = st.drain.get("restart") == plan_id
+            late = bool(st.drain.get("stopping_at"))
+            if mine and not late:
+                st.drain = {}
+        if mine and late:
+            print("too late: the drain finished and the swarm is already restarting",
+                  file=sys.stderr)
+            return 1
+    restart_mod.update(cfg, plan_id, stage=restart_mod.CANCELLED, ended_at=time.time())
+    _log_pause_schedule(cfg, f"RESTART-CANCELLED id={plan_id} stage={stage} by={by!r}")
+    _poke(cfg, "drain" if stage == restart_mod.DRAINING else "restart-scheduled")
+    if stage == restart_mod.PLANNED:
+        print(f"restart planned for {pauseat.when(float(plan.get('at') or 0), time.time())}"
+              f" (asked by {plan.get('by')}) cancelled")
+    else:
+        print("restart cancelled — the swarm runs on as it was")
+    return 0
+
+
+def cmd_restart_run(cfg: Config, plan_id: str, at: float | None) -> int:
+    """The restart itself, detached (see :func:`restart.run`)."""
+    print(f"== {time.strftime('%Y-%m-%d %H:%M:%S')} restart {plan_id}")
+    return restart_mod.run(cfg, plan_id, at)
 
 
 def cmd_down_verb(cfg: Config, drain: bool, then: str, cancel: bool) -> int:
@@ -1142,39 +1363,9 @@ def _prompt_files(cfg: Config) -> list[tuple[str, Path]]:
 
 
 def _snapshot_cfg(cfg: Config) -> Config | None:
-    """The config the running supervisor is actually using, or None.
-
-    Written by the supervisor at startup and after every reload. It matters
-    because ``load()`` layers SWARM_* env overrides from *that* process's
-    environment: a CLI re-reading the file would compute the wrong "before" for
-    every overridden field, and once the file has been edited it cannot see the
-    old values at all.
-    """
-    path = cfg.state_dir / "config.json"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    kwargs = {}
-    for f in fields(Config):
-        if not f.init:
-            continue
-        name = f.name
-        if name not in raw:
-            # A setting added after this supervisor started: it runs on the
-            # default, so that is its "before".
-            setting = SETTINGS.get(name)
-            if setting is None:
-                return None
-            d = setting.default
-            kwargs[name] = d(cfg.project_dir) if callable(d) else d
-            continue
-        val = raw[name]
-        kwargs[name] = Path(val) if name in ("project_dir",) and isinstance(val, str) else val
-    try:
-        return Config(**kwargs)
-    except (TypeError, ValueError):
-        return None
+    """The config the running supervisor is actually using, or None
+    (:func:`reload.snapshot_cfg`)."""
+    return reload_mod.snapshot_cfg(cfg)
 
 
 def cmd_reload(cfg: Config, dry_run: bool) -> int:
@@ -1911,6 +2102,7 @@ def cmd_resume(cfg: Config, override_cap: bool = False) -> int:
         st.pause_at = 0.0
         # A resume is "go on": it cancels a drain too, unless the stop has begun.
         drained = bool(st.drain) and not st.drain.get("stopping_at")
+        was_draining = dict(st.drain) if drained else {}
         if drained:
             st.drain = {}
         hold = dict(st.usage_hold)
@@ -1924,6 +2116,7 @@ def cmd_resume(cfg: Config, override_cap: bool = False) -> int:
     if scheduled:
         _log_pause_schedule(
             cfg, f"PAUSE-SCHEDULE-CANCELLED at={pauseat.stamp(scheduled)} by=resume")
+    _drop_draining_restart(cfg, was_draining, "resume")
     _poke(cfg, "resume")
     if drained:
         print("drain cancelled")
@@ -2143,6 +2336,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["resources"] = resources_view.status_lines(cfg)
         data["drain_line"] = drain_mod.line(st.drain)
         data["pause_line"] = pauseat.line(st.pause_at)
+        data["restart"] = restart_mod.load(cfg)
+        data["restart_line"] = restart_mod.status_line(cfg, st)
         data["big_picture"] = bigpic_mod.status_text(cfg, bigpic_mod.load(cfg))
         data["owner_rows"] = [{"row": r, "blocks": n}
                               for r, n in owner_mod.current_owner_rows(cfg, st)]
@@ -2162,6 +2357,9 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         lines.insert(1, drain_mod.line(st.drain))
     if st.pause_at:
         lines.insert(1, pauseat.line(st.pause_at))
+    restarting = restart_mod.status_line(cfg, st)
+    if restarting:
+        lines.insert(1, restarting)
     for s in st.slots:
         mark = f"BUSY {s.phase}" if s.busy else "free"
         wt = f" branch={s.branch}" if s.branch else ""
@@ -2240,6 +2438,42 @@ def _build_parser() -> argparse.ArgumentParser:
     dnp.add_argument("--cancel", action="store_true", help="cancel a pending --drain")
     dnp.set_defaults(func=lambda cfg, a: cmd_down_verb(cfg, a.drain, a.then, a.cancel))
     sub.add_parser("_drain-down").set_defaults(func=lambda cfg, a: cmd_drain_down(cfg))
+    rsp = sub.add_parser(
+        "restart",
+        help="load the code on disk: replace the supervisor in place (nothing else is"
+             " touched), now or later; --full drains, stops and starts again",
+        description="Restart the supervisor in place: the tmux session, the workers, every"
+                    " session waiting on you, the operator and your console are not touched,"
+                    " and the new supervisor carries on from where the old one was. With"
+                    " --full: drain, `swarm down`, `swarm up` (a new tmux session).",
+    )
+    when = rsp.add_mutually_exclusive_group()
+    when.add_argument("--in", dest="delay", metavar="DURATION",
+                      help="restart this long from now: 12h, 90m, 1h30m, 2d")
+    when.add_argument("--at", metavar="HH:MM", help="restart at the next HH:MM, local time")
+    when.add_argument("--now", action="store_true", help="restart now (the default)")
+    when.add_argument("--cancel", action="store_true",
+                      help="drop a planned restart, or stop one still waiting")
+    rsp.add_argument("--full", action="store_true",
+                     help="drain the workers, then `swarm down` and `swarm up`; refused while"
+                          " a session waits on you unless one of the next three is given")
+    ask = rsp.add_mutually_exclusive_group()
+    ask.add_argument("--wait-questions", dest="policy", action="store_const",
+                     const=restart_mod.WAIT,
+                     help="--full: also wait until every waiting session is answered")
+    ask.add_argument("--keep-questions", dest="policy", action="store_const",
+                     const=restart_mod.KEEP,
+                     help="--full: carry the waiting sessions across the restart, alive")
+    ask.add_argument("--force", dest="policy", action="store_const", const=restart_mod.FORCE,
+                     help="--full: close the waiting sessions (their work is kept)")
+    rsp.add_argument("--no-wait", action="store_true",
+                     help="return at once instead of following the restart")
+    rsp.set_defaults(policy=None, func=lambda cfg, a: cmd_restart(
+        cfg, a.delay, a.at, a.cancel, a.full, a.policy, follow=not a.no_wait))
+    rrp = sub.add_parser("_restart-run")
+    rrp.add_argument("plan")
+    rrp.add_argument("--at", type=float, default=None)
+    rrp.set_defaults(func=lambda cfg, a: cmd_restart_run(cfg, a.plan, a.at))
     sub.add_parser(
         "reset", help="start a fresh run: ETA and usage count from now (nothing restarts)"
     ).set_defaults(func=lambda cfg, a: cmd_reset(cfg))
@@ -2252,7 +2486,9 @@ def _build_parser() -> argparse.ArgumentParser:
     usp.add_argument("--json", action="store_true", help="machine-readable")
     usp.add_argument("-n", "--last", type=int, default=10, help="past runs to list (default 10)")
     usp.set_defaults(func=lambda cfg, a: cmd_usage(cfg, a.json, a.last))
-    sub.add_parser("_supervise").set_defaults(func=lambda cfg, a: cmd_supervise(cfg))
+    svp = sub.add_parser("_supervise")
+    svp.add_argument("--adopt", action="store_true")
+    svp.set_defaults(func=lambda cfg, a: cmd_supervise(cfg, a.adopt))
     sub.add_parser("context", help="print the read-only state snapshot (JSON)").set_defaults(
         func=lambda cfg, a: cmd_context(cfg))
     sub.add_parser("master-idle", help="signal the master finished a pass").set_defaults(

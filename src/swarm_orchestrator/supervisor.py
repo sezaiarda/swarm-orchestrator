@@ -69,6 +69,7 @@ from . import ovrecord
 from . import pauseat
 from . import pushowed
 from . import resolver as resolver_mod
+from . import restart as restart_mod
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import state as state_mod
@@ -101,6 +102,9 @@ CRASH_WINDOW_S = 3600.0
 #: The cheap doctor checks behind the Overseer's ``doctor`` trigger are probed at
 #: most this often: they parse the ledger, and a FAIL that matters lasts minutes.
 DOCTOR_PROBE_S = 600.0
+#: While a hand-over waits for a safe point, and while a restart it started is
+#: running, the loop wakes this often: what it waits for sends no event.
+HANDOVER_POLL_S = 0.5
 #: An automatic gc that found a build slot taken (or a compiler running) tries
 #: again this much later — soon enough to catch the gap between two builds,
 #: rarely enough that probing the gate costs nothing.
@@ -110,8 +114,23 @@ GC_RETRY_S = 600.0
 class Supervisor:
     """Long-running owner of the FIFO, ``state.json``, the launcher and the master."""
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, adopt: bool = False) -> None:
         self.cfg = cfg
+        # ``swarm restart``: take over a run that is already going (its slots,
+        # panes and waiting sessions, as ``state.json`` records them) instead of
+        # starting one. See :meth:`_adopt`.
+        self._adopting = adopt
+        self._prior_cfg: Config | None = None  # what the last supervisor ran on
+        # The restart this supervisor was asked to hand over to (its plan id),
+        # from the ``handover`` verb until it stops; see :meth:`_handover_tick`.
+        self._handover: str | None = None
+        self._handover_said: list[str] | None = None
+        self._handed_over = False
+        # The detached ``swarm _restart-run`` a scheduled restart started.
+        self._restart_proc: subprocess.Popen | None = None
+        # Phases whose ``swarm done`` sentinel was found at adoption inside its
+        # grace: looked at again once the grace is over (phase -> when).
+        self._adopt_recheck: dict[str, float] = {}
         self.log = Log(cfg.supervisor_log, echo=bool(os.environ.get("SWARM_LOG_ECHO")),
                        max_bytes=logutil.ROTATE_BYTES)
         self.master = master_mod.Master(cfg, self.log)
@@ -154,6 +173,8 @@ class Supervisor:
         # The live pass id, from the moment it is reserved (its spawn runs on a
         # thread) until it ends. Guards "one pass at a time" and holds the finish.
         self._overseer_live: str | None = None
+        # True while the live pass's session is still being started on its thread.
+        self._overseer_spawning = False
         self._overseer_reasons: list[overseer_mod.Reason] = []
         # Passes in a row that would not start or ran past their timeout. One is
         # not the owner's problem (its reasons wait for the next pass); a streak is.
@@ -228,18 +249,30 @@ class Supervisor:
         """
         self._open_fifo()
         self._install_signals()
+        if self._adopting:
+            self._drop_stale_orders()
         with state_mod.transaction(self.cfg) as st:
             st.supervisor_pid = os.getpid()
             st.last_event_at = time.time()
+        # Taking a run over: what the last supervisor ran on, read before the
+        # snapshot below replaces it (see `_adopt_config`).
+        self._prior_cfg = reload_mod.snapshot_cfg(self.cfg) if self._adopting else None
         # Record the config actually in force, so `swarm reload` has an honest
         # "before" to diff against once the file on disk has been edited.
         self._write_config_snapshot()
-        ovrecord.mark_stale(self.cfg)  # no pass survives a restart
-        self.bigpic.recover()
         self.log.line(
             f"SUPERVISOR-START pid={os.getpid()} driver={self.cfg.driver}"
-            f" watchdog_s={self.watchdog_s:g}"
+            f" watchdog_s={self.watchdog_s:g}" + (" adopting" if self._adopting else "")
         )
+        # The FIFO is open: a restart waiting on this lets go of its bridge now.
+        restart_mod.mark_supervisor(self.cfg, self._adopting)
+        if self._adopting:
+            self._dispatch("adopt", self._adopt)
+        else:
+            # No pass survives a `swarm up`, bar one a restart carried across
+            # parked on the owner (`restart.carry_in` put it back in `parked`).
+            ovrecord.mark_stale(self.cfg, live=state_mod.read(self.cfg).live_passes())
+            self.bigpic.recover()
         self._start_resources()
         buf = b""
         try:
@@ -255,18 +288,24 @@ class Supervisor:
                 # through the guard below). A due scheduled pause goes first, so
                 # nothing this wake does can launch past it.
                 self._dispatch("scheduled-pause", self._pause_at_tick)
+                self._dispatch("restart", self._restart_tick)
                 self._dispatch("park-deadlines", self._check_park_deadlines)
                 self._dispatch("operator-queue", self._check_operator_queue)
                 self._dispatch("watchdog", self._watchdog_tick)
                 self._dispatch("launch-retry", self._retry_backed_off)
                 self._dispatch("overseer", self._overseer_tick)
-                self._dispatch("big-picture", self.bigpic.tick)
-                self._dispatch("gc", self._gc_tick)
+                if self._handover is None:
+                    # Nothing new starts while handing over: each of these can
+                    # open a session or a thread the exit would cut off.
+                    self._dispatch("big-picture", self.bigpic.tick)
+                    self._dispatch("gc", self._gc_tick)
+                    self._dispatch("backup", self._backup_tick)
                 self._dispatch("blocked-pings", blockedping.flush, self.cfg, self.log)
                 self._dispatch("usage", self._usage_tick)
-                self._dispatch("backup", self._backup_tick)
+                self._dispatch("adopt-recheck", self._adopt_recheck_tick)
                 self._dispatch("drain", self._drain_tick)
-                if self._fifo_fd not in ready:
+                self._dispatch("handover", self._handover_tick)
+                if self._stop or self._fifo_fd not in ready:
                     continue
                 try:
                     chunk = os.read(self._fifo_fd, 65536)
@@ -284,6 +323,16 @@ class Supervisor:
                     # it could be waiting for nothing.
                     self._dispatch("overseer", self._overseer_tick)
                     self._dispatch("drain", self._drain_tick)
+                    self._dispatch("handover", self._handover_tick)
+                    if self._stop:
+                        break
+            if self._handed_over and buf:
+                # Events read and not yet handled go back into the pipe, which
+                # the restart holds open, for the next supervisor to read.
+                try:
+                    os.write(self._fifo_fd, buf)
+                except OSError as exc:
+                    self.log.line(f"HANDOVER-UNREAD-LOST {len(buf)} bytes {exc}")
         except Exception as exc:  # noqa: BLE001 - announce, then re-raise
             self.log.line(f"SUPERVISOR-CRASH {exc!r}")
             self._ping(
@@ -295,22 +344,11 @@ class Supervisor:
             )
             raise
         finally:
-            if self._overseer_live is not None:
-                ovrecord.update(
-                    self.cfg, self._overseer_live,
-                    status=ovrecord.INTERRUPTED, ended_at=time.time(),
-                )
-            if self.master.is_alive():
-                self.master.kill()  # never orphan a master on the way out
-                with state_mod.transaction(self.cfg) as st:
-                    st.master_alive = False
-                    st.overseer_pass = None
-                    st.overseer_deadline = 0.0
-            # Same obligation, and it matters more: an operator session holds the
-            # owner's full authority on the host, so leaving one typing into a
-            # window nothing owns is worse than leaving a master.
-            operator_mod.release(self.cfg, self.log)
-            self.bigpic.shutdown()
+            # A hand-over leaves every session as it is: the next supervisor
+            # adopts the pass in the master pane, the operator's lease and a
+            # big-picture pass from the state they are recorded in.
+            if not self._handed_over:
+                self._end_sessions()
             if self._resources is not None:
                 self._resources.stop()
             # A finished session's processes are ended off the loop thread; the
@@ -318,8 +356,56 @@ class Supervisor:
             session_mod.join_reaps()
             if self._fifo_fd >= 0:
                 os.close(self._fifo_fd)
-            self.log.line("SUPERVISOR-STOP")
+            self.log.line("SUPERVISOR-STOP" + (" handover" if self._handed_over else ""))
             self.log.close()
+
+    def _drop_stale_orders(self) -> None:
+        """Take out of the pipe what was addressed to the previous supervisor.
+
+        A restart holds the FIFO open across the gap, so everything sent
+        meanwhile is still in it — which is the point for a ``done`` or a
+        ``waiting``, and wrong for a ``shutdown`` or ``handover`` the last
+        supervisor died before reading: obeyed here, it would stop the one
+        process the restart was for. The rest goes back in, in order."""
+        data = b""
+        while True:
+            try:
+                chunk = os.read(self._fifo_fd, 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            data += chunk
+        if not data:
+            return
+        keep: list[bytes] = []
+        for raw in data.splitlines(keepends=True):
+            verb = raw.split()[0].decode("utf-8", "replace") if raw.split() else ""
+            if verb in ("shutdown", "handover", "handover-cancel"):
+                self.log.line(f"STALE-ORDER-DROPPED {raw.decode('utf-8', 'replace').strip()}")
+            else:
+                keep.append(raw)
+        if keep:
+            os.write(self._fifo_fd, b"".join(keep))
+
+    def _end_sessions(self) -> None:
+        """On the way out for good: end the sessions only this process owns."""
+        if self._overseer_live is not None:
+            ovrecord.update(
+                self.cfg, self._overseer_live,
+                status=ovrecord.INTERRUPTED, ended_at=time.time(),
+            )
+        if self.master.is_alive():
+            self.master.kill()  # never orphan a master on the way out
+            with state_mod.transaction(self.cfg) as st:
+                st.master_alive = False
+                st.overseer_pass = None
+                st.overseer_deadline = 0.0
+        # Same obligation, and it matters more: an operator session holds the
+        # owner's full authority on the host, so leaving one typing into a
+        # window nothing owns is worse than leaving a master.
+        operator_mod.release(self.cfg, self.log)
+        self.bigpic.shutdown()
 
     # -- failure containment ----------------------------------------------
     def _dispatch(self, what: str, fn, *args) -> bool:
@@ -414,6 +500,14 @@ class Supervisor:
             self._on_resume()
         elif verb == "drain":
             self._on_drain()
+        elif verb == "handover":
+            self._on_handover(parts[1] if len(parts) > 1 else "?")
+        elif verb == "handover-cancel":
+            self._on_handover_cancel(parts[1] if len(parts) > 1 else "?")
+        elif verb == "restart-scheduled":
+            # `swarm restart --at/--in/--cancel`: only a wake, like a scheduled
+            # pause; the plan is in restart.json and the next wake reads it.
+            self.log.line("EVENT restart-scheduled")
         elif verb == "pause-scheduled":
             # `swarm pause --in/--at/--cancel`: the poke is only a wake, so the
             # next `select` timeout counts the new moment in (or drops it).
@@ -497,7 +591,7 @@ class Supervisor:
         except (OSError, TypeError) as exc:
             self.log.line(f"CONFIG-SNAPSHOT-FAILED {exc}")
 
-    def _on_reload(self) -> None:
+    def _on_reload(self, fill: bool = True) -> None:
         """Re-read .swarm.toml and apply what can safely change mid-run.
 
         Parse-validate-swap, never half-apply: a broken file leaves the running
@@ -594,7 +688,7 @@ class Supervisor:
         if self._usage_check(time.time()):
             return
         st = state_mod.read(self.cfg)
-        if not st.on_hold and not st.finished:
+        if fill and not st.on_hold and not st.finished:
             self._fill_slots("config reloaded")
 
     def _add_slot_panes(self, slot_ids: list[int]) -> None:
@@ -677,6 +771,11 @@ class Supervisor:
         )
         if waits == st.drain.get("waiting") and waits:
             return
+        if not waits and st.drain.get("questions") == restart_mod.KEEP:
+            # A restart that carries the questions across: each waiting session
+            # gets its own window now, so it can be moved out whole before the
+            # tmux session is torn down.
+            self._park_all_waiting(st)
         with state_mod.transaction(self.cfg) as s2:
             if not s2.drain or s2.drain.get("stopping_at"):
                 return  # cancelled, or already stopping, since the read above
@@ -684,19 +783,360 @@ class Supervisor:
             if not waits:
                 s2.drain["stopping_at"] = time.time()
             then = s2.drain.get("then") or ""
+            restarting = bool(s2.drain.get("restart"))
         if waits:
             self.log.line(f"DRAIN-WAITING {', '.join(waits)}")
             return
         started = drain_mod.spawn_down(self.cfg)
-        self.log.line(f"DRAIN-COMPLETE stopping={started} then={then!r}")
-        if started:
+        self.log.line(f"DRAIN-COMPLETE stopping={started} then={then!r} restart={restarting}")
+        if started and restarting:
+            msg = (f"swarm: {self.cfg.slug} finished the work that was running and is"
+                   " restarting, as asked; you hear again only if it does not come back")
+        elif started:
             msg = (f"swarm: {self.cfg.slug} finished the work that was running and is"
                    " shutting down, as you asked")
             msg += f"; afterwards it runs: {then}" if then else ""
         else:
             msg = (f"swarm: {self.cfg.slug} finished the work that was running but could"
                    " not shut itself down; run `swarm down` yourself")
-        self._ping("drain", msg, cooldown=0.0, kind="drain", source="supervisor._drain_tick")
+        self._ping("drain", msg, cooldown=0.0, kind="drain", source="supervisor._drain_tick",
+                   suppressed=(telegram.hold(self.cfg, "a restart: you hear if it fails")
+                               if started and restarting else None))
+
+    def _park_all_waiting(self, st: state_mod.State) -> None:
+        """Park every session that waits on the owner and is still in its home
+        pane: a worker in its slot, a job in the operator window, a pass in the
+        master pane."""
+        keys = list(st.waiting)
+        job = st.operator_phase
+        if job and drain_mod._operator_asking(self.cfg, job):
+            key = state_mod.waiter_key(state_mod.OPERATOR, job)
+            if key not in keys:
+                keys.append(key)  # parking is off: it never armed a deadline
+        for key in keys:
+            self._dispatch(f"park {key}", self._park, key)
+
+    # -- restart: fire a scheduled one, hand over, adopt --------------------
+    def _restart_tick(self) -> None:
+        """Start a scheduled restart once it is due, and notice one that died.
+
+        The restart itself is ``swarm _restart-run``, detached: it replaces this
+        process, and it runs the code on disk, which is the point. A helper that
+        exits non-zero without settling the plan never got as far as running (the
+        new code does not import, say), so this process tells the owner."""
+        proc = self._restart_proc
+        if proc is not None and proc.poll() is not None:
+            self._restart_proc = None
+            plan = restart_mod.load(self.cfg)
+            if proc.returncode != 0 and restart_mod.active(plan):
+                restart_mod.fail(
+                    self.cfg, plan,
+                    f"the restart helper exited with status {proc.returncode}"
+                    f" ({self.cfg.log_dir / restart_mod.RUN_LOG} says why)", self.log)
+        plan = restart_mod.load(self.cfg)
+        if plan.get("stage") != restart_mod.PLANNED or plan.get("timer") != "supervisor":
+            return
+        now = time.time()
+        due = float(plan.get("at") or 0.0)
+        if plan.get("fired_at") or due > now:
+            return
+        if restart_mod.update(self.cfg, plan["id"], fired_at=now) is None:
+            return  # replaced since the read above
+        self.log.line(
+            f"RESTART-DUE id={plan['id']} mode={plan.get('mode')} by={plan.get('by')!r}"
+            f" due={pauseat.stamp(due)} late={now - due:.0f}s")
+        self._restart_proc = restart_mod.spawn_runner(self.cfg, plan["id"])
+        if self._restart_proc is None:
+            restart_mod.fail(self.cfg, plan, "the restart helper could not be started", self.log)
+
+    def _on_handover(self, plan_id: str) -> None:
+        """``swarm restart``: stop at the next safe point and leave every
+        session running for the supervisor that takes over."""
+        plan = restart_mod.load(self.cfg)
+        self.log.line(f"EVENT handover {plan_id} by={plan.get('by', '?')!r}")
+        self._handover = plan_id
+        self._handover_said = None
+        self._handover_tick()
+
+    def _on_handover_cancel(self, plan_id: str) -> None:
+        if self._handover != plan_id:
+            return
+        self._handover = None
+        self.log.line(f"EVENT handover-cancel {plan_id}")
+        self._fill_slots("restart cancelled")
+        self._finish_if_settled()
+
+    def _handover_waits(self) -> list[str]:
+        """What this process is in the middle of that its exit would cut off.
+
+        A merge is never on the list: it runs inside one event, and this is
+        only ever asked between events. Sessions are not on it either — they
+        are adopted — except on the bare driver, whose master is this process's
+        child and cannot be."""
+        out: list[str] = []
+        with self._launch_lock:
+            launching = len(self._launching)
+        if launching:
+            out.append(f"{launching} worker{'' if launching == 1 else 's'} starting")
+        elif any(t.name.startswith("launch:") and t.is_alive() for t in threading.enumerate()):
+            out.append("a worker starting")  # settled, and still reporting it
+        if self._overseer_live is not None and self._overseer_spawning:
+            out.append("an Overseer pass starting")
+        elif self.cfg.driver == "bare" and self.master.is_alive():
+            out.append("an Overseer pass" if self._overseer_live else "the start-up pass")
+        if self.bigpic.mem.live and not self.bigpic._spawned:
+            out.append("the big-picture pass starting")
+        if self._gc_running():
+            out.append("a clean-up")
+        if self._backup_running():
+            out.append("a backup push")
+        return out
+
+    def _handover_tick(self) -> None:
+        """Hand over once nothing is mid-way; until then, say what is."""
+        if self._handover is None or self._stop:
+            return
+        waits = self._handover_waits()
+        if waits:
+            if waits != self._handover_said:
+                self._handover_said = waits
+                self.log.line(f"HANDOVER-WAITING {', '.join(waits)}")
+                restart_mod.update(self.cfg, self._handover, waiting=waits)
+            return
+        with self._launch_lock:
+            fails = {p: list(v) for p, v in self._launch_fails.items()}
+        restart_mod.write_handover(self.cfg, {
+            "id": self._handover,
+            "launch_fails": fails,
+            "crashes": self._crashes,
+            "pinged": self._pinged,
+            "overseer_bad": self._overseer_bad,
+            "backup_last": self._backup_last,
+            "bootstrapped": self._bootstrapped,
+        })
+        self.log.line(f"HANDOVER {self._handover} sessions left running for the next supervisor")
+        self._handed_over = True
+        self._stop = True
+
+    def _adopt(self) -> None:
+        """Take over a run that is already going, from ``state.json`` and the
+        panes as they are. Nothing is started that already runs, and nothing
+        that runs is ended.
+
+        What the last supervisor held only in memory comes from its hand-over
+        note when it left one (launch back-offs, crash counts, ping cooldowns);
+        every timer that matters is a timestamp in the state already (park
+        deadlines, a scheduled pause, the Overseer's deadline, usage holds).
+        The rest is made good here: slots whose pane id the state lost, a pass
+        in the master pane, a claim whose launch was cut off, and a ``swarm
+        done`` whose poke nobody read (the sentinel is the record)."""
+        cfg = self.cfg
+        note = restart_mod.take_handover(cfg)
+        with self._launch_lock:
+            self._launch_fails = {p: (int(v[0]), float(v[1]))
+                                  for p, v in (note.get("launch_fails") or {}).items()}
+        self._crashes = {p: [float(t) for t in ts]
+                         for p, ts in (note.get("crashes") or {}).items()}
+        self._pinged = {k: float(v) for k, v in (note.get("pinged") or {}).items()}
+        self._overseer_bad = int(note.get("overseer_bad") or 0)
+        if note.get("backup_last"):
+            self._backup_last = float(note["backup_last"])
+        self._bootstrapped = True  # `swarm up` poked it for the last supervisor
+        st = state_mod.read(cfg)
+        self.log.line(
+            f"ADOPT busy={sorted(s.phase for s in st.busy_slots() if s.phase)}"
+            f" waiting={sorted(st.waiting)} parked={st.parked} queue={st.integ_queue}"
+            f" blocked={st.integ_blocked} note={'yes' if note else 'no'}")
+        self._adopt_panes(st)
+        self._adopt_config()
+        self._adopt_master(st)
+        self._adopt_dead_claims()
+        self._adopt_reports()
+        st = state_mod.read(cfg)
+        self._flush_ledger(dict(st.done))
+        self._pump_integrations()  # a queue the last supervisor left standing
+        self._check_operator_queue()
+        if not state_mod.read(cfg).on_hold:
+            self._fill_slots("supervisor restarted")
+        self._finish_if_settled()
+
+    def _adopt_config(self) -> None:
+        """Move from the last supervisor's settings to the file's the way
+        ``swarm reload`` does, because the run is the same run: what is safe
+        mid-run is applied (a changed worker count adds or retires slots and
+        their panes), and what names the run itself (state dir, tmux session,
+        driver, isolation) stays as it was until a ``swarm restart --full``."""
+        prior = self._prior_cfg
+        if prior is None:
+            return  # no snapshot: the last supervisor predates it
+        self.cfg = self.master.cfg = self.overseer.cfg = self.bigpic.cfg = prior
+        self.watchdog_s = max(0.0, float(getattr(prior, "watchdog_s", 300) or 0))
+        self._on_reload(fill=False)
+        self._write_config_snapshot()
+
+    def _adopt_panes(self, st: state_mod.State) -> None:
+        """Give back to a slot the pane tmux tags as its own when the state names
+        one that is gone (a park moved the worker out and the write was lost)."""
+        if self.cfg.driver != "tmux":
+            return
+        out = tmux.run(["list-panes", "-s", "-t", f"={self.cfg.session}", "-F",
+                        f"#{{pane_id}}\t#{{{tmux.SLOT_OPT}}}\t#{{window_name}}"])
+        if out.returncode != 0:
+            self.log.line("ADOPT-TMUX-UNREACHABLE the panes are taken as recorded")
+            return
+        live: set[str] = set()
+        tagged: dict[int, str] = {}
+        for row in out.stdout.splitlines():
+            pane, _, rest = row.partition("\t")
+            tag, _, window = rest.partition("\t")
+            live.add(pane)
+            if tag.isdigit() and window.startswith("workers"):
+                tagged[int(tag)] = pane
+        fixed: list[str] = []
+        with state_mod.transaction(self.cfg) as s2:
+            for slot in s2.slots:
+                pane = tagged.get(slot.id)
+                if pane and slot.pane_id not in live and pane != slot.pane_id:
+                    fixed.append(f"slot {slot.id}: {slot.pane_id} -> {pane}")
+                    slot.pane_id = pane
+        for change in fixed:
+            self.log.line(f"ADOPT-PANE {change}")
+
+    def _adopt_master(self, st: state_mod.State) -> None:
+        """Pick up the pass in the master pane: an init pass still holds the
+        first launch, an Overseer pass is the live one again. A pass the state
+        names that is no longer running is settled as interrupted."""
+        cfg = self.cfg
+        running = False
+        if cfg.driver == "tmux" and st.master_alive and st.master_pane:
+            self.master.pane = st.master_pane
+            running = self.master.is_alive()
+            if not running:
+                self.master.pane = None
+        if running and st.overseer_pass:
+            self._overseer_live = st.overseer_pass
+            self.log.line(f"ADOPT-OVERSEER {st.overseer_pass}")
+        elif running:
+            self._bootstrapping = bool(st.bootstrapping)
+            self.log.line(f"ADOPT-MASTER init bootstrapping={self._bootstrapping}")
+        else:
+            with state_mod.transaction(cfg) as s2:
+                lost = s2.overseer_pass
+                s2.master_alive = False
+                s2.overseer_pass = None
+                s2.overseer_deadline = 0.0
+            if lost:
+                self.log.line(f"ADOPT-OVERSEER-GONE {lost}")
+        if not self._bootstrapping:
+            self._end_bootstrap()
+        ovrecord.mark_stale(cfg, live=state_mod.read(cfg).live_passes())
+        if cfg.driver == "tmux" and self.bigpic.mem.live and self.bigpic._alive():
+            self.bigpic._spawned = True  # its window is still up: carry on with it
+        else:
+            self.bigpic.recover()
+
+    def _adopt_dead_claims(self) -> None:
+        """Free a slot that is claimed with no worker in it: a launch the last
+        supervisor's exit cut off after the claim. The pane holds its idle
+        command, so the watchdog (which looks for dead panes) would never see it."""
+        cfg = self.cfg
+        if cfg.driver != "tmux":
+            return
+        st = state_mod.read(cfg)
+        sentinels = gitq.sentinel_done(cfg)
+        for slot in st.busy_slots():
+            phase = slot.phase
+            if not phase or phase in st.integrating() or phase in sentinels:
+                continue
+            markers = session_mod.session_markers(cfg, "worker", phase)
+            if session_mod.session_processes(cfg, markers=markers):
+                continue
+            probe = tmux.run(["display-message", "-p", "-t", slot.pane_id or "",
+                              "#{pane_dead} #{pane_current_command}"])
+            dead, _, command = probe.stdout.strip().partition(" ")
+            if probe.returncode == 0 and dead != "1" and command != "sleep":
+                # Something runs there that is not the idle holder: not ours to judge.
+                self.log.line(f"ADOPT-UNSURE {phase} slot={slot.id} runs {command!r}; left alone")
+                continue
+            self.log.line(f"ADOPT-DEAD-CLAIM {phase} slot={slot.id}: no worker in its pane")
+            self._reap(phase)
+
+    def _claim_times(self) -> dict[str, float]:
+        """When each phase was last claimed, from the log (``CLAIM <phase>``)."""
+        out: dict[str, float] = {}
+        for raw in logutil.read_all(self.cfg.supervisor_log, keep=1).splitlines():
+            if " CLAIM " not in raw:
+                continue
+            ts, msg = logutil.parse_ts(raw)
+            parts = msg.split()
+            if ts is not None and len(parts) >= 2 and parts[0] == "CLAIM":
+                out[parts[1]] = ts
+        return out
+
+    def _unread_report(self, st: state_mod.State, phase: str, sentinels: dict[str, str],
+                       claimed: dict[str, float]) -> tuple[str, float] | None:
+        """``(status, when written)`` of a ``swarm done`` this run never handled
+        for ``phase``, or ``None``. Only a sentinel written since the phase was
+        last claimed counts: one left by an earlier attempt says nothing about
+        the worker running now, and acting on a stale ``fail`` would roll back
+        the branch under it."""
+        status = sentinels.get(phase)
+        if status is None or phase in st.done or phase in st.integrating():
+            return None
+        try:
+            written = (self.cfg.done_dir / f"{phase}.{status}").stat().st_mtime
+        except OSError:
+            return None
+        since = claimed.get(phase)
+        if since is None or written < since - 1.0:
+            self.log.line(f"ADOPT-OLD-SENTINEL {phase} {status}: not from this attempt; left")
+            return None
+        return status, written
+
+    def _adopt_reports(self) -> None:
+        """Act on a ``swarm done`` nobody read: the sentinel is written before
+        the poke, so a phase still in flight with one has finished. One written
+        within ``done_grace_s`` is looked at again once the grace has run."""
+        cfg = self.cfg
+        st = state_mod.read(cfg)
+        sentinels = gitq.sentinel_done(cfg)
+        flying = [p for p in st.claimed_phases() if p in sentinels]
+        if not flying:
+            return
+        claimed = self._claim_times()
+        now = time.time()
+        for phase in flying:
+            found = self._unread_report(st, phase, sentinels, claimed)
+            if found is None:
+                continue
+            status, written = found
+            due = written + cfg.done_grace_s + (2.0 if cfg.done_grace_s else 0.0)
+            if due > now:
+                self._adopt_recheck[phase] = due
+                continue
+            self.log.line(f"ADOPT-DONE {phase} {status}: its report was never read")
+            self._dispatch(f"done {phase} {status}", self._on_done, phase, status)
+
+    def _adopt_recheck_tick(self) -> None:
+        if not self._adopt_recheck:
+            return
+        now = time.time()
+        due = [p for p, at in self._adopt_recheck.items() if at <= now]
+        if not due:
+            return
+        for phase in due:
+            self._adopt_recheck.pop(phase, None)
+        st = state_mod.read(self.cfg)
+        sentinels = gitq.sentinel_done(self.cfg)
+        claimed = self._claim_times()
+        for phase in due:
+            # Its own delayed poke may have arrived meanwhile: then it is done,
+            # or merging, and there is nothing left to act on.
+            found = self._unread_report(st, phase, sentinels, claimed) \
+                if st.in_flight(phase) else None
+            if found is not None:
+                self.log.line(f"ADOPT-DONE {phase} {found[0]}: its report was never read")
+                self._dispatch(f"done {phase} {found[0]}", self._on_done, phase, found[0])
 
     # -- rule 1: done -----------------------------------------------------
     def _on_done(self, phase: str, status: str) -> None:
@@ -1129,6 +1569,13 @@ class Supervisor:
         # next wake (the first one after a restart, say) sets it.
         if st.pause_at:
             stamps.append(st.pause_at)
+        # A scheduled restart this supervisor fires, and sentinels found at
+        # adoption inside their grace.
+        plan = restart_mod.load(self.cfg)
+        if plan.get("stage") == restart_mod.PLANNED and plan.get("timer") == "supervisor" \
+                and not plan.get("fired_at"):
+            stamps.append(float(plan.get("at") or 0.0))
+        stamps.extend(self._adopt_recheck.values())
         queued = opqueue.next_deadline(self.cfg)
         if queued is not None:
             stamps.append(queued)
@@ -1181,6 +1628,9 @@ class Supervisor:
         ``watchdog_s = 0`` this returns ``_next_timeout`` unchanged, so the purely
         event-driven loop is preserved byte-for-byte."""
         deadline = self._next_timeout()
+        if self._handover is not None or self._restart_proc is not None:
+            # A clean-up or a backup ending is not an event: look again shortly.
+            deadline = HANDOVER_POLL_S if deadline is None else min(deadline, HANDOVER_POLL_S)
         if not self.watchdog_s:
             return deadline
         cap = max(0.0, self._last_sweep + self.watchdog_s - time.time())
@@ -1632,6 +2082,11 @@ class Supervisor:
                 self.log.line(f"OWNER-ROWS-ERROR {exc!r}")
         if st.on_hold or st.finished:
             return []
+        if self._handover is not None:
+            # Handing over: a launch started now would be cut off mid-way. The
+            # next supervisor fills the slots the moment it has adopted the run.
+            self.log.line(f"LAUNCH-HELD handover ({reason})")
+            return []
         if self._bootstrapping and not force:
             if self.master.is_alive():
                 self.log.line(f"LAUNCH-HELD bootstrap ({reason})")
@@ -1883,6 +2338,8 @@ class Supervisor:
     def _maybe_start_overseer(self, st: state_mod.State, now: float) -> None:
         if not self._bootstrapped or self._overseer_live is not None or st.drain:
             return
+        if self._handover is not None:
+            return  # handing over: the next supervisor starts the pass
         if self.master.is_alive():
             return  # the init pass has the pane; the pending pass waits for it
         # An init master that died without idling leaves the bootstrap hold set,
@@ -1914,6 +2371,7 @@ class Supervisor:
         digest = overseer_mod.overseer_dir(self.cfg) / f"digest-{pid}.md"
         ovrecord.create(self.cfg, pid, [asdict(r) for r in reasons], digest, mirror, now)
         self._overseer_live = pid
+        self._overseer_spawning = True
         self._overseer_reasons = reasons
         with state_mod.transaction(self.cfg) as st:
             st.overseer_pass = pid
@@ -1971,6 +2429,7 @@ class Supervisor:
         if pid != self._overseer_live:
             self.log.line(f"OVERSEER-SPAWNED-STALE {pid} {outcome}")
             return
+        self._overseer_spawning = False
         if outcome == "ok":
             with state_mod.transaction(self.cfg) as st:
                 st.master_alive = True
@@ -2356,6 +2815,7 @@ class Supervisor:
         self._stop = True
 
 
-def main(cfg: Config) -> None:
-    """Entry point used by the detached ``swarm up`` supervisor process."""
-    Supervisor(cfg).run()
+def main(cfg: Config, adopt: bool = False) -> None:
+    """Entry point of the detached supervisor process: ``swarm up`` starts a
+    run, ``swarm restart`` (``adopt``) takes over the one already going."""
+    Supervisor(cfg, adopt=adopt).run()

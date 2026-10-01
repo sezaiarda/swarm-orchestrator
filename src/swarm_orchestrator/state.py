@@ -530,7 +530,8 @@ def transaction(cfg: Config) -> Iterator[State]:
             fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
-def init_state(cfg: Config, windows: dict[str, str] | None = None, log=None) -> State:
+def init_state(cfg: Config, windows: dict[str, str] | None = None, log=None,
+               carried: frozenset[str] | set[str] = frozenset()) -> State:
     """Rebuild the run's slots from config, preserving completed-phase progress.
 
     ``swarm up`` re-derives the slot list from ``max_workers`` (so a changed
@@ -543,11 +544,15 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None, log=None) -> 
 
     Every worker claim the old state held ends here, whether or not its worker
     ever said ``swarm done``; with a ``log`` each gets its ``RUN-ENDED`` line, so
-    the phase history never keeps a wiped claim open as "running".
+    the phase history never keeps a wiped claim open as "running". Bar the
+    ``carried`` phases: a restart brought their sessions across alive
+    (:func:`restart.carry_in` parks them again), so their run goes on.
     """
     with transaction(cfg) as state:
         if log is not None:
             for phase in state.claimed_phases():
+                if phase in carried:
+                    continue
                 logutil.run_ended(log, phase, "restart")
         prior_done = dict(state.done)
         fresh = State.fresh(cfg.max_workers)

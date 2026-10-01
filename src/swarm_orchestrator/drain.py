@@ -11,7 +11,14 @@ grace), launches in flight, the merge queue while it moves, a merge-conflict
 resolver, a running operator job, the init pass and an Overseer pass. Not waited
 for: anything waiting on the owner — a worker that asked, a parked one, an
 operator job that asked, a queue held on a dirty tree. The down takes those as
-they are; it keeps their work.
+they are; it keeps their work, and ends the sessions, so what they asked is
+gone from the screen. ``swarm down --drain`` says so when it is scheduled.
+
+``swarm restart --full`` drains the same way and is the safe form of the old
+``--then 'swarm up'``: it refuses while a session waits on the owner unless told
+to wait for the answers (``questions = "wait"`` in the drain: they are counted
+here) or to carry the sessions across the restart (``"keep"``, see
+:mod:`restart`).
 """
 
 from __future__ import annotations
@@ -56,6 +63,14 @@ def waiting_for(cfg: Config, st: state_mod.State, *, launching: int = 0,
         out.append("the start-up pass")
     if overseer:
         out.append("an Overseer pass")
+    if st.drain.get("questions") == "wait":
+        # A restart told to wait for the answers: every session that waits on
+        # the owner holds the stop until it is answered and finishes.
+        asked = set(st.waiting) | set(st.parked)
+        if st.operator_phase and _operator_asking(cfg, st.operator_phase):
+            asked.add(state_mod.waiter_key(state_mod.OPERATOR, st.operator_phase))
+        if asked:
+            out.append(f"{len(asked)} question{'' if len(asked) == 1 else 's'}")
     return out
 
 
@@ -70,12 +85,14 @@ def line(drain: dict) -> str:
     if not drain:
         return ""
     waits = list(drain.get("waiting") or [])
+    end = "restart" if drain.get("restart") else "stop"
     if drain.get("stopping_at"):
-        text = "Draining: done waiting, stopping the swarm now"
+        text = ("Draining: done waiting, restarting the swarm now" if drain.get("restart")
+                else "Draining: done waiting, stopping the swarm now")
     elif waits:
-        text = f"Draining: waiting for {_join(waits)}, then stop"
+        text = f"Draining: waiting for {_join(waits)}, then {end}"
     else:
-        text = "Draining: stopping once the supervisor has looked"
+        text = f"Draining: {end} once the supervisor has looked"
     if drain.get("then"):
         text += f", then: {drain['then']}"
     return text

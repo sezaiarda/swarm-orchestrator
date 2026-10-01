@@ -805,7 +805,8 @@ def _plan_tmp(plan: GcPlan, cfg: Config, live: set[str]) -> None:
     """``tmp/<name>`` session temp dirs whose session is over.
 
     Each is normally dropped when its session's work lands; this catches the
-    ones a crash, a reaped pane or an in-place run left behind.
+    ones a crash, a reaped pane or an in-place run left behind, and any plain
+    file a session wrote beside its TMPDIR. A symlink is never planned.
     """
     if not cfg.tmp_dir.is_dir():
         return
@@ -1048,7 +1049,12 @@ def _execute(cfg: Config, target: Target, log=None, live: set[str] | None = None
     """Run one target's action and measure what it actually reclaimed."""
     if target.op == "rmtree":
         path = Path(target.path or "")
-        shutil.rmtree(path, ignore_errors=False)
+        # A session can leave a plain file beside its TMPDIR, and rmtree raises
+        # on one. A symlink still goes to rmtree, which refuses it.
+        if path.is_symlink() or path.is_dir():
+            shutil.rmtree(path, ignore_errors=False)
+        else:
+            path.unlink()
         target.after = du(path)
     elif target.op == "supersede":
         # Re-derived inside the gate, never replayed from the plan: a build
@@ -1235,13 +1241,17 @@ def auto(cfg: Config, log=None) -> AutoResult:
     kinds: dict[str, int] = {}
     for t in plan.targets:
         kinds[t.kind] = kinds.get(t.kind, 0) + (t.reclaimed or 0)
-    errors = [t for t in plan.targets if t.error]
+    # Every failing target by name, in the log and in the record: a bare count
+    # cannot tell a standing failure from a new one without a second run.
+    errors = [f"{t.label}: {t.error}" for t in plan.targets if t.error]
+    for line in errors:
+        (log or _NoLog()).line(f"GC-AUTO-ERROR {line}")
     return AutoResult(
         AUTO_DONE,
         freed=plan.reclaimed_bytes,
         by_kind=kinds,
         errors=len(errors),
-        detail=(errors[0].error or "") if errors else "",
+        detail="; ".join(errors),
     )
 
 

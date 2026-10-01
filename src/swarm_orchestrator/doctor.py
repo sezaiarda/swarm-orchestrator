@@ -55,6 +55,7 @@ from . import ledgerw
 from . import opqueue
 from . import pushowed
 from . import restart as restart_mod
+from . import session as session_mod
 from . import state as state_mod
 from . import statuses
 from . import telegram, tgbot
@@ -580,10 +581,19 @@ def _check_supervisor(cfg: Config, st: State) -> list[Check]:
     return checks
 
 
+class Stopped(NamedTuple):
+    """A busy slot with no worker in its pane (:func:`_slot_worker`)."""
+
+    phase: str
+    what: str  # the slot, its pane and what runs there
+    unlaunched: bool  # claimed and never launched: a launch that died
+    kept: str | None  # why the watchdog's sweep leaves the slot; None when it frees it
+
+
 class PaneProbe(NamedTuple):
     """What one pass over the slots' panes found (:func:`_dead_panes`)."""
 
-    dead: list[tuple[str, str]]  # (phase, what its pane runs) per dead worker
+    dead: list[Stopped]  # one per dead worker
     unknown: int  # panes tmux could not be asked about
     busy: int  # busy slots with a pane, landing ones included
     dead_free: list[str]  # free slots with nowhere to launch into
@@ -622,6 +632,74 @@ def _reported(cfg: Config, st: State, phase: str) -> bool:
     return claimed is not None and max(written) >= claimed - 1.0
 
 
+# What :func:`_slot_worker` answers for a busy slot that is no dead worker.
+_LANDING, _STARTING, _UNREADABLE, _WORKING = "landing", "starting", "unreadable", "working"
+# The one reason the sweep leaves a dead slot that needs nobody's hand: the
+# launch settles it, by starting the worker or by freeing the slot.
+_LAUNCH_RUNNING = "its launch is still running in the supervisor, which settles the slot itself"
+_OLD_SWEEP = (
+    "the running supervisor is older than the rule that frees it and reaps only a pane"
+    " that is gone; `swarm restart` loads the rule"
+)
+
+
+def _sweep_keeps(cfg: Config, st: State, phase: str, cmd: str, sweeper: bool) -> str | None:
+    """Why the watchdog's sweep leaves a dead worker's slot busy, or ``None``
+    when it frees it. ``sweeper`` is the sweep itself asking, which knows the
+    rule; anyone else asks what the running supervisor said of itself.
+
+    A pane that is gone is always reaped. One that is still there is reaped
+    only when nothing of the worker is left: no launch of the supervisor's own
+    still on its way to that pane, and no process of the worker's session.
+    The command a pane shows is only a name, and reaping ends every process the
+    session started, so a worker that is alive under another name stays. And
+    only by a supervisor that knows the rule: one started before it came frees
+    nothing but a pane that is gone, until it is restarted.
+    """
+    if cmd == "gone":
+        return None
+    if not sweeper and not restart_mod.capable(cfg, st.supervisor_pid, "reap-stopped"):
+        return _OLD_SWEEP
+    if phase in st.launching:
+        return _LAUNCH_RUNNING
+    alive = session_mod.session_processes(
+        cfg, markers=session_mod.session_markers(cfg, "worker", phase)
+    )
+    if alive:
+        return f"{len(alive)} process(es) of its session still run"
+    return None
+
+
+def _slot_worker(
+    cfg: Config, st: State, slot: state_mod.Slot, now: float, sweep_cmd=None
+) -> str | Stopped:
+    """What became of the worker in busy ``slot``: landing, starting, working,
+    unreadable, or :class:`Stopped`.
+
+    The one rule ``swarm doctor`` and the supervisor's sweep
+    (``Supervisor._reap_dead_panes``) share, so that doctor says "will be
+    reaped" of exactly the slots the sweep frees. The sweep passes its own
+    reader of a pane's command as ``sweep_cmd``; doctor reads with
+    :func:`_pane_cmd`.
+    """
+    phase = slot.phase or ""
+    if phase and _reported(cfg, st, phase):
+        return _LANDING
+    claimed = _unlaunched(cfg, phase) if phase else None
+    if claimed is not None and now - claimed < _START_GRACE_S:
+        return _STARTING
+    cmd = (sweep_cmd or _pane_cmd)(slot.pane_id or "")
+    if cmd == "?":
+        return _UNREADABLE
+    if cmd == "claude":
+        return _WORKING
+    what = f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}"
+    if claimed is not None:
+        what += f", claimed {_human_age(now - claimed)} ago and never launched"
+    kept = _sweep_keeps(cfg, st, phase, cmd, sweeper=sweep_cmd is not None)
+    return Stopped(phase, what, claimed is not None, kept)
+
+
 def _dead_panes(cfg: Config, st: State) -> PaneProbe:
     """Every slot's pane, probed once.
 
@@ -643,28 +721,22 @@ def _dead_panes(cfg: Config, st: State) -> PaneProbe:
     busy = [s for s in st.busy_slots() if s.pane_id]
     if cfg.driver != "tmux":
         return PaneProbe([], 0, len(busy), [], [], [])
-    dead: list[tuple[str, str]] = []
+    dead: list[Stopped] = []
     dead_free: list[str] = []
     landing: list[str] = []
     starting: list[str] = []
     unknown = 0
     now = time.time()
     for slot in busy:
-        if slot.phase and _reported(cfg, st, slot.phase):
-            landing.append(slot.phase)
-            continue
-        claimed = _unlaunched(cfg, slot.phase) if slot.phase else None
-        if claimed is not None and now - claimed < _START_GRACE_S:
+        found = _slot_worker(cfg, st, slot, now)
+        if isinstance(found, Stopped):
+            dead.append(found)
+        elif found == _LANDING:
+            landing.append(slot.phase or "")
+        elif found == _STARTING:
             starting.append(slot.phase or "")
-            continue
-        cmd = _pane_cmd(slot.pane_id or "")
-        if cmd == "?":
+        elif found == _UNREADABLE:
             unknown += 1
-        elif cmd != "claude":
-            what = f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}"
-            if claimed is not None:
-                what += f", claimed {_human_age(now - claimed)} ago and never launched"
-            dead.append((slot.phase or "", what))
     for slot in st.slots:
         if slot.busy or slot.retiring:
             continue
@@ -691,12 +763,12 @@ def _check_panes(cfg: Config, st: State, probe: PaneProbe) -> Check:
     if cfg.driver != "tmux":
         return Check("slots.panes", OK, f"driver={cfg.driver}; no panes to check")
     if probe.dead:
-        phase = probe.dead[0][0] or "<phase>"
+        phase = probe.dead[0].phase or "<phase>"
         return Check(
             "slots.panes",
             FAIL,
             "worker died without `swarm done`: "
-            + "; ".join([what for _, what in probe.dead] + probe.dead_free),
+            + "; ".join([d.what for d in probe.dead] + probe.dead_free),
             f"swarm free {phase}  # then relaunch it",
         )
     if probe.dead_free:
@@ -733,12 +805,34 @@ def _check_watchdog(cfg: Config, probe: PaneProbe) -> Check:
     is a legitimate choice — but it means a dead pane is never noticed: the loop
     blocks in ``select`` forever whenever nothing is waiting, and the worker that
     would have sent the waking ``swarm done`` is the one that died. With the
-    watchdog on, the same dead pane is reaped within one sweep. So this is not a
-    fault on its own; it is a fault *in combination*, which is exactly the pair
-    nothing else in the tool looks at.
+    watchdog on, the same dead pane is reaped on the sweep's second sighting. So
+    this is not a fault on its own; it is a fault *in combination*, which is
+    exactly the pair nothing else in the tool looks at.
+
+    The sweep does not free every dead slot (:func:`_sweep_keeps`): "will be
+    reaped" is said only of the ones it does, and each of the others is named
+    with why it stays and what frees it.
     """
     watchdog = int(getattr(cfg, "watchdog_s", 0) or 0)
     dead = probe.dead  # busy slots only: the watchdog reaps workers, not free panes
+    kept = [d for d in dead if d.kept]
+    if watchdog and kept:
+        reaped = len(dead) - len(kept)
+        by_hand = [d.phase for d in kept if d.kept != _LAUNCH_RUNNING]
+        detail = (
+            f"watchdog on ({watchdog}s) — "
+            + (f"{reaped} of the dead pane(s) above will be reaped; " if reaped else "")
+            + "it leaves "
+            + "; ".join(f"{d.phase} ({d.kept})" for d in kept)
+        )
+        if not by_hand:
+            return Check("run.watchdog", OK, detail)
+        return Check(
+            "run.watchdog",
+            FAIL,
+            f"{detail}: `swarm free` frees {', '.join(by_hand)} now",
+            f"swarm free {by_hand[0]}  # then relaunch it",
+        )
     if watchdog and dead:
         return Check(
             "run.watchdog",
@@ -971,6 +1065,37 @@ def _lane_waits(held: dict[str, dict]) -> str:
     return f"{len(held)} ready row(s) wait on a lane: " + ", ".join(shown)
 
 
+def _launch_waits(
+    st: State, rows: list[str], now: float, due_grace: float
+) -> tuple[list[str], list[str], list[str]]:
+    """``rows`` split by what the launcher holds against each
+    (``State.launch_fails``): ``(launchable, waiting, given_up)``.
+
+    A row waits out :data:`state.LAUNCH_RETRY_S` after a failed launch and is
+    then retried by the supervisor's own timer, which gets ``due_grace`` to
+    reach it; past that the row is launchable like any other. One given up on
+    (:data:`state.LAUNCH_GIVE_UP`) is started again only by hand. ``waiting``
+    holds a sentence per row, ``given_up`` the rows.
+    """
+    launchable: list[str] = []
+    waiting: list[str] = []
+    given_up: list[str] = []
+    for row in rows:
+        fails, last = st.launch_fail(row)
+        left = last + state_mod.LAUNCH_RETRY_S - now
+        if fails >= state_mod.LAUNCH_GIVE_UP:
+            given_up.append(row)
+        elif fails and left > 0:
+            waiting.append(
+                f"{row}: launch failed {_human_age(now - last)} ago, retried in {left:.0f}s"
+            )
+        elif fails and left > -due_grace:
+            waiting.append(f"{row}: launch failed {_human_age(now - last)} ago, its retry is due")
+        else:
+            launchable.append(row)
+    return launchable, waiting, given_up
+
+
 def _check_nudge(
     st: State,
     ready: list[str],
@@ -978,6 +1103,7 @@ def _check_nudge(
     *,
     held: dict[str, dict] | None = None,
     event_age: float | None = None,
+    now: float | None = None,
 ) -> Check:
     """Free slot + rows to launch + not paused + not blocked = a lost nudge.
 
@@ -992,6 +1118,10 @@ def _check_nudge(
     supervisor: within :data:`_NUDGE_GRACE_S` of an event the supervisor is
     still handling it, and it launches last. The supervisor's own probe runs
     once an event is handled and passes none.
+
+    A row whose launch failed is no lost nudge while it waits to be retried
+    (:func:`_launch_waits`): it is left out and named. One the launcher gave
+    up on is named as that, with the command that starts it again.
     """
     if st.finished or st.on_hold or st.integ_blocked or st.bootstrapping:
         why = (
@@ -1004,20 +1134,37 @@ def _check_nudge(
             else "starting: the first launch waits for the init pass"
         )
         return Check("run.nudge", OK, f"not applicable ({why})")
+    outside = event_age is not None
+    ready, waiting, given_up = _launch_waits(
+        st, ready, time.time() if now is None else now, _NUDGE_GRACE_S if outside else 0.0
+    )
+    apart = "".join(f"; {wait}" for wait in waiting)
     if free and ready:
-        if event_age is not None and event_age < _NUDGE_GRACE_S:
+        if outside and event_age < _NUDGE_GRACE_S:
             return Check(
                 "run.nudge",
                 OK,
                 f"{len(free)} free slot(s) and ready {ready}: the supervisor took up an "
-                f"event {_human_age(event_age)} ago and launches at the end of it",
+                f"event {_human_age(event_age)} ago and launches at the end of it{apart}",
             )
         return Check(
             "run.nudge",
             FAIL,
             f"{len(free)} free slot(s) and ready {ready} but nothing launched — "
-            "lost nudge; nothing will wake the supervisor on its own",
+            f"lost nudge; nothing will wake the supervisor on its own{apart}",
             f"swarm launch {ready[0]}",
+        )
+    if free and given_up:
+        return Check(
+            "run.nudge",
+            FAIL,
+            f"{len(free)} free slot(s) and {given_up} given up on after it kept failing: "
+            f"nothing starts it again by itself{apart}",
+            f"swarm launch {given_up[0]}  # once the cause is fixed",
+        )
+    if free and waiting:
+        return Check(
+            "run.nudge", OK, f"{len(free)} free slot(s) and nothing to launch yet{apart}"
         )
     if free and held:
         return Check(

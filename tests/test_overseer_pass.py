@@ -451,6 +451,26 @@ def test_the_doctor_probe_sees_a_lost_nudge_right_after_an_event(sup, cfg):
     assert set(fails) == {"run.nudge"} and "ready ['P0']" in fails["run.nudge"]
 
 
+def test_the_doctor_probe_leaves_out_a_phase_waiting_out_a_failed_launch(sup, cfg):
+    with state_mod.transaction(cfg) as st:
+        st.bootstrapping = False  # the init pass is over; only P0 is ready
+    stale = state_mod.read(cfg)  # read before the launch failed, as a wake's is
+    sup._launch_failed("P0", time.time() - 20)
+    sup._doctor_probed = 0.0
+    assert sup._doctor_probe(stale, time.time()) == {}
+
+
+def test_the_doctor_probe_names_a_phase_given_up_on(sup, cfg):
+    with state_mod.transaction(cfg) as st:
+        st.bootstrapping = False
+    with sup._launch_lock:
+        sup._launch_fails["P0"] = (state_mod.LAUNCH_GIVE_UP, time.time() - 900)
+    sup._doctor_probed = 0.0
+    fails = sup._doctor_probe(state_mod.read(cfg), time.time())
+    assert set(fails) == {"run.nudge"}
+    assert "['P0'] given up on" in fails["run.nudge"] and "lost nudge" not in fails["run.nudge"]
+
+
 def test_the_doctor_probe_leaves_out_rows_a_lane_holds_back(sup, cfg, monkeypatch):
     sup._doctor_probed = 0.0
     monkeypatch.setattr(cfg, "lanes_enabled", True)

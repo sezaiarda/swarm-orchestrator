@@ -21,6 +21,17 @@ from typing import Iterator
 from . import logutil
 from .config import Config
 
+#: A phase whose launch *failed* (claimed a slot, could not start) is not
+#: relaunched on the very next event: the cause is usually still there, and the
+#: next free slot would just fail it again and ping again. It waits this long,
+#: then is eligible like any other ready phase.
+LAUNCH_RETRY_S = 60.0
+#: After this many consecutive failed launches a phase is no longer launched
+#: automatically; the owner is told once. ``swarm launch <phase>`` or ``swarm
+#: resume`` puts it back. It stops holding the finish open, and the finish
+#: message names it.
+LAUNCH_GIVE_UP = 3
+
 
 @dataclass
 class Slot:
@@ -201,6 +212,13 @@ class State:
     # it goes. Same compatibility rule as ``lanes``: top-level, written only when
     # non-empty, released with the lane.
     landing: dict[str, dict[str, dict]] = field(default_factory=dict)
+    # What the supervisor's launcher holds in memory, written out by it so that
+    # ``swarm doctor`` reads the same thing: the phases a launch thread of its
+    # own is starting right now, and ``{phase: [failed launches in a row, when
+    # the last one failed]}`` (:data:`LAUNCH_RETRY_S`, :data:`LAUNCH_GIVE_UP`).
+    # Same compatibility rule as ``lanes``: top-level, written only when non-empty.
+    launching: list[str] = field(default_factory=list)
+    launch_fails: dict[str, list[float]] = field(default_factory=dict)
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -301,6 +319,12 @@ class State:
         no longer in flight."""
         self.lanes.pop(phase, None)
         self.landing.pop(phase, None)
+
+    def launch_fail(self, phase: str) -> tuple[int, float]:
+        """``(failed launches in a row, when the last one failed)`` for
+        ``phase``; ``(0, 0.0)`` when its last launch did not fail."""
+        fails = self.launch_fails.get(phase)
+        return (int(fails[0]), float(fails[1])) if fails else (0, 0.0)
 
     def park(self, phase: str, park_after: float | None = None) -> None:
         """Move a waiting session off the grid into the parked set.
@@ -510,9 +534,9 @@ class State:
             del d["lanes"]  # a run with lanes off writes no new key
         if not d["landing"]:
             del d["landing"]
-        for mark in ("asked", "answered"):
+        for mark in ("asked", "answered", "launching", "launch_fails"):
             if not d[mark]:
-                del d[mark]  # no parked session has the mark: no new key
+                del d[mark]  # nothing to say: no new key
         return d
 
     @classmethod
@@ -556,6 +580,8 @@ class State:
             pause_at=float(data.get("pause_at") or 0.0),
             lanes={k: list(v) for k, v in (data.get("lanes") or {}).items()},
             landing={k: dict(v) for k, v in (data.get("landing") or {}).items()},
+            launching=list(data.get("launching") or []),
+            launch_fails={k: list(v) for k, v in (data.get("launch_fails") or {}).items()},
         )
 
     @classmethod

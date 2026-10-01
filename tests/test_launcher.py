@@ -201,6 +201,34 @@ def test_a_launch_thread_records_the_outcome_and_clears_the_guard(sup, cfg, monk
     assert pokes == ["launched P0 failed\n", "launched P0 launched\n"]
 
 
+def test_the_launcher_writes_its_pause_where_doctor_reads_it(sup, cfg, monkeypatch):
+    """The back-off lived in the supervisor's memory only, so ``swarm doctor``
+    read a phase waiting it out as launchable."""
+    outcomes = iter([launch_mod.FAILED, launch_mod.LAUNCHED])
+    monkeypatch.setattr(launch_mod, "launch_outcome", lambda *a, **k: next(outcomes))
+    monkeypatch.setattr(launch_mod, "_poke_fifo", lambda c, line: None)
+    with sup._launch_lock:
+        sup._launching.add("P0")
+    sup._publish_launches()
+    assert state_mod.read(cfg).launching == ["P0"]
+    sup._launch_worker("P0")
+    st = state_mod.read(cfg)
+    assert st.launching == [] and st.launch_fail("P0")[0] == 1
+    assert time.time() - st.launch_fail("P0")[1] < 5
+    with sup._launch_lock:
+        sup._launching.add("P0")
+    sup._launch_worker("P0")
+    assert state_mod.read(cfg).launch_fails == {}  # a success clears it there too
+
+
+def test_a_resume_clears_the_published_pause(sup, cfg):
+    _fail(sup, "P0", n=sup_mod.LAUNCH_GIVE_UP)
+    sup._publish_launches()
+    assert state_mod.read(cfg).launch_fail("P0")[0] == sup_mod.LAUNCH_GIVE_UP
+    sup._on_resume()
+    assert "P0" not in state_mod.read(cfg).launch_fails
+
+
 def test_a_raising_launch_frees_its_claim(sup, cfg, monkeypatch):
     def boom(c, phase, log, **_):
         with state_mod.transaction(c) as st:

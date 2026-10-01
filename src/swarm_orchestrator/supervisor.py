@@ -46,7 +46,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from . import caps
@@ -84,16 +84,10 @@ from .resources import sampler as resources_mod
 from .logutil import Log
 
 
-#: A phase whose launch *failed* (claimed a slot, could not start) is not
-#: relaunched on the very next event: the cause is usually still there, and the
-#: next free slot would just fail it again and ping again. It waits this long,
-#: then is eligible like any other ready phase.
-LAUNCH_RETRY_S = 60.0
-#: After this many consecutive failed launches a phase is no longer launched
-#: automatically; the owner is told once. ``swarm launch <phase>`` or ``swarm
-#: resume`` puts it back. It stops holding the finish open, and the finish
-#: message names it.
-LAUNCH_GIVE_UP = 3
+#: The launch back-off and the give-up count live beside the state field that
+#: carries them out of this process (``State.launch_fails``).
+LAUNCH_RETRY_S = state_mod.LAUNCH_RETRY_S
+LAUNCH_GIVE_UP = state_mod.LAUNCH_GIVE_UP
 #: A worker whose pane dies this many times within :data:`CRASH_WINDOW_S` is not
 #: started again automatically: something about the phase kills it, and each
 #: restart costs a session. The owner is told once.
@@ -257,6 +251,9 @@ class Supervisor:
         with state_mod.transaction(self.cfg) as st:
             st.supervisor_pid = os.getpid()
             st.last_event_at = time.time()
+            # The last supervisor's launcher went with it: a hand-over note
+            # brings its back-offs across (`_adopt`), nothing else does.
+            st.launching, st.launch_fails = [], {}
         # Taking a run over: what the last supervisor ran on, read before the
         # snapshot below replaces it (see `_adopt_config`).
         self._prior_cfg = reload_mod.snapshot_cfg(self.cfg) if self._adopting else None
@@ -737,6 +734,7 @@ class Supervisor:
         with self._launch_lock:
             self._launch_fails.clear()
             self._retried.clear()
+        self._publish_launches()
         self._fill_slots("resumed")
         self._finish_if_settled()
 
@@ -945,6 +943,7 @@ class Supervisor:
         if note.get("backup_last"):
             self._backup_last = float(note["backup_last"])
         self._bootstrapped = True  # `swarm up` poked it for the last supervisor
+        self._publish_launches()
         st = state_mod.read(cfg)
         self.log.line(
             f"ADOPT busy={sorted(s.phase for s in st.busy_slots() if s.phase)}"
@@ -1041,7 +1040,8 @@ class Supervisor:
     def _adopt_dead_claims(self) -> None:
         """Free a slot that is claimed with no worker in it: a launch the last
         supervisor's exit cut off after the claim. The pane holds its idle
-        command, so the watchdog (which looks for dead panes) would never see it."""
+        command, and the watchdog would free it only minutes later (the start
+        bound, then two sweeps); a supervisor that has just started knows now."""
         cfg = self.cfg
         if cfg.driver != "tmux":
             return
@@ -1728,7 +1728,8 @@ class Supervisor:
         busy and the run hangs silently forever. This sweep is the only poll in the
         supervisor and it only ever asserts what the event path would have done:
 
-        * a busy slot whose pane is gone -> free it, keep its work for the next
+        * a busy slot whose worker is gone (its pane, or everything that ran in
+          it: :meth:`_reap_dead_panes`) -> free it, keep its work for the next
           attempt, ping (never when tmux itself cannot answer);
         * idle, unpaused, unblocked, with a free slot and ready phases -> run the
           launcher again, past a hung init master and a launch-retry backoff
@@ -1837,9 +1838,15 @@ class Supervisor:
         self._finish_run(ctx)
 
     def _reap_dead_panes(self, st: state_mod.State) -> list[str]:
-        """Free every busy slot whose worker pane has vanished. Returns the phases.
+        """Free every busy slot whose worker is gone. Returns the phases.
 
-        A phase is only reaped after being seen dead on TWO consecutive sweeps:
+        Gone is a pane tmux no longer has or reports dead, and a pane that is
+        still there with nothing of the worker in it: a launch that died after
+        its claim leaves the idle command running, which tmux calls alive. The
+        second kind is judged by ``doctor._slot_worker``, the rule ``swarm
+        doctor`` reads too, so what doctor says will be reaped is what is.
+
+        A phase is only reaped after being seen gone on TWO consecutive sweeps:
         ``launch`` claims the slot before it creates the worktree and respawns the
         pane, so a single sighting inside that window would reap a worker that is
         about to start. Bare-driver runs have no panes and are skipped entirely.
@@ -1855,31 +1862,76 @@ class Supervisor:
             self.log.line("WATCHDOG-TMUX-UNREACHABLE no answer from tmux; nothing reaped")
             self._suspect = {}
             return []
+        now = time.time()
+        with self._launch_lock:  # the launcher's own view, never older than the state's
+            st = replace(st, launching=sorted(self._launching))
         suspect: dict[int, str] = {}
-        reaped: list[str] = []
+        reaped: list[tuple[str, str, str]] = []
         for slot in st.busy_slots():
-            if not slot.pane_id or not slot.phase or panes.get(slot.pane_id) is False:
+            if not slot.pane_id or not slot.phase:
                 continue
+            why = "pane-dead"
+            if panes.get(slot.pane_id) is False:  # the pane is there: is the worker?
+                found = doctor_mod._slot_worker(self.cfg, st, slot, now, self._pane_cmd)
+                if not isinstance(found, doctor_mod.Stopped) or found.kept:
+                    continue
+                why = "never-launched" if found.unlaunched else "no-worker"
             if self._suspect.get(slot.id) != slot.phase:
                 suspect[slot.id] = slot.phase  # first sighting; confirm next sweep
                 self.log.line(
                     f"WATCHDOG-SUSPECT {slot.phase} slot={slot.id} pane={slot.pane_id}"
                 )
                 continue
-            reaped.append(slot.phase)
+            reaped.append((slot.phase, slot.pane_id, why))
         self._suspect = suspect
-        for phase in reaped:
-            self._reap(phase)
-        return reaped
+        for phase, pane, why in reaped:
+            if why == "never-launched":
+                self._reap_unlaunched(phase, pane)
+            else:
+                self._reap(phase, why)
+        return [phase for phase, _, _ in reaped]
 
-    def _reap(self, phase: str) -> None:
+    @staticmethod
+    def _pane_cmd(pane: str) -> str:
+        """What ``pane`` runs, for the sweep; ``?`` when tmux gives no answer."""
+        out = tmux.run(["display-message", "-p", "-t", pane, "#{pane_current_command}"])
+        return (out.stdout.strip() if out.returncode == 0 else "") or "?"
+
+    def _reap_unlaunched(self, phase: str, pane: str) -> None:
+        """Settle a launch that died after its claim the way a failed launch
+        settles itself (:func:`launch.launch_outcome`): the pane back on its
+        idle command, the slot and the lane released, what an earlier attempt
+        left in the mirror kept, one more failed launch on the phase's count.
+        The launcher's back-off and give-up then treat it like any other."""
+        self.log.line(f"WATCHDOG-REAP {phase} never-launched")
+        now = time.time()
+        try:
+            tmux.respawn_pane(pane, "exec sleep infinity")
+        except subprocess.CalledProcessError:
+            pass  # the pane went meanwhile: nothing is left running in the mirror
+        with state_mod.transaction(self.cfg) as st:
+            st.free_slot_for(phase)
+            st.release_lane(phase)
+            st.last_event_at = now
+        logutil.run_ended(self.log, phase, "launch-failed")
+        if self.cfg.git_isolation == "worktree":
+            try:
+                gitq.set_aside(self.cfg, phase, self.log)
+            except gitq.GitError as exc:
+                self.log.line(f"WATCHDOG-SET-ASIDE-ERROR {phase} {exc}")
+        fails = self._launch_failed(phase, now)
+        self._publish_launches()
+        if fails == LAUNCH_GIVE_UP:
+            self._ping_gave_up(phase, fails)
+
+    def _reap(self, phase: str, why: str = "pane-dead") -> None:
         """Free the slot of a worker that died without reporting, keep its work
         for the next attempt (:func:`gitq.set_aside`), tell the owner. Not
         recorded in ``done``: the phase stays launchable, and its next launch
         resumes on the same branch. After :data:`CRASH_LIMIT` deaths within
         :data:`CRASH_WINDOW_S` it is given up on instead, like a phase that
         keeps failing to launch, until the owner puts it back."""
-        self.log.line(f"WATCHDOG-REAP {phase} pane-dead")
+        self.log.line(f"WATCHDOG-REAP {phase} {why}")
         now = time.time()
         recent = [t for t in self._crashes.get(phase, []) if now - t < CRASH_WINDOW_S]
         recent.append(now)
@@ -1888,6 +1940,7 @@ class Supervisor:
         if crash_looping:
             with self._launch_lock:
                 self._launch_fails[phase] = (LAUNCH_GIVE_UP, now)
+            self._publish_launches()
             self.log.line(f"WATCHDOG-CRASH-HOLD {phase} {len(recent)} deaths in an hour")
         with state_mod.transaction(self.cfg) as st:
             st.free_slot_for(phase)
@@ -2118,6 +2171,35 @@ class Supervisor:
         fails, last = self._launch_fails.get(phase, (0, 0.0))
         return fails > 0 and now - last < LAUNCH_RETRY_S
 
+    def _publish_launches(self) -> None:
+        """Write what the launcher holds in memory (the launches in flight, the
+        failed ones and their back-offs) into the state, where ``swarm doctor``
+        reads it. Called after every change to either; never with
+        ``_launch_lock`` held, which is taken inside the state's own lock."""
+        with state_mod.transaction(self.cfg) as st:
+            with self._launch_lock:
+                st.launching = sorted(self._launching)
+                st.launch_fails = {p: [n, last] for p, (n, last) in self._launch_fails.items()}
+
+    def _launch_failed(self, phase: str, now: float) -> int:
+        """Count one more failed launch of ``phase`` and start its back-off;
+        return the failures in a row."""
+        with self._launch_lock:
+            fails = self._launch_fails.get(phase, (0, 0.0))[0] + 1
+            self._launch_fails[phase] = (fails, now)
+            self._retried.discard(phase)  # a fresh back-off to wait out
+        return fails
+
+    def _ping_gave_up(self, phase: str, fails: int) -> None:
+        self._ping(
+            f"launch-gave-up:{phase}",
+            f"swarm: the worker for {phase} failed to start {fails} times in a row,"
+            " so the swarm stopped trying and the phases after it wait. Fix the"
+            f" cause, then run `swarm launch {phase}` (or `swarm resume` to retry"
+            " every phase it gave up on).",
+            cooldown=0.0,
+        )
+
     def _fill_slots(self, reason: str, *, force: bool = False) -> list[str]:
         """Launch the ledger's ready phases into the free slots; return the picks.
 
@@ -2174,6 +2256,7 @@ class Supervisor:
                 picks.append(phase)
             self._launching.update(picks)
         if picks:
+            self._publish_launches()
             self.log.line(f"LAUNCH-READY {' '.join(picks)} ({reason})")
         for phase in picks:
             self._start_launch(phase)
@@ -2198,14 +2281,13 @@ class Supervisor:
                 held = st.free_slot_for(phase) is not None  # don't strand the claim
             if held:
                 logutil.run_ended(self.log, phase, "launch-failed")
+        if outcome == launch_mod.FAILED:
+            self._launch_failed(phase, time.time())
         with self._launch_lock:
             self._launching.discard(phase)
-            if outcome == launch_mod.FAILED:
-                fails = self._launch_fails.get(phase, (0, 0.0))[0] + 1
-                self._launch_fails[phase] = (fails, time.time())
-                self._retried.discard(phase)  # a fresh back-off to wait out
-            elif outcome == launch_mod.LAUNCHED:
+            if outcome == launch_mod.LAUNCHED:
                 self._launch_fails.pop(phase, None)
+        self._publish_launches()
         launch_mod._poke_fifo(cfg, f"launched {phase} {outcome}\n")
 
     def _on_launched(self, phase: str, outcome: str) -> None:
@@ -2219,14 +2301,7 @@ class Supervisor:
             fails = self._launch_fails.get(phase, (0, 0.0))[0]
         self.log.line(f"EVENT launched {phase} {outcome} fails={fails}")
         if outcome == launch_mod.FAILED and fails == LAUNCH_GIVE_UP:
-            self._ping(
-                f"launch-gave-up:{phase}",
-                f"swarm: the worker for {phase} failed to start {fails} times in a row,"
-                " so the swarm stopped trying and the phases after it wait. Fix the"
-                f" cause, then run `swarm launch {phase}` (or `swarm resume` to retry"
-                " every phase it gave up on).",
-                cooldown=0.0,
-            )
+            self._ping_gave_up(phase, fails)
         self._finish_if_settled()
 
     def _retry_backed_off(self) -> None:
@@ -2379,22 +2454,26 @@ class Supervisor:
         :data:`DOCTOR_PROBE_S`: ``ledger`` (a cycle or unknown dep strands every
         phase behind it) and ``run.nudge`` (free slots and rows the launcher would
         start, nothing launching — a phase given up after failed launches shows
-        here). No grace for a recent event: this runs once the event is handled.
+        here, one waiting out a failed launch's back-off does not). No grace for
+        a recent event: this runs once the event is handled.
         Never the full doctor, which shells out to git and du. ``None`` = not probed."""
         if now - self._doctor_probed < DOCTOR_PROBE_S:
             return None
         if not self._bootstrapped or self.master.is_alive():
             return None
-        launching, _given_up, backing = self._launch_view()
-        if launching:
-            return None  # a launch in flight reads as a lost nudge
+        with self._launch_lock:
+            if self._launching:
+                return None  # a launch in flight reads as a lost nudge
+            # The back-offs as they are now: `st` was read before this wake's work.
+            st = replace(
+                st, launch_fails={p: [n, last] for p, (n, last) in self._launch_fails.items()}
+            )
         self._doctor_probed = now
         ctx = master_mod.build_context(self.cfg, st)
         startable, held = doctor_mod._startable(ctx)
-        ready = [p for p in startable if p not in backing]
         checks = [
             doctor_mod._check_ledger(self.cfg, st),
-            doctor_mod._check_nudge(st, ready, ctx["free_slots"], held=held),
+            doctor_mod._check_nudge(st, startable, ctx["free_slots"], held=held, now=now),
         ]
         return {c.name: c.detail for c in checks if c.status == doctor_mod.FAIL}
 

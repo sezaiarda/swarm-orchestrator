@@ -88,8 +88,10 @@ FORCE = "force"
 
 #: What a supervisor that can hand over says of itself in :data:`MARK_FILE`.
 #: ``keep-later``: it keeps the work of a phase that finishes ``later`` for its
-#: date, so ``swarm done`` may tell the worker so.
-CAPS = ("handover", "restart-at", "keep-later")
+#: date, so ``swarm done`` may tell the worker so. ``reap-stopped``: its sweep
+#: frees a busy slot whose pane is still there with no worker in it, so ``swarm
+#: doctor`` may say such a slot will be reaped.
+CAPS = ("handover", "restart-at", "keep-later", "reap-stopped")
 
 #: How long a restart waits for a safe moment, then for the old supervisor to
 #: be gone. Past it the restart fails and says what it was still waiting for;

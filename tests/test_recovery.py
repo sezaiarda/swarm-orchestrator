@@ -12,17 +12,21 @@ The pure-state cases assert the accounting directly; the loop cases drive a real
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import gitq, ledger
+from swarm_orchestrator import doctor, gitq, ledger, procs
+from swarm_orchestrator import restart as restart_mod
 from swarm_orchestrator import state as state_mod
+from swarm_orchestrator import supervisor as sup_mod
 from swarm_orchestrator.config import load
 from swarm_orchestrator.state import State
 from swarm_orchestrator.supervisor import Supervisor
+from test_doctor import log as stamped
 
 LEDGER = (
     "- [ ] `P0` · needs:—\n"
@@ -205,6 +209,227 @@ def test_watchdog_leaves_a_live_pane_alone(tmp_path, monkeypatch):
         assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"]
     finally:
         sup.log.close()
+
+
+# -- a pane that is still there, with no worker in it ------------------------
+def _panes_running(cmds: dict[str, str], calls: list | None = None):
+    """Stand-in for `tmux run`: every pane of ``cmds`` is alive and runs its
+    command. ``calls`` collects what was asked."""
+
+    def fake(args, check=False):
+        if calls is not None:
+            calls.append(list(args))
+        if args[0] == "list-panes":
+            return _R(0, "".join(f"{p} 0\n" for p in cmds))
+        if args[0] == "display-message":
+            return _R(0, cmds.get(args[args.index("-t") + 1], "") + "\n")
+        return _R(0, "")
+
+    return fake
+
+
+def _claimed(tmp_path, monkeypatch, cmd: str, *entries: tuple[float, str]):
+    """A tmux run whose slot 0 is P0's, its pane ``%42`` running ``cmd``, with
+    ``(seconds_ago, message)`` lines in the supervisor's log. Returns the
+    config, the supervisor, the phases set aside and the tmux calls."""
+    cfg = _cfg(tmp_path, monkeypatch, driver="tmux", isolation="worktree", watchdog=1)
+    state_mod.init_state(cfg)
+    restart_mod.mark_supervisor(cfg, False)  # what a supervisor's `run` says of itself
+    with state_mod.transaction(cfg) as st:
+        st.claim_slot("P0")
+        st.slots[0].pane_id = "%42"
+        st.supervisor_pid = os.getpid()
+    aside: list[str] = []
+    calls: list[list[str]] = []
+    monkeypatch.setattr(gitq, "set_aside", lambda c, p, l: aside.append(p))
+    monkeypatch.setattr("swarm_orchestrator.tmux.run", _panes_running({"%42": cmd}, calls))
+    sup = Supervisor(cfg)
+    stamped(cfg, *entries)
+    return cfg, sup, aside, calls
+
+
+def _sweep(sup, times: int = 1) -> None:
+    for _ in range(times):
+        sup._last_sweep = 0.0
+        sup._watchdog_tick()
+
+
+PAST_THE_BOUND = doctor._START_GRACE_S + 60
+
+
+def test_watchdog_frees_a_claim_whose_launch_died_and_left_the_pane_parked(tmp_path, monkeypatch):
+    """A launch cut off after its claim leaves the slot busy and the pane on its
+    idle ``sleep``, which tmux calls alive: the sweep looked for dead panes only,
+    so the slot stayed busy until somebody ran ``swarm free``."""
+    cfg, sup, aside, calls = _claimed(
+        tmp_path, monkeypatch, "sleep", (PAST_THE_BOUND, "CLAIM P0 slot=0"))
+    try:
+        _sweep(sup)
+        assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"], "one sighting"
+        _sweep(sup)
+        st = state_mod.read(cfg)
+        assert not st.busy_slots() and "P0" not in st.done
+        assert aside == ["P0"]  # what an earlier attempt left is kept
+        assert ["respawn-pane", "-k", "-t", "%42", "exec sleep infinity"] in calls
+        # Counted as a failed launch: it waits the back-off, then is retried.
+        assert sup._launch_fails["P0"][0] == 1 and st.launch_fail("P0")[0] == 1
+        assert "P0" not in sup._fill_slots("test")
+        with sup._launch_lock:
+            sup._launch_fails["P0"] = (1, time.time() - sup_mod.LAUNCH_RETRY_S - 1)
+        sup.stub_launches.clear()
+        sup._retry_backed_off()
+        assert sup.stub_launches[0] == "P0"  # launchable again
+    finally:
+        sup.log.close()
+    text = cfg.supervisor_log.read_text(encoding="utf-8")
+    assert "WATCHDOG-REAP P0 never-launched" in text
+    assert "RUN-ENDED P0 reason=launch-failed" in text
+    assert _tg(tmp_path) == []  # retried by itself: nothing for the owner to do
+
+
+def test_a_launch_that_keeps_dying_is_given_up_on_and_the_owner_told_once(tmp_path, monkeypatch):
+    cfg, sup, _aside, _calls = _claimed(
+        tmp_path, monkeypatch, "sleep", (PAST_THE_BOUND, "CLAIM P0 slot=0"))
+    try:
+        with sup._launch_lock:
+            sup._launch_fails["P0"] = (sup_mod.LAUNCH_GIVE_UP - 1, time.time() - 600)
+        _sweep(sup, 2)
+        assert sup._given_up("P0")
+        assert state_mod.read(cfg).launch_fail("P0")[0] == sup_mod.LAUNCH_GIVE_UP
+    finally:
+        sup.log.close()
+    assert sum("failed to start 3 times" in ln for ln in _tg(tmp_path)) == 1
+
+
+def test_watchdog_leaves_a_claim_inside_the_start_bound_alone(tmp_path, monkeypatch):
+    cfg, sup, aside, _calls = _claimed(tmp_path, monkeypatch, "sleep", (30, "CLAIM P0 slot=0"))
+    try:
+        _sweep(sup, 3)
+        assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"]
+    finally:
+        sup.log.close()
+    assert aside == [] and "WATCHDOG-SUSPECT" not in cfg.supervisor_log.read_text()
+
+
+@pytest.mark.parametrize("entries", [
+    [(3600, "CLAIM P0 slot=0"), (3590, "LAUNCH P0 slot=0")],
+    [(PAST_THE_BOUND, "CLAIM P0 slot=0")],  # no LAUNCH line, and a worker all the same
+])
+def test_watchdog_never_touches_a_slot_whose_pane_runs_the_worker(tmp_path, monkeypatch, entries):
+    cfg, sup, aside, _calls = _claimed(tmp_path, monkeypatch, "claude", *entries)
+    try:
+        _sweep(sup, 3)
+        assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"]
+    finally:
+        sup.log.close()
+    assert aside == [] and "WATCHDOG-SUSPECT" not in cfg.supervisor_log.read_text()
+
+
+def test_watchdog_reaps_a_launched_worker_that_left_a_shell_and_no_process(tmp_path, monkeypatch):
+    """Launched, no ``swarm done``, the pane back on a shell and nothing of the
+    session running: the same dead worker as a pane that is gone."""
+    cfg, sup, aside, _calls = _claimed(
+        tmp_path, monkeypatch, "bash", (3600, "CLAIM P0 slot=0"), (3590, "LAUNCH P0 slot=0"))
+    try:
+        _sweep(sup)
+        assert state_mod.read(cfg).busy_slots()
+        _sweep(sup)
+        assert not state_mod.read(cfg).busy_slots()
+        assert "P0" not in sup._launch_fails  # a crash, not a failed launch
+    finally:
+        sup.log.close()
+    assert aside == ["P0"]
+    assert "WATCHDOG-REAP P0 no-worker" in cfg.supervisor_log.read_text(encoding="utf-8")
+    assert any("stopped without finishing" in ln for ln in _tg(tmp_path))
+
+
+def _session_process(cfg, phase: str) -> subprocess.Popen:
+    """A live process carrying ``phase``'s worker session markers."""
+    env = {"PATH": os.environ["PATH"], "SWARM_STATE_DIR": str(cfg.state_dir),
+           procs.SESSION_ENV: f"worker:{phase}"}
+    return subprocess.Popen(["sleep", "60"], env=env)
+
+
+def test_watchdog_leaves_a_slot_whose_session_still_has_a_process(tmp_path, monkeypatch):
+    """The command a pane shows is only a name. Reaping ends every process of
+    the session, so one that still has any is not the sweep's to judge."""
+    cfg, sup, aside, _calls = _claimed(
+        tmp_path, monkeypatch, "bash", (3600, "CLAIM P0 slot=0"), (3590, "LAUNCH P0 slot=0"))
+    child = _session_process(cfg, "P0")
+    try:
+        _sweep(sup, 3)
+        assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"]
+        assert child.poll() is None
+    finally:
+        child.kill()
+        child.wait()
+        sup.log.close()
+    assert aside == []
+
+
+def test_watchdog_leaves_a_claim_whose_launch_is_still_running_here(tmp_path, monkeypatch):
+    """A mirror that takes longer than the bound to build is a slow launch, and
+    its thread still owns the claim."""
+    cfg, sup, aside, _calls = _claimed(
+        tmp_path, monkeypatch, "sleep", (PAST_THE_BOUND, "CLAIM P0 slot=0"))
+    try:
+        with sup._launch_lock:
+            sup._launching.add("P0")
+        _sweep(sup, 3)
+        assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"]
+    finally:
+        sup.log.close()
+    assert aside == []
+
+
+def test_watchdog_leaves_a_reported_worker_whose_pane_is_parked(tmp_path, monkeypatch):
+    """After ``swarm done`` the pane goes back on ``sleep`` and the slot is kept
+    until the work has landed."""
+    cfg, sup, aside, _calls = _claimed(
+        tmp_path, monkeypatch, "sleep", (3600, "CLAIM P0 slot=0"), (3590, "LAUNCH P0 slot=0"))
+    try:
+        cfg.done_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.done_dir / "P0.ok").write_text("", encoding="utf-8")
+        _sweep(sup, 3)
+        assert [s.phase for s in state_mod.read(cfg).busy_slots()] == ["P0"]
+    finally:
+        sup.log.close()
+    assert aside == []
+
+
+@pytest.mark.parametrize("case", ["died-launch", "shell", "live-process", "launching", "gone"])
+def test_doctor_says_will_be_reaped_of_exactly_the_slots_the_sweep_frees(
+    tmp_path, monkeypatch, case
+):
+    launched = [(3600, "CLAIM P0 slot=0"), (3590, "LAUNCH P0 slot=0")]
+    entries = [(PAST_THE_BOUND, "CLAIM P0 slot=0")] if case in ("died-launch", "launching") else launched
+    cmd = "sleep" if case in ("died-launch", "launching") else "bash"
+    cfg, sup, _aside, _calls = _claimed(tmp_path, monkeypatch, cmd, *entries)
+    child = _session_process(cfg, "P0") if case == "live-process" else None
+    try:
+        if case == "launching":
+            with sup._launch_lock:
+                sup._launching.add("P0")
+            sup._publish_launches()
+        if case == "gone":
+            monkeypatch.setattr("swarm_orchestrator.tmux.run", _pane_probe({"%42"}))
+        monkeypatch.setattr(doctor, "_pane_cmd", lambda pane: "gone" if case == "gone" else cmd)
+        cfg.watchdog_s = 300
+        st = state_mod.read(cfg)
+        said = doctor._check_watchdog(cfg, doctor._dead_panes(cfg, st))
+        cfg.watchdog_s = 1
+        _sweep(sup, 2)
+        freed = not state_mod.read(cfg).busy_slots()
+    finally:
+        if child is not None:
+            child.kill()
+            child.wait()
+        sup.log.close()
+    assert freed == (case in ("died-launch", "shell", "gone"))
+    assert ("will be reaped" in said.detail) == freed, said.detail
+    if not freed:
+        assert "it leaves P0 (" in said.detail
+        assert (said.status == doctor.FAIL) == (case == "live-process")
 
 
 def test_watchdog_relaunches_an_idle_swarm_with_ready_phases(tmp_path, monkeypatch):

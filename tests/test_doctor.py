@@ -724,6 +724,114 @@ def test_a_free_slot_with_no_event_on_record_is_a_lost_nudge(cfg):
     assert nudge(cfg).status == FAIL
 
 
+# -- a failed launch waits to be retried ----------------------------------------
+def failed(st: state_mod.State, phase: str, ago: float, n: int = 1) -> state_mod.State:
+    st.launch_fails[phase] = [n, time.time() - ago]
+    return st
+
+
+LONG_AGO = 3600.0  # the last event: far outside the grace for one being handled
+
+
+def test_a_phase_waiting_out_a_failed_launch_is_not_offered_and_is_named():
+    """The supervisor held the pause in memory only, so doctor read the phase
+    as launchable and offered ``swarm launch`` for it."""
+    st = failed(state_mod.State.fresh(2), "P1", ago=20)
+    check = doctor._check_nudge(st, ["P1"], [0, 1], event_age=LONG_AGO)
+    assert check.status == OK and check.fix_hint is None
+    assert "P1: launch failed 20s ago, retried in 40s" in check.detail
+
+
+def test_the_phases_beside_a_waiting_one_are_still_a_lost_nudge():
+    st = failed(state_mod.State.fresh(2), "P1", ago=20)
+    check = doctor._check_nudge(st, ["P1", "P2"], [0, 1], event_age=LONG_AGO)
+    assert check.status == FAIL and check.fix_hint == "swarm launch P2"
+    assert "ready ['P2']" in check.detail and "P1: launch failed 20s ago" in check.detail
+
+
+def test_a_retry_that_is_due_gets_the_supervisors_timer_a_moment_to_reach_it():
+    st = failed(state_mod.State.fresh(2), "P1", ago=state_mod.LAUNCH_RETRY_S + 5)
+    check = doctor._check_nudge(st, ["P1"], [0], event_age=LONG_AGO)
+    assert check.status == OK and "its retry is due" in check.detail
+
+
+def test_a_phase_is_offered_again_once_its_pause_has_passed():
+    ago = state_mod.LAUNCH_RETRY_S + doctor._NUDGE_GRACE_S + 5
+    st = failed(state_mod.State.fresh(2), "P1", ago=ago)
+    check = doctor._check_nudge(st, ["P1"], [0], event_age=LONG_AGO)
+    assert check.status == FAIL and "lost nudge" in check.detail
+    assert check.fix_hint == "swarm launch P1"
+
+
+def test_a_phase_given_up_on_is_named_as_given_up_not_as_a_lost_nudge():
+    st = failed(state_mod.State.fresh(2), "P1", ago=900, n=state_mod.LAUNCH_GIVE_UP)
+    check = doctor._check_nudge(st, ["P1"], [0], event_age=LONG_AGO)
+    assert check.status == FAIL and "lost nudge" not in check.detail
+    assert "['P1'] given up on" in check.detail
+    assert check.fix_hint == "swarm launch P1  # once the cause is fixed"
+
+
+def test_the_launchers_pause_survives_the_state_file_and_adds_no_key_when_empty(cfg):
+    set_state(cfg)
+    assert not {"launching", "launch_fails"} & set(json.loads(cfg.state_path.read_text()))
+    with state_mod.transaction(cfg) as st:
+        st.launching = ["P2"]
+        st.launch_fails["P1"] = [2, 123.5]
+    st = state_mod.read(cfg)
+    assert st.launching == ["P2"] and st.launch_fail("P1") == (2, 123.5)
+    assert st.launch_fail("P2") == (0, 0.0)
+
+
+# -- which dead slots the sweep frees -------------------------------------------
+def sweeping(cfg) -> dict:
+    """State fields of a run whose supervisor (this process) knows the sweep's
+    rule for a pane that is still there, as one started on this code says."""
+    doctor.restart_mod.mark_supervisor(cfg, False)
+    return {"supervisor_pid": os.getpid()}
+
+
+def test_a_died_launch_is_reaped_by_a_supervisor_that_knows_the_rule(cfg, monkeypatch):
+    log(cfg, (doctor._START_GRACE_S + 60, "CLAIM P1 slot=0"))
+    pane, watchdog = landing(cfg, monkeypatch, {"%1": "sleep"}, watchdog=300, **sweeping(cfg))
+    assert pane.status == FAIL and "never launched" in pane.detail
+    assert watchdog.status == OK and "the 1 dead pane(s) above will be reaped" in watchdog.detail
+
+
+def test_a_supervisor_started_before_the_rule_is_not_said_to_reap_a_parked_pane(cfg, monkeypatch):
+    """The CLI runs the code on disk and the supervisor what was there when it
+    started: until its restart it frees only a pane that is gone."""
+    log(cfg, (doctor._START_GRACE_S + 60, "CLAIM P1 slot=0"))
+    _, watchdog = landing(cfg, monkeypatch, {"%1": "sleep", "%2": "gone"}, watchdog=300)
+    assert watchdog.status == FAIL
+    assert "1 of the dead pane(s) above will be reaped; it leaves P1 (" in watchdog.detail
+    assert "older than the rule" in watchdog.detail and "`swarm restart`" in watchdog.detail
+    assert watchdog.fix_hint.startswith("swarm free P1 ")
+
+
+def test_a_dead_slot_whose_launch_is_still_running_is_left_to_that_launch(cfg, monkeypatch):
+    log(cfg, (doctor._START_GRACE_S + 60, "CLAIM P1 slot=0"))
+    pane, watchdog = landing(
+        cfg, monkeypatch, {"%1": "sleep"}, watchdog=300, launching=["P1"], **sweeping(cfg))
+    assert pane.status == FAIL and "never launched" in pane.detail
+    assert watchdog.status == OK and "will be reaped" not in watchdog.detail
+    assert "it leaves P1 (its launch is still running in the supervisor" in watchdog.detail
+
+
+def test_a_dead_slot_with_a_live_session_process_is_freed_only_by_hand(cfg, monkeypatch):
+    log(cfg, (20, "CLAIM P1 slot=0"), (12, "LAUNCH P1 slot=0"),
+        (20, "CLAIM P2 slot=1"), (12, "LAUNCH P2 slot=1"))
+    monkeypatch.setattr(
+        doctor.session_mod, "session_processes",
+        lambda c, roots=(), markers=(): {4242} if "SWARM_SESSION_ID=worker:P2" in markers else set(),
+    )
+    _, watchdog = landing(
+        cfg, monkeypatch, {"%1": "bash", "%2": "bash"}, watchdog=300, **sweeping(cfg))
+    assert watchdog.status == FAIL
+    assert "1 of the dead pane(s) above will be reaped; it leaves P2 (1 process(es)" in watchdog.detail
+    assert "`swarm free` frees P2 now" in watchdog.detail
+    assert watchdog.fix_hint.startswith("swarm free P2 ")
+
+
 def test_the_grace_outlasts_the_longest_pass_seen_and_stays_short():
     # 279 finishes on a live log: 27 s at worst from the freed slot to the claim.
     assert 27 * 2 <= doctor._NUDGE_GRACE_S <= 120

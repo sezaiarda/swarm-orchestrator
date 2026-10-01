@@ -52,10 +52,17 @@ logged to `<state>/logs/supervisor.log`.
 **Watchdog** (`[swarm].watchdog_s`, default 300, `0` = off): the supervisor's one
 periodic poll. On each sweep it:
 
-- frees a busy slot whose pane is gone, once seen on two sweeps in a row, and
+- frees a busy slot whose worker is gone, once seen on two sweeps in a row, and
   keeps that phase's work for its next launch, which resumes on the same branch.
-  A tmux that errors, hangs or has lost the session reaps nothing. A worker that
-  dies 3 times within an hour is not restarted again, and you are told;
+  Gone is a pane tmux no longer has, and a pane that is still there with nothing
+  of the worker in it: no `swarm done`, a command other than `claude`, and no
+  process of the worker's session left. A slot that was claimed and whose worker
+  was never started counts once the claim is 3 minutes old, and as a failed
+  launch: it waits a minute, is retried, and after 3 in a row you are told. A
+  slot whose session still has a process, or whose launch the supervisor is
+  still running, is left alone, and `swarm doctor` says which. A tmux that
+  errors, hangs or has lost the session reaps nothing. A worker that dies 3
+  times within an hour is not restarted again, and you are told;
 - relaunches when the swarm has been idle for a full interval with free slots and
   ready phases;
 - finishes a run that has settled;
@@ -1335,8 +1342,10 @@ and exits 1 if any check FAILs. It checks:
 - **supervisor:** pid alive, FIFO has a reader, no stray second supervisor;
 - **slots:** busy panes run `claude`; a busy slot with no edits or commits
   20 minutes after launch (the lost-prompt signature);
-- **run:** watchdog, finished with ready work, free slots beside ready phases,
-  no event for 90 minutes;
+- **run:** watchdog (which dead slots it will free, and what frees the others),
+  finished with ready work, free slots beside ready phases (a phase waiting to
+  be retried after a failed launch is named, not offered; one given up on is
+  named as that), no event for 90 minutes;
 - **integration:** hold age, owed pushes;
 - **owner:** questions waiting on you (`owner.blocking`, a WARN, never a FAIL);
 - **ledger:** cycles and unknown dependencies;

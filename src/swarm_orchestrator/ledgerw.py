@@ -471,13 +471,15 @@ def append_lesson(root: Path, lessons: str, phase: str, text: str, title: str, d
 
 
 # -- the queue ------------------------------------------------------------
-def _qdir(cfg: Config) -> Path:
+def queue_dir(cfg: Config) -> Path:
+    """Where queued reports wait (:func:`pending`). The directory moves whenever
+    one is queued or taken, which is how a dashboard knows to read it again."""
     return cfg.state_dir / "ledger"
 
 
 @contextmanager
 def _locked(cfg: Config) -> Iterator[None]:
-    d = _qdir(cfg)
+    d = queue_dir(cfg)
     d.mkdir(parents=True, exist_ok=True)
     with (d / ".lock").open("w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -504,7 +506,7 @@ def _write(path: Path, data: dict) -> None:
 def queue(cfg: Config, key: str, op: dict) -> None:
     """Add one report to ``key``'s queue. An ``outcome`` replaces the one before."""
     with _locked(cfg):
-        path = _qdir(cfg) / f"{key}.json"
+        path = queue_dir(cfg) / f"{key}.json"
         data = _read(path)
         op = {**op, "ts": time.time()}
         if op.get("kind") == "outcome":
@@ -516,7 +518,7 @@ def queue(cfg: Config, key: str, op: dict) -> None:
 
 def pending(cfg: Config) -> dict[str, dict]:
     """Every queued report, by key."""
-    d = _qdir(cfg)
+    d = queue_dir(cfg)
     if not d.is_dir():
         return {}
     return {p.stem: _read(p) for p in sorted(d.glob("*.json")) if not p.name.startswith(".")}
@@ -950,10 +952,10 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
         return total
     if not _markdown(cfg):
         for k in due:
-            (_qdir(cfg) / f"{k}.json").unlink(missing_ok=True)
+            (queue_dir(cfg) / f"{k}.json").unlink(missing_ok=True)
         log.line(f"LEDGER-SKIP {' '.join(due)} (not a checklist ledger)")
         return total
-    flushed_path = _qdir(cfg) / ".flushed.json"
+    flushed_path = queue_dir(cfg) / ".flushed.json"
     try:
         flushed = json.loads(flushed_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -984,7 +986,7 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
     with _locked(cfg):
         now = time.time()
         for k in due:
-            path = _qdir(cfg) / f"{k}.json"
+            path = queue_dir(cfg) / f"{k}.json"
             if _read(path) == queued[k]:
                 path.unlink(missing_ok=True)
             else:  # a report arrived while we wrote: drop only what was applied
@@ -1028,7 +1030,7 @@ def _hold_relaned(cfg: Config, relaned: dict[str, tuple[list[str], list[str]]],
 def later_date(cfg: Config, phase: str) -> str:
     """The date ``phase``'s queued ``later`` report names; "" when its report
     is not a ``later``, carries no valid date, or is not queued."""
-    return _later_date(_read(_qdir(cfg) / f"{phase}.json"))
+    return _later_date(_read(queue_dir(cfg) / f"{phase}.json"))
 
 
 def _later_date(report: dict) -> str:

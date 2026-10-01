@@ -707,10 +707,10 @@ def test_a_refused_thin_recap_is_the_guard_working(cfg):
     assert check.status == OK and "1 thinner re-report(s) refused" in check.detail
 
 
-def test_a_failed_phase_warns_with_a_retry_hint():
+def test_a_failed_phase_warns_with_a_retry_hint(cfg):
     st = state_mod.State.fresh(1)
     st.done = {"P0": "ok", "P2": "fail"}
-    check = doctor._check_failed(st)
+    check = doctor._check_failed(cfg, st)
     assert check.status == WARN and check.fix_hint.startswith("swarm retry P2")
 
 

@@ -816,7 +816,7 @@ function kcard(c) {
   const s = cstatus(c);
   let m = "";
   if (c.col === "building") m = `${c.since ? `<span data-since="${c.since}">${dur(now() - c.since)}</span> in` : ""} slot ${c.slot}`;
-  else if (c.root) m = `waits on <span class="id">${esc(c.root)}</span>`;
+  else if (c.root) m = `waits on <span class="id">${esc(c.root)}</span>${c.root_sub ? ", " + esc(c.root_sub) : ""}`;
   else if (c.sub) m = esc(c.sub);
   if (c.eta && c.eta[0]) m += (m ? "<br>" : "") + `done ~${esc(when(c.eta[0]))}`;
   return `<button class="card s-${s}" data-phase="${esc(c.id)}"><span class="h"><span class="id">${esc(c.id)}</span><span class="book-tag">${esc(c.c)}</span></span>${c.t ? `<span class="t">${esc(c.t)}</span>` : ""}${m ? `<div class="m">${m}</div>` : ""}</button>`;
@@ -1581,7 +1581,7 @@ function paintBook(name, keep) {
     const list = groups[s]; if (!list) continue;
     body += `<div class="grp-h">${dotS(s)}${esc(STATUS[s][0])} <span class="mu">${list.length}</span></div><div class="rows">`;
     for (const x of list) {
-      const why = x.col === "building" ? (x.since ? `building for ${dur(now() - x.since)}` : "building") : x.root ? `waits on ${x.root}${x.needs && x.needs.length > 1 ? ` (needs ${x.needs.join(", ")})` : ""}` : x.sub || "";
+      const why = x.col === "building" ? (x.since ? `building for ${dur(now() - x.since)}` : "building") : x.root ? `waits on ${x.root}${x.root_sub ? ", " + x.root_sub : ""}${x.needs && x.needs.length > 1 ? ` (needs ${x.needs.join(", ")})` : ""}` : x.sub || "";
       const eta = x.eta && x.eta[0] ? `~${esc(when(x.eta[0]))}` : s === "done" && x.at ? esc(when(x.at)) : "";
       body += `<button class="rowi" data-phase="${esc(x.id)}">${dotS(s)}<span class="id">${esc(x.id)}</span><span class="eta mu">${eta}</span>${x.t ? `<span class="t">${esc(x.t)}</span>` : ""}${why && s !== "done" ? `<span class="why">${esc(why)}</span>` : ""}</button>`;
     }
@@ -1606,7 +1606,7 @@ function paintSheet(id, d, keep) {
   else {
     const sec = (t, h) => h ? `<section><h3>${t}</h3>${h}</section>` : "";
     const s = cstatus(c);
-    body += `<dl class="kv" style="margin-top:16px"><dt>Status</dt><dd>${dotS(s)} ${esc(STATUS[s][0])}${c.sub ? ", " + esc(c.sub) : ""}${c.root ? `, waits on <span class="id">${esc(c.root)}</span> (it holds up ${c.root_blocks})` : ""}</dd>`;
+    body += `<dl class="kv" style="margin-top:16px"><dt>Status</dt><dd>${dotS(s)} ${esc(STATUS[s][0])}${c.sub ? ", " + esc(c.sub) : ""}${c.root ? `, waits on <span class="id">${esc(c.root)}</span> (it holds up ${c.root_blocks})${c.root_sub ? ", " + esc(c.root_sub) : ""}` : ""}</dd>`;
     if (d.campaign) body += `<dt>Phase book</dt><dd><button class="linkish" data-book="${esc(d.campaign.name)}">${esc(d.campaign.name)}</button>${d.campaign.what ? ", " + esc(d.campaign.what) : ""}</dd>`;
     if (c.eta && c.eta[0]) body += `<dt>Finish</dt><dd>${esc(when(c.eta[0]))}${c.eta[1] ? `, P85 ${esc(when(c.eta[1]))}` : ""}</dd>`;
     if (d.row && d.row.dirs && d.row.dirs.length) body += `<dt>Repo</dt><dd class="id">${esc(repos(d.row.dirs))}</dd>`;

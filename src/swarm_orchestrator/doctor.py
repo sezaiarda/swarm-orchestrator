@@ -50,6 +50,7 @@ from . import gc as gc_mod
 from . import gitq
 from . import keep as keep_mod
 from . import ledger as ledger_mod
+from . import ledgerw
 from . import opqueue
 from . import pushowed
 from . import restart as restart_mod
@@ -1312,10 +1313,12 @@ def _check_recaps(cfg: Config) -> Check:
     return Check("recaps.history", OK, f"{len(histories)} phase(s) with done history")
 
 
-def _check_failed(st: State) -> Check:
+def _check_failed(cfg: Config, st: State) -> Check:
     """Phases recorded ``fail``. Their work was rolled back and nothing
-    downstream of them can ever become ready again on its own."""
-    failed = sorted(p for p, s in st.done.items() if s == "fail")
+    downstream of them can ever become ready again on its own. A ``later``
+    finish that waits for its date is not one (:func:`ledgerw.not_failed`)."""
+    done = ledgerw.not_failed(st.done, ledgerw.dated(cfg))
+    failed = sorted(p for p, s in done.items() if s == "fail")
     if not failed:
         return Check("phases.failed", OK, "no failed phases")
     return Check(
@@ -1508,7 +1511,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.extend(_check_disk(cfg))
     checks.append(_check_sentinels(cfg, st))
     checks.append(_check_recaps(cfg))
-    checks.append(_check_failed(st))
+    checks.append(_check_failed(cfg, st))
     checks.append(_check_operator(cfg))
     checks.append(_check_prompts())
     checks.append(_check_web(cfg, st))

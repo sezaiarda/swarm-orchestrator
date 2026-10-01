@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .. import statuses
+from .. import ledgerw, statuses
 
 # `dash-W3` / `inventory-P4` / `billing-P0-ops` -> campaign `dash`, `inventory`, `billing`.
 # A phase with no dash (`U0`, `I3`, `phase-B`) forms its own single-member group
@@ -106,13 +106,15 @@ def summarise(
     *ready* when every dependency is satisfied and it has not been attempted — a
     ``fail`` does NOT satisfy a dependency, matching ledger.SATISFIES_DEPS, so a
     dependent of a failed phase reads as blocked rather than ready. Nor is a
-    row whose ``after:`` date is still ahead (``deferred``, as
-    :func:`ledger.deferred` reads it): the launcher leaves it alone, so it is
-    ``dated``, never ready.
+    row that waits for a date still ahead (``deferred``, as
+    :func:`ledgerw.dated` reads it): the launcher leaves it alone, so it is
+    ``dated``, never ready, and never failed either, even while the record of
+    its ``later`` finish is still there (:func:`ledgerw.not_failed`).
     """
     busy = busy or set()
     excluded = excluded or set()
     deferred = deferred or set()
+    done = ledgerw.not_failed(done, deferred)
     satisfied = {p for p, s in done.items() if s in SATISFIED}
 
     buckets: dict[str, dict] = {}

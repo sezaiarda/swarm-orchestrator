@@ -114,18 +114,21 @@ def build(graph: dict[str, set[str]], text: str, landed: dict[str, str], *,
           now: float, busy: dict[str, float], asking: set[str] | frozenset[str] = frozenset(),
           merging: set[str] | frozenset[str] = frozenset(),
           excluded: set[str] | frozenset[str] = frozenset(), workers: int = 1,
-          build_slots: int = 0, park_after: float = 900.0) -> Plan:
+          build_slots: int = 0, park_after: float = 900.0,
+          dated: dict[str, str] | None = None) -> Plan:
     """The plan for ``graph`` (:func:`ledger.parse`) and ledger ``text``.
 
     ``landed`` is the launcher's done view (:func:`ledger.with_ticked`); ``busy``
     maps each running row to when its worker started; ``asking`` are the rows
     whose worker waits on the owner (``waiting`` or ``parked``); ``merging`` the
-    rows whose worker finished and are in the merge queue.
+    rows whose worker finished and are in the merge queue; ``dated`` the rows
+    that wait for a date (:func:`ledgerw.dated`), read from ``text`` when a
+    caller has nothing else.
     """
     dirs = ledger_mod.dirs(text)
     satisfied = {p for p, s in landed.items() if s in statuses.SATISFIES_DEPS}
-    today = time.strftime("%Y-%m-%d", time.gmtime(now))
-    dated = ledger_mod.deferred(text, today)
+    if dated is None:
+        dated = ledger_mod.deferred(text, time.strftime("%Y-%m-%d", time.gmtime(now)))
     open_rows = [p for p in graph if p not in satisfied]
     live = set(open_rows)
     roots: dict[str, str] = {}

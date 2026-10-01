@@ -23,7 +23,10 @@ a person would want to be told:
 6. **Excluded** — in ``[tasks].exclude`` (owner-run rows), and not done.
 7. **Failed** — recorded ``fail``.
 8. **Blocked** — a dependency has not landed; the card names the root. A row
-   whose ``after:`` date is still ahead is blocked too, and says until when.
+   that waits for a date still ahead (:func:`ledgerw.dated`, as the dash read
+   it) is blocked too, and says until when; so does a card behind such a row.
+   A ``later`` finish is one of these from the moment it is reported, never
+   *Failed*: the dash's snapshot drops its record (:func:`ledgerw.not_failed`).
 9. **Ready** — nothing stands in its way.
 
 Dependency satisfaction is the launcher's own (:data:`statuses.SATISFIES_DEPS`
@@ -114,7 +117,8 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
     view = ledger.with_ticked(done, {p for p, r in rows.items() if r.checked}, flying)
     satisfied = {p for p, s in view.items() if s in statuses.SATISFIES_DEPS}
 
-    starve = starvation_map(graph, view, excluded, flying, examples=len(graph) + 1)
+    starve = starvation_map(graph, view, excluded, flying, examples=len(graph) + 1,
+                            dated=set(dated))
     roots_of: dict[str, list[dict]] = {}
     for b in starve["blockers"]:
         for p in b["examples"]:
@@ -266,6 +270,8 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
         if roots:
             extra.update(root=roots[0]["phase"], root_kind=roots[0]["kind"],
                          root_blocks=roots[0]["blocks"])
+            if roots[0]["kind"] == "dated":
+                extra["root_sub"] = f"which waits until {dated[roots[0]['phase']]}"
             if len(roots) > 1:
                 extra["roots"] = [b["phase"] for b in roots[:6]]
         else:

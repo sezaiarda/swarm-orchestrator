@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from swarm_orchestrator import buildsem
 from swarm_orchestrator import gitq
 from swarm_orchestrator import landing
 from swarm_orchestrator import ledgerw
@@ -88,7 +89,8 @@ def _make_workspace(tmp_path: Path, siblings=("pricing", "webhooks")):
 class Ws:
     """One lanes-on workspace: config, log, the fake check's control files."""
 
-    def __init__(self, monkeypatch, tmp_path: Path, timeout_s: int = 60) -> None:
+    def __init__(self, monkeypatch, tmp_path: Path, timeout_s: int = 60,
+                 extra: str = "") -> None:
         self.project, self.repos = _make_workspace(tmp_path)
         self.ctl = tmp_path / "ctl"
         self.ctl.mkdir()
@@ -111,6 +113,7 @@ class Ws:
             f"check_timeout_s = {timeout_s}\n"
             "[lanes.check]\n"
             f'"*" = "sh {check}"\n'
+            f"{extra}"
         )
         monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
         monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
@@ -519,3 +522,158 @@ def test_supervisor_lands_later_phases_while_a_check_runs(ws):
     finally:
         sup.log.close()
     assert (ws.repos["pricing"] / "a.txt").read_text() == "A\n"
+
+
+# -- 10. main moves after the check passed ----------------------------------------
+def _passed(ws, lane: str = "pricing", sibling: str = "other.txt", mine: str = "code.txt",
+            also: dict[str, str] | None = None) -> None:
+    """P's check in ``lane`` has passed against sibling S; P has not landed."""
+    ws.phase("S")
+    ws.phase("P")
+    ws.commit("S", lane, {sibling: "S\n"})
+    ws.commit("P", lane, {mine: "P\n", **(also or {})})
+    ws.land("S")
+    assert ws.integrate("P") == gitq.LANE_CHECKING
+    assert ws.wait_result("P", lane) == "ok"
+
+
+def _main_gains(ws, lane: str, files: dict[str, str]) -> str:
+    """Commit ``files`` straight onto ``lane``'s main, as the ledger writer or a
+    sibling's landing does. Returns the new commit."""
+    repo = ws.repo(lane)
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "main moves")
+    return _out(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "lane, sibling, mine, commons",
+    [("pricing", "other.txt", "code.txt", "CHANGELOG.md"),
+     (".", "s.txt", "notes.txt", "docs/PHASE-LEDGER.md")],
+)
+def test_a_passed_check_survives_a_commons_only_move_of_main(ws, lane, sibling, mine, commons):
+    _passed(ws, lane, sibling, mine)
+    tested = ws.runs()[0]["tree"]
+    _main_gains(ws, lane, {commons: "a note\n"})
+    moved = _main_gains(ws, lane, {commons: "a note\nand another\n"})
+
+    ws.land("P")
+    assert len(ws.runs()) == 1  # the green check was not thrown away
+    repo = ws.repo(lane)
+    # The branch caught up with main before it landed, so that merge could not conflict.
+    _git(repo, "merge-base", "--is-ancestor", moved, "master^2")
+    # What landed is the tested tree plus what the commons gained, nothing else.
+    assert _out(repo, "diff", "--name-only", tested, "master") == commons
+    assert (repo / mine).read_text() == "P\n"
+    assert (repo / sibling).read_text() == "S\n"
+    ws.canonical_clean(lane)
+    log = ws.cfg.supervisor_log.read_text()
+    assert f"LANE-CHECK-KEPT P {repo.name}" in log
+    assert "LANE-MAIN-MOVED" not in log
+    assert not state_mod.read(ws.cfg).landing
+
+
+def test_a_commons_move_while_the_check_runs_does_not_start_a_second_check(ws):
+    ws.phase("S")
+    ws.phase("P")
+    ws.commit("S", "pricing", {"other.txt": "S\n"})
+    ws.commit("P", "pricing", {"code.txt": "P\n"})
+    ws.land("S")
+    (ws.ctl / "hold").write_text("")
+    assert ws.integrate("P") == gitq.LANE_CHECKING
+    _main_gains(ws, "pricing", {"CHANGELOG.md": "- a line\n"})
+    assert ws.integrate("P") == gitq.LANE_CHECKING  # still the first check
+    (ws.ctl / "hold").unlink()
+    assert ws.wait_result("P", "pricing") == "ok"
+
+    ws.land("P")
+    assert len(ws.runs()) == 1
+    assert (ws.repos["pricing"] / "CHANGELOG.md").read_text() == "- a line\n"
+
+
+def test_a_passed_check_is_run_again_when_main_gains_a_file_outside_the_commons(ws):
+    _passed(ws)
+    # A commons line and a sibling's file together: one file outside is enough.
+    _main_gains(ws, "pricing", {"CHANGELOG.md": "- a line\n", "third.txt": "T\n"})
+
+    assert ws.integrate("P") == gitq.LANE_CHECKING
+    assert ws.wait_result("P", "pricing") == "ok"
+    ws.land("P")
+    runs = ws.runs()
+    assert len(runs) == 2
+    repo = ws.repos["pricing"]
+    assert _out(repo, "rev-parse", "master^{tree}") == runs[1]["tree"]
+    assert (repo / "third.txt").read_text() == "T\n"
+    log = ws.cfg.supervisor_log.read_text()
+    assert "LANE-MAIN-MOVED P pricing" in log
+    assert "LANE-CHECK-KEPT" not in log
+
+
+def test_a_commons_conflict_after_the_pass_holds_on_the_worktree_and_is_rechecked(ws):
+    _passed(ws, also={"CHANGELOG.md": "- P\n"})
+    _main_gains(ws, "pricing", {"CHANGELOG.md": "- someone else\n"})
+    main_moved = ws.main_head("pricing")
+    wt = ws.wt("P", "pricing")
+
+    assert ws.integrate("P") == gitq.LANE_CONFLICT
+    assert gitq._merge_in_progress(wt)
+    assert landing.blocked(ws.cfg, "P") == (ws.repos["pricing"], wt, landing.CONFLICT)
+    ws.canonical_clean("pricing")
+    assert ws.main_head("pricing") == main_moved
+    assert len(ws.runs()) == 1
+
+    # A resolver wrote the merge by hand, so the pair is tested again.
+    (wt / "CHANGELOG.md").write_text("- someone else\n- P\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "--no-edit")
+    landing.retest(ws.cfg, "P")
+    assert ws.integrate("P") == gitq.LANE_CHECKING
+    assert ws.wait_result("P", "pricing") == "ok"
+    ws.land("P")
+    assert len(ws.runs()) == 2
+    assert (ws.repos["pricing"] / "CHANGELOG.md").read_text() == "- someone else\n- P\n"
+
+
+# -- 11. the check and the build gate ----------------------------------------------
+_ONE_SLOT = "[build]\nmax_concurrent = 1\n"
+
+
+def _sibling_landed(ws) -> None:
+    ws.phase("S")
+    ws.phase("P")
+    ws.commit("S", "pricing", {"other.txt": "S\n"})
+    ws.commit("P", "pricing", {"code.txt": "P\n"})
+    ws.land("S")
+
+
+def test_a_check_waits_for_the_build_slot_like_any_build(monkeypatch, tmp_path):
+    ws = Ws(monkeypatch, tmp_path, extra=_ONE_SLOT)
+    try:
+        _sibling_landed(ws)
+        with buildsem.slot(ws.cfg, "a long build", ws.project, "other"):
+            assert ws.integrate("P") == gitq.LANE_CHECKING
+            time.sleep(2.0)
+            assert ws.runs() == []  # queued behind the build that holds the only slot
+        assert ws.wait_result("P", "pricing") == "ok"
+        ws.land("P")
+        assert len(ws.runs()) == 1
+    finally:
+        ws.close()
+
+
+def test_a_check_declared_light_runs_beside_a_build(monkeypatch, tmp_path):
+    ws = Ws(monkeypatch, tmp_path, extra=_ONE_SLOT + 'light = ["sh */check.sh"]\n')
+    try:
+        _sibling_landed(ws)
+        with buildsem.slot(ws.cfg, "a long build", ws.project, "other"):
+            assert ws.integrate("P") == gitq.LANE_CHECKING
+            assert ws.wait_result("P", "pricing", deadline_s=20) == "ok"
+        text = landing.check_log(ws.cfg, "P", ws.repos["pricing"]).read_text()
+        assert "not queued" in text
+        ws.land("P")
+        assert len(ws.runs()) == 1
+    finally:
+        ws.close()

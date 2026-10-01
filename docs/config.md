@@ -157,7 +157,13 @@ anything but `commons` since the phase branched, the integrator takes that repo'
 main into the phase's own worktree and runs `check` there, detached (`swarm _lane-check`); the queue
 lands other phases meanwhile, and nothing else lands in that repo until this one does. Green, it lands
 the tree that was tested. Red, a timeout or a text conflict holds the queue and opens the resolver on the
-worktree, never on your checkout; `swarm resolved <phase>` merges main again and re-checks. Files a phase
+worktree, never on your checkout; `swarm resolved <phase>` merges main again and re-checks. A green
+check is kept when main moves again before the phase lands, as long as main gained only `commons` (the
+swarm's own ledger writes, for one): main is merged in once more and the phase lands without a second
+check. Anything else main gained starts the check again. The check queues for a build slot like any
+`swarm build`, unless its command is light by the same rules: a check that compiles nothing and is
+cheap to run beside a build (a lint-only gate) can be named in `[build].light`, and then starts at
+once. Files a phase
 changed outside its lane (its touches, anything added with `swarm widen`, and `commons`) are noted in its
 history and in the next Overseer digest; that never holds a merge.
 
@@ -191,7 +197,7 @@ check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
 | `jobs` | `6` | `SWARM_BUILD_JOBS` | next | `CARGO_BUILD_JOBS` for a `cargo` run through `swarm build`, and for every worker under worktree isolation. `0` means no cap. |
 | `cache` | `true` | `SWARM_BUILD_CACHE` | next | Point each Rust worktree's `target/` at one shared per-repo cache, `<state>/cache/target/<repo>`. This happens only where the repo gitignores `target`. |
 | `heavy` | `[]` | `SWARM_BUILD_HEAVY` | hot | Command patterns that always queue, over the built-in rules. A pattern is a command prefix whose words are globs (`"cargo check"`, `"scripts/*.sh"`). Heavy wins over light. |
-| `light` | `[]` | `SWARM_BUILD_LIGHT` | hot | Command patterns that never queue (`"bun run lint*"`). Only for commands that do no compile, test, bundle or image work. |
+| `light` | `[]` | `SWARM_BUILD_LIGHT` | hot | Command patterns that never queue (`"bun run lint*"`). Only for commands that compile, bundle and build nothing, and that are small enough to run beside a build: measure one first (CPU, peak memory, bytes written). The landing's lane check reads it too, so a `[lanes].check` named here starts without a build slot. |
 | `short_s` | `60` | `SWARM_BUILD_SHORT_S` | hot | A command whose last runs took at most this long (median, from the gate's log) counts as short and may go ahead of long ones. |
 | `overtake` | `2` | `SWARM_BUILD_OVERTAKE` | hot | How many short builds may go ahead of one long build that is waiting. `0` is plain first-come, first-served. |
 | `idle_yield_s` | `150` | `SWARM_BUILD_IDLE_YIELD_S` | hot | A build that holds a slot while its whole process tree does nothing (under 5% of a core and next to no disk IO) for this long is set aside: it keeps running, but stops counting against `max_concurrent`, so the next waiting build starts beside it. If it starts working again it counts again. Commands whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield, nor does one started with `swarm build --hold`. `0` turns this off. |

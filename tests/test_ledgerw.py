@@ -368,14 +368,18 @@ def test_a_later_phase_waits_for_its_date_then_comes_back(tmp_path, monkeypatch)
         text = (project / "docs" / "PHASE-LEDGER.md").read_text()
         assert "status: later, after 2999-01-01" in text
         assert master_mod.build_context(cfg, state_mod.read(cfg))["deferred"] == {"a-W2": "2999-01-01"}
-        assert ledgerw.release_due(cfg, log) == []
-
-        (project / "docs" / "PHASE-LEDGER.md").write_text(text.replace("2999-01-01", "2000-01-01"))
+        # The row carries the date now, so the failure record has done its job:
+        # the phase waits for a date, it is not a failed one.
         cfg.done_dir.mkdir(parents=True, exist_ok=True)
         (cfg.done_dir / "a-W2.fail").write_text("a-W2 fail x\n")
-        assert ledgerw.release_due(cfg, log) == ["a-W2"]
+        assert ledgerw.release_dated(cfg, log) == ["a-W2"]
         assert "a-W2" not in state_mod.read(cfg).done
         assert not (cfg.done_dir / "a-W2.fail").exists()
+        ctx = master_mod.build_context(cfg, state_mod.read(cfg))
+        assert "a-W2" not in ctx["ready"] and ctx["deferred"] == {"a-W2": "2999-01-01"}
+        assert ledgerw.release_dated(cfg, log) == []
+
+        (project / "docs" / "PHASE-LEDGER.md").write_text(text.replace("2999-01-01", "2000-01-01"))
         assert "a-W2" in master_mod.build_context(cfg, state_mod.read(cfg))["ready"]
     finally:
         log.close()

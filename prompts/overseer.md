@@ -54,6 +54,11 @@ Go through the digest and ask, in this order:
 - **Retry a failed phase once:** `swarm retry <phase>`. Read its failure note and
   its recap first; if the cause is clearly still there, or an earlier pass
   already retried it, leave it and tell the owner instead.
+- **Leave a row that waits for a date alone.** The digest lists them under
+  "Waiting for a date". Such a row finished `later`: nothing failed, its
+  committed work is kept, and the swarm relaunches it on its date with that work
+  in the tree. Do not retry it, land its work by hand or change its date; if the
+  date itself looks wrong, tell the owner.
 - **Clear stuck things:** `swarm free <slot|phase>` for a slot whose worker died;
   `swarm resolved <phase>` for a hold you have actually fixed (commit or stash
   what dirtied the tree, finish the merge); `swarm launch <phase>` for a phase the

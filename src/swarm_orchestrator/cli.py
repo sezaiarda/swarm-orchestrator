@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from . import caps
@@ -139,7 +139,8 @@ def _reconcile_orphans(cfg: Config) -> None:
         seed = gitq.sentinel_done(cfg)
         st = state_mod.read(cfg)
         try:
-            result = gitq.reconcile(cfg, dict(st.done), log, operator=_mirror_plan(cfg))
+            result = gitq.reconcile(cfg, dict(st.done), log, operator=_mirror_plan(cfg),
+                                    later=set(ledgerw.dated(cfg)))
         except gitq.GitError as exc:
             print(f"reconcile skipped (git error): {exc}", file=sys.stderr)
             log.line(f"RECONCILE-ERROR {exc}")
@@ -2280,14 +2281,16 @@ def _phase_standing(cfg: Config, st) -> dict:
     path = cfg.project_dir / cfg.ledger
     graph = ledger_mod.load(path)
     ticked = ledger_mod.load_ticked(path)
-    dated = ledger_mod.load_deferred(path, time.strftime("%Y-%m-%d", time.gmtime()))
+    dated = ledgerw.dated(cfg)
     busy = {s.phase for s in st.busy_slots() if s.phase}
     landed = ledger_mod.with_ticked(st.done, ticked, busy | set(st.parked) | set(st.waiting))
     t = campaign.overall(campaign.summarise(graph, landed, busy, set(cfg.exclude or []), ticked,
                                             dated))
     return {"done": t.built, "total": t.live_total, "held": t.held, "running": len(t.running),
             "ready": len(t.ready), "blocked": t.blocked, "dated": t.dated, "failed": t.failed,
-            "excluded": t.excluded}
+            "excluded": t.excluded,
+            "dates": {p: d for p, d in sorted(dated.items(), key=lambda kv: kv[::-1])
+                      if p in graph and p not in busy}}
 
 
 def _standing_line(n: dict) -> str:
@@ -2299,6 +2302,13 @@ def _standing_line(n: dict) -> str:
     excluded = f" · {n['excluded']} yours to do, not counted" if n["excluded"] else ""
     return (f"phases: {n['done']} of {n['total']} done{held}"
             f"{' · ' + rest if rest else ''}{excluded}")
+
+
+def _dates_line(dates: dict[str, str]) -> str:
+    """Which rows wait for a date, soonest first: the swarm starts each that day."""
+    shown = [f"{p} ({d})" for p, d in list(dates.items())[:8]]
+    more = f" and {len(dates) - 8} more" if len(dates) > 8 else ""
+    return f"waiting for a date: {', '.join(shown)}{more}"
 
 
 def _forecast(cfg: Config, st):
@@ -2315,8 +2325,13 @@ def _forecast(cfg: Config, st):
 def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> int:
     """The state, for a person or (``--json``) a script. The done map grows with
     the ledger — thousands of entries on a long-lived project — so it is counted
-    unless ``--all`` asks for every phase."""
+    unless ``--all`` asks for every phase.
+
+    A ``later`` the ledger has not taken yet is recorded ``fail`` for the
+    launcher's sake only (:func:`ledgerw.not_failed`): every line here reads it
+    as what it is, a row waiting for its date."""
     st = state_mod.read(cfg)
+    st = replace(st, done=ledgerw.not_failed(st.done, ledgerw.dated(cfg)))
     if as_json:
         data = asdict(st)
         if not show_all:
@@ -2377,7 +2392,10 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.extend(caps.summary_for(cfg, st.usage_hold))
-    lines.append(_standing_line(_phase_standing(cfg, st)))
+    standing = _phase_standing(cfg, st)
+    lines.append(_standing_line(standing))
+    if standing["dates"]:
+        lines.append(_dates_line(standing["dates"]))
     fc, why = _forecast(cfg, st)
     if fc is not None:
         from .tui import books

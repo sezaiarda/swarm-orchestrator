@@ -480,9 +480,17 @@ report is held and the watchdog retries it; nothing is lost across a restart.
   `## ` section per phase with dated `### ` entries. Past `history_split_kb` it
   becomes `<history>/<family>/<id>.md`. The web board's detail sheet shows it
   under the row.
-- **`later`** finishes like `fail` but writes `after:` on the row; the launcher
-  leaves the row alone until that date, and the watchdog then clears the failure
-  so the next free slot takes it.
+- **`later`** lands nothing, like `fail`, and writes `after:` on the row; the
+  launcher leaves the row alone until that date. It is recorded `fail` only
+  until the row carries the date (`LATER-WAITS` in the log); from then on the
+  record and its sentinel are gone and the row *waits for a date*: `swarm
+  status` counts it so and lists it with its date, `swarm why` says "waits
+  until", the Overseer's digest lists it under "Waiting for a date" and no pass
+  is woken for it. While the ledger cannot take the report (the checkout is
+  busy), the same readers and the launcher take the date from the queued report;
+  the dashboards show the record until the report lands. On the date the row is
+  ready again (`LATER-DUE`) and the launcher runs. A `later` with no date is a
+  `blocked`.
 
 ## Integrator and merge-conflict resolver
 
@@ -576,6 +584,21 @@ on main is removed (a `fail`, a reaped worker, `swarm retry`, gc of an orphan
 mirror), its uncommitted edits are first committed onto the branch and the tip is
 kept at `refs/swarm-attic/<phase>/<utc-stamp>`, logged as `ATTIC`. If that fails,
 nothing is removed. gc drops attic refs older than `[gc].attic_days` (30).
+
+A phase that finishes `later` with a date is the exception to the attic: its work
+is wanted again. Its tip (uncommitted edits committed first) is kept at
+`refs/swarm-later/<phase>` in each repo it changed, logged as `LATER-KEPT`, and
+gc never prunes it; the backup pass copies it to origin as `swarm/<phase>`. When
+the row is relaunched, each such repo's new
+`swarm/<phase>` branch is made from that day's main and the kept work is merged
+into it (`LATER-RESTORED ... onto <main>`), so the worker starts with what it
+committed and everything that landed since. If the two no longer merge cleanly,
+the branch is put back where the work left it (`... as it was`), as for a resumed
+interrupted attempt, and the landing meets the conflict the usual way. The ref is
+removed once the work is on the branch. `swarm up` keeps the work of a `later`
+whose worker reported while no supervisor ran, and moves kept work to the attic
+when its row has been closed some other way. A `blocked` or dateless finish goes
+to the attic as before: nothing says when, or whether, that work is wanted.
 
 [The integration flow diagram](../README.md#integrator-and-merge-conflict-resolver) is in the README.
 

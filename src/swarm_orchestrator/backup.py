@@ -4,7 +4,9 @@ Work on ``swarm/<phase>`` lives only on this machine until it merges, which can
 be hours. A pass copies it to the ``origin`` each repo already pushes its main to,
 under names the swarm owns:
 
-* ``swarm/<phase>``      — the phase branch, when it holds commits main lacks;
+* ``swarm/<phase>``      — the phase branch, when it holds commits main lacks
+  (also for a phase that finished ``later``: its branch is gone and its work
+  waits for its date under ``refs/swarm-later/<phase>``);
 * ``swarm-wip/<phase>``  — what its worktree has not committed yet, as a snapshot
   commit on top of the branch head, built in a throwaway index so the worker's
   own index and files are never touched;
@@ -245,6 +247,9 @@ def _wanted(cfg: Config, repo: Path, main: str, log: Log, res: Result) -> dict[s
             log.line(f"BACKUP-SNAPSHOT-FAILED {phase} {repo.name}: {why}")
     for ref, sha in _refs(repo, ATTIC_REFS).items():
         want[_attic_branch(ref)] = sha
+    # Work kept for a `later` phase's date has no branch until the relaunch.
+    for ref, sha in _refs(repo, gitq.LATER + "/").items():
+        want.setdefault(BRANCH + ref[len(gitq.LATER) + 1:], sha)
     return want
 
 

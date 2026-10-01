@@ -169,6 +169,24 @@ def test_attic_refs_are_backed_up_as_branches(env):
     assert _remote(tmp / "comp.git") == {"swarm-attic/P2-20260927T101500Z": kept}
 
 
+def test_work_kept_for_a_later_date_is_backed_up_as_its_phase_branch(env):
+    """A phase that finished `later` has no branch any more, only its kept ref,
+    and that work is as unmerged as any: it may wait there for weeks."""
+    cfg, log, tmp = env
+    wt = gitq.worktree_add(cfg, "P1", log)
+    (wt / "comp" / "lib.rs").write_text("for the date\n")
+    _git(wt / "comp", "commit", "-q", "-am", "work")
+    kept = _git(wt / "comp", "rev-parse", "HEAD")
+    gitq.keep_later(cfg, "P1", log)  # it finished before any backup pass ran
+    backup.run(cfg, log)
+    assert _remote(tmp / "comp.git") == {"swarm/P1": kept}
+    assert backup.run(cfg, log).deleted == []
+    # Relaunched on its date: the branch holds the work again and the backup follows.
+    gitq.worktree_add(cfg, "P1", log)
+    assert backup.run(cfg, log).deleted == []
+    assert _remote(tmp / "comp.git") == {"swarm/P1": kept}
+
+
 def test_a_refusing_pre_push_hook_does_not_stop_a_backup(env):
     cfg, log, tmp = env
     wt = gitq.worktree_add(cfg, "P1", log)

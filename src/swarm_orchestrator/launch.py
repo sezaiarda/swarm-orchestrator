@@ -1177,6 +1177,7 @@ class DoneResult:
     route_detail: str  # why no session, in the words the CLI prints
     poke: str  # delivered | detached | no-reader
     grace_s: int
+    work: str = ""  # what becomes of the phase's commits when nothing lands
 
     def render(self) -> str:
         """The human-readable multi-line summary; the CLI prints it verbatim."""
@@ -1212,6 +1213,7 @@ class DoneResult:
             f"done {self.phase} {self.status} [{self.verdict}]"
             + (f" (as `{self.spelling}`)" if self.spelling in statuses.ALIASES else ""),
             f"  {sentinel}",
+            *([f"  {self.work}"] if self.work else []),
             f"  {ping}",
             f"  {route}",
             f"  {poke}",
@@ -1446,7 +1448,34 @@ def done(
         route_detail=plan.route_detail,
         poke=poke,
         grace_s=cfg.done_grace_s,
+        work=_work_line(cfg, phase, status),
     )
+
+
+def _work_line(cfg: Config, phase: str, status: str) -> str:
+    """What becomes of the phase's commits, said to the worker that made them:
+    a finish that lands nothing must not let it believe its work went to main,
+    nor that it is lost. Empty when the phase lands, or works in place."""
+    if status in statuses.INTEGRATES or cfg.git_isolation != "worktree":
+        return ""
+    from . import restart as restart_mod  # lazy: restart builds on this module
+
+    after = ledgerw.later_date(cfg, phase)
+    aside = f"set aside under {gitq.ATTIC}/{phase}/"
+    if not after:
+        return (f"work: nothing lands. What you committed is {aside}, and a retry starts"
+                f" from {cfg.git_main_branch} without it")
+    # The supervisor acts on this finish, and one started before it learned to
+    # keep a `later`'s work still sets it aside: say what will really happen.
+    pid = restart_mod.live_supervisor(cfg)
+    if pid and not restart_mod.capable(cfg, pid, "keep-later"):
+        return (f"work: nothing lands now, and the supervisor running this swarm predates"
+                f" keeping a `later` finish's work (it needs `swarm restart`): what you"
+                f" committed is {aside}, and the relaunch on {after} starts without it."
+                " Name that in your recap")
+    return (f"work: nothing lands now. What you committed (uncommitted edits too) is kept"
+            f" until {after}, and is in the tree again, merged onto that day's"
+            f" {cfg.git_main_branch}, when the row is relaunched")
 
 
 #: How much of a question an owner ping carries. The owner answers from a phone;

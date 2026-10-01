@@ -31,6 +31,7 @@ from pathlib import Path
 from . import caps
 from . import master as master_mod
 from . import ledger as ledger_mod
+from . import ledgerw
 from . import state as state_mod
 from . import statuses
 from .config import Config
@@ -102,11 +103,13 @@ def explain(cfg: Config, phase: str, st: State | None = None) -> Explanation:
     # Read the done map the launcher reads: a ticked row it holds no record of is
     # landed. A copy, so the caller's state is never touched.
     flying = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+    # The launcher's own reading of the dates still ahead, today in UTC. A row
+    # that finished `later` waits for one: its record is not a failure.
+    dated = ledgerw.dated(cfg)
     st = dataclasses.replace(
-        st, done=ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(path), flying)
+        st, done=ledger_mod.with_ticked(
+            ledgerw.not_failed(st.done, dated), ledger_mod.load_ticked(path), flying)
     )
-    # The launcher's own reading of `after:`: a date still ahead, today in UTC.
-    dated = ledger_mod.load_deferred(path, time.strftime("%Y-%m-%d", time.gmtime()))
     exp = _classify(cfg, phase, st, graph, dated)
     if exp.reason != BLOCKED:
         return exp

@@ -395,6 +395,16 @@ window). A parked session keeps the run from finishing, the same as one still
 building. `waiting`/`parked` in `state.json` hold the keys `<phase>`,
 `operator:<job>` and `overseer:<pass>`.
 
+A parked session stays in its own window whether or not you have answered it,
+so state also says which it is. `asked` holds, per parked key, when its
+question without an answer was asked; `swarm resumed` on a parked key moves it
+to `answered` (with the time), and from then on it is working there and waits
+on nobody. A later `swarm waiting` from it is a new question with a clock of
+its own. Only a session asking now counts as waiting on you: for the
+Overseer's owner trigger (once per unanswered question), `swarm doctor`'s
+`owner.blocking`, the digest, `swarm status` and the boards. A parked key with
+neither mark, from a state file written before they existed, reads as asking.
+
 **Owner-run rows** (`[tasks].exclude`) are never sessions, so nothing ever asks
 about them. A ready one (its dependencies have landed, it is not done or
 ticked) that is holding other rows up shows up in "Needs you" in the dashboard

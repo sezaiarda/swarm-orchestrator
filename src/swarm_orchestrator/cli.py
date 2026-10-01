@@ -529,8 +529,9 @@ def cmd_drain(cfg: Config, then: str) -> int:
     print("  `swarm status` says what it waits for; `swarm down --cancel` or `swarm resume` cancels")
     asked = restart_mod.questions(cfg, state_mod.read(cfg))
     if asked:
-        print(f"NOTE: the stop does not wait for the {len(asked)} session(s) waiting on you,"
-              " and it closes them: their work is kept, what they asked is not.",
+        lost = "what they asked is not" if all(q.asking for q in asked) else "the sessions are not"
+        print(f"NOTE: the stop does not wait for the {restart_mod.standing(asked)},"
+              f" and it closes them: their work is kept, {lost}.",
               file=sys.stderr)
         for line in restart_mod.question_lines(asked):
             print(line, file=sys.stderr)
@@ -630,7 +631,7 @@ def cmd_restart(cfg: Config, delay: str | None = None, at: str | None = None,
         return 1
     asked = restart_mod.questions(cfg, st)
     if full and asked and policy == restart_mod.REFUSE:
-        print(f"swarm restart --full: refused — {len(asked)} session(s) are waiting on you,"
+        print(f"swarm restart --full: refused — {restart_mod.standing(asked, 'are ')},"
               " and a full restart closes them:", file=sys.stderr)
         for line in restart_mod.question_lines(asked):
             print(line, file=sys.stderr)
@@ -2002,6 +2003,7 @@ def cmd_skip(cfg: Config, phase: str) -> int:
     """
     with state_mod.transaction(cfg) as st:
         held = phase in st.claimed_phases()
+        asking = st.asking(phase)
         was_parked = st.clear_phase(phase, "skip")
         wait_win = st.windows.pop(f"wait:{phase}", None)
     if held:
@@ -2010,8 +2012,10 @@ def cmd_skip(cfg: Config, phase: str) -> int:
         tmux.kill_window(wait_win)
     launch_mod._write_sentinel(cfg, phase, "skip", "skipped with `swarm skip`")
     print(f"skipped {phase}")
-    if was_parked:
+    if was_parked and asking:
         print("  (it was parked waiting on you — its window is closed)")
+    elif was_parked:
+        print("  (it was working on your answer in its own window — that window is closed)")
     _poke(cfg, "resume")
     return 0
 
@@ -2388,7 +2392,10 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         wt = f" branch={s.branch}" if s.branch else ""
         lines.append(f"  slot {s.id} pane={s.pane_id} {mark}{wt}")
     if st.waiting or st.parked:
-        lines.append(f"waiting={sorted(st.waiting)} parked={st.parked}")
+        # A parked session the owner answered is working again, in its own window.
+        working = st.working_parked()
+        lines.append(f"waiting={sorted(st.waiting)} parked={st.parked}"
+                     + (f" working={working}" if working else ""))
     # A live operator session holds the owner's own authority on the host. It has
     # no slot and no pane probe can find it, so these lines are the only place the
     # text UI can say one is running at all.

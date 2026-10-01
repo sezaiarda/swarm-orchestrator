@@ -1067,40 +1067,49 @@ waiting_question = _waiting_question
 
 
 def _check_owner(cfg: Config, st: State) -> Check:
-    """``waiting``/``parked`` phases — the cases where the OWNER is the blocker.
+    """Sessions asking the owner right now — the cases where the OWNER is the blocker.
 
     Not a fault: a worker that self-reports rather than guessing is doing the
     right thing. But it holds the run open (a parked worker keeps it ``pending``
-    forever), so it is surfaced with how long it has been waiting and what it
-    asked.
+    forever), so it is surfaced with how long its latest question has gone
+    unanswered and what it asked. A parked session the owner has answered is
+    working in its own window: it is named as that, and never as a blocker.
     """
-    if not st.waiting and not st.parked:
-        return Check("owner.blocking", OK, "no worker is waiting on you")
     now = time.time()
+    working = [
+        f"{key} in {state_mod.wait_window(key)}, answered {_human_age(now - st.answered[key])} ago"
+        for key in sorted(st.working_parked())
+    ]
+    note = f"working on your answer: {'; '.join(working)}" if working else ""
+    asking = sorted(st.on_owner(), key=lambda k: (k not in st.waiting, k))
+    if not asking:
+        return Check("owner.blocking", OK,
+                     "no worker is waiting on you" + (f" ({note})" if note else ""))
     bits: list[str] = []
     oldest = 0.0
-    for phase, deadline in sorted(st.waiting.items()):
-        # `waiting` stores the PARK deadline, so the ask began park_after earlier.
-        asked = float(deadline) - cfg.park_after
-        age = now - asked
-        oldest = max(oldest, age)
-        question = _waiting_question(cfg, phase)
-        bits.append(f"{phase} waiting {_human_age(age)}" + (f': "{question}"' if question else ""))
-    for phase in sorted(st.parked):
-        since = _log_ts(cfg, f"PARK {phase} ")
-        age = now - since if since else None
+    for key in asking:
+        # `waiting` stores the PARK deadline, so the ask began park_after earlier;
+        # a parked session carries the moment of its question. One parked before
+        # that was recorded ages from its park line in the log.
+        asked = st.asked_at(key, cfg.park_after)
+        if key in st.waiting:
+            age, words = now - asked, f"{key} waiting {_human_age(now - asked)}"
+        elif asked is not None:
+            age, words = now - asked, f"{key} parked, asked {_human_age(now - asked)} ago"
+        else:
+            since = _log_ts(cfg, f"PARK {key} ")
+            age = now - since if since else None
+            words = f"{key} parked {_human_age(age)}"
         if age:
             oldest = max(oldest, age)
-        question = _waiting_question(cfg, phase)
-        bits.append(
-            f"{phase} parked {_human_age(age)}" + (f': "{question}"' if question else "")
-        )
+        question = _waiting_question(cfg, key)
+        bits.append(words + (f': "{question}"' if question else ""))
     status = WARN if oldest >= _WAIT_WARN_S else OK
-    target = sorted(st.waiting)[0] if st.waiting else sorted(st.parked)[0]
+    target = asking[0]
     return Check(
         "owner.blocking",
         status,
-        "you are the blocker: " + "; ".join(bits),
+        "you are the blocker: " + "; ".join(bits) + (f" ({note})" if note else ""),
         f"answer in its pane, then `swarm resumed {target} '<the answer>'` (or `swarm done {target} ...`)",
     )
 

@@ -17,8 +17,8 @@ Triggers
 *Events* — a phase finishing ``fail`` (a ``later`` is not one: it waits for its
 date, :func:`ledgerw.dated`); an integration hold no resolver is handling
 (below); a newly owed push; a
-cheap doctor check turning FAIL; a phase waiting or parked on the owner for longer
-than ``[overseer] owner_wait_s`` (once per phase); starvation — free slots and
+cheap doctor check turning FAIL; a session asking the owner for longer than
+``[overseer] owner_wait_s`` (once per unanswered question); starvation — free slots and
 nothing launchable while non-excluded backlog remains, sustained for
 ``[overseer] starve_s`` (once per episode). *Counters* — every
 ``[overseer] every_finished`` phases finished, and every ``[overseer] every_s``.
@@ -358,21 +358,35 @@ class Policy:
         return out
 
     def _observe_owner(self, st, now: float) -> list[str]:
-        """A phase on the owner for too long, once per phase per wait.
+        """A session asking the owner for too long, once per unanswered question.
 
-        ``waiting`` stores the park *deadline*, so the ask began ``park_after``
-        before it; a parked phase has no timestamp in state, so the first sighting
-        stands in (kept across restarts in the memory)."""
-        on_owner = set(st.waiting) | set(st.parked)
+        Only a session that is asking now counts (:meth:`state.State.on_owner`):
+        one parked and answered is working in its own window, and is forgotten
+        here like one that finished. ``waiting`` stores the park *deadline*, so
+        the ask began ``park_after`` before it, and a parked session carries the
+        moment of its question. One parked by a supervisor that did not record it
+        has no timestamp, so the first sighting stands in (kept across restarts in
+        the memory).
+
+        A parked session whose question is later than the one remembered asked
+        again: that is a new wait, with a new clock, and it may fire again even
+        when no look fell between the owner's answer and the next question."""
+        on_owner = set(st.on_owner())
         for phase in list(self.mem.owner_since):
             if phase not in on_owner:
                 del self.mem.owner_since[phase]
         self.mem.owner_fired = [p for p in self.mem.owner_fired if p in on_owner]
-        for phase, deadline in st.waiting.items():
-            asked = float(deadline) - self.cfg.park_after
-            self.mem.owner_since[phase] = min(self.mem.owner_since.get(phase, asked), asked)
-        for phase in st.parked:
-            self.mem.owner_since.setdefault(phase, now)
+        for phase in on_owner:
+            asked = st.asked_at(phase, self.cfg.park_after)
+            seen = self.mem.owner_since.get(phase)
+            if asked is None:
+                self.mem.owner_since.setdefault(phase, now)
+            elif phase in st.parked:
+                if seen is not None and asked > seen:  # a question after the one timed
+                    self.mem.owner_fired = [p for p in self.mem.owner_fired if p != phase]
+                self.mem.owner_since[phase] = asked
+            else:
+                self.mem.owner_since[phase] = asked if seen is None else min(seen, asked)
         out: list[str] = []
         for phase in sorted(on_owner):
             since = self.mem.owner_since[phase]

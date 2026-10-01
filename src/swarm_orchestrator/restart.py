@@ -204,18 +204,25 @@ def requester(cfg: Config, env=None) -> str:
 # -- who waits on the owner ---------------------------------------------------
 @dataclass(frozen=True)
 class Question:
-    """One session waiting on the owner."""
+    """One session a full restart would close: waiting on the owner, or parked
+    and working on the owner's answer."""
 
     key: str
     who: str
     where: str  # its tmux window; "" on the bare driver
     text: str
     parked: bool
+    #: False for a parked session the owner has answered: it is at work in its
+    #: own window, and ``text`` (the question it had) is empty.
+    asking: bool = True
 
 
 def questions(cfg: Config, st: state_mod.State) -> list[Question]:
     """Every session that waits on the owner right now: a worker that asked, a
-    parked one, an operator job that asked, an Overseer pass that asked."""
+    parked one, an operator job that asked, an Overseer pass that asked. A
+    parked session the owner has answered is listed too, as working
+    (``asking=False``): it holds no slot, so no drain waits for it, and a full
+    restart closes it like the others."""
     from . import doctor as doctor_mod  # lazy: doctor reads the plan too
     from . import owner as owner_mod
 
@@ -224,6 +231,7 @@ def questions(cfg: Config, st: state_mod.State) -> list[Question]:
         key = state_mod.waiter_key(state_mod.OPERATOR, item.phase)
         if item.state == opqueue.WAITING and key not in keys:
             keys.append(key)  # parking is off, or the poke has not landed yet
+    working = set(st.working_parked())
     out: list[Question] = []
     for key in keys:
         kind, ident = state_mod.waiter(key)
@@ -239,36 +247,57 @@ def questions(cfg: Config, st: state_mod.State) -> list[Question]:
             where = owner_mod.where(cfg, key, st)
         except (OSError, KeyError, subprocess.SubprocessError):
             where = ""
-        out.append(Question(key, who, where, " ".join((text or "").split()), key in st.parked))
+        asking = key not in working
+        out.append(Question(key, who, where, " ".join((text or "").split()) if asking else "",
+                            key in st.parked, asking))
     return out
 
 
 def question_lines(qs: list[Question]) -> list[str]:
-    """One line per waiting session: who, where, what it asked."""
+    """One line per session: who, where, and what it asked or that it is at work."""
     out = []
     for q in qs:
         line = f"  - {q.who}"
         if q.where:
             line += f" (tmux window {q.where})"
-        if q.text:
+        if not q.asking:
+            line += ": working on your answer"
+        elif q.text:
             line += f": {q.text[:200]}"
         out.append(line)
     return out
 
 
+def standing(qs: list[Question], are: str = "") -> str:
+    """``qs`` counted in words, the ones that ask apart from the ones at work:
+    ``2 session(s) waiting on you``, ``1 session(s) waiting on you and 1 working
+    on your answer``. ``are`` is the verb a sentence wants before each."""
+    working = sum(1 for q in qs if not q.asking)
+    asking = len(qs) - working
+    if not working:
+        return f"{asking} session(s) {are}waiting on you"
+    if not asking:
+        return f"{working} session(s) {are}working on your answer"
+    return f"{asking} session(s) {are}waiting on you and {working} {are}working on your answer"
+
+
 def counts(st: state_mod.State) -> tuple[int, int]:
-    """``(workers at work, sessions waiting on the owner)`` from the state alone."""
+    """``(workers at work, sessions waiting on the owner)`` from the state alone.
+
+    A parked session the owner has answered is in neither: it asks nothing, and
+    it works outside the slots, where no drain waits for it."""
     workers = sum(1 for s in st.busy_slots() if s.phase not in st.waiting)
-    return workers, len(set(st.waiting) | set(st.parked))
+    return workers, len(st.on_owner())
 
 
 def counts_of(state: dict) -> tuple[int, int]:
     """:func:`counts` for a raw ``state.json`` dict (the dashboard's view)."""
     waiting = state.get("waiting") or {}
     parked = state.get("parked") or []
+    answered = state.get("answered") or {}
     workers = sum(1 for s in state.get("slots") or []
                   if isinstance(s, dict) and s.get("busy") and s.get("phase") not in waiting)
-    return workers, len(set(waiting) | set(parked))
+    return workers, len(set(waiting) | {k for k in parked if k not in answered})
 
 
 def _n(n: int, word: str) -> str:
@@ -833,7 +862,9 @@ def carry_out(cfg: Config, plan_id: str, log: Log) -> list[str]:
     Each is alive and stays alive: its window moves to :func:`hold_session`, and
     ``swarm down`` spares the processes that carry its markers. The supervisor
     parked the ones that asked before it stopped; one that asked since is given
-    its own window here."""
+    its own window here. A parked session the owner has answered goes the same
+    way, and each entry says which it is: ``asked`` is when its open question
+    was put, ``answered`` when the owner answered it."""
     from . import operator as operator_mod
 
     st = state_mod.read(cfg)
@@ -853,6 +884,7 @@ def carry_out(cfg: Config, plan_id: str, log: Log) -> list[str]:
             "key": key, "kind": kind, "ident": ident, "window": name, "win": win,
             "markers": _markers(cfg, kind, ident),
             "pids": _pane_pids(win) if cfg.driver == "tmux" and win else [],
+            "asked": st.asked_at(key, cfg.park_after), "answered": st.answered.get(key),
         }
         if kind == state_mod.WORKER:
             entry["lane"] = st.lanes.get(ident)
@@ -899,7 +931,10 @@ def carry_in(cfg: Config, log: Log) -> list[str]:
     windows into the new tmux session, their keys into ``parked``. Called by
     ``swarm up`` once the session exists and before the supervisor starts, so
     the launcher never sees a kept phase as ready. A session that ended while
-    the swarm was down is left out; its work is where it left it."""
+    the swarm was down is left out; its work is where it left it. One the owner
+    had answered comes back as working, and one still asking keeps the time of
+    its question; an entry that says neither (a file from before these marks)
+    reads as asking since an unknown moment."""
     kept = load_kept(cfg)
     entries = kept.get("sessions") or []
     if not entries:
@@ -915,6 +950,10 @@ def carry_in(cfg: Config, log: Log) -> list[str]:
             tmux.run(["move-window", "-d", "-s", entry["win"], "-t", f"={cfg.session}:"])
         with state_mod.transaction(cfg) as st:
             st.park(key)
+            if entry.get("answered") is not None:
+                st.answer(key, float(entry["answered"]))
+            elif entry.get("asked") is not None:
+                st.asked[key] = float(entry["asked"])
             if cfg.driver == "tmux" and entry.get("win"):
                 st.windows[entry["window"]] = entry["win"]
             if entry.get("kind") == state_mod.WORKER and entry.get("lane"):
@@ -1034,8 +1073,12 @@ def _finish_in_place(cfg: Config, plan: dict, log: Log) -> int:
 
 
 def refusal(plan: dict, qs: list[Question]) -> str:
-    return (f"{_n(len(qs), 'session')} waiting on the owner would be closed by a full restart:"
-            f" {_join([q.who for q in qs])}")
+    working = sum(1 for q in qs if not q.asking)
+    what = f"{_n(len(qs) - working, 'session')} waiting on the owner"
+    if working:
+        at_work = f"{_n(working, 'session')} working on the owner's answer"
+        what = f"{what} and {at_work}" if working < len(qs) else at_work
+    return f"{what} would be closed by a full restart: {_join([q.who for q in qs])}"
 
 
 def _run_full(cfg: Config, plan: dict, log: Log) -> int:
@@ -1046,8 +1089,10 @@ def _run_full(cfg: Config, plan: dict, log: Log) -> int:
     qs = questions(cfg, st)
     policy = plan.get("questions") or REFUSE
     if qs and policy == REFUSE:
-        fail(cfg, plan, refusal(plan, qs) + "; answer them, or plan it again with"
-             " --wait-questions or --keep-questions", log)
+        fail(cfg, plan, refusal(plan, qs)
+             + ("; answer them, or plan it again with" if any(q.asking for q in qs)
+                else "; plan it again with")
+             + " --wait-questions or --keep-questions", log)
         return 1
     old = live_supervisor(cfg, st)
     if old is not None and not capable(cfg, old):
@@ -1095,6 +1140,9 @@ def finish_full(cfg: Config, plan_id: str, down: Callable[[Config], int],
     try:
         update(cfg, plan_id, stage=RESTARTING)
         kept = carry_out(cfg, plan_id, log) if plan.get("questions") == KEEP else []
+        # Read now: `swarm up` carries them back in and removes the file.
+        at_work = sum(1 for e in load_kept(cfg).get("sessions") or []
+                      if e.get("answered") is not None) if kept else 0
         log.line(f"RESTART-FULL-DOWN id={plan_id} kept={len(kept)}")
         try:
             down(cfg)
@@ -1112,7 +1160,9 @@ def finish_full(cfg: Config, plan_id: str, down: Callable[[Config], int],
         else:
             detail = "`swarm up` failed (logs/drain-down.log says why)"
         if rc == 0 and has_reader(cfg):
-            words = f"{_n(len(kept), 'question')} carried across" if kept else "nothing to carry"
+            carried = [_n(n, word) for n, word in ((len(kept) - at_work, "question"),
+                                                   (at_work, "working session")) if n]
+            words = f"{' and '.join(carried)} carried across" if kept else "nothing to carry"
             update(cfg, plan_id, stage=DONE, detail=words, ended_at=time.time())
             log.line(f"RESTART-DONE id={plan_id} by={plan.get('by')!r} full; {words}")
             return 0

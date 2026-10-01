@@ -112,10 +112,21 @@ class State:
     # seconds, so it survives a supervisor restart); when the deadline fires the
     # supervisor ``park``s it — moving its live pane to its own window and freeing
     # what it held (a grid slot, the operator window, the master pane) — and the
-    # key moves to ``parked``. A parked session owes the owner an answer but holds
-    # nothing else; it clears when it finishes.
+    # key moves to ``parked``. A parked session holds nothing else and stays in its
+    # own window until it finishes.
     waiting: dict[str, float] = field(default_factory=dict)
     parked: list[str] = field(default_factory=list)
+    # What a parked session is doing about the owner, by its key. ``asked`` holds
+    # the moment (epoch seconds) of its question that has no answer yet;
+    # ``answered`` the moment the owner answered, after which it is working again
+    # and owes the owner nothing until it asks once more. A parked key is in at
+    # most one of the two; in neither (a file written before the marks existed) it
+    # reads as asking, since when is unknown. Use :meth:`asking`, :meth:`asked_at`
+    # and :meth:`on_owner` rather than the maps. Optional on both sides of a
+    # version skew, like ``push_owed``: an older supervisor drops them on its next
+    # write, and every parked session reads as asking again, as it did before.
+    asked: dict[str, float] = field(default_factory=dict)
+    answered: dict[str, float] = field(default_factory=dict)
     # Live pane arrangement of the worker windows, set by ``swarm layout``.
     # ``None`` = follow ``[tmux].layout``; a value here wins for the rest of the
     # run (so a park re-tidy can't revert what the owner just chose). Reset on
@@ -291,18 +302,74 @@ class State:
         self.lanes.pop(phase, None)
         self.landing.pop(phase, None)
 
-    def park(self, phase: str) -> None:
+    def park(self, phase: str, park_after: float | None = None) -> None:
         """Move a waiting session off the grid into the parked set.
 
         For a worker, frees its busy slot (``free_slot_for`` nulls the phase but
         keeps the slot's ``pane_id``, so a replacement worker can respawn into it)
         and records the phase as parked — its worker keeps building/waiting on
         ``swarm/<phase>`` in its own window. Any other key holds no slot, so this
-        only moves it. Idempotent on the parked list."""
+        only moves it. Idempotent on the parked list.
+
+        ``park_after`` is the park timer the session's ``waiting`` deadline was
+        armed with: given it, the moment the question was asked goes with the
+        session into ``asked``. Without it the session is asking since an unknown
+        moment."""
         self.free_slot_for(phase)
-        self.waiting.pop(phase, None)
-        if phase not in self.parked:
-            self.parked.append(phase)
+        deadline = self.waiting.pop(phase, None)
+        if phase in self.parked:
+            return
+        self.parked.append(phase)
+        if deadline is not None and park_after is not None:
+            self.asked[phase] = float(deadline) - park_after
+
+    # -- a parked session: asking the owner, or working on their answer ----
+    def answer(self, key: str, now: float) -> bool:
+        """The owner answered ``key``'s question. A parked session is marked
+        answered at ``now``: it is working again, in the window it is in. Returns
+        whether it was parked (one still on its park timer has no mark to set)."""
+        if key not in self.parked:
+            return False
+        self.asked.pop(key, None)
+        self.answered[key] = now
+        return True
+
+    def ask(self, key: str, now: float) -> bool:
+        """A parked session asked the owner something: it is asking from ``now``,
+        whatever it was doing, so its age is always that of its latest question.
+        Returns whether the owner had answered its last one (it is asking
+        *again*). A session that is not parked has its park timer instead."""
+        if key not in self.parked:
+            return False
+        again = self.answered.pop(key, None) is not None
+        self.asked[key] = now
+        return again
+
+    def asking(self, key: str) -> bool:
+        """``key``'s session owes the owner's attention right now: it is on its
+        park timer, or parked with a question the owner has not answered."""
+        return key in self.waiting or (key in self.parked and key not in self.answered)
+
+    def on_owner(self) -> list[str]:
+        """Every session that is asking the owner now (:meth:`asking`): the ones
+        on their park timer first, then the parked ones, each in recorded order."""
+        return [*self.waiting, *(k for k in self.parked
+                                 if k not in self.waiting and k not in self.answered)]
+
+    def working_parked(self) -> list[str]:
+        """Parked sessions the owner has answered: each is working in its own
+        window and waits on nobody."""
+        return [k for k in self.parked if k in self.answered]
+
+    def asked_at(self, key: str, park_after: float) -> float | None:
+        """When ``key``'s unanswered question was asked, or ``None`` when the
+        session is not asking or the moment was never recorded. ``waiting`` holds
+        the park deadline, so that question began ``park_after`` before it."""
+        if key in self.waiting:
+            return float(self.waiting[key]) - park_after
+        if key in self.parked and key not in self.answered:
+            return self.asked.get(key)
+        return None
 
     def live_passes(self) -> set[str]:
         """Overseer passes still alive: the one in the master pane, and any parked
@@ -314,6 +381,8 @@ class State:
         """Drop a finished phase from the waiting/parked tracking. Returns whether
         it had been parked (so the caller can close its ``wait:<phase>`` window)."""
         self.waiting.pop(phase, None)
+        self.asked.pop(phase, None)
+        self.answered.pop(phase, None)
         if phase in self.parked:
             self.parked.remove(phase)
             return True
@@ -441,6 +510,9 @@ class State:
             del d["lanes"]  # a run with lanes off writes no new key
         if not d["landing"]:
             del d["landing"]
+        for mark in ("asked", "answered"):
+            if not d[mark]:
+                del d[mark]  # no parked session has the mark: no new key
         return d
 
     @classmethod
@@ -464,6 +536,8 @@ class State:
             push_owed=dict(data.get("push_owed") or {}),
             waiting=dict(data.get("waiting", {})),
             parked=list(data.get("parked", [])),
+            asked={k: float(v) for k, v in (data.get("asked") or {}).items()},
+            answered={k: float(v) for k, v in (data.get("answered") or {}).items()},
             layout=data.get("layout"),
             last_event_at=float(data.get("last_event_at", 0.0)),
             operator_phase=data.get("operator_phase"),

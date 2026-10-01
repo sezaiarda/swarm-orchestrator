@@ -158,14 +158,17 @@ def _workers(keys) -> list[str]:
 
 
 def owner_questions(cfg: Config, st: State, now: float) -> list[dict]:
-    """Every question the owner has not answered yet, and how long it has waited."""
+    """Every question the owner has not answered yet, and how long it has waited.
+
+    Only a session asking now is here (:meth:`state.State.on_owner`), aged from
+    its latest question. A parked worker the owner has answered is working in its
+    own window: :func:`working_parked` lists it."""
     out: list[dict] = []
-    for phase in sorted(_workers(st.waiting)):
-        asked = float(st.waiting[phase]) - cfg.park_after
-        out.append({"who": phase, "state": "waiting", "age_s": now - asked,
-                    "question": doctor_mod.waiting_question(cfg, phase)})
-    for phase in sorted(_workers(st.parked)):
-        out.append({"who": phase, "state": "parked", "age_s": None,
+    asking = _workers(st.on_owner())
+    for phase in sorted(asking, key=lambda p: (p not in st.waiting, p)):
+        asked = st.asked_at(phase, cfg.park_after)
+        out.append({"who": phase, "state": "waiting" if phase in st.waiting else "parked",
+                    "age_s": now - asked if asked is not None else None,
                     "question": doctor_mod.waiting_question(cfg, phase)})
     for item in opqueue.load_all(cfg):
         if item.state == opqueue.WAITING:
@@ -175,6 +178,13 @@ def owner_questions(cfg: Config, st: State, now: float) -> list[dict]:
                         "age_s": now - item.asked_at if item.asked_at else None,
                         "question": item.question})
     return out
+
+
+def working_parked(st: State, now: float) -> list[dict]:
+    """Parked sessions the owner has answered: each works on in its own window
+    and waits on nobody, so none of them is a question for a pass to chase."""
+    return [{"who": key, "window": state_mod.wait_window(key),
+             "answered_s": now - st.answered[key]} for key in sorted(st.working_parked())]
 
 
 #: How many operator outcomes the digest lists in full (flagged ones first).
@@ -210,7 +220,8 @@ def operator_summary(cfg: Config, st: State, since: float = 0.0) -> dict:
 
 
 def in_flight(st: State, launching: set[str] | frozenset[str] = frozenset()) -> dict[str, str]:
-    """``phase -> building|parked`` for the starvation map."""
+    """``phase -> building|parked`` for the starvation map. ``parked`` is a phase
+    asking the owner now, on its park timer or in its own window."""
     out = {s.phase: "building" for s in st.busy_slots() if s.phase}
     for p in st.integ_queue:
         out.setdefault(p, "building")
@@ -218,7 +229,9 @@ def in_flight(st: State, launching: set[str] | frozenset[str] = frozenset()) -> 
         out.setdefault(st.integ_blocked, "building")
     for p in launching:
         out.setdefault(p, "building")
-    for p in list(st.waiting) + list(st.parked):
+    for p in st.working_parked():
+        out[p] = "building"  # answered: it works on in its own window
+    for p in st.on_owner():
         out[p] = "parked"
     return out
 
@@ -269,7 +282,9 @@ def build(
         "paused": st.paused,
         "usage_hold": bool(st.usage_hold),
         "waiting": ctx["waiting"],
-        "parked": ctx["parked"],
+        # Parked and asking now; the answered ones are working, listed apart.
+        "parked": [k for k in st.parked if k not in st.answered],
+        "parked_working": st.working_parked(),
         "integ_queue": list(st.integ_queue),
         "integ_blocked": (
             {"phase": st.integ_blocked, "kind": st.integ_blocked_kind,
@@ -309,6 +324,7 @@ def build(
         "failures": failures(cfg, st, waits),
         "dated": dated(waits),
         "owner": owner_questions(cfg, st, now),
+        "owner_answered": working_parked(st, now),
         # Rows only the owner can do, ready, holding other rows up: the owner
         # was pinged about each and sees them under "Needs you".
         "owner_rows": [{"row": r, "blocks": n} for r, n in mine],
@@ -355,7 +371,9 @@ def render(d: dict) -> str:
     out.append(f"- ready: {c['ready_count']} {c['ready'][:10]}; launchable now: {c['launchable']}")
     if c["launching"] or c["given_up"]:
         out.append(f"- launching: {c['launching']}; launch given up: {c['given_up']}")
-    out.append(f"- waiting on owner: {c['waiting']}; parked: {c['parked']}")
+    out.append(f"- waiting on owner: {c['waiting']}; parked: {c['parked']}"
+               + (f"; answered and working in their own windows: {c['parked_working']}"
+                  if c.get("parked_working") else ""))
     hold = c["integ_blocked"]
     out.append(
         f"- merge queue: {c['integ_queue']}"
@@ -417,6 +435,12 @@ def render(d: dict) -> str:
         f"- {q['who']} ({q['state']}, {_age(q['age_s'])}): {q['question'] or '(question not recorded)'}"
         for q in d["owner"]
     ] or ["- nobody"]
+    answered = d.get("owner_answered") or []
+    if answered:
+        out.append("Answered by the owner and working again, each in its own window (none"
+                   " of them waits on anyone): "
+                   + ", ".join(f"{a['who']} ({a['window']}, answered {_age(a['answered_s'])} ago)"
+                               for a in answered))
 
     mine = d.get("owner_rows") or []
     out += ["", f"## Rows only the owner can do, holding others up ({len(mine)})"]

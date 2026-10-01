@@ -162,13 +162,18 @@ def from_files(cfg, st, now: float | None = None) -> Inputs:
 
 
 # -- what a forecast is made from ---------------------------------------------------
+def at_work(st) -> list[str]:
+    """The rows a worker is building now: the ones in a slot, and the parked
+    ones the owner has answered, which work on in a window of their own."""
+    return [s.phase for s in st.busy_slots() if s.phase] + st.working_parked()
+
+
 def plan_of(inputs: Inputs) -> plan_mod.Plan:
     st = inputs.state
-    busy = {s.phase: inputs.started.get(s.phase, inputs.now) for s in st.busy_slots()
-            if s.phase}
+    busy = {p: inputs.started.get(p, inputs.now) for p in at_work(st)}
     return plan_mod.build(
         inputs.graph, inputs.text, inputs.landed, now=inputs.now, busy=busy,
-        asking=set(st.parked) | set(st.waiting), merging=st.integrating(),
+        asking=set(st.on_owner()), merging=st.integrating(),
         excluded=set(inputs.exclude), workers=inputs.workers,
         build_slots=inputs.build_slots, park_after=inputs.park_after, dated=inputs.dated)
 
@@ -268,9 +273,8 @@ def key(inputs: Inputs, fit_id: str) -> str:
         "v": VERSION,
         "ledger": hashlib.sha1(inputs.text.encode("utf-8")).hexdigest(),
         "landed": sorted(inputs.landed.items()),
-        "busy": sorted((s.phase, round(inputs.started.get(s.phase, 0.0)))
-                       for s in st.busy_slots() if s.phase),
-        "asking": sorted(set(st.parked) | set(st.waiting)),
+        "busy": sorted((p, round(inputs.started.get(p, 0.0))) for p in at_work(st)),
+        "asking": sorted(st.on_owner()),
         "merging": sorted(st.integrating()),
         "holds": [st.paused, bool(st.drain), st.pause_at, sorted(st.usage_hold),
                   sorted(st.usage_override)],
@@ -347,7 +351,7 @@ def write_cache(cfg, want: str, fc: forecast_mod.Forecast) -> None:
 def recompute_s(inputs: Inputs) -> float:
     """How long a forecast stands: :data:`RECOMPUTE_S` while rows run (they
     age), :data:`IDLE_RECOMPUTE_S` when none does."""
-    running = any(s.phase for s in inputs.state.busy_slots())
+    running = bool(at_work(inputs.state))
     return RECOMPUTE_S if running else IDLE_RECOMPUTE_S
 
 

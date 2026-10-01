@@ -15,7 +15,8 @@ a person would want to be told:
 1. **Needs you** — a worker waiting or parked on a question, a retired
    ``needs-owner`` finish, an operator job asking (or given up), or an
    owner-run row that holds other rows up.
-2. **Building** — it holds a slot.
+2. **Building** — it holds a slot, or it is parked and the owner has answered
+   it: it works on in its own window, and the card says which.
 3. **Merging / held** — in the merge queue, holding it, or pushed-but-owed.
 4. **Operator** — a hand-off job queued or running for it.
 5. **Done** — landed (``ok`` / ``operator`` / ``skip``), or ticked in the
@@ -103,6 +104,8 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
     excluded = set(getattr(cfg, "exclude", None) or [])
     waiting = dict(state.get("waiting") or {})
     parked = list(state.get("parked") or [])
+    # Parked sessions the owner has answered (``State.answered``): at work again.
+    answered = dict(state.get("answered") or {})
     busy = {s.phase: s for s in snap.slots if s.busy and s.phase}
     queue = [p for p, _ in snap.integ_queue]
     owed = {str(rec.get("phase")): (repo, rec)
@@ -112,7 +115,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
     jobs: dict[str, list] = {}
     for item in snap.operator or []:
         jobs.setdefault(opqueue.owning_phase(item.phase), []).append(item)
-    flying = _in_flight(snap, waiting, parked)
+    flying = _in_flight(snap, waiting, parked, answered)
     # The launcher's view: a ticked row with no record of ours has landed.
     view = ledger.with_ticked(done, {p for p, r in rows.items() if r.checked}, flying)
     satisfied = {p for p, s in view.items() if s in statuses.SATISFIES_DEPS}
@@ -131,11 +134,13 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         if row is not None and row.dirs:
             card["r"] = row.dirs
         col, extra = _place(pid, graph, view, satisfied, excluded, waiting, parked, busy,
-                            queue, snap, owed, jobs, questions, roots_of, dated)
+                            queue, snap, owed, jobs, questions, roots_of, dated, answered)
         card["col"] = col
         card.update({k: v for k, v in extra.items() if v not in (None, "", [], {})})
         cards[pid] = card
-    _building_extras(cards, busy, dash, turns or {})
+    started = {pid: slot.started_at for pid, slot in busy.items()}
+    started.update(_working_since(dash, [p for p in parked if p in answered]))
+    _building_extras(cards, started, dash, turns or {})
     _done_times(cards, dash)
     _row_etas(cards, getattr(dash, "forecast", None))
     extra_cards = _job_cards(jobs, graph, parked) + _pass_cards(passes, parked)
@@ -183,8 +188,10 @@ def _row_etas(cards: dict, fc) -> None:
             card["eta"] = [round(r.p50), round(r.p85) if r.p85 != float("inf") else None]
 
 
-def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:
+def _in_flight(snap, waiting: dict, parked: list, answered=()) -> dict[str, str]:
     """``phase -> building|parked``, the shape :func:`starvation_map` takes.
+    ``parked`` is a session that waits on the owner; a parked one the owner has
+    ``answered`` is building.
 
     Mirrors :func:`ovdigest.in_flight`, which reads a typed ``State``; the board
     holds the dashboard's normalised snapshot instead (a state file from a newer
@@ -196,12 +203,22 @@ def _in_flight(snap, waiting: dict, parked: list) -> dict[str, str]:
     if snap.integ_blocked:
         out.setdefault(snap.integ_blocked, "building")
     for p in list(waiting) + list(parked):
-        out[p] = "parked"
+        out[p] = "building" if p in answered and p not in waiting else "parked"
     return out
 
 
+def _working_since(dash, working: list) -> dict:
+    """When each parked phase that is at work again was launched: its open run
+    in the history, the same clock a card in a slot shows."""
+    open_runs = {}
+    for run in getattr(dash, "history", None) or []:  # newest first
+        if run.ended_at is None and run.status is None:
+            open_runs.setdefault(run.phase, run.started_at)
+    return {pid: open_runs.get(pid) for pid in working}
+
+
 def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, snap,
-           owed, jobs, questions, roots_of, dated=None) -> tuple[str, dict]:
+           owed, jobs, questions, roots_of, dated=None, answered=()) -> tuple[str, dict]:
     """``(column, card extras)`` for one ledger phase — the rules in the module doc.
 
     ``done`` is the launcher's view (:func:`ledger.with_ticked`), so a ticked row
@@ -217,6 +234,8 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
                            "q": clip(blocker.question if blocker else "", _QUESTION_CHARS),
                            "since": blocker.since if blocker else None,
                            "parks_at": waiting.get(pid)}
+    if pid in parked and pid in answered:
+        return BUILDING, {"sub": f"works on your answer in tmux window {_wait_window(pid)}"}
     if pid in parked:
         return NEEDS_YOU, {"sub": f"asks you · answer in tmux window {_wait_window(pid)}",
                            "q": clip(blocker.question if blocker else "", _QUESTION_CHARS),
@@ -299,20 +318,21 @@ def _job_asks(job, parked: list) -> str:
     return f"operator job asks you · answer in tmux window {window}"
 
 
-def _building_extras(cards: dict, busy: dict, dash, turns: dict) -> None:
-    """Elapsed, context and the worker's own last words, for every busy card."""
+def _building_extras(cards: dict, started: dict, dash, turns: dict) -> None:
+    """Elapsed, context and the worker's own last words, for every card a worker
+    is on. ``started`` maps each to when its worker was launched, if known."""
     meters = getattr(dash, "meters", None) or {}
     # The phase every busy card is measured against (the client draws elapsed
     # from ``since`` itself, so the board does not change every second).
     seen = typical_durations(getattr(dash, "eta_runs", None) or [])
     typical = median(seen) if seen else None
-    for pid, slot in busy.items():
+    for pid, since in started.items():
         card = cards.get(pid)
         if card is None:
             continue
         m = meters.get(pid)
-        if slot.started_at:
-            card["since"] = slot.started_at
+        if since:
+            card["since"] = since
         if m is not None:
             if m.context_tokens and m.context_window:
                 card["ctx"] = round(min(100.0, 100.0 * m.context_tokens / m.context_window), 1)
@@ -384,8 +404,8 @@ def _order(key: str, cards: list[dict], queue: list[str], graph: dict) -> list[d
         return sorted(cards, key=lambda c: (-(c.get("at") or 0), pos.get(c["id"], 1 << 30)))
     if key == NEEDS_YOU:
         return sorted(cards, key=lambda c: (c.get("since") or 0, c["id"]))
-    if key == BUILDING:
-        return sorted(cards, key=lambda c: c.get("slot", 0))
+    if key == BUILDING:  # the slots in order, then the ones in a window of their own
+        return sorted(cards, key=lambda c: ("slot" not in c, c.get("slot", 0)))
     if key == MERGING:
         return sorted(cards, key=lambda c: (queue.index(c["id"]) if c["id"] in queue else -1))
     return sorted(cards, key=lambda c: (pos.get(c["id"], 1 << 30), c["id"]))

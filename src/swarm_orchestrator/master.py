@@ -120,6 +120,9 @@ def build_context(cfg: Config, st: State) -> dict:
         # keep the run `pending` until the worker is answered and runs `swarm done`.
         "waiting": sorted(st.waiting),
         "parked": list(st.parked),
+        # The parked ones the owner has answered: each is working again in its
+        # own window and waits on nobody. The rest of `parked` still ask.
+        "parked_working": st.working_parked(),
         # Rows waiting for a date (`after:`), which `ready` leaves out until then.
         "deferred": deferred,
         # Repos merged locally but not yet on origin. Informational: nothing a

@@ -483,6 +483,11 @@ def build_snapshot(
         {k: str(v) for k, v in (state.get("done") or {}).items()}, deferred or {})
     waiting = state.get("waiting") or {}
     parked = list(state.get("parked") or [])
+    # A parked session the owner has answered (``State.answered``) is working
+    # again in its own window: still in flight, and no longer a question.
+    answered = state.get("answered") or {}
+    # When a parked session's unanswered question was asked (``State.asked``).
+    asked = state.get("asked") or {}
     busy_phases = {s.phase for s in slots if s.busy and s.phase}
     in_flight = busy_phases | set(parked) | {p for p in waiting}
     # The launcher's done view: a ticked row with no record counts as landed.
@@ -509,14 +514,14 @@ def build_snapshot(
             )
         )
     for phase in parked:
-        if not worker(phase):
+        if not worker(phase) or phase in answered:
             continue
         blockers.append(
             Blocker(
                 phase=phase,
                 kind="parked",
                 question=questions.get(phase, ""),
-                since=launch_times.get(phase),
+                since=_as_float(asked.get(phase)) or launch_times.get(phase),
                 detail=f"its worker waits in tmux window {state_mod.wait_window(phase)};"
                 " the run cannot finish until you answer",
             )
@@ -998,9 +1003,11 @@ class PhaseRun:
 
 
 def _live_holds(state: dict) -> dict[str, str]:
-    """Phase -> how the current state holds it: ``running`` (a busy slot), else
-    ``waiting``, ``parked`` or ``integrating``. Only a busy slot is running."""
+    """Phase -> how the current state holds it: ``running`` (a busy slot, or a
+    parked worker the owner has answered, at work in its own window), else
+    ``waiting``, ``parked`` or ``integrating``."""
     out: dict[str, str] = {}
+    answered = state.get("answered") or {}
     for phase, _ in normalize_queue(state.get("integ_queue")):
         out[phase] = "integrating"
     if isinstance(state.get("integ_blocked"), str):
@@ -1008,7 +1015,7 @@ def _live_holds(state: dict) -> dict[str, str]:
     for name in ("parked", "waiting"):
         for key in state.get(name) or []:
             if isinstance(key, str) and ":" not in key:  # a worker's key is its phase
-                out[key] = name
+                out[key] = "running" if name == "parked" and key in answered else name
     for raw in state.get("slots") or []:
         if isinstance(raw, dict) and raw.get("busy") and isinstance(raw.get("phase"), str):
             out[raw["phase"]] = "running"
@@ -1037,7 +1044,8 @@ def build_history(
     ``RUN-ENDED`` line, by the next ``SUPERVISOR-START`` (every start follows
     ``swarm up``, which rebuilds the slots) or by a fresh claim of the same phase.
     With ``state`` given, what is still open is checked against it: a run is
-    ``running`` only while a busy slot holds its phase, so a log that never
+    ``running`` only while a busy slot holds its phase (or it is parked and at
+    work on the owner's answer, :func:`_live_holds`), so a log that never
     recorded the end cannot keep a dead worker "running". A lost run that left a
     sentinel reads as that sentinel; one the ledger has ticked since (``ticked``)
     and this swarm holds no report of reads as "done elsewhere".

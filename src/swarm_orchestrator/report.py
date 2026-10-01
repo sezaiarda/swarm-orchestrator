@@ -640,7 +640,8 @@ def _live_map(st: State) -> dict[str, str]:
     if st.integ_blocked:
         live[st.integ_blocked] = "integ-blocked"
     live.update({p: "waiting" for p in st.waiting})
-    live.update({p: "parked" for p in st.parked})
+    # A parked worker the owner has answered is at work again, in its own window.
+    live.update({p: "parked" if st.asking(p) else "busy" for p in st.parked})
     return live
 
 

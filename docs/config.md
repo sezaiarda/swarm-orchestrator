@@ -282,7 +282,7 @@ it starts real work will yield and then wake, which a longer window avoids.
 | `min_gap_s` | `600` | `SWARM_OVERSEER_MIN_GAP` | hot | The minimum time between the starts of two non-urgent passes. |
 | `every_finished` | `3` | `SWARM_OVERSEER_EVERY_FINISHED` | hot | Run a pass every N finished phases. `0` turns this off. |
 | `every_s` | `10800` | `SWARM_OVERSEER_EVERY` | hot | Run a pass at least this often. `0` turns this off. |
-| `owner_wait_s` | `3600` | `SWARM_OVERSEER_OWNER_WAIT` | hot | A phase waiting on you this long triggers a pass, once per phase. |
+| `owner_wait_s` | `3600` | `SWARM_OVERSEER_OWNER_WAIT` | hot | A session asking you this long triggers a pass, once per unanswered question (one parked and answered is working, and does not count). |
 | `starve_s` | `600` | `SWARM_OVERSEER_STARVE` | hot | Free slots, nothing launchable and backlog still open for this long triggers a pass, once per episode. |
 | `hold_wait_s` | `600` | `SWARM_OVERSEER_HOLD_WAIT` | hot | A merge conflict the resolver is working on triggers a pass only once it has been held this long. A hold with no resolver, or one the resolver gave up on, triggers at once. |
 | `timeout_s` | `2700` | `SWARM_OVERSEER_TIMEOUT` | next | A pass still running after this is killed, and whatever it committed is merged. `swarm waiting` stretches the deadline while you are being asked. |

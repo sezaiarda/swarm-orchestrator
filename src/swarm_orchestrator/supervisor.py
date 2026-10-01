@@ -1579,26 +1579,35 @@ class Supervisor:
         (:func:`state.waiter_key`). The FIFO poke already woke ``select``;
         recording the deadline re-arms the loop's timeout on the next pass.
         ``park_after == 0`` disables parking (the session just holds what it
-        holds), and one already parked is in its own window for good."""
-        if self.cfg.park_after <= 0:
-            self.log.line(f"WAITING-IGNORED {key} parking-disabled")
-            return
+        holds).
+
+        One already parked is in its own window for good and has no timer to
+        arm: it is asking from now (:meth:`state.State.ask`), which after an
+        answer is a new question with a clock of its own."""
+        now = time.time()
         with state_mod.transaction(self.cfg) as st:
-            if key in st.parked:
-                self.log.line(f"WAITING-IGNORED {key} already-parked")
-                return
-            st.waiting[key] = time.time() + self.cfg.park_after
-        self.log.line(f"EVENT waiting {key} park_after={self.cfg.park_after}")
+            parked = key in st.parked
+            again = st.ask(key, now) if parked else False
+            if not parked and self.cfg.park_after > 0:
+                st.waiting[key] = now + self.cfg.park_after
+        if parked:
+            self.log.line(f"EVENT waiting {key} parked=True asking-again={again}")
+        elif self.cfg.park_after <= 0:
+            self.log.line(f"WAITING-IGNORED {key} parking-disabled")
+        else:
+            self.log.line(f"EVENT waiting {key} park_after={self.cfg.park_after}")
 
     def _on_resumed(self, key: str) -> None:
-        """The owner answered before the park fired: cancel the pending park.
+        """The owner answered: cancel a pending park, or mark a parked session
+        answered.
 
         Distinct from the ``resume`` (unpause) verb. A session that was ALREADY
-        parked is not in ``waiting``, so this is a no-op for it — it stays in its
-        own window until it finishes."""
+        parked stays in its own window until it finishes; from here on it is
+        working there, not waiting on the owner (:meth:`state.State.answer`)."""
         with state_mod.transaction(self.cfg) as st:
             cancelled = st.waiting.pop(key, None) is not None
-        self.log.line(f"EVENT resumed {key} cancelled={cancelled}")
+            answered = st.answer(key, time.time())
+        self.log.line(f"EVENT resumed {key} cancelled={cancelled} parked={answered}")
 
     def _next_timeout(self) -> float | None:
         """Seconds until the earliest scheduled deadline, or ``None`` when nothing
@@ -1985,7 +1994,7 @@ class Supervisor:
                 s = st.slot_by_id(sid)
                 if s is not None:
                     s.pane_id = replacement
-            st.park(phase)
+            st.park(phase, self.cfg.park_after)
             paused = st.on_hold
         self._parked_ping(phase, f"the worker on {phase}")
         if paused:
@@ -2008,7 +2017,7 @@ class Supervisor:
             if replacement:
                 st.operator_pane = replacement
             st.release_operator()
-            st.park(key)
+            st.park(key, self.cfg.park_after)
         self._parked_ping(key, f"operator job {job}")
         self._check_operator_queue()
 
@@ -2030,7 +2039,7 @@ class Supervisor:
             st.master_alive = False
             st.overseer_pass = None
             st.overseer_deadline = 0.0
-            st.park(key)
+            st.park(key, self.cfg.park_after)
         self.overseer.end(time.time())
         self._parked_ping(key, "the Overseer")
 

@@ -708,7 +708,7 @@ function runItem(c) {
   const el = c.since ? now() - c.since : null;
   const ctx = c.ctx != null ? `<span class="ctx" style="--w:${Math.min(100, c.ctx)}%;--c:${c.ctx >= 60 ? "var(--failed)" : c.ctx >= 30 ? "var(--owner)" : "var(--ready)"}">context <i></i> ${Math.round(c.ctx)}%</span>` : "";
   return `<button class="run" data-phase="${esc(c.id)}"><span><span class="id">${esc(c.id)}</span><span class="book-tag">${esc(c.c)}</span></span>
-<span class="el"><span data-since="${c.since || ""}">${c.col === "merging" ? "merging" : dur(el)}</span><small>${c.typical ? "typical " + dur(c.typical) : c.sub ? esc(c.sub) : ""}</small></span>
+<span class="el"><span data-since="${c.since || ""}">${c.col === "merging" ? "merging" : dur(el)}</span><small>${c.sub ? esc(c.sub) : c.typical ? "typical " + dur(c.typical) : ""}</small></span>
 ${c.t ? `<span class="t">${esc(c.t)}</span>` : ""}${c.doing ? `<span class="doing">${esc(c.doing)}</span>` : ""}${ctx ? `<span style="grid-column:1/-1">${ctx}</span>` : ""}</button>`;
 }
 function capSentence(nc, e) {
@@ -815,7 +815,7 @@ function kanban(q) {
 function kcard(c) {
   const s = cstatus(c);
   let m = "";
-  if (c.col === "building") m = `${c.since ? `<span data-since="${c.since}">${dur(now() - c.since)}</span> in` : ""} slot ${c.slot}`;
+  if (c.col === "building") m = `${c.since ? `<span data-since="${c.since}">${dur(now() - c.since)}</span>${c.slot != null ? " in" : " ·"}` : ""} ${c.slot != null ? "slot " + c.slot : esc(c.sub || "")}`;
   else if (c.root) m = `waits on <span class="id">${esc(c.root)}</span>${c.root_sub ? ", " + esc(c.root_sub) : ""}`;
   else if (c.sub) m = esc(c.sub);
   if (c.eta && c.eta[0]) m += (m ? "<br>" : "") + `done ~${esc(when(c.eta[0]))}`;

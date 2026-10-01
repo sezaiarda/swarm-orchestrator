@@ -183,6 +183,13 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]],
             f"its worker finished; waiting in the merge queue{ahead}{held}",
         )
 
+    if phase in st.parked and not st.asking(phase):
+        return Explanation(
+            phase,
+            PARKED,
+            "its worker is working on your answer in tmux window"
+            f" {state_mod.wait_window(phase)} — it is not stuck, and not waiting on you",
+        )
     if phase in st.parked:
         return Explanation(
             phase,
@@ -279,7 +286,7 @@ def _holder_state(st: State, holder: str) -> str:
     if holder in st.waiting:
         return "waiting on the owner"
     if holder in st.parked:
-        return "parked"
+        return "parked" if st.asking(holder) else "working in its own window"
     if holder in st.integrating():
         return "merging"
     return "running"

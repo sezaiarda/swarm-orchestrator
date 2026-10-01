@@ -9,6 +9,7 @@ accounting is tag-driven and immune to stray teammate panes.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from typing import Callable, Sequence
@@ -467,6 +468,10 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+#: How claude's input box shows a long chunk of input: folded, the text hidden.
+_FOLDED = re.compile(r"\[Pasted text #\d+")
+
+
 def _box_holds(pane_id: str, head: str) -> bool:
     """True while claude's input box still holds the typed text.
 
@@ -476,12 +481,19 @@ def _box_holds(pane_id: str, head: str) -> bool:
     a terminal Device-Attributes reply like ``10;1c`` is the one caught live —
     survives ``lstrip`` and used to make this return False permanently for that
     pane, which turned every later check into a false "the box is empty, so it
-    must have been submitted"."""
+    must have been submitted".
+
+    Input that arrives as one chunk longer than about 800 characters is shown
+    folded, as ``[Pasted text #1]``, and the text itself is nowhere in the box.
+    That placeholder is the text too (the box was cleared before typing, so it is
+    ours). Read as "not there", it made a swallowed Enter look like a box that
+    let go of the text: one Enter, UNCONFIRMED, and the message sat unsent."""
     text = capture_joined(pane_id)
     idx = text.rfind("❯")
     if idx < 0:
         return False
-    return _flat(head) in _flat(text[idx + 1 :])
+    box = _flat(text[idx + 1 :])
+    return _flat(head) in box or _FOLDED.search(box) is not None
 
 
 def _transcript(pane_id: str) -> str:

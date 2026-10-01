@@ -48,7 +48,9 @@ class _FakeClaude:
     all, ``paint`` delays typed text becoming visible in a box that already
     exists, ``swallow`` eats Enters, ``echo=False`` submits without rendering the
     message. Keystrokes typed before the box exists are DISCARDED, as claude
-    discards them.
+    discards them. ``fold`` is the length past which one chunk of input is shown
+    in the box as ``[Pasted text #N]`` instead of as its text (about 800
+    characters on the real TUI); submitted, it renders in full above the box.
     """
 
     def __init__(
@@ -60,6 +62,7 @@ class _FakeClaude:
         paint: int = 0,
         swallow: int = 0,
         echo: bool = True,
+        fold: int = 0,
     ) -> None:
         self.calls: list[list[str]] = []
         self.typed: list[str] = []  # every payload we TRIED to put in the box
@@ -72,6 +75,9 @@ class _FakeClaude:
         self.pending = 0
         self.swallow = swallow
         self.echo = echo
+        self.fold = fold
+        self.folded = 0  # the paste number the box shows instead of its text
+        self.pastes = 0
         self.captures = 0
 
     def run(self, args, check=False, input_text=None):
@@ -98,7 +104,7 @@ class _FakeClaude:
         body = "\n".join(self.transcript)
         if not self._box_up():
             return _ok(body)
-        shown = self.contents
+        shown = f"[Pasted text #{self.folded}]" if self.folded else self.contents
         if self.pending > 0:
             self.pending -= 1
             shown = ""
@@ -109,6 +115,7 @@ class _FakeClaude:
             self._put(args[-1])
         elif args[-1] == "C-u":
             self.contents = ""
+            self.folded = 0
         elif args[-1] == "Enter":
             self._enter()
         return _ok()
@@ -119,6 +126,9 @@ class _FakeClaude:
             return  # no box yet: claude drops the keystrokes on the floor
         self.contents += text
         self.pending = self.paint
+        if self.fold and len(text) > self.fold:
+            self.pastes += 1
+            self.folded = self.pastes
 
     def _enter(self) -> None:
         if self.swallow > 0:
@@ -129,6 +139,7 @@ class _FakeClaude:
         if self.echo:
             self.transcript.append(f"> {self.contents}")
         self.contents = ""
+        self.folded = 0
         self.pending = 0
 
 
@@ -236,6 +247,53 @@ def test_silent_submit_is_unconfirmed_and_not_retried(pane):
     assert tmux.send_submit_ex("%1", "hello world") == tmux.UNCONFIRMED
     assert fake.typed == ["hello world"]
     assert len(_enters(fake)) == 1
+
+
+# -- a brief long enough for claude to fold it into "[Pasted text #N]" -------
+# The box then shows the placeholder, never the text. Reading that as "the box
+# let go of the text" is what stranded a merge resolver: one Enter went out, the
+# TUI swallowed it into the paste, and the verdict was UNCONFIRMED — where the
+# sender stops — with the whole brief still sitting in the box, unsent.
+_LONG = "Read the resolver prompt and follow it exactly. " + "x" * 1200
+
+
+def test_a_folded_paste_counts_as_text_in_the_box(pane):
+    fake = pane(fold=800)
+    fake.run(["send-keys", "-t", "%1", "-l", "--", _LONG])
+
+    assert "[Pasted text #1]" in tmux.capture_joined("%1")
+    assert tmux._box_holds("%1", _LONG[:40])
+
+
+def test_a_folded_paste_is_delivered(pane):
+    """Fold alone is survivable: the Enter submits and the text renders above."""
+    fake = pane(fold=800)
+
+    assert tmux.send_submit_ex("%1", _LONG) == tmux.DELIVERED
+    assert fake.typed == [_LONG]
+    assert fake.contents == ""
+
+
+def test_a_swallowed_enter_on_a_folded_paste_is_pressed_again(pane):
+    """The stranded resolver: folded brief, first Enter eaten. The text is still
+    in the box, so the Enter is retried (never the text) until it submits."""
+    fake = pane(fold=800, swallow=1)
+
+    assert tmux.send_submit_ex("%1", _LONG) == tmux.DELIVERED
+    assert fake.typed == [_LONG]  # typed once: a second copy would submit twice
+    assert len(_enters(fake)) == 2
+    assert fake.contents == ""
+
+
+def test_a_folded_paste_that_never_submits_is_not_delivered(pane):
+    """Still sitting in the box after every Enter is NOT_DELIVERED, which says
+    where the text is. UNCONFIRMED would claim the box let go of it."""
+    fake = pane(fold=800, swallow=99)
+
+    assert tmux.send_submit_ex("%1", _LONG) == tmux.NOT_DELIVERED
+    assert fake.typed == [_LONG]
+    assert len(_enters(fake)) == 4  # == tries
+    assert fake.contents == _LONG
 
 
 def test_repeat_prompt_is_proven_by_a_new_occurrence(pane):

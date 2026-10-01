@@ -432,6 +432,12 @@ The **resolver** is a Claude session (prompt: `prompts/resolver.md`, model
   progress;
 - never pushes and never launches.
 
+Its brief is written to `<state>/resolver/<phase>.brief.md` and the session is
+typed one short line pointing at it. A session that does not take that line (or
+never becomes ready) is closed and one more is opened. If that one fails too, no
+resolver is on the hold: you are told at once (`RESOLVER-SPAWN-FAIL` in the log),
+and the Overseer's next look treats it as a hold nobody is working on.
+
 `swarm resolved` re-checks the repo (no merge in progress, clean tree, on main)
 before releasing the queue. A premature call keeps the hold and pings again.
 

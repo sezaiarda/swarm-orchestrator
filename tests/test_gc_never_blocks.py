@@ -139,7 +139,7 @@ def test_resolver_pretrusts_its_repo_before_starting(tmp_path, monkeypatch):
     monkeypatch.setattr(tmux, "new_window", lambda *a, **k: "@9")
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: ["%9"])
     monkeypatch.setattr(tmux, "respawn_pane", lambda *a, **k: None)
-    monkeypatch.setattr(resolver_mod, "_deliver", lambda *a, **k: None)
+    monkeypatch.setattr(resolver_mod, "_deliver", lambda *a, **k: True)
 
     repo = project / "frontend"
     log = _Log()

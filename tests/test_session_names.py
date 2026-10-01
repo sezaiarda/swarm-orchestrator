@@ -41,7 +41,7 @@ def resolver_cmd(cfg, monkeypatch) -> str:
     monkeypatch.setattr(tmux, "new_window", lambda *a, **k: "@9")
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: ["%9"])
     monkeypatch.setattr(tmux, "respawn_pane", lambda pane, cmd, **k: got.append(cmd))
-    monkeypatch.setattr(resolver_mod, "_deliver", lambda *a, **k: None)
+    monkeypatch.setattr(resolver_mod, "_deliver", lambda *a, **k: True)
 
     class _Log:
         def line(self, text: str) -> None:

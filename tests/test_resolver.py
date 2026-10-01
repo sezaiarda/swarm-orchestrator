@@ -36,7 +36,7 @@ def cfg(tmp_path, monkeypatch):
 def _spawned_cmd(cfg, monkeypatch) -> str:
     got: list[str] = []
     monkeypatch.setattr(tmux, "respawn_pane", lambda pane, cmd, **k: got.append(cmd))
-    monkeypatch.setattr(resolver_mod, "_deliver", lambda *a, **k: None)
+    monkeypatch.setattr(resolver_mod, "_deliver", lambda *a, **k: True)
     resolver_mod.spawn(cfg, "P1", cfg.project_dir / "repo", _Log())
     return got[0]
 
@@ -56,11 +56,15 @@ def test_a_custom_resolver_cmd_is_used_as_is(cfg, monkeypatch):
     assert _spawned_cmd(cfg, monkeypatch) == "my-resolver"
 
 
-def test_the_typed_line_names_the_projects_checks(cfg, monkeypatch):
+def test_the_brief_names_the_projects_checks(cfg, monkeypatch):
     typed: list[str] = []
     monkeypatch.setattr(launch_mod, "await_ready", lambda *a, **k: True)
-    monkeypatch.setattr(tmux, "send_submit", lambda pane, line: typed.append(line) or True)
+    monkeypatch.setattr(
+        tmux, "send_submit_ex", lambda pane, line: typed.append(line) or tmux.DELIVERED)
     cfg.git_auto_resolve_check = {"docs/PHASE-LEDGER.md": "python3 ci/gate.py"}
-    resolver_mod._deliver(cfg, "%9", "P1", cfg.project_dir / "repo", _Log())
-    assert "docs/PHASE-LEDGER.md: `python3 ci/gate.py`" in typed[0]
-    assert "swarm resolved P1" in typed[0]
+    assert resolver_mod._deliver(cfg, "%9", "P1", cfg.project_dir / "repo", _Log())
+    brief_file = resolver_mod.brief_path(cfg, "P1")
+    assert str(brief_file) in typed[0]  # the pane is typed a pointer, not the brief
+    brief = brief_file.read_text(encoding="utf-8")
+    assert "docs/PHASE-LEDGER.md: `python3 ci/gate.py`" in brief
+    assert "swarm resolved P1" in brief

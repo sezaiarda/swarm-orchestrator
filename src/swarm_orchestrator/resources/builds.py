@@ -15,6 +15,11 @@ Two sources, in order of preference:
    ``flock`` on ``buildsem/slotN``, and ``/proc/locks`` names the pid holding
    it (matched on the slot file's device and inode). That pid is the build.
 
+**gc is not a build.** It holds every slot while it deletes build output, and
+logs that like a build's turn with ``cls`` ``"gc"``; those events are skipped.
+Without an event log, a slot held while ``buildsem/gc`` (gc's record) is
+locked is gc's, and nobody's build.
+
 Either way the build is a pid; its *tree* (the pid and every descendant) is
 what is measured each sample (:mod:`.ptree`). A :class:`Build` keeps the running
 figures; when it ends, :meth:`Build.summary` is the row ``meters/builds.jsonl``
@@ -32,6 +37,7 @@ from pathlib import Path
 from . import ptree
 
 EVENTS = "events.jsonl"
+GC = "gc"  # ``cls`` of gc's events, and the name of its record file
 #: On a (re)start the event log is read from at most this far back: enough to
 #: find the builds still running, without parsing months of history.
 TAIL_BYTES = 1 << 20
@@ -114,20 +120,36 @@ def flock_holders(locks_text: str, slots: dict[tuple[int, int, int], int]) -> di
     A line reads ``N: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<inode> 0 EOF``
     (device numbers in hex); a waiter's line carries ``->`` and holds nothing."""
     out: dict[int, int] = {}
+    for pid, key in _flocks(locks_text):
+        slot = slots.get(key)
+        if slot is not None and pid > 0:
+            out[slot] = pid
+    return out
+
+
+def _flocks(locks_text: str) -> list[tuple[int, tuple[int, int, int]]]:
+    """``(pid, (major, minor, inode))`` of every granted ``flock``."""
+    out = []
     for line in locks_text.splitlines():
         parts = line.split()
         if len(parts) < 6 or "->" in parts or parts[1] != "FLOCK":
             continue
         try:
-            pid = int(parts[4])
             major, minor, inode = parts[5].split(":")
-            key = (int(major, 16), int(minor, 16), int(inode))
+            out.append((int(parts[4]), (int(major, 16), int(minor, 16), int(inode))))
         except ValueError:
             continue
-        slot = slots.get(key)
-        if slot is not None and pid > 0:
-            out[slot] = pid
     return out
+
+
+def gc_holds(locks_text: str, buildsem: Path) -> bool:
+    """Is gc holding the gate: is its record, ``buildsem/gc``, locked?"""
+    try:
+        st = (buildsem / GC).stat()
+    except OSError:
+        return False
+    key = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+    return any(k == key for _, k in _flocks(locks_text))
 
 
 @dataclass
@@ -305,7 +327,7 @@ class BuildBook:
 
     def _event(self, ev: dict, now: float, table: dict[int, ptree.Proc] | None) -> None:
         kind, bid = ev.get("event"), str(ev.get("id") or "")
-        if not bid:
+        if not bid or ev.get("cls") == GC:  # gc's turn at the gate is not a build
             return
         if kind == "queued":
             self.queued[bid] = ev
@@ -358,7 +380,8 @@ class BuildBook:
             locks = (self.proc / "locks").read_text()
         except OSError:
             locks = ""
-        holders = flock_holders(locks, slot_files(self.buildsem))
+        holders = ({} if gc_holds(locks, self.buildsem)
+                   else flock_holders(locks, slot_files(self.buildsem)))
         held = {}
         for slot, pid in holders.items():
             ticks = self._identity(pid, table)

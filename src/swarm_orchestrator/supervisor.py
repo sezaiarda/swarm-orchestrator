@@ -2549,10 +2549,10 @@ class Supervisor:
         """Start a background gc when one is due; never blocks the loop.
 
         Due at most once per ``[gc].every_s``, and once per idle episode (no busy
-        slot) longer than ``[gc].idle_s``. :func:`gc.auto` itself refuses to run
-        while any build slot is held or a compiler is running under a tree it
-        would touch; that comes back as ``busy`` and is retried after
-        :data:`GC_RETRY_S` rather than queueing builds behind it."""
+        slot) longer than ``[gc].idle_s``. :func:`gc.auto` waits its turn in the
+        build queue, holding no slot, and refuses to run while any build is
+        alive or a compiler is running under a tree it would touch; that comes
+        back as ``busy`` and is retried after :data:`GC_RETRY_S`."""
         cfg = self.cfg
         if not cfg.gc_auto:
             return

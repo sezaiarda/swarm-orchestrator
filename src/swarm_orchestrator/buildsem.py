@@ -17,11 +17,11 @@ them is gone. No daemon, no counter to leak.
   record (id, phase, pid, command, start), which ``--status`` and the waiting
   line show; whether the lock is held is whether the build is alive.
 - A **slot**, ``<state>/buildsem/slotN`` (``N < max_concurrent``), *shared*.
-  Anything that wants a slot to itself takes it exclusively and so waits for
-  every build on it: ``swarm gc`` (which takes every slot before it deletes
-  build output) and a ``swarm build`` from before seats existed. So gc never
-  runs while any build is alive, set aside or not, and an old caller never
-  starts on a slot that has a build on it.
+  Anything that wants a slot to itself takes it exclusively, which works only
+  while no build is on it: ``swarm gc`` (which holds every slot while it
+  deletes build output, see *gc takes its turn*) and a ``swarm build`` from
+  before seats existed. So gc never runs while any build is alive, set aside
+  or not, and an old caller never starts on a slot that has a build on it.
 
 **Idle yield.** A holder whose whole process tree has done nothing for
 ``[build].idle_yield_s`` is *set aside*: it is not stopped or signalled, it
@@ -61,6 +61,31 @@ budget as the short ones: each waiter is passed at most ``[build].overtake``
 times in all, and once it has been, or once a build that must run alone is the
 oldest waiter, nothing starts until it has. ``"any"`` (the default) is the gate
 without these rules.
+
+**gc takes its turn.** gc must have the gate to itself, and it gets that
+through the queue, never by taking slots one at a time: a gc that held one
+slot while it waited for a build on another kept that slot from every build
+for as long as it waited. :func:`whole` queues a ticket like any waiter and
+holds nothing until, under ``queue.lock``, it finds no build alive and nobody
+older waiting; then it takes every slot in that one step, or none. While its
+ticket waits:
+
+- *Builds pass it* for as long as any build is alive: the ticket holds nobody
+  back, and gc runs the moment the gate is empty and it is the oldest waiter
+  (no younger waiter starts ahead of it then).
+- *For the last* ``hold_s`` *of its wait it is passed no more*: no build that
+  queued after it starts until it has run, so the builds alive end and the
+  gate empties under constant load too. Only builds at work are waited for
+  like that; while a holder set aside as idle, a process a build left behind,
+  or someone outside the queue is on the gate, nobody knows when it will be
+  empty, and builds go on passing.
+- *When its wait is over* it leaves the queue (a ``left`` event) and its caller
+  tries again later. It never held a lock.
+
+So the most a gc costs a waiting build is ``hold_s`` plus the sweep itself.
+Its hold is recorded like a build's: ``<state>/buildsem/gc`` holds its record
+and is locked for as long as it holds the gate, and its events carry
+``cls`` ``"gc"``.
 
 **What it says.** On stderr: the queue position, who holds each slot and for how
 long, and an ETA from past run times, on joining and every 45 s; "queued Xs,
@@ -102,6 +127,11 @@ _TURN_POLL_S = 0.1  # the waiter whose turn it is, watching for a free slot
 _REPORT_S = 45.0
 _STALE_S = 15.0  # a ticket not refreshed this long is passed over
 _KILL_GRACE_S = 10.0
+_GC_POLL_S = 0.1  # a gc waiting for the gate: the waiters behind it wait on this
+GC = "gc"  # ``cls`` of gc's events and of its record
+GC_ARGV = "swarm gc"
+GC_WHY = "gc deletes build output"
+GC_FIRST = "gc runs first"  # why a waiter behind a gc ticket is held back
 HELD_ENV = "SWARM_BUILD_HELD"  # "<slot>:<id>:<seat>" inside a build that holds a slot
 HOLD_WHY = "started with --hold"
 _HOLD_HINT = ("If it needs the machine to itself (a measurement), rerun it with"
@@ -124,6 +154,11 @@ def _queue_dir(cfg: Config) -> Path:
     return cfg.buildsem_dir / "queue"
 
 
+def gc_path(cfg: Config) -> Path:
+    """gc's record; locked for as long as gc holds the gate."""
+    return cfg.buildsem_dir / GC
+
+
 def seats(cfg: Config) -> int:
     """How many builds the gate may have alive at once: the slots, plus the idle
     holders that may be set aside beside them."""
@@ -140,6 +175,18 @@ def _seat_indices(cfg: Config) -> list[int]:
     try:
         for p in cfg.buildsem_dir.iterdir():
             if p.name.startswith("seat") and p.name[4:].isdigit():
+                found.add(int(p.name[4:]))
+    except OSError:
+        pass
+    return sorted(found)
+
+
+def _slot_indices(cfg: Config) -> list[int]:
+    """Every slot a build may be on: this config's, and any other on disk."""
+    found = set(range(max(0, cfg.build_max_concurrent)))
+    try:
+        for p in cfg.buildsem_dir.iterdir():
+            if p.name.startswith("slot") and p.name[4:].isdigit():
                 found.add(int(p.name[4:]))
     except OSError:
         pass
@@ -242,8 +289,9 @@ def _synthetic_end(cfg: Config, rec: dict, slot: int | None, now: float) -> None
     start = rec.get("start_ts") or now
     buildlog.event(cfg, "end", id=rec.get("id", "?"), phase=rec.get("phase"),
                    pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=slot,
-                   cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
-                   run_s=now - start, exit=None, repo=rec.get("repo"), ts=now)
+                   cls=rec.get("cls") or "heavy", argv=rec.get("argv", ""),
+                   cwd=rec.get("cwd", ""), run_s=now - start, exit=None,
+                   repo=rec.get("repo"), ts=now)
 
 
 def reap_records(cfg: Config, only: int | None = None, force: bool = False,
@@ -269,6 +317,11 @@ def reap_records(cfg: Config, only: int | None = None, force: bool = False,
                 _synthetic_end(cfg, rec, slot, now)  # unless an older reaper already did
             _mark_ended(path, rec, now)
             _end_slot_copy(cfg, rec, now)
+        path = gc_path(cfg)  # a gc killed while it held the gate
+        rec = read_record(path)
+        if rec and not rec.get("ended") and rec.get("v") == 1 and not _locked(path):
+            _synthetic_end(cfg, rec, None, now)
+            _mark_ended(path, rec, now)
     idx = [only] if only is not None else range(cfg.build_max_concurrent)
     for i in idx:
         rec = read_record(_slot_path(cfg, i))
@@ -420,7 +473,8 @@ def _is_short(meta: dict, short_s: int) -> bool:
 
 
 def select(tickets: list[dict], counts: dict[str, int], overtake: int,
-           short_s: int, blocked: dict[str, str] | None = None) -> dict | None:
+           short_s: int, blocked: dict[str, str] | None = None,
+           wall: str | None = None) -> dict | None:
     """Whose turn it is: the oldest waiter, unless a predicted-short one stands
     behind predicted-long ones that may each still be passed (fewer than
     ``overtake`` times) -- then the oldest such short one.
@@ -431,7 +485,10 @@ def select(tickets: list[dict], counts: dict[str, int], overtake: int,
     a short one behind it) as long as every older waiter may still be passed.
     A waiter that must run alone is never passed once it is the oldest. When
     nobody may start, the turn stays with the oldest, who waits for the builds
-    in its way to end."""
+    in its way to end.
+
+    ``wall`` is the id of a ticket nothing younger may pass, short or not: a
+    gc's (see :func:`gc_view`)."""
     live = [t for t in tickets if t.get("fresh", True)]
     if not live:
         return None
@@ -445,20 +502,21 @@ def select(tickets: list[dict], counts: dict[str, int], overtake: int,
             first = t
         if counts.get(t["id"], 0) >= overtake:
             break  # passed as often as it may be: nothing more goes ahead of it
-        if rules and n == 0 and t.get("alone"):
+        if (rules and n == 0 and t.get("alone")) or t["id"] == wall:
             break
     return first or live[0]
 
 
 def service_order(tickets: list[dict], counts: dict[str, int], overtake: int,
-                  short_s: int, blocked: dict[str, str] | None = None) -> list[dict]:
+                  short_s: int, blocked: dict[str, str] | None = None,
+                  wall: str | None = None) -> list[dict]:
     """The order the current waiters would start in, if nobody else came (and,
     with ``blocked``, if the builds alive stayed as they are)."""
     left = [t for t in tickets if t.get("fresh", True)]
     counts = dict(counts)
     order = []
     while left:
-        t = select(left, counts, overtake, short_s, blocked)
+        t = select(left, counts, overtake, short_s, blocked, wall)
         if t is None:
             break
         for older in left:
@@ -476,6 +534,7 @@ class View:
     my_turn: bool = False
     # None: no pairing rules. Else {ticket id: why the rules hold it back now}.
     blocked: dict[str, str] | None = None
+    wall: str | None = None  # the gc ticket nothing younger may pass now
 
 
 @dataclass
@@ -516,6 +575,50 @@ def live_holders(cfg: Config) -> list[dict]:
                 rec.pop("id", None)
             out.append(rec)
     return out
+
+
+def _gate_state(cfg: Config, holders: list[dict], now: float) -> tuple[bool, bool]:
+    """``(busy, working)`` for :func:`gc_view`. Busy: something is on the gate,
+    so a gc cannot start. Working: all of it is builds at work, which end; not
+    a holder set aside as idle, a process a build left behind, or someone who
+    holds a slot from outside the queue. Under ``queue.lock``."""
+    foreign = any(_locked(_slot_path(cfg, i)) for i in _slot_indices(cfg))
+    if not holders and not foreign:
+        return False, False
+    aside = {h.get("id") for h in buildidle.set_aside(cfg, buildidle.load(cfg), holders, now)}
+    working = not foreign and all(not h.get("over") and h.get("id") not in aside
+                                  for h in holders)
+    return True, working
+
+
+def gc_view(tickets: list[dict], now: float, busy: bool,
+            working: bool) -> tuple[list[dict], str | None]:
+    """The queue as a waiting build reads it: ``(tickets, wall)``.
+
+    A gc's ticket (``gc`` set) is not a build's. While the gate is ``busy`` it
+    is left out: builds pass it and it is not counted as passed. It stays in,
+    as the ``wall`` no younger waiter may pass (:func:`select`), when the gate
+    is empty (it is its turn if it is the oldest) and once it is *firm*: from
+    its ``firm_ts`` on, while everything on the gate is ``working`` and so
+    will end. A gc ticket whose waiter stopped polling is nobody's wall."""
+    out: list[dict] = []
+    wall = None
+    for t in tickets:
+        if t.get("gc"):
+            if busy and not (working and now >= float(t.get("firm_ts") or 0.0)):
+                continue
+            if wall is None and t.get("fresh", True):
+                wall = t["id"]
+        out.append(t)
+    return out, wall
+
+
+def behind(tickets: list[dict], wall: str | None) -> set[str]:
+    """The ids of the waiters ``wall`` holds back: every ticket younger."""
+    seq = next((t.get("seq", 0) for t in tickets if t["id"] == wall), None)
+    if seq is None:
+        return set()
+    return {t["id"] for t in tickets if t.get("seq", 0) > seq}
 
 
 def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False) -> dict:
@@ -619,20 +722,26 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
         pass
     with _qlock(cfg):
         tickets = live_tickets(cfg, t)
+        rules = buildpair.enabled(cfg)
+        holders: list[dict] | None = None
+        wall = None
+        if any(m.get("gc") for m in tickets):  # a gc is waiting for the gate
+            now = time.time()
+            holders = live_holders(cfg)
+            tickets, wall = gc_view(tickets, now, *_gate_state(cfg, holders, now))
         ids = {m["id"] for m in tickets}
         q = _read_q(cfg)
         counts = {k: int(v) for k, v in (q.get("overtaken") or {}).items() if k in ids}
-        rules = buildpair.enabled(cfg)
         beside: list[dict] = []
         found: dict[str, str] = {}
         blocked = None
         if rules:
-            beside = buildpair.counted(live_holders(cfg))
+            beside = buildpair.counted(live_holders(cfg) if holders is None else holders)
             found = buildpair.marks(cfg)
             blocked = buildpair.blocked_all(buildpair.waiters(tickets), beside, found)
-        chosen = select(tickets, counts, overtake, short_s, blocked)
+        chosen = select(tickets, counts, overtake, short_s, blocked, wall)
         view = View(tickets, counts, chosen is not None and chosen["id"] == t.meta["id"],
-                    blocked)
+                    blocked, wall)
         if not view.my_turn or (blocked and t.meta["id"] in blocked):
             if buildidle.enabled(cfg):
                 _idle_pass(cfg, live_holders(cfg), time.time())
@@ -1159,6 +1268,120 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
         call.log(cfg, "end", pid=os.getpid(), slot=claim.slot, run_s=now - start,
                  exit=held.exit, ts=now)
         claim.close()
+
+
+# -- gc's turn ------------------------------------------------------------
+class Busy(RuntimeError):
+    """The gate did not empty within the wait (:func:`whole`)."""
+
+
+def _alive_text(holders: list[dict], now: float) -> str:
+    h = min(holders, key=lambda r: r.get("start_ts") or now)
+    more = f" and {len(holders) - 1} more" if len(holders) > 1 else ""
+    slot = f"slot {h['slot']}" if isinstance(h.get("slot"), int) else "a seat"
+    return (f"{h.get('phase') or '-'} `{buildlog.short_cmd(h.get('argv', ''), 40)}` on {slot},"
+            f" running {buildlog.fmt_s(now - (h.get('start_ts') or now))}{more}")
+
+
+def _take_whole(cfg: Config, t: Ticket) -> tuple[list[int] | None, str]:
+    """Take the whole gate if nothing is alive on it and nobody older waits:
+    every slot exclusively and gc's record, in this one step under
+    ``queue.lock``, or nothing at all. ``(fds, "")``, the last fd being the
+    record's, or ``(None, what is in the way)``."""
+    try:
+        os.utime(t.fd)  # still here: keep the ticket fresh
+    except OSError:
+        pass
+    with _qlock(cfg):
+        tickets = live_tickets(cfg, t)
+        now = time.time()
+        holders = live_holders(cfg)
+        if holders:
+            return None, _alive_text(holders, now)
+        ahead = [m for m in tickets if m.get("fresh", True) and m["seq"] < t.meta["seq"]]
+        if ahead:
+            return None, f"{len(ahead)} older waiter(s) in the build queue"
+        fds: list[int] = []
+        try:
+            for i in _slot_indices(cfg):
+                fd = os.open(_slot_path(cfg, i), os.O_CREAT | os.O_RDWR, 0o644)
+                fds.append(fd)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    for held in fds:  # all of them or none: nothing is kept
+                        os.close(held)
+                    return None, f"build slot {i} is held from outside the queue"
+            reap_records(cfg)  # whoever was here is gone: the ends never written
+            for i in _slot_indices(cfg):
+                reap_records(cfg, only=i, force=True)
+            seat = os.open(gc_path(cfg), os.O_CREAT | os.O_RDWR, 0o644)
+            fds.append(seat)
+            fcntl.flock(seat, fcntl.LOCK_EX)  # only a momentary probe can be on it
+            tick = procs.start_ticks(os.getpid())
+            _write_record(seat, {
+                "v": 1, "id": t.meta["id"], "cls": GC, "phase": None,
+                "argv": t.meta.get("argv", GC_ARGV), "cwd": t.meta.get("cwd", ""),
+                "queued_ts": t.meta.get("queued_ts"), "start_ts": now, "pid": os.getpid(),
+                "pid_start": tick, "gate_pid": os.getpid(), "gate_start": tick, "ended": None,
+            })
+        except BaseException:
+            for held in fds:
+                os.close(held)
+            raise
+        _drop(t)
+    return fds, ""
+
+
+@contextmanager
+def whole(cfg: Config, wait_s: float, hold_s: float = 0.0,
+          argv: str = GC_ARGV) -> Iterator[list[int]]:
+    """Hold the whole gate for the body, in this process: no build is alive
+    when it starts and none starts until it ends. For gc.
+
+    It queues like a build and holds nothing while it waits (see *gc takes its
+    turn* in the module docstring): for ``wait_s`` in all, of which the last
+    ``hold_s`` hold back the builds queued after it. Raises :class:`Busy` when
+    the gate did not empty in that time. Yields the slots' locked fds."""
+    queued = time.time()
+    wait_s = max(0.0, wait_s)
+    meta = {"id": uuid.uuid4().hex[:12], "phase": None, "pid": os.getpid(), "argv": argv,
+            "cwd": str(cfg.project_dir), "queued_ts": queued, "gc": True, "alone": GC_WHY,
+            "firm_ts": queued + max(0.0, wait_s - max(0.0, hold_s)),
+            "leave_ts": queued + wait_s}
+    call = _Call(meta["id"], None, argv, meta["cwd"], GC)
+    ticket = _enqueue(cfg, meta)
+    call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued, alone=True, why=GC_WHY)
+    fds, why = None, "interrupted"
+    try:
+        while True:
+            fds, why = _take_whole(cfg, ticket)
+            if fds is not None or time.time() >= meta["leave_ts"]:
+                break
+            time.sleep(_GC_POLL_S)
+    finally:
+        if fds is None:
+            _drop(ticket)
+            call.log(cfg, "left", pid=os.getpid(), slot=None, wait_s=time.time() - queued,
+                     alone=True, why=why)
+    if fds is None:
+        raise Busy(f"the build gate was not empty within {wait_s:.0f}s ({why}); nothing was"
+                   " held while waiting — try again later")
+    start = time.time()
+    call.log(cfg, "start", pid=os.getpid(), slot=None, wait_s=start - queued, hold=False,
+             alone=True, why=GC_WHY, ts=start)
+    code = 1
+    try:
+        yield fds[:-1]
+        code = 0
+    finally:
+        now = time.time()
+        rec = read_record(gc_path(cfg))
+        if rec and rec.get("id") == meta["id"]:
+            _write_record(fds[-1], dict(rec, ended=now))
+        call.log(cfg, "end", pid=os.getpid(), slot=None, run_s=now - start, exit=code, ts=now)
+        for fd in reversed(fds):
+            os.close(fd)  # closing releases the lock
 
 
 def _exec(cfg: Config, argv: list[str]) -> int:

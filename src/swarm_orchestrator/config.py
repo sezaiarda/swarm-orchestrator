@@ -494,8 +494,16 @@ class Config:
     # and the disk guard's whole-tree eviction did the pruning.
     gc_wait_s: int = _k(
         "gc", "wait_s", 600, HOT, env="SWARM_GC_WAIT", minimum=0,
-        doc="auto gc waits this long (s) for the build slots",
-        why="read when the next automatic gc takes the build gate")
+        doc="auto gc waits this long (s) in the build queue",
+        why="read when the next automatic gc joins the build queue")
+    # While it waits, builds pass it: a gc that held every waiter back for its
+    # whole wait kept free slots idle behind one long build. But with two slots
+    # under load the gate is never empty by itself, so for the end of the wait
+    # it is passed no more, and the builds alive run out.
+    gc_hold_s: int = _k(
+        "gc", "hold_s", 120, HOT, env="SWARM_GC_HOLD", minimum=0,
+        doc="of that wait, the last N s hold builds back",
+        why="read when the next gc joins the build queue")
     # Three days keeps every dependency a phase in the current campaign built.
     gc_keep_days: int = _k(
         "gc", "keep_days", 3, HOT, env="SWARM_GC_KEEP_DAYS", minimum=1,

@@ -306,9 +306,10 @@ read where the project stands instead of surveying it. See
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `auto` | `true` | `SWARM_GC_AUTO` | hot | Let the supervisor run `swarm gc` by itself. |
-| `every_s` | `900` | `SWARM_GC_EVERY` | hot | At most this often (a busy build slot defers it a few minutes). `0` leaves only the idle trigger. |
+| `every_s` | `900` | `SWARM_GC_EVERY` | hot | At most this often (a build gate that did not empty within `wait_s` defers it ten minutes). `0` leaves only the idle trigger. |
 | `idle_s` | `1800` | `SWARM_GC_IDLE` | hot | Also once per idle stretch (no busy slot) of this length. `0` turns this off. |
-| `wait_s` | `600` | `SWARM_GC_WAIT` | hot | How long an automatic gc waits for the build slots before it gives up and retries later. It polls faster than a queued build, so it runs between two builds instead of never. `0` only takes a slot that is free right now. |
+| `wait_s` | `600` | `SWARM_GC_WAIT` | hot | How long an automatic gc waits in the build queue for the gate to be empty before it leaves and retries later. It holds no slot while it waits and builds pass it, so waiting costs the builds nothing; it runs the moment no build is alive, ahead of the builds queued after it. `0` only takes a gate that is empty right now. |
+| `hold_s` | `120` | `SWARM_GC_HOLD` | hot | For the last `hold_s` of that wait, gc is passed no more: no build queued after it starts until it has run or its wait is over. With two build slots under load the gate is never empty by itself, and the disk fills; this is what empties it. It is also the most a gc makes any build wait, plus the sweep itself (seconds). Larger: gc runs more surely, and a free slot may sit idle that long behind a long build. `0`: gc holds no build back and runs only when the gate happens to be empty. It also applies to `swarm gc --yes`, whose whole wait is 5 minutes. |
 | `keep_days` | `3` | `SWARM_GC_KEEP_DAYS` | hot | Build output used within this many days survives `cargo sweep`. At least 1. |
 | `attic_days` | `30` | `SWARM_GC_ATTIC_DAYS` | hot | Work the swarm set aside instead of deleting (a discarded phase's commits, under `refs/swarm-attic/<phase>/<utc-stamp>`) is kept this many days before gc drops the ref, and its backup branch on origin with it. At least 1. |
 

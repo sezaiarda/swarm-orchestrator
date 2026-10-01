@@ -195,6 +195,45 @@ def test_light_builds_and_the_queue(env):
     assert store.read_now(cfg.state_dir)["queued"] == 1
 
 
+def test_a_gc_holding_the_gate_is_not_a_build(env):
+    """gc logs its turn at the gate like a build's, with ``cls`` ``gc``. It is
+    neither measured as a build nor counted as one waiting."""
+    cfg, fake, pings = env
+    fake.add(500, comm="swarm", own=900)  # the supervisor: gc runs inside it
+    gc = {"pid": 500, "cls": "gc", "argv": "swarm gc", "slot": None, "phase": None}
+    event(cfg, ts=T0 - 9, event="queued", id="g1", **gc)
+    event(cfg, ts=T0 - 3, event="start", id="g1", wait_s=6.0, **gc)
+    event(cfg, ts=T0 - 2, event="queued", id="g2", **gc)  # a second one, still waiting
+    s = make_sampler(cfg, fake, pings)
+    s.step(T0)
+    assert not s.book.busy() and not s.book.queued
+    now = store.read_now(cfg.state_dir)
+    assert (now["builds"], now["queued"], now["idle_holders"]) == ([], 0, [])
+    event(cfg, ts=T0 + 0.5, event="end", id="g1", run_s=3.5, exit=0, **gc)
+    event(cfg, ts=T0 + 0.6, event="left", id="g2", wait_s=2.6, **gc)
+    s.step(T0 + 1)
+    assert summaries(cfg) == [] and not s.book.queued and not pings
+
+
+def test_without_an_event_log_a_slot_gc_holds_is_not_a_build(env):
+    cfg, fake, pings = env
+    keys = []
+    for name in ("slot0", "slot1", "gc"):
+        path = cfg.buildsem_dir / name
+        path.touch()
+        st = path.stat()
+        keys.append(f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}")
+    fake.add(700, started=T0 - 30, comm="swarm", argv="swarm supervise")
+    held = [f"{n}: FLOCK  ADVISORY  WRITE 700 {key} 0 EOF\n" for n, key in enumerate(keys, 1)]
+    (fake.root / "locks").write_text("".join(held))  # gc: every slot, and its own record
+    s = make_sampler(cfg, fake, pings)
+    s.step(T0)
+    assert s.book.source == "flock" and not s.book.busy()
+    (fake.root / "locks").write_text(held[0])  # a slot held with gc's record free: a build
+    s.step(T0 + 1)
+    assert [b.slot for b in s.book.active.values()] == [0]
+
+
 def test_a_restarted_sampler_does_not_summarise_a_build_twice(env):
     cfg, fake, pings = env
     event(cfg, ts=T0 - 9, event="start", id="b1", pid=900, cls="heavy")

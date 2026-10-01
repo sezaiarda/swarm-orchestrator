@@ -395,8 +395,10 @@ flowchart TD
 - **How:** the build inherits its locks (a seat of its own, and its slot,
   shared), so a killed build frees them, and an older `swarm build` still shares
   the same cap. Workers wrap their gates in it (`swarm build cargo nextest run`;
-  several steps in one turn with `swarm build -- sh -c 'a && b'`). Automatic gc
-  takes every slot to itself first, so it never runs while a build is alive.
+  several steps in one turn with `swarm build -- sh -c 'a && b'`). gc holds
+  every slot while it deletes, so it never runs while a build is alive; it
+  waits for that as a ticket in the same queue, holding no slot, and builds
+  pass it until the last `[gc].hold_s` of its wait.
 
 ### Resource tracking (`swarm resources`)
 
@@ -466,7 +468,8 @@ flowchart TD
     superseded cargo units, `cargo sweep` past `keep_days`, orphan mirrors,
     stale temp dirs.
   - **Opt-in:** `--aggressive`, `--transcripts`, `--branches`, `--canonical`.
-  - **Safety:** it holds every build slot while it deletes.
+  - **Safety:** it holds every build slot while it deletes, and none while it
+    waits for the builds to end.
   - **Automatic:** the supervisor runs it by itself (`[gc]`): every 15 minutes,
     plus once per idle stretch.
 

@@ -5,11 +5,11 @@ is a contract other tools read. Every line has exactly these keys::
 
     {"ts": <unix float>,
      "event": "queued"|"start"|"end"|"bypass"|"preflight_fail"|"yield"|"unyield"
-              |"passed"|"alone",
+              |"passed"|"alone"|"left",
      "id": "<one per swarm build call>", "phase": <$SWARM_PHASE or null>,
-     "pid": <int>, "slot": <int or null>, "cls": "heavy"|"light",
+     "pid": <int>, "slot": <int or null>, "cls": "heavy"|"light"|"gc",
      "argv": "<command, at most 300 chars>", "cwd": "<path>",
-     "wait_s": <float on start, else null>,
+     "wait_s": <float on start and left, else null>,
      "run_s": <float on end, yield and unyield, else null>,
      "exit": <int or null on end, else null>,
      "idle_s": <float on yield and unyield, else null>,
@@ -51,6 +51,20 @@ is a contract other tools read. Every line has exactly these keys::
   image build a script started): from now on nothing starts beside it. Same
   ``id``, ``pid`` and ``slot`` as its ``start``; ``why`` says what was seen.
 
+**gc's turn** is logged with ``cls`` ``"gc"`` (see *gc takes its turn* in
+:mod:`buildsem`): ``queued`` when it joins the queue, ``start`` when it holds
+the whole gate (``slot`` null: it holds every slot; ``wait_s`` how long it
+queued), ``end`` when it lets go (``run_s`` is how long no build could run;
+``exit`` 0, 1 if it failed, null for a gc that was killed), or, instead of a
+``start``:
+
+- ``left``: its wait ran out and it left the queue, having held nothing;
+  ``wait_s`` is how long it waited, ``why`` what was still in the way.
+
+``pid`` is the process gc runs in (the supervisor, for the automatic one) and
+``alone`` is true. A gc is not a build: readers that count or measure builds
+skip ``cls`` ``"gc"``.
+
 ``repo`` is the repository a queued build works in, by the swarm's name for it
 (its path in the project, ``.`` for the project's own; see :mod:`buildpair`),
 on every event of that build; null when it has none, and for a light command.
@@ -84,6 +98,7 @@ ARGV_MAX = 300
 _TAIL_BYTES = 2 * 1024 * 1024
 _HISTORY_N = 20
 _DEFAULT_RUN_S = 120.0
+_DEFAULT_GC_S = 10.0
 _WRAPPERS = frozenset({"timeout", "env", "nice", "nohup", "time", "stdbuf", "ionice", "exec"})
 
 
@@ -220,11 +235,16 @@ class History:
         self.exact: dict[tuple[str, str], list[float]] = {}
         self.shape: dict[tuple[str, str], list[float]] = {}
         self.all: list[float] = []
+        self.gc: list[float] = []  # how long each gc held the gate
         for e in events if events is not None else read_events(cfg):
-            if e.get("event") != "end" or e.get("cls") != "heavy" or e.get("exit") is None:
+            if e.get("event") != "end" or e.get("exit") is None:
                 continue
             run = e.get("run_s")
             if not isinstance(run, (int, float)):
+                continue
+            if e.get("cls") == "gc":
+                self.gc.append(float(run))
+            if e.get("cls") != "heavy":
                 continue
             loc = where(cfg, str(e.get("cwd", "")))
             text = str(e.get("argv", ""))
@@ -250,6 +270,13 @@ class History:
         """What to assume for a command with no history."""
         runs = self.all[-200:]
         return statistics.median(runs) if runs else _DEFAULT_RUN_S
+
+
+    @property
+    def gc_default(self) -> float:
+        """How long a gc usually holds the gate."""
+        runs = self.gc[-_HISTORY_N:]
+        return statistics.median(runs) if runs else _DEFAULT_GC_S
 
 
 def fmt_s(seconds: float | None) -> str:

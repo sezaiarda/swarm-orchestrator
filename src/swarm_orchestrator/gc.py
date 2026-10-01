@@ -27,15 +27,19 @@ cold compile of the entire dependency graph — precisely the memory blow-up
 touched at all without an explicit ``--canonical``.
 
 **Build-safety interlock.** GC must not race a build that is mid-write in a
-target dir. :mod:`buildsem` takes ONE slot and then ``exec``s; GC needs the
-inverse — it acquires *every* ``[build].max_concurrent`` slot, works, and releases
-them. Acquisition is in **ascending** slot order, the same order
-:func:`buildsem._try_once` scans, so GC can never deadlock against a waiting
-builder (a builder holds at most one slot and never blocks while holding one). If
-the gate is disabled (``max_concurrent = 0``) it proves nothing, so GC refuses
-without ``--force``. As a backstop for a bare ``cargo`` that never went through
-``swarm build``, :func:`live_builders` also looks for live cargo/rustc processes
-with a cwd inside the worktree root.
+target dir. A build holds a seat and shares one slot; GC needs the inverse — it
+holds *every* build slot exclusively while it works, which the kernel grants
+only while no build is alive on any of them (set aside as idle or not, started
+by an older ``swarm build`` or not). It never takes them one at a time: with
+two slots, a GC that took slot 0 and then waited ten minutes for a long build
+on slot 1 kept slot 0 from every build for those ten minutes, each interval,
+and still did not run. :func:`build_gate` instead waits in the build queue
+like a build (:func:`buildsem.whole`), holding nothing, and takes all the slots
+in one step when the gate is empty; a wait that runs out leaves the queue and
+is retried later. If the gate is disabled (``max_concurrent = 0``) it proves
+nothing, so GC refuses without ``--force``. As a backstop for a bare ``cargo``
+that never went through ``swarm build``, :func:`live_builders` also looks for
+live cargo/rustc processes with a cwd inside the worktree root.
 
 **Symlinked caches are the normal case, not an exception.** In a live run every
 ``cache/target/<repo>`` is a symlink into the canonical repo's own ``target/``
@@ -48,8 +52,8 @@ resolved root there must be a directory literally named ``target``, and nothing
 outside such a root is touched without ``--canonical``.
 
 **It also runs by itself** (:func:`auto`, from the supervisor): at most once per
-``[gc].every_s`` and once per long idle stretch, only when every build slot can
-be taken *without waiting*, and never with the opt-in tiers (``--aggressive``,
+``[gc].every_s`` and once per long idle stretch, only with the whole build gate
+to itself, and never with the opt-in tiers (``--aggressive``,
 ``--transcripts``, ``--branches``). What it removes is dead by construction:
 superseded cargo units (:func:`superseded`), build output unused for
 ``[gc].keep_days``, ``incremental/`` (workers run ``CARGO_INCREMENTAL=0``),
@@ -65,7 +69,6 @@ and none is ever read again once the phase lands.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -78,7 +81,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import backup as backup_mod
-from . import gitq
+from . import buildsem, gitq
 from . import ledger as ledger_mod
 from . import operator as operator_mod
 from . import ovrecord
@@ -86,9 +89,6 @@ from . import state as state_mod
 from .config import Config
 from .state import State
 
-# Ten times faster than a queued builder polls (buildsem._POLL_S), so a gc that
-# is waiting for the gate takes a freed slot ahead of the next build.
-_POLL_S = 0.05
 _SWEEP_TIMEOUT_S = 600.0
 _GIT_TIMEOUT_S = 60.0
 
@@ -138,7 +138,9 @@ class GcOptions:
     branches: bool = False  # also delete merged swarm/* branches + prune
     canonical: bool = False  # allow touching anything under the project dir
     force: bool = False  # proceed despite a disabled gate / live builders
-    gate_timeout_s: float = 300.0
+    gate_timeout_s: float = 300.0  # how long to wait in the build queue
+    # Of that wait, the last seconds that hold new builds back (None: [gc].hold_s).
+    gate_hold_s: float | None = None
     # Ask cargo-sweep for a dry-run estimate at plan time. The automatic gc skips
     # it: that is a second full walk of every target just to print a number the
     # applied run measures anyway.
@@ -1205,10 +1207,12 @@ def auto(cfg: Config, log=None) -> AutoResult:
     The build gate is waited for up to ``[gc].wait_s`` and held for the whole
     run, planning included — so the sizes it measures are the sizes it deletes,
     and no build can start mid-sweep. Waiting is what lets it run at all on a
-    busy swarm: :func:`build_gate` polls faster than a queued builder, so it
-    takes the slot between two builds and the next build queues behind one
-    short sweep. A slot still busy after the wait, or a live cargo/rustc under a
-    tree it would touch, is ``busy``: the caller retries later. The opt-in tiers are never used,
+    busy swarm: its place in the build queue gets it the gate the moment no
+    build is alive, and for the last ``[gc].hold_s`` of the wait no build
+    queued after it starts, so the gate does empty; the next build queues
+    behind one short sweep. It holds no slot while it waits. A gate still busy
+    after the wait, or a live cargo/rustc under a tree it would touch, is
+    ``busy``: the caller retries later. The opt-in tiers are never used,
     and neither is ``--canonical``; the canonical project is reached only through
     the build-cache links (:func:`cache_roots`).
     """
@@ -1276,12 +1280,12 @@ def read_record(cfg: Config) -> dict | None:
 def build_gate(cfg: Config, opts: GcOptions):
     """Hold EVERY ``swarm build`` slot for the duration of the block.
 
-    :func:`buildsem._try_once` scans slots ``0..N-1`` with ``LOCK_NB`` and closes
-    the fd the moment one is taken, so a builder never blocks while holding a
-    lock. Acquiring in the same ascending order therefore cannot deadlock against
-    one — the worst case is that builds queue behind GC, which is the intent. A
-    timeout releases everything rather than holding the swarm's builds hostage
-    forever.
+    The wait is a place in the build queue (:func:`buildsem.whole`), not a hold
+    on the slots already free: builds keep using those until the gate is empty,
+    and every slot is then taken in one step. For ``opts.gate_timeout_s`` in
+    all, of which the last ``opts.gate_hold_s`` (``[gc].hold_s``) hold back the
+    builds queued behind it; after that it leaves the queue rather than keep
+    the swarm's builds waiting on it.
     """
     if cfg.build_max_concurrent < 1:
         if not opts.force:
@@ -1292,30 +1296,12 @@ def build_gate(cfg: Config, opts: GcOptions):
         yield []
         return
 
-    cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
-    fds: list[int] = []
-    deadline = time.monotonic() + opts.gate_timeout_s
+    hold_s = cfg.gc_hold_s if opts.gate_hold_s is None else opts.gate_hold_s
     try:
-        for i in range(cfg.build_max_concurrent):  # ascending: see the docstring
-            fd = os.open(cfg.buildsem_dir / f"slot{i}", os.O_CREAT | os.O_RDWR, 0o644)
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        os.close(fd)
-                        raise GcRefused(
-                            f"build slot {i} was still busy after"
-                            f" {opts.gate_timeout_s:.0f}s — a build is running;"
-                            " try again later"
-                        )
-                    time.sleep(_POLL_S)
-            fds.append(fd)
-        yield fds
-    finally:
-        for fd in reversed(fds):
-            os.close(fd)  # closing releases the flock
+        with buildsem.whole(cfg, opts.gate_timeout_s, float(hold_s)) as fds:
+            yield fds
+    except buildsem.Busy as exc:  # raised on the way in only: nothing was held
+        raise GcRefused(str(exc)) from None
 
 
 def live_builders(cfg: Config, opts: GcOptions | None = None) -> list[str]:

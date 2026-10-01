@@ -971,6 +971,16 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 | `unyield` | a set-aside build is working again and counts again | as in its `start` | `idle_s` = how long it was set aside; `why` = what the measurement saw (`it is using CPU again`) |
 | `passed` | a pairing rule held this waiter back and a younger one started ahead of it | the waiting `swarm build` | `why` = the rule (`same repo as slot 0 (lib)`); `by` = the `id` of the build that started |
 | `alone` | a running build was found to hold a command that runs alone; nothing starts beside it from now on | as in its `start` | `why` = what was seen; `run_s` = how long it had run |
+| `left` | a gc's wait for the gate ran out and it left the queue; it held nothing | the process gc runs in | `wait_s` = how long it waited; `why` = what was still alive |
+
+`cls` is `heavy` for a queued build, `light` for a command that skipped the
+gate, and `gc` for gc's own turn at the gate (see *gc and the gate* below):
+`queued` when it joins the queue, `start` when it holds every slot (`slot` is
+null, `wait_s` how long it queued), `end` when it lets go (`run_s` is how long
+no build could run; `exit` 0, or 1 if the sweep failed), or `left` instead of a
+`start`. `pid` is the process gc runs in (the supervisor, for the automatic
+one), `alone` is true. A gc is not a build: the run-time history and the
+resource sampler skip these lines.
 
 `phase` is `$SWARM_PHASE` (null outside a worker); `argv` is at most 300
 characters. `repo` is the repository a queued build works in, by the swarm's
@@ -985,25 +995,70 @@ a build's `end` is a process that build left behind, set aside in its turn. A
 synthetic `end` with `exit` null as soon as it notices (when a waiter reports,
 or when the slot is next taken).
 
+**gc and the gate.** gc deletes build output, so it holds every build slot
+exclusively while it works, and the kernel grants that only while no build is
+alive on any of them: set aside as idle or not, started by an older `swarm
+build` or not, a process a build left behind included. It gets there through
+the queue, as a waiter that runs alone, and never by taking slots one at a
+time. (It used to: with two slots it took slot 0, waited its ten minutes for a
+long build on slot 1, gave up, and did the same at the next interval. A third
+of one slot's time went to a gc that never ran.)
+
+- **It holds nothing while it waits.** Its ticket is in the queue for
+  `[gc].wait_s` (10 minutes). When no build is alive and no older waiter is
+  ahead of it, it takes every slot in one step under the queue's lock, or none.
+- **Builds pass it** for as long as any build is alive, so a free slot is
+  never kept for it. The moment the gate is empty it goes first: no build
+  queued after it starts ahead of it. With one slot that is between any two
+  builds.
+- **For the last `[gc].hold_s`** (2 minutes) **of its wait it is passed no
+  more:** no build queued after it starts, the builds that are running end,
+  and gc runs. That is what lets it run with two slots under constant load,
+  where the gate is otherwise never empty and the disk fills. It holds builds
+  back only for builds at work: while a holder set aside as idle, a process a
+  build left behind, or a slot held from outside the queue is in the way,
+  nobody knows when the gate will be empty, and builds go on passing.
+- **When its wait is over** it leaves the queue (`left`), the supervisor logs
+  `GC-AUTO-SKIP … busy` with what was still alive, and tries again ten
+  minutes later.
+- **What it costs a build:** at most `hold_s` of waiting behind a gc that is
+  passed no more, plus the sweep itself, during which nothing starts. A sweep
+  takes seconds (2 to 15 s on a run that frees up to 13 GB at a time); how long
+  each one held the gate is the `run_s` of its `end` and the recent list of
+  `--status`. `hold_s = 0` makes the first part zero and gc a pure opportunist.
+- **Killed** (the supervisor died): a waiting gc's ticket is dropped by the
+  next waiter to look, like any dead waiter's; one that held the gate frees
+  every slot with its last process, and the gate writes the `end` it never
+  wrote (`exit` null).
+
+`swarm gc --yes` takes the gate the same way (it waits 5 minutes in all). So
+does nothing else: the landing's lane check is an ordinary build with a seat
+and one shared slot, and it too holds nothing while it queues.
+
 **`swarm build --status [--json]`** shows the holders, the queue in the order it
 would start with ETAs, and the last builds with their wait and run times;
 `swarm status` and `swarm doctor` carry a one-line summary. Holders that were
 set aside are listed apart (`yielded: P-7 … yielded after 2m30s idle, still
 running 12m`; `yielded` in `--json`, and every build alive under `builds`), a
 build that ended while one of its processes still holds the slot is marked so,
-and a recent build that was set aside says for how long. A slot that is busy
-with no current record is gc, an older `swarm build` or a process such a build
-left behind; `--status` names the pids holding it open. Under the pairing rules
+and a recent build that was set aside says for how long. A gc is shown as what
+it is: `gc: waiting 2m10s to run alone; builds pass it for another 5m50s, then
+none starts until it has run` while it queues, `slot N: gc running 4s` on every
+slot while it sweeps, and in the recent list with how long it queued and ran
+(or `gc waited 10m00s for the gate to empty and left; it held nothing`);
+`--json` carries it under `gc` (`state` `waiting` or `running`, and for a
+waiting one `firm_in_s`, `leaves_in_s` and `holding`), and a waiter it holds
+back says `held back: gc runs first`. A slot that is busy with no current
+record is an older `swarm build` or a process such a build left behind;
+`--status` names the pids holding it open. Under the pairing rules
 each holder's line ends with its repo and, if so, `runs alone (why)`, a waiter
 the rules hold back says `held back: …`, and `--json` carries `pair`, `alone`
 (the patterns), `repo`/`alone` on each holder and `repo`/`alone`/`blocked` on
 each waiter.
 
 Workers are told to wrap their gates in it (`swarm build cargo nextest run`), and
-to give those commands a generous timeout, since they may queue. Automatic gc
-takes every build slot (exclusively) before it deletes anything, so it never
-runs while any build is alive, set aside or not. The landing's lane check
-queues like any other build, and like any other build it does not queue when
+to give those commands a generous timeout, since they may queue. The landing's
+lane check queues like any other build, and like any other build it does not queue when
 its command is light: by the built-in rules, or because the project names it in
 `[build].light`. That is for a check that compiles nothing (a lint-only gate
 that takes half a minute should not wait ten behind a compile); its log starts
@@ -1247,11 +1302,13 @@ and exits 1 if any check FAILs. It checks:
   - `--transcripts`: orphan worker transcripts in `~/.claude/projects`;
   - `--branches`: merged `swarm/*` branches;
   - `--canonical`: paths inside the project's own repos.
-- **Safety:** it takes every build-gate slot first, refuses while a compiler runs
-  in a tree it would touch (unless `--force`), and re-checks every path at delete
-  time against a protected list.
+- **Safety:** it holds every build-gate slot while it deletes, which it gets by
+  waiting its turn in the build queue (see *gc and the gate*), refuses while a
+  compiler runs in a tree it would touch (unless `--force`), and re-checks every
+  path at delete time against a protected list.
 - **Automatic runs:** the supervisor runs a conservative gc by itself (`[gc]`) at
   most every 15 minutes, plus once per idle stretch, and never during a build.
+  It never keeps a build slot while it waits for another.
 
 ## The owner console
 

@@ -335,6 +335,26 @@ def test_stale_tmp_goes_and_a_live_sessions_tmp_stays(cfg):
         assert (cfg.tmp_dir / name / "f").exists()
 
 
+def test_a_stray_file_in_tmp_goes_like_a_folder_and_a_symlink_is_left(cfg):
+    """A session can leave a plain file beside its TMPDIR. It is unlinked, not
+    handed to `rmtree`, which raises on a file and so failed on every run."""
+    _fill(cfg.tmp_dir / "P-dead" / "f")
+    _fill(cfg.tmp_dir / "pointer", 94)
+    kept = cfg.project_dir / "kept"
+    _fill(kept / "f")
+    (cfg.tmp_dir / "link").symlink_to(kept)
+
+    plan = gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True))
+    stale = _kinds(plan).get("stale-tmp", [])
+    assert [t.label for t in stale] == ["tmp/P-dead", "tmp/pointer"]
+    gc_mod.apply(plan)
+    assert [t.error for t in plan.targets if t.error] == []
+    assert not (cfg.tmp_dir / "P-dead").exists()
+    assert not (cfg.tmp_dir / "pointer").exists()
+    assert all(t.reclaimed == t.before for t in stale)
+    assert (cfg.tmp_dir / "link").is_symlink() and (kept / "f").exists()
+
+
 def test_a_tmp_dir_that_went_live_after_planning_is_skipped(cfg):
     _fill(cfg.tmp_dir / "P1" / "f")
     plan = gc_mod.plan_gc(cfg, gc_mod.GcOptions(yes=True))
@@ -540,6 +560,32 @@ def test_auto_gc_waits_for_the_slot_and_runs_between_two_builds(cfg, monkeypatch
     assert 0.4 < time.monotonic() - t0 < 10
     assert result.outcome == gc_mod.AUTO_DONE and result.by_kind.get("stale-tmp", 0) > 0
     assert not (cfg.tmp_dir / "P-dead").exists()
+
+
+def test_auto_gc_names_every_failing_target_in_the_log_and_the_record(cfg, monkeypatch):
+    """`errors=N` must be readable without a second run: each failing target is
+    a log line of its own, and the record's detail carries all of them."""
+    for name in ("P-a", "P-b"):
+        _fill(cfg.tmp_dir / name / "f")
+
+    def refuse(c, target, log=None, live=None):
+        raise OSError(f"cannot remove {target.label}")
+
+    monkeypatch.setattr(gc_mod, "_execute", refuse)
+    log = Log(cfg.supervisor_log)
+    result = gc_mod.auto(cfg, log)
+    log.close()
+
+    assert result.outcome == gc_mod.AUTO_DONE and result.errors == 2
+    lines = [ln for ln in cfg.supervisor_log.read_text().splitlines() if "GC-AUTO-ERROR" in ln]
+    assert [ln.split("GC-AUTO-ERROR ", 1)[1] for ln in lines] == [
+        "tmp/P-a: cannot remove tmp/P-a",
+        "tmp/P-b: cannot remove tmp/P-b",
+    ]
+    gc_mod.write_record(cfg, result, "interval", time.time())
+    rec = gc_mod.read_record(cfg)
+    assert rec["errors"] == 2
+    assert rec["detail"] == "tmp/P-a: cannot remove tmp/P-a; tmp/P-b: cannot remove tmp/P-b"
 
 
 def test_the_supervisor_backs_off_after_busy_and_runs_on_the_interval(cfg, monkeypatch):

@@ -40,6 +40,7 @@ file does not load, the command says so and reads the folder it is run from.
 
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
+| `name` | the project folder's name | `SWARM_NAME` | hot | The swarm's display name: what you read wherever the swarm names itself. `""` means the folder's name. It names nothing on disk: the slug, the state dir, the worktrees and `SWARM_PROJECT` follow the folder, so renaming the swarm moves no state and needs no folder rename. See [the display name](#the-display-name-swarmname) for what an edit reaches when. |
 | `max_workers` | `4` | | hot | Worker slots. Must be at least 1. Growing adds panes live; shrinking marks the extra slots retiring, and a busy one finishes its phase first. |
 | `master_model` | `""` | | next | `--model` for the init pass and, by default, the Overseer. `""` inherits the user's setting. |
 | `slug` | `<dirname>-<sha1 of path, 8 chars>` | `SWARM_SLUG` | restart | Names the state dir. The hash keeps two projects with the same folder name apart. |
@@ -48,6 +49,33 @@ file does not load, the command says so and reads the folder it is run from.
 | `resolver_cmd` | `""` | `SWARM_RESOLVER_CMD` | next | Replaces `cd <repo> && exec claude` for the merge-conflict resolver. With it set, no prompt is typed in. |
 | `resolver_model` | `"sonnet"` | | next | `--model` for the merge-conflict resolver. `""` inherits the user's setting. Ignored when `resolver_cmd` is set. |
 | `watchdog_s` | `300` | `SWARM_WATCHDOG` | hot | Seconds between the supervisor's liveness sweeps. `0` turns the sweep off and leaves the loop purely event-driven. See the README's watchdog section. |
+
+### The display name (`[swarm].name`)
+
+One name, shown in several places. An edit reaches them at different times:
+
+| where you read it | when a new name shows |
+|---|---|
+| Telegram messages that name the swarm ("… has stopped", "… did not restart") | **hot**: the next message after `swarm reload` |
+| `swarm status` (`name=`, and `config.name` in `--json`) | **hot**: the next command |
+| the web board's title and its `project` field | **hot**: the board re-reads the file when it changes |
+| the dashboard's status bar, the command listener's log line and its entry in the bot lock | **next**: when the dashboard and the listener next start; a plain `swarm restart` restarts both |
+| the tmux session (`tmux ls`, `tmux attach -t …`), unless `[tmux].session` sets it | **restart**: `swarm down` then `swarm up`, or `swarm restart --full` |
+
+The tmux session cannot be renamed under a run: every pane and window the run
+recorded is in it. So after the name changes, a running swarm stays in its old
+session, every `swarm` command (`attach`, `console`, `down`, …) keeps
+addressing that one, and `swarm reload` lists `[tmux].session: <old> -> <new>`
+under *REFUSED*, each time, until the restart that renames it. `swarm down`
+ends the old session and the `swarm up` after it creates the new one.
+
+A web board or a command listener started under the old name is still this
+swarm's: the board is recognised by the project's slug (one started before
+boards reported a slug, by the folder name it answers with), and the listener
+by its pid file in the state dir and the per-bot lock, none of which the name
+touches. So `swarm status` and the dashboard find the old one and
+`swarm down` or `swarm restart` replaces it; a second one is never started
+beside it.
 
 ## `[worker]`
 
@@ -93,7 +121,7 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
-| `session` | the project folder name, slugified | `SWARM_SESSION` | restart | The tmux session name. |
+| `session` | `[swarm].name`, slugified | `SWARM_SESSION` | restart | The tmux session name. Unset, it follows `[swarm].name`; set here (or by the variable), it wins. A running swarm keeps the session it was started in either way: see [the display name](#the-display-name-swarmname). |
 | `layout` | `"auto"` | `SWARM_LAYOUT` | hot | How worker windows arrange their panes. `auto` gives one pane the full window, puts two side by side, and tiles three or four. The others are `even-horizontal` (aliases `side-by-side`, `left-right`, `columns`), `even-vertical` (aliases `top-bottom`, `stacked`, `rows`), `tiled` (alias `grid`), `main-horizontal` and `main-vertical`. An unknown name fails the load. `swarm layout <name>` changes it live, and a layout set that way wins over a reload until the next `swarm up`. |
 | `panes_per_window` | `4` | `SWARM_PANES_PER_WINDOW` | restart | Worker panes per tmux window. More slots page into further windows: `workers`, `workers-2`, …. At 2, five workers are 2, 2 and 1; three are 2 and 1. At least 1 (a lower value counts as 1). Restart, because the windows are paged at `swarm up`. |
 

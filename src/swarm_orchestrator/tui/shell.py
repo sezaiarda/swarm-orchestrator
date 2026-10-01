@@ -65,7 +65,8 @@ class StatusBar(Static):
             parts.append(f"[{COLOR[WARN]}]● draining[/]")
         else:
             parts.append(f"[{COLOR[OK]}]● live[/]")
-        parts.append(f"[b]{self.app.cfg.session}[/b]")
+        cfg = self.app.cfg
+        parts.append(f"[b]{getattr(cfg, 'name', '') or cfg.session}[/b]")
 
         # 2. Capacity, as a fraction rather than prose.
         busy = sum(1 for s in snap.slots if s.busy)

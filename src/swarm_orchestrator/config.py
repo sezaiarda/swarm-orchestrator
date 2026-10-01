@@ -14,6 +14,7 @@ and the TUI config form all read :data:`SETTINGS`; nothing restates it.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import tomllib
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .buildclass import ALONE_DEFAULT
+from . import tmux
 from .tmux import AUTO_LAYOUT, LAYOUTS, normalize_layout
 
 
@@ -46,6 +48,12 @@ def _default_slug(pdir: Path) -> str:
     """
     digest = hashlib.sha1(str(pdir.resolve()).encode()).hexdigest()[:8]
     return f"{_slugify(pdir.name)}-{digest}"
+
+
+def session_default(name: str) -> str:
+    """The tmux session a swarm called ``name`` gets when ``[tmux].session``
+    names none."""
+    return _slugify(name) or "swarm"
 
 
 #: What ``claude --effort`` accepts (CLI 2.1.276). "" means pass nothing.
@@ -252,6 +260,14 @@ class Config:
     """
 
     # -- [swarm] ----------------------------------------------------------
+    # What the owner reads, never what the run is keyed by: the state dir, the
+    # worktrees and SWARM_PROJECT follow the folder, so a rename moves nothing.
+    name: str = _k(
+        "swarm", "name", lambda pdir: pdir.name, HOT, env="SWARM_NAME", kind=STR,
+        doc="the swarm's display name; \"\" = the folder's",
+        why="pings, status and the web board read it each time they show it; the"
+            " dashboard shows it from its next start, and the tmux session"
+            " follows it only at a full restart")
     max_workers: int = _k(
         "swarm", "max_workers", 4, HOT, minimum=1, gate="resize", parse=_workers,
         doc="phases in flight at once (one pane each)",
@@ -398,12 +414,13 @@ class Config:
             " integration and on the watchdog tick")
 
     # -- [tmux] -----------------------------------------------------------
-    # The project's own name, not a generic `swarm`: it is what `tmux ls` shows,
-    # and one box can host several runs at once.
+    # The swarm's own name, not a generic `swarm`: it is what `tmux ls` shows,
+    # and one box can host several runs at once. Unset, it follows [swarm].name
+    # (see `load`), but a live run keeps the session it was started in.
     session: str = _k(
-        "tmux", "session", lambda pdir: _slugify(pdir.name) or "swarm", RESTART,
+        "tmux", "session", lambda pdir: session_default(pdir.name), RESTART,
         env="SWARM_SESSION", kind=STR,
-        doc="tmux session name — what you see in `tmux ls`",
+        doc="tmux session name; default follows [swarm].name",
         why="every pane and window id recorded in state.json belongs to the old"
             " tmux session")
     tmux_layout: str = _k(
@@ -794,6 +811,10 @@ class Config:
             " worktrees are under the old one")
 
     state_dir: Path = field(init=False)
+    #: The session the file asks for. It differs from :attr:`session` only while
+    #: a live run is still in the session an earlier ``[swarm].name`` gave it;
+    #: "" (a config not made by :func:`load`) means no such difference.
+    session_wanted: str = field(init=False, default="", compare=False)
 
     def __post_init__(self) -> None:
         base = os.environ.get("SWARM_STATE_DIR")
@@ -905,7 +926,43 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
             data = tomllib.load(fh)
     values = {name: s.read(data.get(s.table, {}), pdir)
               for name, s in SETTINGS.items() if s.table != CLI}
-    return Config(project_dir=pdir, **values)
+    values["name"] = values["name"].strip() or pdir.name
+    follows = ("session" not in data.get("tmux", {})
+               and os.environ.get(SETTINGS["session"].env) is None)
+    if follows:
+        values["session"] = session_default(values["name"])
+    cfg = Config(project_dir=pdir, **values)
+    cfg.session_wanted = cfg.session
+    if follows:
+        cfg.session = _live_session(cfg) or cfg.session
+    return cfg
+
+
+def _live_session(cfg: Config) -> str | None:
+    """The tmux session a running swarm is in, when it is not the one the name
+    gives now; None when there is no such session.
+
+    A session cannot be renamed under a run: every pane and window id in
+    ``state.json`` is in it. So after ``[swarm].name`` changes, the session the
+    last supervisor recorded (``config.json``) stays this run's for as long as
+    tmux still has it carrying this run's state dir, and every ``swarm`` command
+    keeps addressing it: ``swarm down`` ends it, and the ``swarm up`` after that
+    creates the new one.
+    """
+    if cfg.driver != "tmux":
+        return None
+    try:
+        last = json.loads((cfg.state_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    was = last.get("session") if isinstance(last, dict) else None
+    if not isinstance(was, str) or not was or was == cfg.session:
+        return None
+    try:
+        owner = tmux.session_owner(was)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return was if owner == str(cfg.state_dir) else None
 
 
 def session_project() -> Path | None:

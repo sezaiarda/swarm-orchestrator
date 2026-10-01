@@ -976,7 +976,7 @@ def fail(cfg: Config, plan: dict, detail: str, log: Log, *, left: str = UNCHANGE
     }.get(left, " Nothing was changed: the swarm runs on as it was.")
     telegram.notify(
         cfg.telegram_notify,
-        f"swarm: {cfg.slug} did not restart (asked by {by}): {detail}.{tail}",
+        f"swarm: {cfg.name} did not restart (asked by {by}): {detail}.{tail}",
         kind="restart", source="restart.fail", state_dir=cfg.state_dir,
     )
 
@@ -1102,6 +1102,9 @@ def finish_full(cfg: Config, plan_id: str, down: Callable[[Config], int],
             pass
         with state_mod.transaction(cfg) as st:
             st.drain = {}
+        # The old tmux session is gone, so the one `[swarm].name` asks for is
+        # no longer held back (see `config._live_session`).
+        cfg.session = cfg.session_wanted or cfg.session
         try:
             rc = up(cfg)
         except Exception as exc:  # noqa: BLE001 - the owner must hear, whatever broke
@@ -1114,7 +1117,8 @@ def finish_full(cfg: Config, plan_id: str, down: Callable[[Config], int],
             log.line(f"RESTART-DONE id={plan_id} by={plan.get('by')!r} full; {words}")
             return 0
         if load_kept(cfg):
-            detail += (f"; the kept questions are alive in tmux session {hold_session(cfg)}"
+            hold = load_kept(cfg).get("hold") or hold_session(cfg)
+            detail += (f"; the kept questions are alive in tmux session {hold}"
                        " and `swarm up` brings them back")
         fail(cfg, plan, detail, log, left=DOWN)
         return 1

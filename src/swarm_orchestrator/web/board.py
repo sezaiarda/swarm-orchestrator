@@ -48,7 +48,7 @@ from ..tui.campaign import campaign_of
 from ..tui.data import (
     LOST, five_outlook, held_merge, kept_rows, limit_outlook, run_word, typical_durations,
 )
-from . import usagechart
+from . import lifecycle, usagechart
 from .rows import clip
 
 NEEDS_YOU = "needs_you"
@@ -150,7 +150,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
     header = _header(cfg, dash, cards, extra_cards, passes, now)
     return {
         "generated_at": now,
-        "project": getattr(cfg, "project_dir", None) and cfg.project_dir.name,
+        "project": lifecycle.display_name(cfg),
         "header": header,
         "columns": columns,
         "campaigns": _campaigns(cards, metas, getattr(dash, "forecast", None), now),

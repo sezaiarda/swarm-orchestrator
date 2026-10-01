@@ -262,7 +262,8 @@ def _event(version: int) -> bytes:
 def _health_body(cfg) -> dict:
     """What ``/healthz`` answers: enough for a caller (:func:`lifecycle.probe`) to
     tell *our* board from whatever else might already be squatting the port."""
-    return {"app": lifecycle.APP_ID, "project": cfg.project_dir.name}
+    return {"app": lifecycle.APP_ID, "project": lifecycle.display_name(cfg),
+            "slug": cfg.slug}
 
 
 def bind(host: str, port: int, feed: Feed, page: bytes,
@@ -313,7 +314,8 @@ def serve(cfg, host: str, port: int, pidfile: str | None = None,
     cfg.web_port = real
     cfg.web_host = host
     shown = lifecycle.urls(cfg)
-    print(f"swarm web: read-only board for {cfg.project_dir.name} (state {cfg.state_dir})")
+    print(f"swarm web: read-only board for {lifecycle.display_name(cfg)}"
+          f" (state {cfg.state_dir})")
     for url in shown:
         print(f"  {url}")
     print("  open to anyone who can reach it, no token (by choice); Ctrl-C stops it", flush=True)

@@ -405,9 +405,9 @@ def serve(cfg, pidfile_path: str | None = None, sleep: Callable[[float], None] =
     listener = Listener(cfg, token, chat)
     lock = None
     try:
-        _log(f"swarm telegram-bot for {cfg.project_dir.name}: answering /usage and /help "
+        _log(f"swarm telegram-bot for {cfg.name}: answering /usage and /help "
              f"from chat {chat} only (state {cfg.state_dir})")
-        while (lock := take_lock(token, cfg.project_dir.name)) is None:
+        while (lock := take_lock(token, cfg.name)) is None:
             listener._set_state(WAITING_LOCK, f"another listener polls this bot "
                                 f"({lock_holder(token)}); retrying in {LOCK_RETRY_S:.0f}s")
             sleep(LOCK_RETRY_S)

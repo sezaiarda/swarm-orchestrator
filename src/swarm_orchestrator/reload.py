@@ -35,7 +35,10 @@ The three classes:
     worktrees exist under the old ``wt_dir``, and every worker was handed
     ``SWARM_STATE_DIR`` at launch. Changing ``slug`` / ``state_dir`` /
     ``project_dir`` / ``driver`` / ``[tmux].session`` mid-run does not move the
-    run — it forks it in two, and the half still holding the FIFO wins.
+    run — it forks it in two, and the half still holding the FIFO wins. The
+    session's default follows ``[swarm].name``, which is ``HOT``: the name is
+    applied and the session rename it implies is reported as refused
+    (:func:`_session_follows_name`).
 
 Two behaviours are worth calling out because they are where a naive reload does
 damage:
@@ -64,7 +67,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .config import HOT, NEXT, RESTART, SETTINGS, Config, Setting
+from .config import HOT, NEXT, RESTART, SETTINGS, Config, Setting, session_default
 from .state import State
 
 # Not a policy class — an *outcome*: the file changed (or could) but a SWARM_*
@@ -192,6 +195,9 @@ def diff(old_cfg: Config, new_cfg: Config, facts: Facts) -> list[Change]:
             env=policy.env,
         )
         _apply_gate(change, policy, old, new, facts)
+        if (name == "session" and old_cfg.name != new_cfg.name
+                and new == session_default(new_cfg.name)):
+            change.effect = _follows_name(policy)
         if shadow is None and policy.env and policy.env in facts.env:
             # The value differs even though the variable is set: only `_int_env`
             # does that, by walking past an override it cannot parse. Say so — the
@@ -202,7 +208,44 @@ def diff(old_cfg: Config, new_cfg: Config, facts: Facts) -> list[Change]:
                 " wins)"
             )
         out.append(change)
+    pending = _session_follows_name(old_cfg, new_cfg)
+    if pending is not None:
+        out.append(pending)
     return out
+
+
+def _session_follows_name(old_cfg: Config, new_cfg: Config) -> Change | None:
+    """The rename ``[swarm].name`` asks of the tmux session, which a run cannot
+    take: None unless the file's session is not the one the run is in.
+
+    :func:`config.load` keeps a live run's session (so the two configs agree
+    on it and the loop above is silent), and records the one the name now gives
+    as ``session_wanted``. Reported as the refusal it is, each reload, until the
+    restart that renames it — like an edit to ``[tmux].session`` itself.
+    """
+    wanted = getattr(new_cfg, "session_wanted", "") or new_cfg.session
+    if wanted == new_cfg.session or old_cfg.session != new_cfg.session:
+        return None
+    policy = SETTINGS["session"]
+    return Change(
+        name="session",
+        section=policy.section,
+        key=policy.key,
+        klass=policy.klass,
+        effective=RESTART,
+        old=new_cfg.session,
+        new=wanted,
+        env=policy.env,
+        effect=_follows_name(policy),
+    )
+
+
+def _follows_name(policy: Setting) -> str:
+    return (
+        "REFUSED — the session takes its name from [swarm].name, and"
+        f" {policy.why}; `swarm down` and `swarm up` (or `swarm restart --full`)"
+        " rename it"
+    )
 
 
 def _env_change(policy: Setting, value: Any, var: str) -> Change:

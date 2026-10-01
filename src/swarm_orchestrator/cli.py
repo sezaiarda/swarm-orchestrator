@@ -195,7 +195,7 @@ def _reconcile_orphans(cfg: Config) -> None:
             log.line(f"RECONCILE-HELD-BOOT {names}")
             telegram.notify(
                 cfg.telegram_notify,
-                f"swarm: {cfg.slug} started, but finished work could not be merged:"
+                f"swarm: {cfg.name} started, but finished work could not be merged:"
                 f" {names}. All merging waits on it. `swarm doctor` shows what is in"
                 " the way; fix it, then run `swarm resolved <phase>`.",
                 kind="integrate-hold",
@@ -270,7 +270,7 @@ def _report_web_board(cfg: Config, hosted: bool = False) -> None:
     print(f"  fix: {hint}", file=sys.stderr)
     telegram.notify(
         cfg.telegram_notify,
-        f"swarm: {cfg.slug} is running, but the web board did not start ({reason})."
+        f"swarm: {cfg.name} is running, but the web board did not start ({reason})."
         " The TUI still works. To fix it, give the board a free port in .swarm.toml"
         " and restart the swarm.",
         kind="web-board",
@@ -2340,7 +2340,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
             data["failed"] = sorted(p for p, s in st.done.items() if s == statuses.FAIL)
         data["phases"] = _phase_standing(cfg, st)
         data["config"] = {
-            "slug": cfg.slug, "driver": cfg.driver, "isolation": cfg.git_isolation,
+            "name": cfg.name, "slug": cfg.slug, "driver": cfg.driver,
+            "isolation": cfg.git_isolation,
             "main_branch": cfg.git_main_branch, "layout": st.layout or cfg.tmux_layout,
             "state_dir": str(cfg.state_dir),
         }
@@ -2362,7 +2363,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     lines = [
-        f"slug={cfg.slug} driver={cfg.driver} finished={st.finished} paused={st.paused}"
+        f"name={cfg.name} slug={cfg.slug} driver={cfg.driver} finished={st.finished}"
+        f" paused={st.paused}"
         f" layout={st.layout or cfg.tmux_layout}",
         f"master_alive={st.master_alive} supervisor_pid={st.supervisor_pid}",
         f"isolation={cfg.git_isolation} main={cfg.git_main_branch}"

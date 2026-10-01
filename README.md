@@ -66,8 +66,9 @@ repository layout: it drives one repo or an umbrella of many, configured by one
 
 ## How it works
 
-`swarm up` creates a tmux session named after the project and starts a detached
-**supervisor**. The supervisor first runs one **init pass**: a Claude session in the
+`swarm up` creates a tmux session named after the swarm (`[swarm].name`, by
+default the project folder's name) and starts a detached **supervisor**. The
+supervisor first runs one **init pass**: a Claude session in the
 overseer window that checks Telegram, reads the plan, and patches your worker
 command for swarm mode. As soon as the init pass idles, the supervisor launches the
 ledger's ready phases, in ledger order, into the free slots. Each worker is a real
@@ -843,7 +844,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 
 `.swarm.toml` at the project root. The sections are:
 
-- `[swarm]`: slots, models, the watchdog;
+- `[swarm]`: the display name, slots, models, the watchdog;
 - `[worker]`: the worker command, settings, effort, parking;
 - `[tasks]`: the ledger, exclusions;
 - `[telegram]`;

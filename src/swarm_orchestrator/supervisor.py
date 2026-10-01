@@ -340,7 +340,7 @@ class Supervisor:
             self.log.line(f"SUPERVISOR-CRASH {exc!r}")
             self._ping(
                 "crash",
-                f"swarm: {self.cfg.slug} has stopped: the swarm hit an internal error"
+                f"swarm: {self.cfg.name} has stopped: the swarm hit an internal error"
                 f" ({exc}). No new work starts and finished work is not merged until"
                 " you restart it with `swarm up`.",
                 cooldown=0.0,
@@ -612,7 +612,7 @@ class Supervisor:
             self.log.line(f"RELOAD-ERROR {exc}")
             self._ping(
                 "reload-error",
-                f"swarm: your settings change for {self.cfg.slug} was not applied: the"
+                f"swarm: your settings change for {self.cfg.name} was not applied: the"
                 f" config file has an error ({exc}). The swarm keeps running on the old"
                 " settings. Fix the file, then run `swarm reload`.",
                 kind="other",
@@ -722,7 +722,7 @@ class Supervisor:
         if failed:
             self._ping(
                 "reload-panes",
-                f"swarm: {self.cfg.slug} could open only {len(panes)} of the"
+                f"swarm: {self.cfg.name} could open only {len(panes)} of the"
                 f" {len(slot_ids)} extra worker place(s) you asked for, so it runs with"
                 " fewer workers than set. Nothing is lost.",
                 cooldown=0.0,
@@ -793,14 +793,14 @@ class Supervisor:
         started = drain_mod.spawn_down(self.cfg)
         self.log.line(f"DRAIN-COMPLETE stopping={started} then={then!r} restart={restarting}")
         if started and restarting:
-            msg = (f"swarm: {self.cfg.slug} finished the work that was running and is"
+            msg = (f"swarm: {self.cfg.name} finished the work that was running and is"
                    " restarting, as asked; you hear again only if it does not come back")
         elif started:
-            msg = (f"swarm: {self.cfg.slug} finished the work that was running and is"
+            msg = (f"swarm: {self.cfg.name} finished the work that was running and is"
                    " shutting down, as you asked")
             msg += f"; afterwards it runs: {then}" if then else ""
         else:
-            msg = (f"swarm: {self.cfg.slug} finished the work that was running but could"
+            msg = (f"swarm: {self.cfg.name} finished the work that was running but could"
                    " not shut itself down; run `swarm down` yourself")
         self._ping("drain", msg, cooldown=0.0, kind="drain", source="supervisor._drain_tick",
                    suppressed=(telegram.hold(self.cfg, "a restart: you hear if it fails")

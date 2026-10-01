@@ -60,6 +60,32 @@ def pidfile(cfg) -> Path:
     return Path(cfg.state_dir) / PIDFILE
 
 
+def display_name(cfg) -> str | None:
+    """What the board calls the swarm: ``[swarm].name``, by default the project
+    folder's name. None for a config that carries neither."""
+    name = getattr(cfg, "name", None)
+    if name:
+        return str(name)
+    pdir = getattr(cfg, "project_dir", None)
+    return Path(pdir).name if pdir else None
+
+
+def is_ours(cfg, body: object) -> bool:
+    """Whether a ``/healthz`` answer is from a board of this project.
+
+    A board says which project it serves by its slug, which a change of
+    ``[swarm].name`` does not move (and which two projects never share, as they
+    may a name). A board started before boards said so answers only
+    ``project``, always the folder's name: it is still recognised by that, so
+    it is found and stopped with its run, never left serving beside a new one.
+    """
+    if not isinstance(body, dict) or body.get("app") != APP_ID:
+        return False
+    if "slug" in body:
+        return body["slug"] == cfg.slug
+    return body.get("project") == Path(cfg.project_dir).name
+
+
 def command(cfg) -> str:
     """The shell command that serves this project's board, as ``up`` runs it.
 
@@ -194,7 +220,7 @@ def probe(cfg, timeout: float = 0.5) -> tuple[str, str | None]:
         if pid is not None and _dashboard_of(cfg, pid):
             return OURS, DASHBOARD
         return TAKEN, who
-    if body.get("app") == APP_ID and body.get("project") == cfg.project_dir.name:
+    if is_ours(cfg, body):
         return OURS, None
     return TAKEN, _occupant(port)[0]
 

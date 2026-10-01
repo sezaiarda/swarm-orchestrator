@@ -1534,8 +1534,10 @@ the worktree.
 It is plain `http.server`, GET and HEAD only, and no URL path ever maps to a file.
 Every payload is scrubbed of credential-shaped strings. It listens on every
 interface **with no token**, by the owner's choice (`[web].host = "0.0.0.0"`). `/healthz`
-answers `{"app": "swarm-web", "project": …}`, which is how `swarm up` tells its own
-board from another program holding the port.
+answers `{"app": "swarm-web", "project": …, "slug": …}`, which is how `swarm up` tells its own
+board from another program holding the port. `project` is the swarm's display
+name (`[swarm].name`); the board is recognised by `slug`, so one started under
+an earlier name is still this swarm's.
 
 Tailscale inside WSL needs nothing more. Without it, under WSL with mirrored
 networking, a phone on the LAN reaches the board only once Windows lets the port in:

@@ -1236,13 +1236,16 @@ class Supervisor:
         """Keep the ``later`` rows on their dates: drop the failure record of
         each one whose row carries its date (:func:`ledgerw.release_dated`), and
         run the launcher when a date that was ahead at the last look has come.
-        True when the done map or the ready set changed. Never raises."""
+        The same sweep retires the failure record of a row closed since it
+        failed (:meth:`_release_closed`). True when the done map or the ready
+        set changed. Never raises."""
+        closed = self._release_closed()
         try:
             released = ledgerw.release_dated(self.cfg, self.log)
             ahead = set(ledgerw.dated(self.cfg))
         except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
             self.log.line(f"LATER-ERROR {exc!r}")
-            return False
+            return closed
         was, self._dated = self._dated, ahead
         come = sorted((was or set()) - ahead)
         if come:
@@ -1253,7 +1256,22 @@ class Supervisor:
         if come or any(p not in ahead for p in released):
             self._touch()
             self._fill_slots("a `later` phase's date has come")
-        return bool(come or released)
+        return bool(come or released or closed)
+
+    def _release_closed(self) -> bool:
+        """Retire the failure record of each phase whose row was closed since
+        it failed (:func:`ledgerw.release_closed`): a tick made by hand, or a
+        record left from before, which no ledger write of the swarm's own will
+        come by. What waited behind it is free, so the launcher runs. Never raises."""
+        try:
+            closed = ledgerw.release_closed(self.cfg, self.log)
+        except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
+            self.log.line(f"FAIL-CLOSED-ERROR {exc!r}")
+            return False
+        if closed:
+            self._touch()
+            self._fill_slots("a failed phase's row was closed")
+        return bool(closed)
 
     def _pump_integrations(self) -> None:
         """Drain ``integ_queue`` head-first while nothing is blocked.

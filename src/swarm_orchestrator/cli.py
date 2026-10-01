@@ -160,6 +160,12 @@ def _reconcile_orphans(cfg: Config) -> None:
                     # `supervisor._pump_integrations` was fixed for: rewriting a
                     # `needs-owner` as a clean success the moment its branch merged.
                     s.mark_done(phase, seed.get(phase, "ok"))
+        # A `<phase>.fail` left beside a row closed since must not come back
+        # as a failure: the seed above read it, this retires it for good.
+        try:
+            ledgerw.release_closed(cfg, log)
+        except (gitq.GitError, OSError) as exc:
+            log.line(f"FAIL-CLOSED-ERROR {exc}")
         if result.integrated:
             print(f"reconciled orphan branches: {', '.join(result.integrated)}")
         if result.operator_integrated:

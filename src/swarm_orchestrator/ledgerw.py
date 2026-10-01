@@ -69,6 +69,8 @@ _WORDS = {
 }
 #: Outcome words that tick the row.
 _TICKS = {"done", "done, operator follow-up", "done, owner follow-up"}
+#: Short statuses that say a row is not closed, whatever its box says.
+_OPEN_WORDS = ("failed", "blocked", "later")
 
 TITLE_CHARS = 120
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -912,7 +914,8 @@ def apply(cfg: Config, root: Path, key: str, data: dict, status: str | None,
     return res
 
 
-def _markdown(cfg: Config) -> bool:
+def is_checklist(cfg: Config) -> bool:
+    """The ledger has checklist rows: boxes to tick and rows to write on."""
     return any(_ROW.match(ln) for ln in _ledger_text(cfg).splitlines())
 
 
@@ -950,7 +953,7 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
     due = [k for k in queued if k == NOW or k in finished]
     if not due:
         return total
-    if not _markdown(cfg):
+    if not is_checklist(cfg):
         for k in due:
             (queue_dir(cfg) / f"{k}.json").unlink(missing_ok=True)
         log.line(f"LEDGER-SKIP {' '.join(due)} (not a checklist ledger)")
@@ -1005,6 +1008,14 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
     for phase in total.carry_skipped:
         log.line(f"CARRY-SKIPPED {phase} lanes")
     _hold_relaned(cfg, total.relaned, log)
+    if total.released:
+        # `swarm record <phase> done` on a phase that failed: the tick just
+        # committed closes it, so its failure record goes with this write. The
+        # write itself stands whatever happens here; the watchdog sweeps again.
+        try:
+            release_closed(cfg, log)
+        except (gitq.GitError, OSError) as exc:
+            log.line(f"FAIL-CLOSED-ERROR {exc}")
     return total
 
 
@@ -1065,6 +1076,77 @@ def not_failed(done: dict[str, str], waits: dict[str, str]) -> dict[str, str]:
     never counted or listed as failed in between. A view, never written back.
     """
     return {p: s for p, s in done.items() if not (s == statuses.FAIL and p in waits)}
+
+
+def reported(cfg: Config) -> set[str]:
+    """The phases a queued report is about: each phase with a report of its own
+    waiting for it to land, and each one a queued ``swarm record`` names. Their
+    rows are about to change, so the ledger does not speak for them yet."""
+    out: set[str] = set()
+    for key, data in pending(cfg).items():
+        if key != NOW:
+            out.add(key)
+        out |= {op["phase"] for op in data.get("ops") or []
+                if op.get("kind") == "record" and op.get("phase")}
+    return out
+
+
+def closed_rows(text: str) -> set[str]:
+    """The rows of a ledger ``text`` that say closed: ticked, and with a short
+    status that names no failure.
+
+    The swarm writes ``status: failed|blocked|later`` on a row whenever a report
+    says so and leaves its box alone, so a ticked row with such a status was
+    ticked first and failed since (a landed phase run again, or a row recorded
+    done while its worker was still on it). That row is not closed.
+    """
+    lines = text.split("\n")
+    out: set[str] = set()
+    for pid, (s, _e) in row_spans(lines).items():
+        head = split_head(lines[s])
+        if head and head.box in "xX" and not head.status.startswith(_OPEN_WORDS):
+            out.add(pid)
+    return out
+
+
+def release_closed(cfg: Config, log: Log) -> list[str]:
+    """Retire the failure record of each phase whose row was closed since.
+
+    The one rule for a ``fail`` record beside a ticked row: the row wins once
+    it says closed (:func:`closed_rows`) in the ledger as committed on the
+    target branch (an edit not committed there may still be taken back, and
+    this cannot be), with no report about it still queued and no worker on it.
+    Then the phase did fail and was closed some other way since (``swarm
+    record <phase> done``, or a tick by hand), and it is no failure any more:
+    the ``done/<phase>.fail`` sentinel and the done-map entry both go, so no
+    reader counts it failed, its dependents are released, and the next ``swarm
+    up`` has nothing to re-seed the failure from. The failure itself stays
+    where its report put it, in the row's history. Returns the phases released.
+    """
+    from . import state as state_mod
+
+    failed = {p for p, s in state_mod.read(cfg).done.items() if s == statuses.FAIL}
+    if not failed:
+        return []  # the usual sweep: no git, no lock
+    text = gitq.committed_text(cfg, cfg.ledger)
+    rows = (closed_rows(text) if text else set()) & failed
+    rows -= reported(cfg)
+    if not rows:
+        return []
+    released = []
+    with state_mod.transaction(cfg) as st:
+        flying = {*st.claimed_phases(), *st.integrating()}
+        for pid in sorted(rows - flying):
+            if st.done.get(pid) != statuses.FAIL:
+                continue
+            # The sentinel first: a record left without it is retired by the
+            # next sweep, a sentinel left without its record only by `swarm up`.
+            (cfg.done_dir / f"{pid}.{statuses.FAIL}").unlink(missing_ok=True)
+            st.done.pop(pid)
+            released.append(pid)
+    for pid in released:
+        log.line(f"FAIL-CLOSED {pid} its row is closed in the ledger: the failure record is retired")
+    return released
 
 
 def release_dated(cfg: Config, log: Log) -> list[str]:

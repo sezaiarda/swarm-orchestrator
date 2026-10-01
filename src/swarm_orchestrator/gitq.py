@@ -1272,6 +1272,22 @@ def commit_to_target(cfg: Config, paths: list[str], write, message: str, log: Lo
         return TargetCommit(COMMITTED, push=push)
 
 
+def committed_text(cfg: Config, rel: str) -> str:
+    """A project file as committed on the target branch: what
+    :func:`commit_to_target` writes onto, whatever the checkout holds right now
+    (another branch, an edit nobody committed, a merge's conflict markers).
+    The file on disk when the project is not under git; "" when the branch has
+    no such file."""
+    repo = cfg.project_dir
+    if not (repo / ".git").exists():
+        try:
+            return (repo / rel).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    got = _git(repo, "show", f"{cfg.git_main_branch}:{rel}", check=False)
+    return got.stdout if got.returncode == 0 else ""
+
+
 def blocked_repo(cfg: Config, phase: str) -> Path | None:
     """The repo currently mid-merge / mid-rebase / dirty / off main for
     ``phase``, if any. A :data:`CONFLICT` or :data:`DIRTY` leaves one; a

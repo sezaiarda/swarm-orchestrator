@@ -1316,16 +1316,65 @@ def _check_recaps(cfg: Config) -> Check:
 def _check_failed(cfg: Config, st: State) -> Check:
     """Phases recorded ``fail``. Their work was rolled back and nothing
     downstream of them can ever become ready again on its own. A ``later``
-    finish that waits for its date is not one (:func:`ledgerw.not_failed`)."""
+    finish that waits for its date is not one (:func:`ledgerw.not_failed`).
+
+    Nor, once the swarm has seen it, is a failed phase whose row was closed
+    since (:func:`ledgerw.release_closed`). One whose row is ticked and still
+    listed here is a row the swarm does not read as closed: it still says
+    failed, or its tick is not committed on the target branch."""
     done = ledgerw.not_failed(st.done, ledgerw.dated(cfg))
     failed = sorted(p for p, s in done.items() if s == "fail")
     if not failed:
         return Check("phases.failed", OK, "no failed phases")
+    ticked = sorted(set(failed) & ledger_mod.load_ticked(cfg.project_dir / cfg.ledger))
+    if ticked:
+        return Check(
+            "phases.failed",
+            WARN,
+            f"{len(failed)} phase(s) recorded fail: {failed} — dependents stay blocked;"
+            f" ticked in the ledger all the same: {ticked}",
+            f"swarm record {ticked[0]} done \"<why>\"  # if it really is closed; or, to build"
+            f" it again: swarm retry {ticked[0]}",
+        )
     return Check(
         "phases.failed",
         WARN,
         f"{len(failed)} phase(s) recorded fail: {failed} — dependents stay blocked",
         f"swarm retry {failed[0]}  # after fixing whatever failed",
+    )
+
+
+def _check_open(cfg: Config, st: State) -> Check:
+    """Phases the swarm landed whose row the ledger still shows open.
+
+    The reverse of a closed failure (:func:`ledgerw.release_closed`), and here
+    the record wins: the work is merged, so the phase counts as done, releases
+    its dependents and is never built again on its own, whatever its box says.
+    It is named so that someone settles it. A row whose tick is still on its
+    way (a report about it queued, or the phase landing) is not one, and
+    neither is a ``skip``, which never ticks a row. A ledger with no checklist
+    rows has no boxes to compare.
+    """
+    path = cfg.project_dir / cfg.ledger
+    if not ledgerw.is_checklist(cfg):
+        return Check("phases.open", OK, "the ledger has no checkboxes to compare")
+    graph = ledger_mod.load(path)
+    ticked = ledger_mod.load_ticked(path)
+    on_its_way = {*ledgerw.reported(cfg), *_landing(st), *st.claimed_phases()}
+    still_open = sorted(
+        p for p, s in st.done.items()
+        if s in statuses.INTEGRATES and p in graph and p not in ticked and p not in on_its_way
+    )
+    if not still_open:
+        return Check("phases.open", OK, "every landed phase is ticked in the ledger")
+    first = still_open[0]
+    return Check(
+        "phases.open",
+        WARN,
+        f"{len(still_open)} phase(s) landed here but still open in the ledger: {still_open}"
+        " — counted done, and never built again on their own",
+        f"swarm record {first} done \"<why>\"  # the ledger agrees; or, to build it again:"
+        f" swarm retry {first}",
     )
 
 
@@ -1512,6 +1561,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_sentinels(cfg, st))
     checks.append(_check_recaps(cfg))
     checks.append(_check_failed(cfg, st))
+    checks.append(_check_open(cfg, st))
     checks.append(_check_operator(cfg))
     checks.append(_check_prompts())
     checks.append(_check_web(cfg, st))

@@ -287,7 +287,9 @@ def with_ticked(
     web board shows such a row as Done; the launcher reads the same view, so a
     row built before the swarm (or by hand) is neither rebuilt nor left blocking
     its dependents. It is a *view*, never written back: a real record always
-    wins, so a ticked row recorded ``fail`` stays failed until ``swarm retry``.
+    wins, so a ticked row recorded ``fail`` stays failed for as long as that
+    record is there (``swarm retry`` clears it, and the swarm itself retires
+    it once the row says closed: :func:`ledgerw.release_closed`).
     A phase in flight is its worker's to finish, so a tick that lands while it
     builds does not release its dependents early.
     """

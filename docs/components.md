@@ -496,6 +496,35 @@ report is held and the watchdog retries it; nothing is lost across a restart.
   <date>", and a card behind it says "waits on <row>, which waits until <date>".
   On the date the row is ready again (`LATER-DUE`) and the launcher runs. A
   `later` with no date is a `blocked`.
+- **A row and a record that disagree** are settled in one place, and by
+  changing the record, so every reader of the done map gets the same answer
+  with no rule of its own.
+  - *`fail` record, row closed since:* the row wins. `ledgerw.release_closed`
+    drops `done/<phase>.fail` and the done-map entry and logs `FAIL-CLOSED
+    <phase>`; the failure stays in the row's history. It runs in the ledger
+    write that ticks a row (`swarm record <phase> done`), in the watchdog's
+    sweep (a tick made by hand, or a record left from before) and at the end of
+    `swarm up`'s re-seed, which is why a sentinel left beside a closed row no
+    longer brings the failure back. The launcher runs when it frees something.
+  - *What counts as closed* (`ledgerw.closed_rows`): the box is ticked and the
+    row's short status names no failure, in the ledger **as committed on the
+    target branch** (`gitq.committed_text`), with no report about the phase
+    still queued (`ledgerw.reported`) and no worker on it. The status is what
+    tells the order: every `failed`, `blocked` or `later` report writes its word
+    on the row and leaves the box alone, so a ticked row that says `failed` was
+    ticked first and failed since (a landed phase run again, or a row recorded
+    done while its worker was still on it) and stays a failure. An edit that is
+    not committed, or sits on another branch, may still be taken back; a
+    retired record cannot. doctor's `phases.failed` names a failed phase whose
+    box is ticked all the same, with the command that closes it.
+  - *Landed record (`ok`, `operator`), row still open:* the record wins. The
+    work is merged and an open box cannot take that back, so the phase counts
+    as done, releases its dependents and is never launched again on its own.
+    `swarm status` counts it ("N of them done by the swarm, still open in the
+    ledger") and doctor's `phases.open` warns with the names, leaving out a row
+    whose tick is on its way (a report about it queued, the phase landing) and
+    a `skip`, which never ticks. To settle one: `swarm record <phase> done` if
+    the work stands, `swarm retry <phase>` to build it again.
 
 ## Integrator and merge-conflict resolver
 

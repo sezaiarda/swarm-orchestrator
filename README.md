@@ -646,9 +646,21 @@ stateDiagram-v2
   ticked `[x]` that the swarm has no record of counts as done. It is neither
   launched nor holds back its dependents, exactly as the web board shows it. It
   is only a reading of the ledger, never written to the records, so a record
-  always wins: a ticked row the swarm recorded `fail` stays failed until
-  `swarm retry`, and a tick on a phase still in flight releases nothing until it
-  lands.
+  always wins, and a tick on a phase still in flight releases nothing until it
+  lands. Where a row and its record disagree, one rule settles it:
+  - *A failed phase whose row was closed since* (`swarm record <phase> done`,
+    or a tick by hand that also takes `failed` off the row's status) is no
+    failure any more. The swarm drops the failure record and its sentinel
+    (`FAIL-CLOSED` in the log), so nothing counts or lists it as failed, its
+    dependents go on, and no later `swarm up` brings it back; the failure stays
+    in the row's history. A ticked row that still says `failed` was ticked
+    first and failed since: it stays failed until `swarm record <phase> done`
+    or `swarm retry`, and `swarm doctor` says which.
+  - *A phase the swarm landed whose row is still open* stays done and is never
+    built again on its own. `swarm status` counts it ("done by the swarm, still
+    open in the ledger") and `swarm doctor` names it (`phases.open`): `swarm
+    record <phase> done` makes the ledger agree, `swarm retry <phase>` builds
+    it again.
 
 ## Lanes
 

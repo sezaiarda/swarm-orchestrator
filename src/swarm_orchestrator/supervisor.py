@@ -2368,9 +2368,10 @@ class Supervisor:
     def _doctor_probe(self, st: state_mod.State, now: float) -> dict[str, str] | None:
         """The cheap doctor checks that mean *stuck*, at most every
         :data:`DOCTOR_PROBE_S`: ``ledger`` (a cycle or unknown dep strands every
-        phase behind it) and ``run.nudge`` (free slots and ready phases, nothing
-        launching — a phase given up after failed launches shows here). Never
-        the full doctor, which shells out to git and du. ``None`` = not probed."""
+        phase behind it) and ``run.nudge`` (free slots and rows the launcher would
+        start, nothing launching — a phase given up after failed launches shows
+        here). No grace for a recent event: this runs once the event is handled.
+        Never the full doctor, which shells out to git and du. ``None`` = not probed."""
         if now - self._doctor_probed < DOCTOR_PROBE_S:
             return None
         if not self._bootstrapped or self.master.is_alive():
@@ -2380,10 +2381,11 @@ class Supervisor:
             return None  # a launch in flight reads as a lost nudge
         self._doctor_probed = now
         ctx = master_mod.build_context(self.cfg, st)
-        ready = [p for p in ctx["ready"] if p not in backing]
+        startable, held = doctor_mod._startable(ctx)
+        ready = [p for p in startable if p not in backing]
         checks = [
             doctor_mod._check_ledger(self.cfg, st),
-            doctor_mod._check_nudge(st, ready, ctx["free_slots"]),
+            doctor_mod._check_nudge(st, ready, ctx["free_slots"], held=held),
         ]
         return {c.name: c.detail for c in checks if c.status == doctor_mod.FAIL}
 

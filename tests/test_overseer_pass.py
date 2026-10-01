@@ -439,6 +439,33 @@ def test_the_doctor_probe_is_cheap_rate_limited_and_reports_stuck_state(sup, cfg
     assert sup._doctor_probe(state_mod.read(cfg), time.time()) is None  # not due again
 
 
+def test_the_doctor_probe_sees_a_lost_nudge_right_after_an_event(sup, cfg):
+    """The probe runs when an event has just been handled. ``swarm doctor``
+    waits out an event that fresh; the supervisor is past it and must not."""
+    sup._doctor_probed = 0.0
+    with state_mod.transaction(cfg) as st:
+        st.bootstrapping = False  # the init pass is over
+        st.last_event_at = time.time()
+    sup.log.line("EVENT done PX ok freed_slot=0 parked=False")
+    fails = sup._doctor_probe(state_mod.read(cfg), time.time())
+    assert set(fails) == {"run.nudge"} and "ready ['P0']" in fails["run.nudge"]
+
+
+def test_the_doctor_probe_leaves_out_rows_a_lane_holds_back(sup, cfg, monkeypatch):
+    sup._doctor_probed = 0.0
+    monkeypatch.setattr(cfg, "lanes_enabled", True)
+    (cfg.project_dir / "frontend" / ".git").mkdir(parents=True)
+    (cfg.project_dir / "ledger.txt").write_text(
+        "- [ ] `ui-W1` · dir:`frontend` · needs:— · touches:`frontend/src/**` · **broad**\n"
+        "- [ ] `ui-W2` · dir:`frontend` · needs:— · touches:`frontend/src/a.ts` · **inside**\n",
+        encoding="utf-8",
+    )
+    with state_mod.transaction(cfg) as st:
+        st.bootstrapping = False
+        st.slots[0].busy, st.slots[0].phase = True, "ui-W1"
+    assert sup._doctor_probe(state_mod.read(cfg), time.time()) == {}
+
+
 def test_disabled_the_supervisor_never_starts_a_pass(sup, cfg):
     cfg.overseer_enabled = False
     sup.overseer.request(ov.MANUAL, "by hand", urgent=True)

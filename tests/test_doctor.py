@@ -629,6 +629,116 @@ def test_the_bootstrap_hold_is_recorded_from_up_until_the_first_launch(swarm):
     assert swarm.state()["bootstrapping"] is False
 
 
+def nudge(cfg) -> Check:
+    return by_name(doctor.run_checks(cfg), "run.nudge")
+
+
+def test_a_slot_freed_moments_ago_is_the_supervisor_at_work_not_a_lost_nudge(cfg):
+    """What the owner saw: a finish freed its slot, and for the seconds the
+    supervisor spent writing the ledger before it launched the next phase,
+    doctor offered ``swarm launch``. The landing merges before it frees the
+    slot, so the state's own stamp is from the event that started the merge."""
+    set_state(cfg, last_event_at=time.time() - 300)
+    log(cfg, (2, "EVENT done PX ok freed_slot=0 parked=False"))
+    check = nudge(cfg)
+    assert check.status == OK, check.detail
+    assert "ready ['P0']" in check.detail and "took up an event 2s ago" in check.detail
+    assert check.fix_hint is None
+
+
+def test_an_event_that_logs_no_line_counts_by_the_state_stamp(cfg):
+    set_state(cfg, last_event_at=time.time() - 1)
+    assert nudge(cfg).status == OK
+
+
+def test_a_slot_left_free_long_after_the_last_event_is_a_lost_nudge(cfg):
+    set_state(cfg, last_event_at=time.time() - 300)
+    log(cfg, (doctor._NUDGE_GRACE_S + 30, "EVENT done PX ok freed_slot=0 parked=False"))
+    check = nudge(cfg)
+    assert check.status == FAIL and "lost nudge" in check.detail
+    assert check.fix_hint == "swarm launch P0"
+
+
+def test_a_periodic_log_line_is_not_the_supervisor_handling_an_event(cfg):
+    set_state(cfg, last_event_at=time.time() - 300)
+    log(cfg, (300, "EVENT done PX ok freed_slot=0 parked=False"),
+        (2, "WATCHDOG idle=298s busy=[] queue=[] blocked=None paused=False"))
+    assert nudge(cfg).status == FAIL
+
+
+def test_a_free_slot_with_no_event_on_record_is_a_lost_nudge(cfg):
+    set_state(cfg)
+    assert nudge(cfg).status == FAIL
+
+
+def test_the_grace_outlasts_the_longest_pass_seen_and_stays_short():
+    # 279 finishes on a live log: 27 s at worst from the freed slot to the claim.
+    assert 27 * 2 <= doctor._NUDGE_GRACE_S <= 120
+
+
+LANES_LEDGER = (
+    "- [ ] `ui-W1` · dir:`frontend` · needs:— · touches:`frontend/src/**` · **broad**\n"
+    "- [ ] `ui-W2` · dir:`frontend` · needs:— · touches:`frontend/src/a.ts` · **inside it**\n"
+)
+OPS_ROW = "- [ ] `ops-W1` · dir:`.` · needs:— · touches:`./ci/x.sh` · **its own lane**\n"
+
+
+def lanes_on(cfg, monkeypatch, ledger: str = LANES_LEDGER):
+    """The same project with lanes on and ``ui-W1`` running in slot 0."""
+    (cfg.project_dir / "frontend" / ".git").mkdir(parents=True)
+    (cfg.project_dir / cfg.ledger).write_text(ledger, encoding="utf-8")
+    monkeypatch.setenv("SWARM_LANES", "1")
+    on = load(project_dir=str(cfg.project_dir))
+    st = set_state(on)
+    busy(st, 0, "ui-W1")
+    save(on, st)
+    return on
+
+
+def test_a_free_slot_whose_ready_rows_all_wait_on_a_lane_is_not_a_lost_nudge(cfg, monkeypatch):
+    """The launcher starts the lane scheduler's picks, never a row it holds
+    back: a free slot beside one is not work nobody launched, and the offered
+    ``swarm launch`` would be refused."""
+    check = nudge(lanes_on(cfg, monkeypatch))
+    assert check.status == OK, check.detail
+    assert check.detail == (
+        "1 free slot(s) and nothing to launch: 1 ready row(s) wait on a lane: "
+        "ui-W2 (frontend/src/** is held by ui-W1)"
+    )
+    assert check.fix_hint is None
+
+
+def test_a_lost_nudge_under_lanes_names_the_row_the_launcher_would_start(cfg, monkeypatch):
+    check = nudge(lanes_on(cfg, monkeypatch, LANES_LEDGER + OPS_ROW))
+    assert check.status == FAIL
+    assert "ready ['ops-W1']" in check.detail and "ui-W2" not in check.detail
+    assert check.fix_hint == "swarm launch ops-W1"
+
+
+def test_lane_waits_are_named_by_their_reason_and_cut_short():
+    st = state_mod.State.fresh(2)
+    held = {
+        "a-W1": {"holder": "run-W1", "touch": "web/src/**", "why": "running"},
+        "a-W2": {"holder": "a-W1", "touch": "web/src/x.ts", "why": "reserved"},
+        "a-W3": {"holder": "run-W1", "touch": "web/**", "why": "per_repo"},
+        "a-W4": {"holder": "run-W1", "touch": "web/src/y.ts", "why": "running"},
+        "a-W5": {"holder": "run-W1", "touch": "web/src/z.ts", "why": "running"},
+    }
+    check = doctor._check_nudge(st, [], [1], held=held)
+    assert check.status == OK
+    assert check.detail == (
+        "1 free slot(s) and nothing to launch: 5 ready row(s) wait on a lane: "
+        "a-W1 (web/src/** is held by run-W1), a-W2 (web/src/x.ts is reserved for a-W1), "
+        "a-W3 (web is at its per-repo limit), +2 more"
+    )
+
+
+def test_no_free_slot_reads_as_before():
+    st = state_mod.State.fresh(2)
+    held = {"a-W1": {"holder": "run-W1", "touch": "web/src/**", "why": "running"}}
+    assert doctor._check_nudge(st, [], [], held=held).detail == "free=[] ready=[]"
+
+
 def test_a_long_silence_with_work_in_flight_warns(cfg):
     st = set_state(cfg, last_event_at=time.time() - 2 * 3600)
     busy(st, 0, "P1")

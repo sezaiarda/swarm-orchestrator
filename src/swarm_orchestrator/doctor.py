@@ -80,6 +80,14 @@ _IDLE_GRACE_S = 20 * 60
 # awaits the boot at most twice (``launch.READY_TIMEOUT_S`` each) and sends the
 # command. The mirror has no limit of its own, so it gets as long as both boots.
 _START_GRACE_S = 4 * launch_mod.READY_TIMEOUT_S
+# How long after the supervisor takes up an event a free slot beside work to
+# launch is that event still being handled. A finish frees its slot first, then
+# writes and commits the ledger, may open an operator session, and launches
+# last. Over 279 finishes on a live log that took 2.9 s at the median, 19 s at
+# p99 and 27 s at worst from the freed slot to the claim; this is twice the worst.
+_NUDGE_GRACE_S = 60.0
+# How many lane-held rows run.nudge names before it counts the rest.
+_NUDGE_SHOWN = 3
 # A held integration freezes the entire queue — every slot drains and none refill.
 # It is worth an alert almost immediately.
 _BLOCKED_WARN_S = 5 * 60
@@ -896,13 +904,68 @@ def _check_finish_race(st: State, ready: list[str]) -> Check:
     return Check("run.finished", OK, "run in progress")
 
 
-def _check_nudge(st: State, ready: list[str], free: list[int]) -> Check:
-    """Free slot + ready phases + not paused + not blocked = a lost nudge.
+def _startable(ctx: dict) -> tuple[list[str], dict[str, dict]]:
+    """``(rows, held)``: the ready rows the launcher would start now, in its
+    order, and the ready rows a lane holds back with what each waits for.
+
+    With lanes on the launcher walks the lane scheduler's picks, never
+    ``ready``: a row it holds back is refused by the launch backstop too.
+    """
+    lanes = ctx.get("lanes") or {}
+    if not lanes.get("enabled"):
+        return list(ctx.get("ready", [])), {}
+    return list(lanes.get("picked", [])), dict(lanes.get("waits", {}))
+
+
+def _event_age(cfg: Config, st: State) -> float | None:
+    """Seconds since the supervisor last took up an event; ``None`` if never.
+
+    The newer of ``State.last_event_at``, stamped as an event is read, and the
+    log's last ``EVENT`` line. A landing merges before it frees its slot, so
+    its ``EVENT done`` line can be a minute newer than the stamp. The lines the
+    supervisor's timers write (watchdog, usage, backup) do not count: they
+    come whether or not anything is being handled.
+    """
+    seen = max(float(getattr(st, "last_event_at", 0.0) or 0.0), _log_ts(cfg, "EVENT ") or 0.0)
+    return time.time() - seen if seen else None
+
+
+def _lane_waits(held: dict[str, dict]) -> str:
+    """The first rows of ``held`` and why each waits, for one line of output."""
+    def one(row: str, w: dict) -> str:
+        touch, holder = w.get("touch"), w.get("holder")
+        if w.get("why") == "per_repo":
+            return f"{row} ({str(touch).split('/', 1)[0]} is at its per-repo limit)"
+        verb = "reserved for" if w.get("why") == "reserved" else "held by"
+        return f"{row} ({touch} is {verb} {holder})"
+
+    shown = [one(row, w) for row, w in list(held.items())[:_NUDGE_SHOWN]]
+    if len(held) > _NUDGE_SHOWN:
+        shown.append(f"+{len(held) - _NUDGE_SHOWN} more")
+    return f"{len(held)} ready row(s) wait on a lane: " + ", ".join(shown)
+
+
+def _check_nudge(
+    st: State,
+    ready: list[str],
+    free: list[int],
+    *,
+    held: dict[str, dict] | None = None,
+    event_age: float | None = None,
+) -> Check:
+    """Free slot + rows to launch + not paused + not blocked = a lost nudge.
 
     Nothing in the design will ever wake the supervisor from this state: the wake
     path is entirely input-driven, so a poke that was dropped (or a master pass
     that ended without launching) leaves the swarm idle with work available and
     no timer to notice.
+
+    ``ready`` is what the launcher would start now and ``held`` the ready rows
+    a lane keeps back (:func:`_startable`); a free slot beside only those is
+    said so. ``event_age`` (:func:`_event_age`) comes from a caller outside the
+    supervisor: within :data:`_NUDGE_GRACE_S` of an event the supervisor is
+    still handling it, and it launches last. The supervisor's own probe runs
+    once an event is handled and passes none.
     """
     if st.finished or st.on_hold or st.integ_blocked or st.bootstrapping:
         why = (
@@ -916,12 +979,23 @@ def _check_nudge(st: State, ready: list[str], free: list[int]) -> Check:
         )
         return Check("run.nudge", OK, f"not applicable ({why})")
     if free and ready:
+        if event_age is not None and event_age < _NUDGE_GRACE_S:
+            return Check(
+                "run.nudge",
+                OK,
+                f"{len(free)} free slot(s) and ready {ready}: the supervisor took up an "
+                f"event {_human_age(event_age)} ago and launches at the end of it",
+            )
         return Check(
             "run.nudge",
             FAIL,
             f"{len(free)} free slot(s) and ready {ready} but nothing launched — "
             "lost nudge; nothing will wake the supervisor on its own",
             f"swarm launch {ready[0]}",
+        )
+    if free and held:
+        return Check(
+            "run.nudge", OK, f"{len(free)} free slot(s) and nothing to launch: {_lane_waits(held)}"
         )
     return Check("run.nudge", OK, f"free={free} ready={ready}")
 
@@ -1613,7 +1687,10 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.append(_check_push_owed(st))
     checks.append(_check_backup(cfg))
     checks.append(_check_finish_race(st, ready))
-    checks.append(_check_nudge(st, ready, free))
+    startable, held = _startable(ctx)
+    checks.append(
+        _check_nudge(st, startable, free, held=held, event_age=_event_age(cfg, st))
+    )
     checks.append(_check_stall(cfg, st))
     checks.append(_check_owner(cfg, st))
     checks.append(_check_ledger(cfg, st))

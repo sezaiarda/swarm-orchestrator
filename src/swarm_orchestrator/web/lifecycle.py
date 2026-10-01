@@ -47,6 +47,9 @@ CLOSED = "closed"
 #: The detail :func:`probe` gives with :data:`OURS` when the listener is this
 #: run's dashboard, which serves the board from its own process.
 DASHBOARD = "the dashboard is hosting it"
+#: A dashboard this young that holds the port without answering is still
+#: starting; an older one that stays silent is a board that hangs.
+DASHBOARD_BOOT_S = 120.0
 #: Interfaces that are never the LAN: container bridges and virtual links. A
 #: phone cannot reach 172.17.0.1, and printing it as "the address" would send
 #: the owner to a dead URL first.
@@ -233,8 +236,8 @@ def _board_of(cfg, pid: int) -> bool:
 
 
 def _dashboard_of(cfg, pid: int) -> bool:
-    """Is ``pid`` this run's dashboard? ``swarm up`` starts it with the run's
-    ``SWARM_STATE_DIR``, and it serves the board itself
+    """Is ``pid`` this run's dashboard, still starting? ``swarm up`` starts it
+    with the run's ``SWARM_STATE_DIR``, and it serves the board itself
     (:mod:`swarm_orchestrator.tui.webboard`)."""
     try:
         args = [a.decode(errors="replace")
@@ -246,7 +249,15 @@ def _dashboard_of(cfg, pid: int) -> bool:
         "swarm_orchestrator" in a or Path(a).name == "swarm" for a in args
     ):
         return False
-    return f"SWARM_STATE_DIR={cfg.state_dir}".encode() in env
+    if f"SWARM_STATE_DIR={cfg.state_dir}".encode() not in env:
+        return False
+    try:  # how long it has been running: uptime minus its start, both since boot
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        started = int(stat[stat.rfind(")") + 2:].split()[19]) / os.sysconf("SC_CLK_TCK")
+        age = float(Path("/proc/uptime").read_text().split()[0]) - started
+    except (OSError, ValueError, IndexError):
+        return False
+    return age < DASHBOARD_BOOT_S
 
 
 def status_line(cfg) -> str:

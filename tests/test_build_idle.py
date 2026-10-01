@@ -68,6 +68,11 @@ class IdleGate(Gate):
     def kinds(self, phase: str) -> list[str]:
         return [e["event"] for e in self.events() if e["phase"] == phase]
 
+    def look(self) -> tuple[dict, str]:
+        """``--status`` without starting a process (when every second counts)."""
+        snap = buildstatus.snapshot(self.cfg())
+        return snap, buildstatus.render(snap)
+
     def status(self) -> tuple[dict, str]:
         base = [sys.executable, "-m", "swarm_orchestrator", "build", "--status"]
         snap = subprocess.run([*base, "--json"], cwd=self.proj, env=self.env,
@@ -157,12 +162,40 @@ def test_idle_yield_off_keeps_the_queue_as_it_was(gate):
     assert buildsem.seats(g.cfg()) == 1
 
 
+def test_a_build_starts_beside_an_idle_holder_only_on_a_fresh_short_look(gate, monkeypatch):
+    """The ordinary samples span seconds, and a holder that woke up a second ago
+    can hide in such an average. So the sample that sets a holder aside does not
+    by itself let a build start: one more look, over the last moment only, does."""
+    g = gate()
+    h = g.run("h", f"sleep:{WINDOW * 3 + 4}")
+    start_h = g.wait_event("start", "P-h")
+    cfg = g.cfg()
+    monkeypatch.setattr(buildidle, "fresh_s", lambda _cfg: 0.1)  # as with the real 5 s / 1 s
+    claims = []
+    deadline = time.time() + WINDOW * 3
+    while time.time() < deadline:
+        with buildsem._qlock(cfg):
+            claim = buildsem._claim(cfg)
+        claims.append((claim, "yield" in g.kinds("P-h")))
+        if claim is not None:
+            break
+        time.sleep(0.15)
+    last, marked = claims[-1]
+    assert last is not None and marked, claims
+    assert (None, True) in claims[:-1]  # set aside, and still no start on that sample
+    assert [b["id"] for b in last.beside] == [start_h["id"]] and last.slot == 0
+    entry = buildidle.load(cfg)["h"][start_h["id"]]
+    assert 0 < entry["dt"] <= 0.2 and entry["ok"]
+    last.close()
+    h.kill()
+
+
 # -- waking up ----------------------------------------------------------------
 def test_a_woken_holder_counts_again_and_blocks_new_starts(gate):
     g = gate()
-    h = g.run("h", f"sleep:{WINDOW + 1.5} burn:5")
+    h = g.run("h", f"sleep:{WINDOW + 2} burn:6")
     g.wait_event("start", "P-h")
-    beside = g.run("b", "burn:3")  # starts beside h, and is still running when h wakes
+    beside = g.run("b", "burn:4.5")  # starts beside h, and is still running when h wakes
     g.wait_event("start", "P-b")
     # nobody is queued now: h's own `swarm build` notices that it woke up
     woke = g.wait_event("unyield", "P-h")
@@ -185,14 +218,14 @@ def test_docker_style_commands_never_yield(gate):
     """A client waiting on a daemon is at 0% CPU and is not idle: by its argv
     (``docker build``), and by what runs in its tree when the script is opaque."""
     g = gate(max_concurrent=2)
-    named = g.start("named", "docker", "build", ".", dur=WINDOW + 2.5)
-    opaque = g.start("opaque", "sh", "-c", "x=$(true); docker build .", dur=WINDOW + 2.5)
+    named = g.start("named", "docker", "build", ".", dur=WINDOW + 3)
+    opaque = g.start("opaque", "sh", "-c", "x=$(true); docker build .", dur=WINDOW + 3)
     g.wait_event("start", "P-named")
     g.wait_event("start", "P-opaque")
     w = g.run("w", "sleep:0.1")
     g.wait_event("queued", "P-w")
     time.sleep(WINDOW + 1.0)
-    snap, text = g.status()
+    snap, text = g.look()
     by = {s["phase"]: s for s in snap["slots"]}
     assert "docker" in by["P-named"]["noyield"] and "never yields" in text
     assert "noyield" not in by["P-opaque"] and snap["yielded"] == []
@@ -313,8 +346,7 @@ def test_a_process_a_build_left_behind_stops_blocking_once_idle(gate):
     g.wait_event("end", "P-left")
     w = g.run("w", "burn:0.3")
     g.wait_event("queued", "P-w")
-    time.sleep(0.5)
-    snap, text = g.status()
+    snap, text = g.look()  # well before a window has passed
     assert snap["slots"][0]["left"] and "still holds the slot" in text
     _finish([left, w])
     assert g.kinds("P-left") == ["queued", "start", "end", "yield"]
@@ -441,10 +473,15 @@ def test_the_rule_respects_the_cap_and_unwatched_stretches():
     entry, changes = _walk(quiet, room=False)
     assert changes == [] and entry["yielded"] is None  # no room: it stays a holder
     assert _walk([(30, 0.0, 0, None)], entry=entry)[1] == [("yield", 30, 30.0)]
-    # nobody measured for ten minutes and next to nothing was used: quiet all along
-    assert _walk([(600, 0.01, 0, None)])[1] == [("yield", 600, 600.0)]
-    # ...but a few CPU seconds somewhere in the gap restart the clock
-    assert _walk([(600, 3.0, 0, None)])[1] == []
+    # nobody measured for ten minutes and next to nothing was used: quiet all along,
+    # which one ordinary sample must confirm (the clock may have jumped a suspend)
+    entry, changes = _walk([(600, 0.01, 0, None)])
+    assert changes == [] and entry["ok"] is False and entry["quiet"] == 1000.0
+    assert _walk([(601, 0.01, 0, None)], entry=dict(entry))[1] == [("yield", 601, 601.0)]
+    assert _walk([(601, 0.9, 0, None)], entry=dict(entry))[1] == []  # it was not idle
+    # ...and a few CPU seconds somewhere in the gap restart the clock
+    entry, changes = _walk([(600, 3.0, 0, None)])
+    assert changes == [] and entry["quiet"] == 1600.0 and entry["ok"] is True
     # a set-aside holder nobody watched: unknown until the next sample, not trusted
     entry, _ = _walk([(t, 0.0, 0, None) for t in range(1, 11)])
     entry, changes = _walk([(300, 4.0, 0, None)], entry=entry)
@@ -454,6 +491,30 @@ def test_the_rule_respects_the_cap_and_unwatched_stretches():
     # busy on average over the whole gap: surely awake
     entry, _ = _walk([(t, 0.0, 0, None) for t in range(1, 11)])
     assert _walk([(300, 200.0, 0, None)], entry=entry)[1] == [("unyield", 300, 290.0)]
+
+
+def test_the_rule_is_not_fooled_by_the_clock_or_a_starved_build():
+    quiet = [(t, 0.0, 0, None) for t in range(1, 10)]
+    # the clock stepped back: a new baseline, the quiet stretch starts over
+    entry, _ = _walk(quiet)
+    entry, changes = _walk([(5, 0.0, 0, None)], entry=entry)
+    assert changes == [] and entry["quiet"] == 1005.0 and entry["ok"] is False
+    assert _walk([(t, 0.0, 0, None) for t in range(6, 15)], entry=dict(entry))[1] == []
+    # ...and a set-aside holder is not trusted again until a sample after it
+    entry, _ = _walk(quiet + [(10, 0.0, 0, None)])
+    entry, changes = _walk([(4, 0.0, 0, None)], entry=entry)
+    assert changes == [] and entry["yielded"] and entry["ok"] is False
+    # no CPU progress, but a process that is runnable (or waiting on disk): not idle
+    entry = None
+    for t in range(1, 40):
+        s = buildidle.Sample(0.0, 0, 1, None, runnable=True)
+        entry, change = buildidle.advance(entry, REC, s, 1000.0 + t, 10.0, 1.0, True)
+        assert change is None
+    # once set aside, that alone does not wake it: only real use does
+    entry, _ = _walk(quiet + [(10, 0.0, 0, None)])
+    s = buildidle.Sample(0.01, 0, 1, None, runnable=True)
+    entry, change = buildidle.advance(entry, REC, s, 1011.0, 10.0, 1.0, True)
+    assert change is None and entry["yielded"]
 
 
 def _cfg_for(tmp_path, monkeypatch, **env):
@@ -472,19 +533,49 @@ def test_a_yield_mark_is_only_trusted_fresh_alive_and_within_the_cap(tmp_path, m
     every = buildidle.sample_every(cfg)
     now = 5000.0
     st = {"ts": now, "h": {
-        "a": {"t": now, "yielded": now - 50, "ok": True},
-        "b": {"t": now, "yielded": now - 40, "ok": True},
+        "a": {"t": now, "yielded": now - 50, "ok": True, "dt": 1.0},
+        "b": {"t": now, "yielded": now - 40, "ok": True, "dt": 5.0},  # a long average
         "c": {"t": now, "yielded": now - 30, "ok": True},  # over the cap of two
         "stale": {"t": now - 3 * every - 2, "yielded": now - 60, "ok": True},
+        "ahead": {"t": now + 30, "yielded": now - 60, "ok": True},  # the clock went back
         "unsure": {"t": now, "yielded": now - 60, "ok": False},
         "gone": {"t": now, "yielded": now - 60, "ok": True},  # no live holder has this id
         "busy": {"t": now, "yielded": None, "ok": True},
     }}
-    holders = [{"id": i} for i in ("a", "b", "c", "stale", "unsure", "busy")]
+    holders = [{"id": i} for i in ("a", "b", "c", "stale", "ahead", "unsure", "busy")]
     holders.append({"id": "pinned", "noyield": "docker hands its work to a daemon"})
     assert [h["id"] for h in buildidle.set_aside(cfg, st, holders, now)] == ["a", "b"]
+    # to start a build beside one, the look must be fresh and span a second or two:
+    # a holder that woke up a second ago cannot hide in a five-second average
+    fresh = buildidle.fresh_s(cfg)
+    assert [h["id"] for h in buildidle.set_aside(cfg, st, holders, now, fine=True)] == ["a"]
+    assert buildidle.set_aside(cfg, st, holders, now + fresh + 0.1, fine=True) == []
     off = _cfg_for(tmp_path, monkeypatch, SWARM_BUILD_IDLE_YIELD_S=0)
     assert buildidle.set_aside(off, st, holders, now) == []
+
+
+def test_a_damaged_state_file_sets_nobody_aside(tmp_path, monkeypatch):
+    """``idle.json`` is only a cache of measurements. Entries that are not
+    measurements are dropped (the holder is measured afresh), and a measurement
+    that fails outright leaves the queue as it is without idle yield."""
+    cfg = _cfg_for(tmp_path, monkeypatch)
+    path = cfg.buildsem_dir / buildidle.STATE
+    good = {"t": 1.0, "cpu": 0.0, "io": 0, "quiet": 1.0, "yielded": None}
+    path.write_text(json.dumps({"ts": "soon", "h": {
+        "ok": good, "text": "yielded", "partial": {"yielded": 5.0},
+        "typed": dict(good, t="1.0"), "marked": dict(good, yielded="yes")}}))
+    assert buildidle.load(cfg) == {"ts": 0.0, "h": {"ok": good}}
+    for junk in ("", "{", "[1, 2]", '{"h": 3}'):
+        path.write_text(junk)
+        assert buildidle.load(cfg) == {"ts": 0.0, "h": {}}
+
+    def boom(*_a, **_k):
+        raise RuntimeError("no /proc today")
+
+    monkeypatch.setattr(buildidle.ptree, "scan", boom)
+    holder = {"id": "b1", "start_ts": time.time() - 500, "seat_path": None}
+    st = buildsem._idle_pass(cfg, [holder], time.time())
+    assert st == {"ts": 0.0, "h": {}} and buildidle.set_aside(cfg, st, [holder], time.time()) == []
 
 
 def test_measuring_drops_the_dead_and_skips_what_never_yields(tmp_path, monkeypatch):

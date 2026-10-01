@@ -580,9 +580,9 @@ is no daemon and no counter to leak.
   waiting line show.
 - A **slot**, `<state>/buildsem/slot<N>` (`N < max_concurrent`), held *shared*.
   Whatever needs a slot to itself takes it exclusively and so waits for every
-  build on it: gc, and a `swarm build` from before seats existed. Old and new
-  callers together therefore still never exceed the cap. The slot file carries
-  a copy of the record of the last build that started on it.
+  build on it: gc, and a `swarm build` from before seats existed (which
+  therefore never starts on a slot that has a build on it). The slot file
+  carries a copy of the record of the last build that started on it.
 
 A build may start when fewer than `max_concurrent` builds *count* (alive and not
 set aside as idle, see below), a seat is free, and some slot has no counted
@@ -615,9 +615,11 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
 - *Quiet* means, over one measurement (every 5 s), under 5% of one core and
   under 256 KiB/s of disk IO, summed over the build's process tree: its root and
   every descendant, plus any process that still has its seat file open (a child
-  that detached). Any other measurement restarts the clock, so the pauses a
-  working build has (between compile and test, behind a lock, while linking)
-  never add up to a window.
+  that detached); and no process of the tree runnable or waiting on disk at that
+  instant, so a build starved on a stalling box does not pass for idle. Any
+  other measurement restarts the clock, so the pauses a working build has
+  (between compile and test, behind a lock, while linking) never add up to a
+  window.
 - *Waking up.* A set-aside holder that uses half a core (or 4 MiB/s of disk)
   over a measurement counts again from then on: no new build starts while the
   builds that count fill the slots. A build that already started beside it keeps
@@ -647,9 +649,13 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
   when nobody waits, nobody needs the answer. The counters compared are the
   kernel's cumulative ones, so a waiter that dies loses nothing: the next one
   carries on from its last sample, and a build's start is itself a sample (zero
-  used). A set-aside holder's own `swarm build` keeps measuring while nobody
-  waits, so its wake-up is logged when it happens. A build never starts beside
-  a set-aside holder on a measurement older than a second.
+  used). A stretch nobody measured counts as quiet only if next to nothing was
+  used in all of it, and one ordinary measurement must agree before anything is
+  done about it (after a suspend the counters say nothing happened). A
+  set-aside holder's own `swarm build` keeps measuring while nobody waits, so
+  its wake-up is logged when it happens. A build starts beside a set-aside
+  holder only on a look at most a second old that itself spans a second or two,
+  which costs that start about a second.
 - *Crashes.* The mark that a holder is set aside names its build id and is only
   honoured while that build's seat lock is held and the measurement behind it is
   fresh. A killed holder's seat is free and its mark is dropped; a killed waiter

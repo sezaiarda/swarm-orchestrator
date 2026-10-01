@@ -27,11 +27,16 @@ once; disk IO is ``read_bytes+write_bytes`` of ``/proc/<pid>/io``.
 **The rule.**
 
 - *Quiet*: over one sample the tree used under :data:`IDLE_CORES` of a core and
-  under :data:`IDLE_IO_BPS` of disk IO. Any other sample restarts the quiet
-  clock, so a pause between compile and test, behind a lock or while linking
-  never adds up to a window.
+  under :data:`IDLE_IO_BPS` of disk IO, and none of its processes is runnable
+  or waiting on disk at that instant (on a box that is stalling, a starved
+  build makes no progress either, and must not pass for idle). Any other
+  sample restarts the quiet clock, so a pause between compile and test, behind
+  a lock or while linking never adds up to a window.
 - *Yield*: quiet for ``[build].idle_yield_s`` in a row, and fewer than
-  ``[build].idle_yield_max`` holders set aside already.
+  ``[build].idle_yield_max`` holders set aside already. A stretch nobody
+  measured counts as quiet only if next to nothing was used in all of it, and
+  the yield waits for one more ordinary sample: after a suspend or a freeze the
+  counters say "nothing happened" about a build that is in full swing.
 - *Wake*: a set-aside holder that uses :data:`WAKE_CORES` of a core (or
   :data:`WAKE_IO_BPS`) over a sample counts again from that sample; no new
   build starts while the builds that count fill the slots, and a build that
@@ -48,7 +53,9 @@ process whose IO cannot be read (another user's) is never idle either.
 
 **Nothing can leak.** The yield mark names a build id and is only honoured for
 a holder whose seat lock is still held, and only while the sample behind it is
-fresh (:data:`FRESH_S` before a build starts beside it). A dead holder's seat
+fresh: a build starts beside a set-aside holder only on a sample at most
+:data:`FRESH_S` old that itself spans a second or two, so a holder that just
+woke up is seen. A dead holder's seat
 is free and its mark is dropped; a mark nobody refreshed is re-measured before
 it is used. Whatever the marks say, the seats cap the builds alive at
 ``max_concurrent + idle_yield_max`` (see :mod:`buildsem`).
@@ -101,6 +108,7 @@ class Sample:
     io: int = 0
     procs: int = 0
     busy: str | None = None  # why it is not idle whatever the counters say
+    runnable: bool = False  # a process is running, or waiting on disk, right now
 
 
 def _has_open(pid: int, target: str, root: Path) -> bool:
@@ -158,6 +166,8 @@ def measure(rec: dict, seat: Path | None, table: dict[int, ptree.Proc],
         s.cpu_s += proc.cpu / ptree.TICK
         if proc.state in ("Z", "X"):
             continue
+        if proc.state in ("R", "D"):
+            s.runnable = True
         name = ptree.comm(pid, root)
         if name in buildclass.DAEMON_CLIENTS:
             s.busy = f"{name} is running (its work happens in a daemon)"
@@ -186,7 +196,15 @@ def load(cfg: Config) -> dict:
         data = None
     if not isinstance(data, dict) or not isinstance(data.get("h"), dict):
         return {"ts": 0.0, "h": {}}
-    return data
+    num = (int, float)
+    entries = {
+        bid: e for bid, e in data["h"].items()
+        if isinstance(e, dict) and all(isinstance(e.get(k), num) for k in ("t", "cpu", "io",
+                                                                          "quiet"))
+        and isinstance(e.get("yielded"), (*num, type(None)))
+    }  # anything else is not a measurement: the holder is measured afresh
+    ts = data.get("ts")
+    return {"ts": float(ts) if isinstance(ts, num) else 0.0, "h": entries}
 
 
 def _save(cfg: Config, st: dict) -> None:
@@ -212,31 +230,39 @@ def advance(entry: dict | None, rec: dict, s: Sample, now: float, window: float,
     """Fold one sample into a holder's entry. ``room``: may one more holder be
     set aside. The entry keeps the last counters (``t``, ``cpu``, ``io``), when
     the quiet stretch began (``quiet``), when it was set aside (``yielded``),
-    and ``ok``: whether the last sample could tell what it is doing *now*."""
+    how long the last sample spanned (``dt``), and ``ok``: whether that sample
+    could tell what the holder is doing *now* (if not, the next one comes soon
+    and nothing is decided before it)."""
     start = float(rec.get("start_ts") or now)
     if entry is None:
         # A build starts with nothing used: its start is a sample nobody took.
         entry = {"t": start, "cpu": 0.0, "io": 0, "quiet": start, "yielded": None, "ok": True}
     dt = now - float(entry["t"])
-    if dt <= 0:
+    if dt <= 0:  # the clock went back: this sample is only a new baseline
+        entry.update(t=round(now, 3), cpu=round(s.cpu_s, 3), io=s.io, ok=False, dt=0.0)
+        if entry.get("yielded") is None:
+            entry["quiet"] = now
         return entry, None
     span = min(dt, 2 * every)
+    watched = dt <= 2 * every
     dcpu, dio = s.cpu_s - float(entry["cpu"]), s.io - int(entry["io"])
     change = None
     if entry.get("yielded") is None:
         # A long gap gets no bigger allowance than a short one, so a stretch
         # nobody watched only counts as quiet if next to nothing happened in it.
-        quiet = (s.busy is None and abs(dcpu) < IDLE_CORES * span
+        quiet = (s.busy is None and not s.runnable and abs(dcpu) < IDLE_CORES * span
                  and abs(dio) < IDLE_IO_BPS * span)
         if not quiet:
             entry["quiet"] = now
-        elif room and now - float(entry["quiet"]) >= window:
+        elif watched and room and now - float(entry["quiet"]) >= window:
             entry["yielded"], entry["idle_s"] = now, round(now - float(entry["quiet"]), 1)
             change = Change("yield", rec, now - float(entry["quiet"]))
-        entry["ok"] = True
+        # Quiet through a stretch nobody watched (the clock may have jumped over
+        # a suspend): believed, but not acted on before an ordinary sample agrees.
+        entry["ok"] = watched or not quiet
     else:
         still = abs(dcpu) < IDLE_CORES * span and abs(dio) < IDLE_IO_BPS * span
-        if dt <= 2 * every:
+        if watched:
             woke = dcpu >= WAKE_CORES * span or dio >= WAKE_IO_BPS * span
         else:  # nobody watched: only a gap busy on average is surely awake
             woke = dcpu >= WAKE_CORES * dt or dio >= WAKE_IO_BPS * dt
@@ -247,9 +273,9 @@ def advance(entry: dict | None, rec: dict, s: Sample, now: float, window: float,
             entry.update(yielded=None, quiet=now, ok=True)
             entry.pop("idle_s", None)
         else:
-            entry["ok"] = still or dt <= 2 * every
+            entry["ok"] = still or watched
     entry.update(t=round(now, 3), cpu=round(s.cpu_s, 3), io=s.io, busy=s.busy,
-                 procs=s.procs)
+                 procs=s.procs, dt=round(dt, 3))
     return entry, change
 
 
@@ -290,18 +316,28 @@ def update(cfg: Config, holders: list[dict], now: float, force: bool = False,
     return st, changes
 
 
-def set_aside(cfg: Config, st: dict, holders: list[dict], now: float) -> list[dict]:
+def set_aside(cfg: Config, st: dict, holders: list[dict], now: float,
+              fine: bool = False) -> list[dict]:
     """The holders that do not count now: marked, still alive, their last
-    sample fresh enough to trust, and at most ``idle_yield_max`` of them."""
+    sample fresh enough to trust, and at most ``idle_yield_max`` of them.
+    ``fine``: only on a sample good enough to start a build beside them, at most
+    :func:`fresh_s` old and spanning at most twice that, so that a holder which
+    woke up a second ago cannot hide in a long average."""
     if not enabled(cfg):
         return []
     limit = 2 * sample_every(cfg) + 1.0
     out = []
     for h in holders:
         e = st["h"].get(h.get("id") or "")
-        if e and e.get("yielded") and e.get("ok", True) and now - float(e["t"]) <= limit \
-                and not h.get("noyield"):
-            out.append(dict(h, yielded_ts=e["yielded"], idle_s=e.get("idle_s")))
+        if not e or not e.get("yielded") or not e.get("ok", True) or h.get("noyield"):
+            continue
+        age = now - float(e["t"])
+        if not 0 <= age <= limit:
+            continue
+        if fine and not (age <= fresh_s(cfg)
+                         and 0 < float(e.get("dt") or 0.0) <= 2 * fresh_s(cfg)):
+            continue
+        out.append(dict(h, yielded_ts=e["yielded"], idle_s=e.get("idle_s")))
     out.sort(key=lambda h: h["yielded_ts"])
     return out[: cfg.build_idle_yield_max]
 

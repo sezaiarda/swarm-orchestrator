@@ -19,9 +19,9 @@ them is gone. No daemon, no counter to leak.
 - A **slot**, ``<state>/buildsem/slotN`` (``N < max_concurrent``), *shared*.
   Anything that wants a slot to itself takes it exclusively and so waits for
   every build on it: ``swarm gc`` (which takes every slot before it deletes
-  build output) and a ``swarm build`` from before seats existed. Old and new
-  callers together therefore still never exceed the cap, and gc never runs
-  while any build is alive, set aside or not.
+  build output) and a ``swarm build`` from before seats existed. So gc never
+  runs while any build is alive, set aside or not, and an old caller never
+  starts on a slot that has a build on it.
 
 **Idle yield.** A holder whose whole process tree has done nothing for
 ``[build].idle_yield_s`` is *set aside*: it is not stopped or signalled, it
@@ -228,11 +228,14 @@ def _synthetic_end(cfg: Config, rec: dict, slot: int | None, now: float) -> None
                    run_s=now - start, exit=None, ts=now)
 
 
-def reap_records(cfg: Config, only: int | None = None, force: bool = False) -> None:
+def reap_records(cfg: Config, only: int | None = None, force: bool = False,
+                 seat: int | None = None) -> None:
     """Write the ``end`` a dead holder never wrote (``exit`` null). Call under
     ``queue.lock`` so two noticers cannot both write it. A seat's holder is dead
-    when its lock is free or both its processes are gone; ``only``/``force`` name
-    a slot just found free, for a record a build from before seats left there."""
+    when its lock is free or both its processes are gone. ``seat`` is one the
+    caller has just taken: it was free, so whatever its record says is over.
+    ``only``/``force`` name a slot just found free, for a record a build from
+    before seats left there."""
     now = time.time()
     if only is None:
         for k in _seat_indices(cfg):
@@ -240,7 +243,7 @@ def reap_records(cfg: Config, only: int | None = None, force: bool = False) -> N
             rec = read_record(path)
             if not rec or rec.get("ended") or rec.get("v") != 1:
                 continue
-            if _locked(path) and _holder_alive(rec):
+            if k != seat and _locked(path) and _holder_alive(rec):
                 continue
             slot = rec.get("slot") if isinstance(rec.get("slot"), int) else None
             copy = read_record(_slot_path(cfg, slot)) if slot is not None else None
@@ -471,13 +474,23 @@ def live_holders(cfg: Config) -> list[dict]:
     for k in _seat_indices(cfg):
         path = _seat_path(cfg, k)
         if _locked(path):
-            out.append(dict(read_record(path) or {}, seat=k, seat_path=path))
+            rec = dict(read_record(path) or {}, seat=k, seat_path=path)
+            if not isinstance(rec.get("slot"), int):
+                rec["slot"] = None
+            if not isinstance(rec.get("id"), str):
+                rec.pop("id", None)
+            out.append(rec)
     return out
 
 
 def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False) -> dict:
-    """Measure the holders if due, and log who was set aside or woke up."""
-    st, changes = buildidle.update(cfg, holders, now, force=force)
+    """Measure the holders if due, and log who was set aside or woke up. A
+    measurement that fails sets nobody aside: the queue then waits, as it would
+    without idle yield, and the build that is waiting is not harmed."""
+    try:
+        st, changes = buildidle.update(cfg, holders, now, force=force)
+    except Exception:  # noqa: BLE001 -- measuring must never break a queued build
+        return {"ts": 0.0, "h": {}}
     for c in changes:
         rec = c.rec
         buildlog.event(cfg, c.kind, id=rec.get("id", "?"), phase=rec.get("phase"),
@@ -515,36 +528,43 @@ def _claim(cfg: Config) -> Claim | None:
     aside = buildidle.set_aside(cfg, st, holders, now)
     if len(holders) - len(aside) >= cap:
         return None
-    if aside and now - float(st.get("ts") or 0.0) > buildidle.fresh_s(cfg):
-        # About to start beside a holder taken for idle: look again, now.
-        st = _idle_pass(cfg, holders, now, force=True)
-        aside = buildidle.set_aside(cfg, st, holders, now)
+    if aside:
+        # A holder taken for idle stops counting only on a look taken just now,
+        # over the last second or so. Until there is one, it counts.
+        if len(buildidle.set_aside(cfg, st, holders, now, fine=True)) < len(aside):
+            st = _idle_pass(cfg, holders, now, force=True)
+        aside = buildidle.set_aside(cfg, st, holders, now, fine=True)
     ids = {h["id"] for h in aside}
     counted = [h for h in holders if h.get("id") not in ids]
+    if len(counted) >= cap:
+        return None
     busy = {h.get("slot") for h in counted}
     alive = {h.get("slot") for h in holders}
     free: list[tuple[int, int]] = []
     foreign = 0
-    for i in range(cap):
-        fd = os.open(_slot_path(cfg, i), os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
-            foreign += 1
-            continue
-        if i in busy:
-            os.close(fd)
-        else:
-            free.append((i, fd))
-    free.sort(key=lambda g: (g[0] in alive, g[0]))
-    seat = _free_seat(cfg) if free and len(counted) + foreign < cap else None
-    if seat is None:
+    try:
+        for i in range(cap):
+            fd = os.open(_slot_path(cfg, i), os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                foreign += 1
+                continue
+            if i in busy:
+                os.close(fd)
+            else:
+                free.append((i, fd))
+        free.sort(key=lambda g: (g[0] in alive, g[0]))
+        seat = _free_seat(cfg) if free and len(counted) + foreign < cap else None
+    except BaseException:
         for _, fd in free:
             os.close(fd)
-        return None
-    for _, fd in free[1:]:
+        raise
+    for _, fd in free[1:] if seat is not None else free:
         os.close(fd)
+    if seat is None:
+        return None
     relied = len(holders) + foreign >= cap  # only the set-aside ones made room
     return Claim(free[0][0], free[0][1], seat[0], seat[1], aside if relied else [],
                  alone=free[0][0] not in alive)
@@ -577,7 +597,7 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
                 counts[m["id"]] = counts.get(m["id"], 0) + 1
         q["overtaken"] = counts
         _write_q(cfg, q)
-        reap_records(cfg)  # this seat's last holder is gone: write the end it never did
+        reap_records(cfg, seat=got.seat)  # its last holder is gone: the end it never wrote
         if got.alone:  # and so is whoever left a record on this slot
             reap_records(cfg, only=got.slot, force=True)
         rec = _record(t.meta, None, None, got)

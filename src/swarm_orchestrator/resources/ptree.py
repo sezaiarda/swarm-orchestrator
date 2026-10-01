@@ -188,8 +188,8 @@ def cmdline(pid: int, root: Path = PROC) -> str:
 
 
 def comm(pid: int, root: Path = PROC) -> str:
-    try:
-        return (root / str(pid) / "comm").read_text().strip()
+    try:  # at most 15 bytes: a longer name may be cut in the middle of a character
+        return (root / str(pid) / "comm").read_bytes().decode(errors="replace").strip()
     except OSError:
         return ""
 

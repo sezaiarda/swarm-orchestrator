@@ -51,6 +51,17 @@ of older waiters predicted long -- but each long waiter can be passed at most
 after at most the waiters older than it plus ``overtake`` short ones: nobody
 starves. ``overtake = 0`` is plain FIFO.
 
+**Pairing rules.** With ``[build].pair = "distinct-repo"`` a build starts
+beside the builds alive only if it shares no repository with any of them, and
+a build that must run alone (an image build, ``--hold``, a build whose repo is
+unknown: ``[build].alone``) starts only when no other build is alive, and
+nothing starts while it runs (see :mod:`buildpair`). The queue then lets a
+waiter the rules allow go ahead of older ones they hold back, out of the same
+budget as the short ones: each waiter is passed at most ``[build].overtake``
+times in all, and once it has been, or once a build that must run alone is the
+oldest waiter, nothing starts until it has. ``"any"`` (the default) is the gate
+without these rules.
+
 **What it says.** On stderr: the queue position, who holds each slot and for how
 long, and an ETA from past run times, on joining and every 45 s; "queued Xs,
 starting" when it starts (and beside which idle holder, if one made room);
@@ -83,7 +94,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from . import buildclass, buildidle, buildlog, procs
+from . import buildclass, buildidle, buildlog, buildpair, procs
 from .config import Config
 
 _POLL_S = 0.5  # a waiter whose turn it is not yet
@@ -232,7 +243,7 @@ def _synthetic_end(cfg: Config, rec: dict, slot: int | None, now: float) -> None
     buildlog.event(cfg, "end", id=rec.get("id", "?"), phase=rec.get("phase"),
                    pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=slot,
                    cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
-                   run_s=now - start, exit=None, ts=now)
+                   run_s=now - start, exit=None, repo=rec.get("repo"), ts=now)
 
 
 def reap_records(cfg: Config, only: int | None = None, force: bool = False,
@@ -409,30 +420,45 @@ def _is_short(meta: dict, short_s: int) -> bool:
 
 
 def select(tickets: list[dict], counts: dict[str, int], overtake: int,
-           short_s: int) -> dict | None:
+           short_s: int, blocked: dict[str, str] | None = None) -> dict | None:
     """Whose turn it is: the oldest waiter, unless a predicted-short one stands
     behind predicted-long ones that may each still be passed (fewer than
-    ``overtake`` times) -- then the oldest such short one."""
+    ``overtake`` times) -- then the oldest such short one.
+
+    ``blocked`` (the pairing rules are on) names the waiters that may not start
+    beside the builds alive. They are stepped over like the long ones, out of
+    the same budget: the turn goes to the oldest waiter that is not blocked (or
+    a short one behind it) as long as every older waiter may still be passed.
+    A waiter that must run alone is never passed once it is the oldest. When
+    nobody may start, the turn stays with the oldest, who waits for the builds
+    in its way to end."""
     live = [t for t in tickets if t.get("fresh", True)]
     if not live:
         return None
-    if overtake > 0:
-        for t in live:
-            if _is_short(t, short_s):
-                return t
-            if counts.get(t["id"], 0) >= overtake:
-                break
-    return live[0]
+    rules = blocked is not None
+    first = None  # the oldest waiter the rules let start
+    for n, t in enumerate(live):
+        ok = not rules or t["id"] not in blocked
+        if ok and overtake > 0 and _is_short(t, short_s):
+            return t
+        if ok and first is None:
+            first = t
+        if counts.get(t["id"], 0) >= overtake:
+            break  # passed as often as it may be: nothing more goes ahead of it
+        if rules and n == 0 and t.get("alone"):
+            break
+    return first or live[0]
 
 
 def service_order(tickets: list[dict], counts: dict[str, int], overtake: int,
-                  short_s: int) -> list[dict]:
-    """The order the current waiters would start in, if nobody else came."""
+                  short_s: int, blocked: dict[str, str] | None = None) -> list[dict]:
+    """The order the current waiters would start in, if nobody else came (and,
+    with ``blocked``, if the builds alive stayed as they are)."""
     left = [t for t in tickets if t.get("fresh", True)]
     counts = dict(counts)
     order = []
     while left:
-        t = select(left, counts, overtake, short_s)
+        t = select(left, counts, overtake, short_s, blocked)
         if t is None:
             break
         for older in left:
@@ -448,6 +474,8 @@ class View:
     tickets: list[dict] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     my_turn: bool = False
+    # None: no pairing rules. Else {ticket id: why the rules hold it back now}.
+    blocked: dict[str, str] | None = None
 
 
 @dataclass
@@ -503,7 +531,8 @@ def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False
         buildlog.event(cfg, c.kind, id=rec.get("id", "?"), phase=rec.get("phase"),
                        pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=rec.get("slot"),
                        cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
-                       run_s=now - (rec.get("start_ts") or now), idle_s=c.idle_s, ts=now)
+                       run_s=now - (rec.get("start_ts") or now), idle_s=c.idle_s,
+                       repo=rec.get("repo"), ts=now)
     return st
 
 
@@ -521,13 +550,15 @@ def _free_seat(cfg: Config) -> tuple[int, int] | None:
     return None
 
 
-def _claim(cfg: Config) -> Claim | None:
+def _claim(cfg: Config, strict: bool = False) -> Claim | None:
     """Take a seat and a slot if a build may start now. Under ``queue.lock``.
 
     May start: fewer than ``max_concurrent`` builds *count* (alive and not set
     aside, plus whoever holds a slot exclusively: gc, an older ``swarm build``),
     a slot has no counted build on it, and a seat is free. A slot with nobody on
-    it is preferred to one whose holders are all set aside."""
+    it is preferred to one whose holders are all set aside. ``strict`` (the
+    pairing rules are on): not while anyone holds a slot exclusively either,
+    since what that is, and in which repo, cannot be read."""
     now = time.time()
     cap = cfg.build_max_concurrent
     holders = live_holders(cfg)
@@ -563,7 +594,8 @@ def _claim(cfg: Config) -> Claim | None:
             else:
                 free.append((i, fd))
         free.sort(key=lambda g: (g[0] in alive, g[0]))
-        seat = _free_seat(cfg) if free and len(counted) + foreign < cap else None
+        room = free and len(counted) + foreign < cap and not (strict and foreign)
+        seat = _free_seat(cfg) if room else None
     except BaseException:
         for _, fd in free:
             os.close(fd)
@@ -590,18 +622,41 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
         ids = {m["id"] for m in tickets}
         q = _read_q(cfg)
         counts = {k: int(v) for k, v in (q.get("overtaken") or {}).items() if k in ids}
-        chosen = select(tickets, counts, overtake, short_s)
-        view = View(tickets, counts, chosen is not None and chosen["id"] == t.meta["id"])
-        if not view.my_turn:
+        rules = buildpair.enabled(cfg)
+        beside: list[dict] = []
+        found: dict[str, str] = {}
+        blocked = None
+        if rules:
+            beside = buildpair.counted(live_holders(cfg))
+            found = buildpair.marks(cfg)
+            blocked = buildpair.blocked_all(buildpair.waiters(tickets), beside, found)
+        chosen = select(tickets, counts, overtake, short_s, blocked)
+        view = View(tickets, counts, chosen is not None and chosen["id"] == t.meta["id"],
+                    blocked)
+        if not view.my_turn or (blocked and t.meta["id"] in blocked):
             if buildidle.enabled(cfg):
                 _idle_pass(cfg, live_holders(cfg), time.time())
             return None, view
-        got = _claim(cfg)
+        got = _claim(cfg, strict=rules)
         if got is None:
             return None, view
+        if rules and beside:
+            # The last look before a build starts beside others: is one of them
+            # running something that must run alone, whatever its command said?
+            seen = _spot_alone(cfg, beside, found)
+            if seen is None or seen:
+                got.close()
+                if seen:
+                    view.blocked = buildpair.blocked_all(tickets, beside, {**found, **seen})
+                return None, view
         for m in tickets:
             if m["seq"] < t.meta["seq"]:
                 counts[m["id"]] = counts.get(m["id"], 0) + 1
+                if blocked and m["id"] in blocked:
+                    buildlog.event(cfg, "passed", id=m["id"], phase=m.get("phase"),
+                                   pid=m.get("pid") or 0, slot=None, cls="heavy",
+                                   argv=m.get("argv", ""), cwd=m.get("cwd", ""),
+                                   repo=m.get("repo"), why=blocked[m["id"]], by=t.meta["id"])
         q["overtaken"] = counts
         _write_q(cfg, q)
         reap_records(cfg, seat=got.seat)  # its last holder is gone: the end it never wrote
@@ -614,6 +669,34 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
     return got, view
 
 
+def _note_alone(cfg: Config, seen: dict[str, str], now: float) -> None:
+    """Record the builds just found to be running something that runs alone,
+    and log each one once. Under ``queue.lock``."""
+    live = live_holders(cfg)
+    new = buildpair.mark(cfg, seen, live, now)
+    for h in live:
+        if h.get("id") in new:
+            buildlog.event(cfg, "alone", id=h["id"], phase=h.get("phase"),
+                           pid=h.get("pid") or h.get("gate_pid") or 0, slot=h.get("slot"),
+                           cls="heavy", argv=h.get("argv", ""), cwd=h.get("cwd", ""),
+                           run_s=now - (h.get("start_ts") or now), repo=h.get("repo"),
+                           why=seen[h["id"]], ts=now)
+
+
+def _spot_alone(cfg: Config, holders: list[dict], found: dict[str, str]) -> dict[str, str] | None:
+    """Look at the processes of the holders not known to run alone: ``{build
+    id: why}`` for those that do after all (recorded and logged). ``None`` when
+    the look itself failed: then nothing starts beside them."""
+    open_ = [h for h in holders if buildpair.holder_alone(h, found) is None]
+    try:
+        seen = buildpair.scan(cfg, open_)
+        if seen:
+            _note_alone(cfg, seen, time.time())
+    except Exception:  # noqa: BLE001 -- unseen is not the same as safe
+        return None
+    return seen
+
+
 def _record(meta: dict, pid: int | None, start_ts: float | None,
             claim: Claim | None = None) -> dict:
     return {
@@ -624,6 +707,7 @@ def _record(meta: dict, pid: int | None, start_ts: float | None,
         "pid": pid, "pid_start": procs.start_ticks(pid) if pid else None, "ended": None,
         "slot": claim.slot if claim else None, "seat": claim.seat if claim else None,
         "noyield": meta.get("noyield"), "hold": bool(meta.get("hold")),
+        "repo": meta.get("repo"), "repos": meta.get("repos"), "alone": meta.get("alone"),
     }
 
 
@@ -759,6 +843,36 @@ class _OwnYield:
              f" it for {buildlog.fmt_s(total)} of its {buildlog.fmt_s(run_s)}. {_HOLD_HINT}")
 
 
+class _OwnAlone:
+    """What a holder's own ``swarm build`` does every :data:`buildpair.SCAN_S`
+    under the pairing rules, for a build not known to run alone: it looks at the
+    build's process tree for a command that must (a script that turned out to
+    build an image). Found once, the build is alone for the rest of its run:
+    recorded, logged, and said on stderr. The waiters do not depend on it: each
+    takes its own look before it starts beside a running build."""
+
+    def __init__(self, cfg: Config, bid: str, pid: int) -> None:
+        self.cfg, self.bid, self.pid = cfg, bid, pid
+        self.due = 0.0
+        self.done = False
+
+    def tick(self) -> None:
+        now = time.time()
+        if self.done or now < self.due:
+            return
+        self.due = now + buildpair.SCAN_S
+        why = buildpair.tree_alone(self.cfg, self.pid)
+        if why is None:
+            return
+        with _qlock(self.cfg, wait_s=1.0) as got:
+            if not got:
+                self.due = 0.0  # a stopped process holds the lock: look again soon
+                return
+            _note_alone(self.cfg, {self.bid: why}, now)
+        self.done = True
+        _say(f"this build runs alone from now on ({why}): no other build starts beside it")
+
+
 def _clock(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
@@ -809,6 +923,7 @@ class _Call:
     argv: list[str] | str
     cwd: str
     cls: str
+    repo: str | None = None
 
     @property
     def text(self) -> str:
@@ -816,7 +931,27 @@ class _Call:
 
     def log(self, cfg: Config, kind: str, **kw) -> None:
         buildlog.event(cfg, kind, id=self.id, phase=self.phase, cls=self.cls,
-                       argv=self.argv, cwd=self.cwd, **kw)
+                       argv=self.argv, cwd=self.cwd, repo=self.repo, **kw)
+
+
+def _start_kw(meta: dict | None, held: Claim | None) -> dict:
+    """What a ``start`` says of a build that took a slot (nothing for a bypass)."""
+    if not held:
+        return {"hold": None}
+    why = (meta or {}).get("alone")
+    return {"hold": bool(meta and meta.get("hold")), "alone": bool(why), "why": why}
+
+
+def _ticker(ticks: list):
+    """One callable for ``_wait_child`` out of several; one that fails is dropped."""
+    def run() -> None:
+        for tick in list(ticks):
+            try:
+                tick()
+            except Exception:  # noqa: BLE001 -- measuring must never end a build
+                ticks.remove(tick)
+
+    return run if ticks else None
 
 
 def _finish(cfg: Config, claim: Claim, rec: dict, now: float) -> None:
@@ -824,7 +959,9 @@ def _finish(cfg: Config, claim: Claim, rec: dict, now: float) -> None:
     lock only keeps the copy from being rewritten under a build that is starting
     on the same slot; without it the records are written all the same."""
     with _qlock(cfg, wait_s=2.0):
-        _write_record(claim.seat_fd, dict(rec, ended=now))
+        # ``over``: its own gate saw the command end. Whatever still holds the
+        # seat is a process it left behind, not a build (see buildpair.counted).
+        _write_record(claim.seat_fd, dict(rec, ended=now, over=True))
         _end_slot_copy(cfg, rec, now)
 
 
@@ -852,7 +989,7 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
         if held:
             _finish(cfg, held, _record(meta or {"id": call.id}, None, now, held), now)
         call.log(cfg, "start" if held else "bypass", pid=os.getpid(), slot=slot,
-                 wait_s=wait_s, hold=bool(meta and meta.get("hold")) if held else None)
+                 wait_s=wait_s, **_start_kw(meta, held))
         call.log(cfg, "end", pid=os.getpid(), slot=slot, run_s=0.0, exit=127)
         if held:
             held.close()
@@ -864,12 +1001,16 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
         _write_record(held.seat_fd, rec)
         _write_record(held.slot_fd, rec)
         waited = "no wait" if wait_s < 1 else f"queued {buildlog.fmt_s(wait_s)}"
+        alone = f" — alone ({rec['alone']})" if rec.get("alone") else ""
         _say(f"{waited}, starting on slot {slot}: {buildlog.short_cmd(call.text)}"
-             f"{_beside_text(held.beside)}")
+             f"{_beside_text(held.beside)}{alone}")
     call.log(cfg, "start" if held else "bypass", pid=proc.pid, slot=slot, wait_s=wait_s,
-             hold=bool(rec and rec.get("hold")) if held else None)
+             **_start_kw(rec, held))
     watch = _OwnYield(cfg, call.id) if held and buildidle.enabled(cfg) else None
-    code = _wait_child(proc, timeout, start, watch.tick if watch else None)
+    ticks = [watch.tick] if watch else []
+    if held and buildpair.enabled(cfg) and not rec.get("alone"):
+        ticks.append(_OwnAlone(cfg, call.id, proc.pid).tick)
+    code = _wait_child(proc, timeout, start, _ticker(ticks))
     now = time.time()
     if held:
         _finish(cfg, held, rec, now)
@@ -880,6 +1021,17 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
             watch.finish(now, now - start)
         held.close()  # the seat and slot free once the build's leftovers are gone too
     return code
+
+
+def _pairing(cfg: Config, cwd: str, verdict: buildclass.Verdict | None,
+             hold: bool = False) -> tuple[list[str] | None, str | None]:
+    """The repos a build works in (``None``: unknown) and why it runs alone
+    under the pairing rules (``None``: it need not)."""
+    try:
+        names = buildpair.repos(cfg, cwd, verdict)
+    except Exception:  # noqa: BLE001 -- unknown is safe: such a build runs alone
+        names = None
+    return names, buildpair.alone_why(cfg, verdict, names, hold)
 
 
 def _phase(cfg: Config) -> str | None:
@@ -913,10 +1065,13 @@ def run(cfg: Config, argv: list[str], timeout: float | None = None,
         _say("already inside a build that holds a slot — running without queueing"
              + (" (--hold does nothing here: give it to the outer swarm build)" if hold else ""))
         return _exec(cfg, argv)
+    rules = buildpair.enabled(cfg)
     try:
-        verdict = buildclass.classify(argv, cwd, cfg.build_heavy, cfg.build_light)
+        verdict = buildclass.classify(argv, cwd, cfg.build_heavy, cfg.build_light,
+                                      alone=cfg.build_alone if rules else None)
     except Exception as exc:  # noqa: BLE001 -- a classifier bug must not stop a build
-        verdict = buildclass.Verdict(buildclass.HEAVY, f"could not classify ({exc})")
+        verdict = buildclass.Verdict(buildclass.HEAVY, f"could not classify ({exc})",
+                                     alone="its command could not be read" if rules else None)
     noyield = HOLD_WHY if hold else buildclass.daemon_side(verdict)
     if hold and verdict.cls == buildclass.LIGHT and cfg.build_max_concurrent >= 1:
         verdict.cls, verdict.why = buildclass.HEAVY, "--hold takes a slot"
@@ -932,12 +1087,16 @@ def run(cfg: Config, argv: list[str], timeout: float | None = None,
             call.log(cfg, "preflight_fail", pid=os.getpid(), slot=None)
             return 127 if problem.startswith("cannot run") else 2
         hist = buildlog.History(cfg)
+        names, alone = _pairing(cfg, cwd, verdict, hold)
+        call.repo = names[0] if names else None
         queued = time.time()
         meta = {"id": call.id, "phase": call.phase, "pid": os.getpid(), "argv": call.text,
                 "cwd": cwd, "queued_ts": queued, "pred_s": hist.predict(argv, cwd),
-                "noyield": noyield, "hold": hold}
+                "noyield": noyield, "hold": hold, "repo": call.repo, "repos": names,
+                "alone": alone}
         ticket = _enqueue(cfg, meta)
-        call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued)
+        call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued, alone=bool(alone),
+                 why=alone)
         held = _wait_turn(cfg, ticket, hist, announce=True)
         return _run_child(cfg, call, held=held, meta=ticket.meta,
                           wait_s=time.time() - queued, timeout=timeout)
@@ -966,24 +1125,32 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
     text = buildlog.argv_text(argv)
     hist = buildlog.History(cfg)
     queued = time.time()
+    rules = buildpair.enabled(cfg)
     try:
         shell = ["sh", "-c", argv] if isinstance(argv, str) else list(argv)
-        noyield = buildclass.daemon_side(buildclass.classify(shell, str(cwd) or None))
+        verdict = buildclass.classify(shell, str(cwd) or None,
+                                      alone=cfg.build_alone if rules else None)
+        noyield = buildclass.daemon_side(verdict)
     except Exception:  # noqa: BLE001 -- a classifier bug must not stop a build
         noyield = None
+        verdict = buildclass.Verdict(buildclass.HEAVY, "could not classify",
+                                     alone="its command could not be read" if rules else None)
+    names, alone = _pairing(cfg, str(cwd), verdict)
     meta = {"id": uuid.uuid4().hex[:12], "phase": phase, "pid": os.getpid(), "argv": text,
             "cwd": str(cwd), "queued_ts": queued, "pred_s": hist.predict(text, str(cwd)),
-            "noyield": noyield}
-    call = _Call(meta["id"], phase, text, str(cwd), buildclass.HEAVY)
+            "noyield": noyield, "repo": names[0] if names else None, "repos": names,
+            "alone": alone}
+    call = _Call(meta["id"], phase, text, str(cwd), buildclass.HEAVY, meta["repo"])
     ticket = _enqueue(cfg, meta)
-    call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued)
+    call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued, alone=bool(alone),
+             why=alone)
     claim = _wait_turn(cfg, ticket, hist, announce=False)
     start = time.time()
     rec = _record(ticket.meta, os.getpid(), start, claim)
     _write_record(claim.seat_fd, rec)
     _write_record(claim.slot_fd, rec)
     call.log(cfg, "start", pid=os.getpid(), slot=claim.slot, wait_s=start - queued,
-             hold=False)
+             hold=False, alone=bool(alone), why=alone)
     try:
         yield held
     finally:

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from .buildclass import ALONE_DEFAULT
 from .tmux import AUTO_LAYOUT, LAYOUTS, normalize_layout
 
 
@@ -60,6 +61,21 @@ OPERATOR_NOTIFY_DEFAULT = "attention"
 #: ping the swarm has.
 PINGS = ("necessary", "all")
 PINGS_DEFAULT = "necessary"
+
+
+#: ``[build].pair``: which heavy builds may run side by side (see ``buildpair``).
+BUILD_PAIR_ANY = "any"
+BUILD_PAIR_DISTINCT = "distinct-repo"
+BUILD_PAIR = (BUILD_PAIR_ANY, BUILD_PAIR_DISTINCT)
+
+
+def _build_pair(value: object) -> str:
+    """``[build].pair``. Anything that is not ``any`` is ``distinct-repo``: a
+    typo read as ``any`` would quietly drop rules the owner believes are in
+    force, and a load error would do the same in a worker, whose ``swarm build``
+    then reads its own directory's file instead. The strict side only waits."""
+    mode = str(value or "").strip().lower().replace("_", "-")
+    return BUILD_PAIR_ANY if mode in (BUILD_PAIR_ANY, "") else BUILD_PAIR_DISTINCT
 
 
 #: ``[usage].rules``: which window, at what percentage, does what.
@@ -444,6 +460,18 @@ class Config:
         "build", "idle_yield_max", 2, HOT, env="SWARM_BUILD_IDLE_YIELD_MAX", minimum=0,
         doc="most idle holders set aside at once",
         why="every waiting `swarm build` reads it when it measures the holders")
+    # "any" by default: a pairing rule only ever makes a build wait, and a
+    # project that never asked for one keeps the gate it has.
+    build_pair: str = _k(
+        "build", "pair", BUILD_PAIR_ANY, HOT, env="SWARM_BUILD_PAIR", choices=BUILD_PAIR,
+        parse=_build_pair,
+        doc="which builds may run side by side",
+        why="every `swarm build` call reads it when it joins the queue; a waiter"
+            " keeps the value it queued with")
+    build_alone: list[str] = _k(
+        "build", "alone", list(ALONE_DEFAULT), HOT, env="SWARM_BUILD_ALONE",
+        doc="commands no build runs beside (pair on)",
+        why="every `swarm build` call reads it before classifying its command")
 
     # -- [gc] -------------------------------------------------------------
     # Nothing else prunes the build caches. Every 15 minutes, because a busy run

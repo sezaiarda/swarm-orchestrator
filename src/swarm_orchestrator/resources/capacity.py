@@ -154,7 +154,7 @@ def scenario(name: str, builds: int, workers: int, jobs: int | None, b: dict, s:
 
 
 def analyse(build_rows: list[dict], history: list[dict], host: dict, max_concurrent: int,
-            jobs: int, max_workers: int) -> dict:
+            jobs: int, max_workers: int, pair: str = "any") -> dict:
     b = build_stats(build_rows)
     s = session_stats(history)
     jobs_seen = b["jobs"] or (jobs or None)
@@ -183,6 +183,11 @@ def analyse(build_rows: list[dict], history: list[dict], host: dict, max_concurr
         notes.append(f"IO pressure during builds is high (p95 of per-build max:"
                      f" {b['psi_io_full_p95']:.1f}% full): a second concurrent build would"
                      " queue on the disk, not the CPU")
+    if pair != "any":
+        notes.append(f"[build].pair = {pair}: two builds run at once only in different"
+                     " repos, and an image build runs alone, so \"2 builds\" is the most"
+                     " that work at once, not the usual")
     return {"builds": b, "sessions": s, "host": host, "scenarios": scenarios, "notes": notes,
-            "config": {"max_concurrent": max_concurrent, "jobs": jobs, "max_workers": max_workers},
+            "config": {"max_concurrent": max_concurrent, "jobs": jobs, "max_workers": max_workers,
+                       "pair": pair},
             "mem_budget": MEM_BUDGET}

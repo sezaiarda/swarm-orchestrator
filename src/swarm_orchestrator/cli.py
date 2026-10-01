@@ -2574,7 +2574,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "The exit code is the command's (124 on --timeout).\n\n"
             "A build whose whole process tree does nothing for [build].idle_yield_s is set\n"
             "aside: it keeps running, but the next build starts beside it. It is told so\n"
-            "on stderr, then and when it ends. --hold keeps the slot regardless."),
+            "on stderr, then and when it ends. --hold keeps the slot regardless.\n\n"
+            "With [build].pair = \"distinct-repo\" two builds in one repository never run\n"
+            "at once, and an image build ([build].alone), a --hold or a build outside any\n"
+            "git checkout runs with no build beside it. --status says why a build waits."),
         epilog=(
             "several steps in one turn:\n"
             "  swarm build -- sh -c 'cargo clippy -- -D warnings && cargo nextest run'\n"

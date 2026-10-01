@@ -205,11 +205,24 @@ check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
 | `overtake` | `2` | `SWARM_BUILD_OVERTAKE` | hot | How many short builds may go ahead of one long build that is waiting. `0` is plain first-come, first-served. |
 | `idle_yield_s` | `150` | `SWARM_BUILD_IDLE_YIELD_S` | hot | A build that holds a slot while its whole process tree does nothing (under 5% of a core and next to no disk IO) for this long is set aside: it keeps running, but stops counting against `max_concurrent`, so the next waiting build starts beside it. If it starts working again it counts again. Commands whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield, nor does one started with `swarm build --hold`. `0` turns this off. |
 | `idle_yield_max` | `2` | `SWARM_BUILD_IDLE_YIELD_MAX` | hot | The most idle holders set aside at once; a further idle holder keeps its slot and the queue waits, as it would with `idle_yield_s = 0`. The builds alive at one time never exceed `max_concurrent` plus this. `0` also turns idle yield off. |
+| `pair` | `"any"` | `SWARM_BUILD_PAIR` | hot | Which builds may run side by side. `"any"`: whatever fits in `max_concurrent`. `"distinct-repo"`: a build starts only if no build alive is in the same repository, and a build that must run alone (`alone` below, `swarm build --hold`, a build in no git checkout) starts only when no build is alive and keeps the gate to itself. Any other value is read as `"distinct-repo"`. |
+| `alone` | `["docker", "docker-compose", "docker-buildx", "podman", "podman-compose", "buildah", "nerdctl", "buildctl"]` | `SWARM_BUILD_ALONE` | hot | Under `pair = "distinct-repo"`: command patterns (as for `heavy`) that run with no other build beside them, where the command is heavy. The default is the image-build family: `docker build`, `buildx bake`, `compose build`/`up`, `run`, but not `docker ps` or `bake --print`. A build that turns out to run one of them (a script that could not be read) is alone from that moment. `[]` leaves only the repo rule. |
 
 `jobs` and `max_concurrent` describe the machine the swarm runs on. Derive them
 from that host's cores and memory (roughly: one build's peak memory times
 `max_concurrent` must fit with room to spare, and `jobs` times `max_concurrent`
 should not exceed the cores); never copy them from another machine's file.
+
+`pair = "distinct-repo"` is for a machine where two builds are fine but not any
+two: the disk, not the cores, is what builds strain. It only ever makes a build
+wait. A waiter the rules hold back is passed by one they allow, out of the
+`overtake` budget (each waiter at most `overtake` times, for whatever reason),
+and a build that must run alone is never passed once it is the oldest waiter;
+`swarm build --status` says why each waiter waits. The rules count every build
+alive, also one set aside as idle: it keeps its repo, and a build that runs
+alone waits for it to end. A `swarm build` already queued keeps the value it
+queued with. How a repo is told, what "alone" covers and what a script can
+hide: [components.md](components.md#build-gate-swarm-build).
 
 `idle_yield_s` trades waiting for overlap. A set-aside build that wakes up runs
 beside whatever started in its place until one of them ends, so for that time

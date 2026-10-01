@@ -36,6 +36,8 @@ session = "swarm"
 # as e.g. `swarm build cargo nextest run` (see the prime command / init master).
 max_concurrent = 2    # at most this many heavy builds run at once; the rest wait (FIFO-ish)
 jobs           = 6    # CARGO_BUILD_JOBS cap so ONE build can't grab every core
+# pair         = "distinct-repo"  # two builds at once only in different repos, and an
+#                                 # image build (`alone`) with no build beside it
 cache          = true # symlink each worktree's cargo `target/` to a shared per-repo
                       # cache so only *changed* crates recompile across worktrees
 

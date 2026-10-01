@@ -42,6 +42,17 @@ exist for the command to have any chance (the executable, a ``cd`` target, a
 before the command is queued, so a typo fails in a second instead of after the
 queue. A requirement is only recorded while nothing earlier in the command
 could have created it (a ``mkdir`` or a build step ends that stretch).
+
+The same reading answers one more question for the gate's pairing rules
+(:mod:`buildpair`): must this command **run alone**? ``[build].alone`` patterns
+(by default the container clients, :data:`ALONE_DEFAULT`) are matched against
+every simple command the walk meets, and count where that command is heavy
+(``docker build`` yes, ``docker ps`` no). A script that is there but could not
+be read to the end (``$(…)``, a heredoc, a function, python that starts
+processes) is searched for those programs' names instead: naming one is enough.
+What cannot be seen at all (a binary, ``make``, a script that is not there yet)
+is left to the gate, which watches the running build's processes
+(:func:`proc_alone`).
 """
 
 from __future__ import annotations
@@ -96,6 +107,11 @@ DAEMON_CLIENTS = frozenset("""
     sccache bazel bazelisk buck buck2 pants gradle gradlew mvnd nix nix-build nix-shell
     distcc icecc dmypy systemd-run
 """.split())
+
+#: ``[build].alone`` by default: the programs that build and run images. Their
+#: work is done by a daemon the gate cannot see, straight onto the disk.
+ALONE_DEFAULT = ("docker", "docker-compose", "docker-buildx", "podman", "podman-compose",
+                 "buildah", "nerdctl", "buildctl")
 
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 # Once any other step has run, a later path may have been created by it.
@@ -189,6 +205,7 @@ class Verdict:
     why: str
     steps: list[Step] = field(default_factory=list)
     reqs: list[Req] = field(default_factory=list)
+    alone: str | None = None  # why it must run alone ([build].alone), if it must
 
     @property
     def heavy_steps(self) -> list[Step]:
@@ -208,6 +225,32 @@ def _pattern_hit(patterns: list[str], toks: list[str]) -> bool:
         if first and all(fnmatch.fnmatchcase(t, w) for t, w in zip(toks[1:], words[1:])):
             return True
     return False
+
+
+def _label(toks: list[str]) -> str:
+    """``docker build``, ``docker buildx bake``: the program and its subcommands."""
+    words = [os.path.basename(toks[0])]
+    for t in toks[1:3]:
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", t):
+            break
+        words.append(t)
+    return " ".join(words)[:40]
+
+
+def _names_re(patterns: list[str]) -> re.Pattern | None:
+    """Matches the program a pattern starts with, as a word of its own."""
+    names = set()
+    for pat in patterns:
+        try:
+            first = os.path.basename(shlex.split(pat)[0])
+        except (ValueError, IndexError):
+            continue
+        if first and not any(c in first for c in "*?["):
+            names.add(first)
+    if not names:
+        return None
+    alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(rf"(?<![\w.-])(?:{alt})(?![\w.-])")
 
 
 def _only_version(args: list[str]) -> bool:
@@ -257,9 +300,13 @@ _PY_LIGHT_MODULES = frozenset({"json.tool", "py_compile", "tomllib", "this", "si
 class _Walk:
     """One classification: walks the command, collecting steps and requirements."""
 
-    def __init__(self, heavy: list[str], light: list[str], path: str | None):
+    def __init__(self, heavy: list[str], light: list[str], path: str | None,
+                 alone: list[str] | None = None):
         self.heavy_pats = heavy
         self.light_pats = light
+        self.alone_pats = list(alone or [])
+        self.alone_names = _names_re(self.alone_pats)
+        self.alone: str | None = None
         self.path = path if path is not None else os.environ.get("PATH", os.defpath)
         self.steps: list[Step] = []
         self.reqs: list[Req] = []
@@ -294,6 +341,14 @@ class _Walk:
         if not toks:
             self.steps.append(Step(["export"], LIGHT, "variable assignment"))
             return LIGHT, "variable assignment", cwd
+        res = self._cmd(toks, cwd, depth, top)
+        if (res[0] == HEAVY and self.alone is None and self.alone_pats
+                and _pattern_hit(self.alone_pats, toks)):
+            self.alone = f"`{_label(toks)}` is in [build].alone"
+        return res
+
+    def _cmd(self, toks: list[str], cwd: Path | None, depth: int,
+             top: bool) -> tuple[str, str, Path | None]:
         if _pattern_hit(self.heavy_pats, toks):
             return self._leaf(toks, HEAVY, "matches [build].heavy", cwd)
         if _pattern_hit(self.light_pats, toks):
@@ -301,6 +356,7 @@ class _Walk:
         name = os.path.basename(toks[0])
         args = toks[1:]
         if toks[0].startswith("$") or "$(" in toks[0] or "`" in toks[0]:
+            self.sniff(" ".join(toks))
             return self._leaf(toks, HEAVY, "the program comes from a variable", cwd)
         self.need_exe(toks[0], cwd, top)
         if name in ("cd", "pushd"):
@@ -324,6 +380,8 @@ class _Walk:
         if name in LIGHT_NAMES:
             return self._leaf(toks, LIGHT, f"{name} does not compile", cwd)
         if name in HEAVY_NAMES:
+            if name == "eval":
+                self.sniff(" ".join(args))
             return self._leaf(toks, HEAVY, f"{name} is build/test work", cwd)
         return self._program(toks, cwd, depth)
 
@@ -331,6 +389,18 @@ class _Walk:
               cwd: Path | None) -> tuple[str, str, Path | None]:
         self.steps.append(Step(list(toks), cls, why))
         return cls, why, cwd
+
+    def sniff(self, text: str) -> None:
+        """``text`` is code that will run but was not read command by command:
+        if it names a program that runs alone, so does the whole command."""
+        if self.alone is None and self.alone_names is not None:
+            m = self.alone_names.search(text)
+            if m:
+                self.alone = f"it names `{m.group(0)}` in code that could not be read"
+
+    def _unread(self, text: str, why: str, cwd: Path | None) -> tuple[str, str, Path | None]:
+        self.sniff(_strip_comments(text))
+        return self._leaf([text[:80]], HEAVY, why, cwd)
 
     def _cd(self, toks: list[str], cwd: Path | None) -> tuple[str, str, Path | None]:
         args = [a for a in toks[1:] if a not in ("-L", "-P", "-e", "--")]
@@ -510,11 +580,11 @@ class _Walk:
     def _script(self, text: str, cwd: Path | None,
                 depth: int) -> tuple[str, str, Path | None]:
         if depth > _MAX_DEPTH:
-            return self._leaf([text[:80]], HEAVY, "scripts nested too deep", cwd)
+            return self._unread(text, "scripts nested too deep", cwd)
         if "$(" in text or "`" in text:
-            return self._leaf([text[:80]], HEAVY, "command substitution is not read", cwd)
+            return self._unread(text, "command substitution is not read", cwd)
         if "<<" in text.replace("<<<", ""):
-            return self._leaf([text[:80]], HEAVY, "heredoc is not read", cwd)
+            return self._unread(text, "heredoc is not read", cwd)
         lex = shlex.shlex(_strip_comments(text).replace("\\\n", " "), posix=True,
                           punctuation_chars="();<>|&\n")
         lex.whitespace = " \t\r"
@@ -523,7 +593,7 @@ class _Walk:
         try:
             toks = [p for t in lex for p in _split_ops(t)]
         except ValueError:
-            return self._leaf([text[:80]], HEAVY, "unparseable shell", cwd)
+            return self._unread(text, "unparseable shell", cwd)
         steps: list[list[str]] = [[]]
         pending_redirect = False
         for t in toks:
@@ -540,7 +610,7 @@ class _Walk:
                 continue
             if t == "(" and any(w != "\0(" for w in steps[-1]):
                 # `name ( )` is a function definition, `x=(a b)` an array: not read
-                return self._leaf([text[:80]], HEAVY, "shell functions/arrays are not read", cwd)
+                return self._unread(text, "shell functions/arrays are not read", cwd)
             steps[-1].append("\0" + t if t in ("(", ")") else t)
         worst: tuple[str, str] = (LIGHT, "every command in the script is light")
         stack: list[Path | None] = []
@@ -552,6 +622,7 @@ class _Walk:
             if words and not (len(words) == 1 and words[0] in _KEYWORDS_ALONE) and \
                     words[0] not in ("for", "select"):
                 if words[0] in ("case", "function", "coproc", "eval"):
+                    self.sniff(_strip_comments(text))
                     return self._leaf(words, HEAVY, f"`{words[0]}` is not read", cwd)
                 seen = len(self.steps)
                 cls, why, cwd = self.cmd(words, cwd, depth)
@@ -589,15 +660,17 @@ class _Walk:
             cls, why, _ = self._script(text, cwd, depth + 1)
             return self._leaf(toks, cls, f"{os.path.basename(name)}: {why}", cwd)
         if interp and (interp[0].startswith("python") or interp[:2] == ["uv", "run"]):
-            cls, why = _py_text(text)
+            cls, why = _py_text(text, self)
             return self._leaf(toks, cls, f"{os.path.basename(name)}: {why}", cwd)
         return self._leaf(toks, HEAVY, f"{os.path.basename(name)} is not a known light"
                           " command", cwd)
 
 
-def _py_text(text: str) -> tuple[str, str]:
+def _py_text(text: str, w: "_Walk | None" = None) -> tuple[str, str]:
     m = _PY_HEAVY.search(text)
     if m:
+        if w is not None:  # it starts processes nobody here can follow
+            w.sniff(text)
         return HEAVY, f"python code uses {m.group(1)}"
     return LIGHT, "python code that starts no processes"
 
@@ -615,7 +688,7 @@ def _python(w: _Walk, args: list[str], cwd: Path | None, depth: int) -> tuple[st
                 return LIGHT, f"python -m {mod}"
             return HEAVY, f"python -m {mod or '?'} is not a known light module"
         elif a == "-c":
-            return _py_text(args[i + 1] if i + 1 < len(args) else "")
+            return _py_text(args[i + 1] if i + 1 < len(args) else "", w)
         elif a.startswith("-") and a != "-":
             i += 1
         else:
@@ -631,7 +704,7 @@ def _python(w: _Walk, args: list[str], cwd: Path | None, depth: int) -> tuple[st
     text = _read_text(path)
     if text is None:
         return HEAVY, f"cannot read {args[i]}"
-    return _py_text(text)
+    return _py_text(text, w)
 
 
 def _cargo(w: _Walk, args: list[str], cwd: Path | None, depth: int) -> tuple[str, str]:
@@ -928,13 +1001,35 @@ _TOOLS = {
 
 
 def classify(argv: list[str], cwd: str | Path | None, heavy: list[str] | None = None,
-             light: list[str] | None = None, path: str | None = None) -> Verdict:
+             light: list[str] | None = None, path: str | None = None,
+             alone: list[str] | None = None) -> Verdict:
     """Classify ``argv`` (run in ``cwd``) as heavy or light, with its pre-flight
-    requirements. ``heavy``/``light`` are the ``[build]`` patterns."""
-    walk = _Walk(list(heavy or []), list(light or []), path)
+    requirements. ``heavy``/``light``/``alone`` are the ``[build]`` patterns;
+    ``Verdict.alone`` says why a heavy command must run alone, if it must."""
+    walk = _Walk(list(heavy or []), list(light or []), path, alone)
     base = Path(cwd) if cwd is not None else None
     cls, why = walk.argv(list(argv), base)
-    return Verdict(cls, why, walk.steps, walk.reqs)
+    return Verdict(cls, why, walk.steps, walk.reqs, walk.alone if cls == HEAVY else None)
+
+
+def proc_alone(argv: list[str], cwd: str | None, alone: list[str]) -> str | None:
+    """Is this *running process* one that must run alone? Its short name
+    (``docker buildx bake``) if so. ``argv`` is its ``/proc/<pid>/cmdline``:
+    what a script really started, whatever its text said. A docker CLI plugin
+    runs as ``docker-compose compose …``; it is read as the ``docker compose …``
+    it is."""
+    if not argv or not argv[0]:
+        return None
+    name = os.path.basename(argv[0])
+    if name.startswith("docker-") and argv[1:2] == [name[len("docker-"):]]:
+        argv = ["docker", *argv[1:]]
+    if not _pattern_hit(alone, argv):
+        return None
+    try:
+        verdict = classify(argv, cwd, alone=alone, path="")
+    except Exception:  # noqa: BLE001 -- unreadable: it is one of them, and running
+        return _label(argv)
+    return _label(argv) if verdict.alone else None
 
 
 def preflight(verdict: Verdict, path: str | None = None) -> str | None:

@@ -286,7 +286,8 @@ def capacity_payload(cfg, now: float, days: float = CAPACITY_DAYS) -> dict:
     snap = store.read_now(cfg.state_dir)
     static = (snap or {}).get("static") or host.static()
     out = capacity.analyse(store.builds(cfg.state_dir, since), Rows(cfg.state_dir, since),
-                           static, cfg.build_max_concurrent, cfg.build_jobs, cfg.max_workers)
+                           static, cfg.build_max_concurrent, cfg.build_jobs, cfg.max_workers,
+                           cfg.build_pair)
     out = dict(out)
     out.update(days=days, asof=round(now), min_builds=capacity.MIN_BUILDS,
                min_worker_h=capacity.MIN_WORKER_H)

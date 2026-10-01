@@ -4,7 +4,8 @@
 is a contract other tools read. Every line has exactly these keys::
 
     {"ts": <unix float>,
-     "event": "queued"|"start"|"end"|"bypass"|"preflight_fail"|"yield"|"unyield",
+     "event": "queued"|"start"|"end"|"bypass"|"preflight_fail"|"yield"|"unyield"
+              |"passed"|"alone",
      "id": "<one per swarm build call>", "phase": <$SWARM_PHASE or null>,
      "pid": <int>, "slot": <int or null>, "cls": "heavy"|"light",
      "argv": "<command, at most 300 chars>", "cwd": "<path>",
@@ -12,7 +13,10 @@ is a contract other tools read. Every line has exactly these keys::
      "run_s": <float on end, yield and unyield, else null>,
      "exit": <int or null on end, else null>,
      "idle_s": <float on yield and unyield, else null>,
-     "hold": <true|false on start, else null>}
+     "hold": <true|false on start, else null>,
+     "repo": "<the build's repo>" or null,
+     "alone": <true|false on queued and start, else null>,
+     "why": "<a few words>" or null, "by": "<build id>" or null}
 
 - ``queued``: a heavy command joined the queue. ``pid`` is the waiting
   ``swarm build`` process (the build does not exist yet).
@@ -37,6 +41,21 @@ is a contract other tools read. Every line has exactly these keys::
 - ``unyield``: a set-aside build is working again and counts again; ``idle_s``
   is how long it was set aside. A build that ends while set aside gets no
   ``unyield``: its ``end`` closes the stretch.
+
+- ``passed``: under ``[build].pair`` a pairing rule held this waiter back and
+  a younger one started ahead of it: ``id``, ``pid`` and ``argv`` are the
+  waiter's, ``why`` the rule ("same repo as slot 0 (lib)"), ``by`` the ``id``
+  of the build that started. A waiter is passed at most ``[build].overtake``
+  times.
+- ``alone``: a running build was found to hold a command that runs alone (an
+  image build a script started): from now on nothing starts beside it. Same
+  ``id``, ``pid`` and ``slot`` as its ``start``; ``why`` says what was seen.
+
+``repo`` is the repository a queued build works in, by the swarm's name for it
+(its path in the project, ``.`` for the project's own; see :mod:`buildpair`),
+on every event of that build; null when it has none, and for a light command.
+``alone`` says whether the pairing rules made it run with no build beside it
+(always false under ``[build].pair = "any"``), and ``why`` then says why.
 
 A ``queued`` with no ``start`` for the same ``id`` gave up (killed) while
 waiting. A ``start`` with no ``end`` whose ``pid`` is gone died unrecorded; the
@@ -81,7 +100,8 @@ def event(cfg: Config, kind: str, *, id: str, phase: str | None, pid: int,
           slot: int | None, cls: str, argv: list[str] | str, cwd: str,
           wait_s: float | None = None, run_s: float | None = None,
           exit: int | None = None, idle_s: float | None = None,
-          hold: bool | None = None, ts: float | None = None) -> None:
+          hold: bool | None = None, repo: str | None = None, alone: bool | None = None,
+          why: str | None = None, by: str | None = None, ts: float | None = None) -> None:
     """Append one event line. Never raises: the log must not break a build."""
     rec = {
         "ts": round(ts if ts is not None else time.time(), 3), "event": kind, "id": id,
@@ -91,7 +111,7 @@ def event(cfg: Config, kind: str, *, id: str, phase: str | None, pid: int,
         "run_s": round(run_s, 3) if run_s is not None else None,
         "exit": exit,
         "idle_s": round(idle_s, 3) if idle_s is not None else None,
-        "hold": hold,
+        "hold": hold, "repo": repo, "alone": alone, "why": why, "by": by,
     }
     line = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
     path = events_path(cfg)

@@ -188,7 +188,7 @@ def collect(cfg: Config, hours: float = 24.0, days: float = 30.0, now: float | N
     build_rows = store.builds(cfg.state_dir, now - days * 86400)
     static = (snap or {}).get("static") or host.static()
     cap = capacity.analyse(build_rows, month, static, cfg.build_max_concurrent,
-                           cfg.build_jobs, cfg.max_workers)
+                           cfg.build_jobs, cfg.max_workers, cfg.build_pair)
     worst = sorted(build_rows, key=lambda r: -(r.get("peak_anon_mb") or 0))[:10]
     aside = sorted((r for r in build_rows if r.get("yielded_s")),
                    key=lambda r: -r["yielded_s"])

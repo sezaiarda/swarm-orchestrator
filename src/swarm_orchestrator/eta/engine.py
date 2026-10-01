@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .. import ledger as ledger_mod
+from .. import ledgerw
 from .. import logutil
 from .. import pace as pace_mod
 from .. import usage as usage_mod
@@ -83,7 +84,8 @@ class Inputs:
     #: The ledger's text, and :func:`ledger.parse` of it.
     text: str
     graph: dict[str, set[str]]
-    #: The launcher's done view (:func:`ledger.with_ticked`).
+    #: The launcher's done view (:func:`ledger.with_ticked`), without the
+    #: record of a row that waits for its date (:func:`ledgerw.not_failed`).
     landed: dict[str, str]
     #: The swarm's state (:class:`state.State`).
     state: object
@@ -103,17 +105,25 @@ class Inputs:
     rules: tuple = ()
     #: This machine's logged forecasts (:func:`calibrate.load`), oldest first.
     forecasts: tuple = ()
+    #: The rows that wait for a date (:func:`ledgerw.dated`); ``None`` when only
+    #: the ledger's text was given, and its own ``after:`` dates are all there is.
+    dated: dict[str, str] | None = None
 
 
 def gather(cfg, state, *, events, history, ledger_history, usage, text: str | None = None,
            now: float | None = None) -> Inputs:
     """:class:`Inputs` from a config, the state and what the caller has read."""
     now = time.time() if now is None else now
+    dated = None
     if text is None:
         try:
             text = (Path(cfg.project_dir) / cfg.ledger).read_text(encoding="utf-8")
         except OSError:
             text = ""
+        try:
+            dated = ledgerw.dated(cfg)
+        except OSError:
+            dated = None  # the ledger's own dates, from the text
     graph = ledger_mod.parse(text)
     flying = ({s.phase for s in state.busy_slots() if s.phase} | set(state.parked)
               | set(state.waiting))
@@ -123,7 +133,8 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
             started[ev.phase] = ev.ts
     return Inputs(
         now=now, text=text, graph=graph,
-        landed=ledger_mod.with_ticked(state.done, ledger_mod.ticked(text), flying),
+        landed=ledger_mod.with_ticked(ledgerw.not_failed(state.done, dated or {}),
+                                      ledger_mod.ticked(text), flying),
         state=state, started=started, history=list(history or ()), events=list(events or ()),
         ledger_history=ledger_history, usage=list(usage or ()),
         exclude=frozenset(getattr(cfg, "exclude", None) or ()),
@@ -133,6 +144,7 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
         rules=tuple(getattr(cfg, "usage_rules", ()) or ()) if getattr(cfg, "usage_enabled",
                                                                       False) else (),
         forecasts=tuple(calibrate_mod.load(calibrate_mod.log_path(cfg))),
+        dated=dated,
     )
 
 
@@ -158,7 +170,7 @@ def plan_of(inputs: Inputs) -> plan_mod.Plan:
         inputs.graph, inputs.text, inputs.landed, now=inputs.now, busy=busy,
         asking=set(st.parked) | set(st.waiting), merging=st.integrating(),
         excluded=set(inputs.exclude), workers=inputs.workers,
-        build_slots=inputs.build_slots, park_after=inputs.park_after)
+        build_slots=inputs.build_slots, park_after=inputs.park_after, dated=inputs.dated)
 
 
 @dataclass(frozen=True)

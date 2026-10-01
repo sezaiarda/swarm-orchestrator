@@ -92,7 +92,7 @@ def test_retry_without_a_supervisor_names_real_commands(cfg, capsys):
 def test_doctor_points_a_failed_phase_at_retry(cfg):
     from swarm_orchestrator import doctor
 
-    check = doctor._check_failed(state_mod.read(cfg))
+    check = doctor._check_failed(cfg, state_mod.read(cfg))
     assert check.fix_hint.startswith("swarm retry a-P2")
 
 

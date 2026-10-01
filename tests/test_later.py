@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import cli, gitq, ledgerw, ovdigest
+from swarm_orchestrator import cli, doctor, gitq, ledgerw, ovdigest
 from swarm_orchestrator import launch as launch_mod
 from swarm_orchestrator import master as master_mod
 from swarm_orchestrator import overseer as ov
@@ -28,7 +28,12 @@ from swarm_orchestrator import restart as restart_mod
 from swarm_orchestrator import state as state_mod
 from swarm_orchestrator import why as why_mod
 from swarm_orchestrator.config import load
+from swarm_orchestrator.eta import engine as eta_engine
+from swarm_orchestrator.eta import plan as eta_plan
 from swarm_orchestrator.supervisor import Supervisor
+from swarm_orchestrator.tui import campaign, drawer
+from swarm_orchestrator.tui.dash import Dash
+from swarm_orchestrator.web.feed import Feed
 
 LEDGER = """# Ledger
 
@@ -303,6 +308,98 @@ def test_a_later_finish_wakes_no_overseer_pass_and_a_fail_still_does(ws):
         st.mark_done("a-W3", "fail")
     sup.overseer.observe(state_mod.read(cfg))
     assert [r.key for r in sup.overseer.pending] == [f"{ov.FAIL}:a-W3"]
+
+
+# -- the dashboards and doctor read the same dates and the same done map ------
+def _reported_or_queued(cfg, sup, reported: bool) -> None:
+    if reported:
+        _build(cfg, sup)
+        _finish(cfg, sup, "a-W2", "later", FAR)
+    else:
+        _waiting_unreported(cfg)
+
+
+def _tui_counts(dash: Dash) -> campaign.Campaign:
+    """The counts the TUI's headline is drawn from (``tui.home.headline``)."""
+    snap = dash.snapshot
+    busy = {s.phase for s in snap.slots if s.busy and s.phase}
+    return campaign.overall(campaign.summarise(
+        dash.graph, snap.landed, busy, set(dash.cfg.exclude or []), dash.ticked, dash.deferred))
+
+
+@pytest.mark.parametrize("reported", [True, False])
+def test_the_tui_counts_a_later_row_as_waiting_for_its_date(ws, reported):
+    cfg, project, sup = ws
+    _reported_or_queued(cfg, sup, reported)
+    dash = Dash(cfg)
+    dash.poll()
+
+    assert dash.deferred == {"a-W2": FAR}
+    total = _tui_counts(dash)
+    assert (total.dated, total.failed, total.ready, total.blocked) == (1, 0, [], 1)
+    progress = dash.snapshot.progress
+    assert (progress.failed, progress.ready, progress.blocked) == (0, 0, 2)
+    assert [a.title for a in drawer.alerts(dash) if a.phase == "a-W2"] == []
+
+
+def test_an_open_dashboard_sees_a_later_the_moment_it_is_queued(ws):
+    """The report is not in the ledger yet, so the ledger file does not move."""
+    cfg, project, sup = ws
+    dash = Dash(cfg)
+    dash.poll()
+    assert dash.deferred == {} and _tui_counts(dash).ready == ["a-W2"]
+
+    _waiting_unreported(cfg)
+    assert "ledger" in dash.poll()
+    total = _tui_counts(dash)
+    assert dash.deferred == {"a-W2": FAR} and (total.dated, total.failed) == (1, 0)
+
+
+def test_the_counts_never_call_a_row_that_waits_for_its_date_failed():
+    graph = {"a-W1": set(), "a-W2": {"a-W1"}, "a-W3": {"a-W1"}}
+    done = {"a-W1": "ok", "a-W2": "fail", "a-W3": "fail"}
+    (a,) = campaign.summarise(graph, done, deferred={"a-W2": FAR})
+    assert (a.dated, a.failed) == (1, 1)  # a-W3 has no date: it failed
+
+
+@pytest.mark.parametrize("reported", [True, False])
+def test_the_web_board_places_a_later_row_under_its_date(ws, reported):
+    cfg, project, sup = ws
+    _reported_or_queued(cfg, sup, reported)
+    feed = Feed(cfg)
+    feed.refresh(force=True)
+    cards = {c["id"]: c for col in feed.board["columns"] for c in col["cards"]}
+
+    assert (cards["a-W2"]["col"], cards["a-W2"]["sub"]) == ("blocked", f"waits until {FAR}")
+    behind = cards["a-W3"]
+    assert (behind["col"], behind["root"], behind["root_kind"]) == ("blocked", "a-W2", "dated")
+    assert behind["root_sub"] == f"which waits until {FAR}"
+
+
+@pytest.mark.parametrize("reported", [True, False])
+def test_the_forecast_starts_a_later_row_on_its_date_and_never_calls_it_failed(ws, reported):
+    cfg, project, sup = ws
+    _reported_or_queued(cfg, sup, reported)
+
+    plan = eta_engine.plan_of(eta_engine.from_files(cfg, state_mod.read(cfg)))
+    assert plan.stuck == () and plan.gates == {"a-W2": eta_plan.day_start(FAR)}
+    assert set(plan.rows) == {"a-W2", "a-W3"}  # both are forecast, behind the date
+
+
+def test_doctor_does_not_call_a_later_the_ledger_has_not_taken_yet_failed(ws, monkeypatch):
+    cfg, project, sup = ws
+    monkeypatch.setattr(doctor, "_dir_size", lambda path: 0)
+    _waiting_unreported(cfg)
+
+    def failed() -> doctor.Check:
+        return next(c for c in doctor.run_checks(cfg) if c.name == "phases.failed")
+
+    assert (failed().status, failed().detail) == (doctor.OK, "no failed phases")
+    with state_mod.transaction(cfg) as st:
+        st.mark_done("a-W3", "fail")
+    check = failed()
+    assert check.status == doctor.WARN and "['a-W3']" in check.detail
+    assert check.fix_hint.startswith("swarm retry a-W3")
 
 
 def test_on_its_date_the_row_is_ready_again_and_the_launcher_is_run(ws, monkeypatch):

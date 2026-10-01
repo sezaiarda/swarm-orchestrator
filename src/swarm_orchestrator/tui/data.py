@@ -37,6 +37,7 @@ from statistics import median
 from .. import caps
 from .. import keep as keep_mod
 from .. import ledger as ledger_mod
+from .. import ledgerw
 from .. import opqueue
 from .. import pace as pace_mod
 from .. import statuses
@@ -380,12 +381,12 @@ def load_ticked(cfg) -> set[str]:
         return set()
 
 
-def load_deferred(cfg, now: float | None = None) -> dict[str, str]:
-    """Open rows whose ``after:`` date is still ahead, as the launcher reads them
-    (today in UTC); none when the ledger is missing/unreadable."""
-    today = time.strftime("%Y-%m-%d", time.gmtime(time.time() if now is None else now))
+def load_deferred(cfg) -> dict[str, str]:
+    """Open rows that wait for a date still ahead, as the launcher reads them
+    (:func:`ledgerw.dated`: the ledger's ``after:`` dates, and a ``later`` finish
+    whose report is still queued); none when the ledger is missing/unreadable."""
     try:
-        return ledger_mod.load_deferred(Path(cfg.project_dir) / cfg.ledger, today)
+        return ledgerw.dated(cfg)
     except Exception:  # noqa: BLE001 - a broken ledger must not blank the dashboard
         return {}
 
@@ -476,7 +477,10 @@ def build_snapshot(
             )
         )
 
-    done = {k: str(v) for k, v in (state.get("done") or {}).items()}
+    # A row that waits for its date has not failed, whatever its record says
+    # until the ledger has taken its report: every panel reads this view.
+    done = ledgerw.not_failed(
+        {k: str(v) for k, v in (state.get("done") or {}).items()}, deferred or {})
     waiting = state.get("waiting") or {}
     parked = list(state.get("parked") or [])
     busy_phases = {s.phase for s in slots if s.busy and s.phase}

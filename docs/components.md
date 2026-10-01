@@ -487,10 +487,15 @@ report is held and the watchdog retries it; nothing is lost across a restart.
   status` counts it so and lists it with its date, `swarm why` says "waits
   until", the Overseer's digest lists it under "Waiting for a date" and no pass
   is woken for it. While the ledger cannot take the report (the checkout is
-  busy), the same readers and the launcher take the date from the queued report;
-  the dashboards show the record until the report lands. On the date the row is
-  ready again (`LATER-DUE`) and the launcher runs. A `later` with no date is a
-  `blocked`.
+  busy), every reader takes the date from the queued report and reads the done
+  map without the record (`ledgerw.dated`, `ledgerw.not_failed`: the one copy of
+  the rule): the launcher, `swarm status`, `swarm why`, the digest, the TUI's
+  counts and alerts, the web board, the forecast and doctor's `phases.failed`.
+  An open dashboard reads the dates again when the report queue moves, not only
+  when the ledger does. On the board the row sits in *Blocked* with "waits until
+  <date>", and a card behind it says "waits on <row>, which waits until <date>".
+  On the date the row is ready again (`LATER-DUE`) and the launcher runs. A
+  `later` with no date is a `blocked`.
 
 ## Integrator and merge-conflict resolver
 

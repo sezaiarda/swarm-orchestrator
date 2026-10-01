@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from .. import bigpic, opqueue, ovrecord
+from .. import bigpic, ledgerw, opqueue, ovrecord
 from .. import pace as pace_mod
 from .. import restart as restart_mod
 from .. import runs as runs_mod
@@ -132,7 +132,8 @@ class Dash:
         #: chart reads this, never this machine's log alone.
         self.finished: dict[str, float] = {}
         self.bulk: set[str] = set()
-        #: Open rows whose ``after:`` date is still ahead, and the UTC day it was read.
+        #: Open rows that wait for a date still ahead (:func:`ledgerw.dated`), and
+        #: the UTC day it was read.
         self.deferred: dict[str, str] = {}
         self._deferred_day = ""
         #: The forecast worker (:mod:`swarm_orchestrator.eta`); views read
@@ -283,8 +284,11 @@ class Dash:
             self.ticked = load_ticked(self.cfg)
             self.campaign_what = campaign_lines(self.cfg)
             changed.add("ledger")
+        # A `later` finish waits for its date from the moment its report is
+        # queued, which moves the queue and not the ledger.
+        queue_moved = self._changed("ledger-queue", ledgerw.queue_dir(self.cfg))
         today = time.strftime("%Y-%m-%d", time.gmtime())
-        if ledger_moved or today != self._deferred_day:
+        if ledger_moved or queue_moved or today != self._deferred_day:
             self._deferred_day = today
             self.deferred = load_deferred(self.cfg)
             changed.add("ledger")

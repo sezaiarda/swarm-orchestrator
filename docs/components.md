@@ -13,7 +13,8 @@ process that spawns or kills the overseer pane, opens the operator session, and
 drives the merge queue.
 
 **When it runs:** from `swarm up` until the run finishes, `swarm finish`, or
-`swarm down`.
+`swarm down`. `swarm restart` replaces the process and leaves the run going
+(see [Restart](#restart-swarm-restart)).
 
 **What it decides:**
 
@@ -64,6 +65,102 @@ periodic poll. On each sweep it:
 A swarm that is moving is never touched. The sweep exists because a supervisor
 that only reacts to input cannot notice a worker killed out-of-band, which never
 sends `done`.
+
+## Restart (`swarm restart`)
+
+The CLI is an editable install, so every `swarm` command runs the code on disk.
+The supervisor and the dashboard are long-running processes and run what was
+there when they started. `swarm doctor` warns when the supervisor is older than
+the installed code (`restart`), and `swarm restart` is what loads it.
+
+The request is one record, `<state>/restart.json`: an id, the kind, when it
+happens, who asked (the session the command ran in, from its `SWARM_SESSION_ID`
+or phase marker, else `owner terminal`), and how far it has got. It is kept out
+of `state.json` because a supervisor on older code rewrites that file without
+the keys it does not know. `status`, `doctor`, the dashboard and the board read
+it, and every step is a `RESTART-*` line in the supervisor log.
+
+**In place (the default).** Only the supervisor process is replaced, then the
+dashboard, the web board and the Telegram listener are started again. The tmux
+session, the worker panes, parked sessions, the operator, the master pane and
+the owner console are not touched, and nothing is drained.
+
+1. `swarm _restart-run` starts, detached from every session, and opens the
+   control FIFO itself. A pipe keeps what is written to it while anything has it
+   open, so a `swarm done`, `swarm waiting` or `swarm resolved` sent while no
+   supervisor is reading waits in the pipe instead of being dropped.
+2. It sends `handover <id>`. The supervisor launches nothing new and hands over
+   at the next safe point: no launch thread, Overseer or big-picture session
+   start, clean-up or backup push under way. A merge is never interrupted: it
+   runs inside one event, and the request is read between events. Until then
+   `status` says what it waits for. After 15 minutes without a safe point the
+   restart is given up, the supervisor carries on, and you are told.
+3. The supervisor writes what it held only in memory to `handover.json` (failed
+   launches and their back-offs, crash counts, ping cooldowns, the backup
+   clock), puts any event it had read and not handled back into the pipe, and
+   exits without ending the session in the master pane, the operator's session
+   or a big-picture pass.
+4. A new supervisor starts with `--adopt`, in the old one's environment (read
+   from `/proc`, so every `SWARM_*` override still applies). It does not rebuild
+   state. It takes the slots, panes, `waiting` and `parked` as recorded; gives a
+   slot back the pane tmux tags as its own if the state names one that is gone;
+   moves from the old supervisor's settings (`config.json`) to the file's the
+   way `swarm reload` does, so a changed worker count adds or retires slots and
+   restart-class settings stay held;
+   picks up the pass in the master pane and the operator's lease; frees a slot
+   that is claimed with no worker in it; acts on a `done` sentinel whose poke
+   nobody read (after `done_grace_s`, and only one written since the phase was
+   last claimed: an older one is from an earlier attempt); drops a `shutdown`
+   or `handover` left in the pipe for the supervisor before it; then pumps the
+   merge queue and fills free slots. Park deadlines, a scheduled pause, the Overseer's deadline and
+   usage holds are timestamps in the state, so they carry over unchanged.
+5. If no supervisor comes up (two attempts), you are telegrammed that the swarm
+   is unsupervised and that `swarm restart` brings it back. Sessions are still
+   running at that point; nothing was closed.
+
+**A supervisor that predates the command** knows no `handover`. It is told to
+`shutdown` instead, which on its way out ends whatever runs in the master pane
+and the operator window and cuts its own launch threads off. So the restart
+first pauses launching, waits until none of those is running (an init or
+Overseer pass, an operator job in the operator window, a launch in flight, read
+from the log), then stops it, starts the adopting supervisor and lifts the
+pause. Workers and parked sessions are untouched, as above. A big-picture pass
+in flight is ended and runs again later.
+
+**With no supervisor running** (it crashed, or was killed) `swarm restart`
+starts one that adopts the run as it stands. `swarm down && swarm up` rebuilds
+the run instead and closes every parked session.
+
+**Scheduled** (`--in`, `--at`). The supervisor fires it: the plan's time is one
+of its wake-ups, and when it is due it starts `swarm _restart-run`. If that
+helper dies without settling the plan (the new code does not import, say), the
+supervisor is still running and tells you. A supervisor that predates the
+command cannot fire it, so the helper is started at once and sleeps until the
+time. `swarm up` and `swarm down` cancel a planned restart: the code on disk
+loads anyway.
+
+**Full (`--full`).** A drain (`State.drain`, with `restart` and `questions`
+set), then `swarm _drain-down` runs `swarm down` and `swarm up` instead of the
+after-command. A session waiting on you would die with the tmux session, so:
+
+| | what happens to a session that waits on you |
+|---|---|
+| default | The restart is refused, naming each one and its question. |
+| `--wait-questions` | The drain waits for them too (`N questions` in `status`). |
+| `--keep-questions` | Each is carried across alive. |
+| `--force` | Closed with the session. Its work is kept (`swarm up` sets it aside). |
+
+Carrying one across: once the drain is over the supervisor parks every session
+that asked and is still in its home pane; the windows are moved to a holding
+tmux session (`<session>-kept`), recorded in `kept-sessions.json`; `swarm down`
+spares the processes that carry those sessions' markers; `swarm up` leaves their
+mirrors alone (no set-aside, no merge), keeps an operator job's item `waiting`,
+and before the supervisor starts moves the windows into the new session and
+puts the keys back in `parked` with their lanes. The process is never ended, so
+the question is still on screen. `claude --resume` is not used for this: a
+resumed session does not show the question it had open. If the swarm does not
+come back up, the kept sessions stay in the holding session and the next
+`swarm up` brings them back.
 
 ## Workers
 

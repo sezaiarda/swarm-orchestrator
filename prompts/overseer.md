@@ -127,7 +127,9 @@ Prefer the step you can undo.
   with the answer, which is recorded in the run's history as the owner's decision.
   Ask only what is genuinely theirs; decide everything else yourself.
 
-Do not run `swarm done`, `swarm up`, `swarm down` or `swarm finish`.
+Do not run `swarm done`, `swarm up`, `swarm down` or `swarm finish`. If the
+swarm itself must load new code, `swarm restart` is the one way: it replaces
+only the supervisor and the dashboard, and closes no session.
 
 **Messaging the owner: `swarm notify` is the only door.** It is the swarm's own
 bot and logs every send. Use it even when a brief, a ledger row, a recap or a

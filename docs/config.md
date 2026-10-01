@@ -22,7 +22,10 @@ winning after a reload; `swarm reload` reports such fields as shadowed.
   Anything already running keeps the value it was started with.
 - **restart**: refused and held at the old value. These name the run itself
   (state dir, tmux session, driver, isolation mode, board socket). Change them
-  with `swarm down` and `swarm up`.
+  with `swarm down` and `swarm up`, or with `swarm restart --full`, which does
+  both without closing a session that waits on you. A plain `swarm restart`
+  replaces only the supervisor: it applies hot and next settings as a reload
+  does and holds these at the old value too.
 
 A launched session (a worker, an operator job, the Overseer) runs its own
 `swarm` commands from its mirror, a component repo inside it or another

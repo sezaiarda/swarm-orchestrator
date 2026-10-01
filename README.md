@@ -745,6 +745,16 @@ session, and prints the run's summary. `swarm down --drain` launches nothing new
 and stops once the running work is finished (`--then CMD` runs a command
 afterwards, `--cancel` drops a pending drain).
 
+**Restarting:** `swarm restart` replaces the supervisor and the dashboard, so
+they run the code on disk, and touches nothing else: workers keep working, a
+session waiting on you keeps waiting, nothing is drained. Use it after updating
+swarm-orchestrator (`swarm doctor` says when the supervisor is older than the
+installed code), and to pick a swarm up again after its supervisor died.
+`--at 03:00` or `--in 2h` plans it for later; `--cancel` drops it. `swarm restart
+--full` drains, stops and starts again in a new tmux session, and refuses while
+a session waits on you unless you pass `--wait-questions`, `--keep-questions` or
+`--force`. A restart that does not come back telegrams you.
+
 ## Answering the swarm
 
 A worker, an operator job or the Overseer pass stops only when a call is
@@ -852,6 +862,7 @@ project path, so two projects with the same folder name never share state.
 | `state.json` (+ `.lock`) | Slots, the done map, the merge queue, holds, owed pushes, waiting and parked sessions, the operator lease, the live Overseer pass, the run id. Every write is under `flock`. |
 | `control.fifo` | The supervisor's one input. |
 | `config.json` | The config the running supervisor loaded (what `swarm reload` diffs against). |
+| `restart.json`, `supervisor.json`, `handover.json`, `kept-sessions.json` | `swarm restart`: the plan (kind, time, who asked, how far it got); what the running supervisor can do (hand over, fire a planned restart); what a supervisor that handed over held only in memory, read once by its successor; the waiting sessions a `--full --keep-questions` restart is carrying across. |
 | `done/<phase>.<status>`, `done/<phase>.jsonl` | Durable completion sentinels, and every `swarm done` attempt. |
 | `operator/<job>.json`, `.brief.md`, `run.id`, `.lock` | The operator queue. Every item file is changed under `.lock`, so a lease reclaim can't write a finished job back to queued. |
 | `overseer/` | `policy.json` (trigger memory), `digest-<id>.md/.json`, pass records `<id>.md/.json`, briefs. |
@@ -862,6 +873,7 @@ project path, so two projects with the same folder name never share state.
 | `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
 | `meters/resources.jsonl`, `meters/resources-1m.jsonl`, `meters/builds.jsonl`, `resources-now.json` | The resource sampler's samples (a day at full resolution, then a month of minute rows), one summary per finished heavy build, and the latest snapshot. Each file is bounded by age and bytes. |
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
+| `logs/restart.log`, `logs/supervisor-start.err` | What each restart's detached helper printed, and what a supervisor that would not start said. |
 | `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock`, `buildsem/slot<N>`, `buildsem/seat<K>` | Per-repo integration locks; build-gate slots (shared by the builds on them, taken whole by gc) and seats (one per build alive, with its record). |

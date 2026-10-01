@@ -194,3 +194,8 @@ decision you need is asked before you finish (see *Asking the owner*).
 
 Do not run `swarm done`, `swarm launch` or `swarm finish`: those belong to the
 workers and to the owner.
+
+If the swarm itself must load new code (swarm-orchestrator was updated), run
+`swarm restart`: it replaces only the supervisor and the dashboard, and closes
+nothing. Never `swarm down --drain --then 'swarm up'`: that closes every session
+waiting on the owner, and their questions with it.

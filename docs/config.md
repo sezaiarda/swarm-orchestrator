@@ -24,11 +24,14 @@ winning after a reload; `swarm reload` reports such fields as shadowed.
   (state dir, tmux session, driver, isolation mode, board socket). Change them
   with `swarm down` and `swarm up`.
 
-A worker's own `swarm done` runs in its mirror under worktree isolation, so it
-reads the `.swarm.toml` copy that was branched when the phase launched. That is
-why `[operator].enabled`, `triage_model` and `done_grace_s` are "next". An
-operator session's own `swarm operator-done` reads its mirror's copy the same
-way, which is why `[operator].notify` is "next" too.
+A launched session (a worker, an operator job, the Overseer) runs its own
+`swarm` commands from its mirror, a component repo inside it or another
+checkout. They read this file, the project's, not a copy in the folder they
+are run from: `SWARM_PROJECT` names the project. So what a worker's
+`swarm done` or an operator's `swarm operator-done` reads
+(`[operator].enabled`, `triage_model`, `notify`, `done_grace_s`, the
+`[telegram]` keys) is "hot": the next such command uses the saved value. If the
+file does not load, the command says so and reads the folder it is run from.
 
 ## `[swarm]`
 
@@ -54,7 +57,7 @@ way, which is why `[operator].notify` is "next" too.
 | `ready_marker` | `""` | `SWARM_READY_MARKER` | next | Text that means "claude has booted". `""` means the running `claude --version`, which the boot banner prints; if that cannot be read, `Claude Code`. |
 | `worker_settings` | `'{"teammateMode":"in-process"}'` | `SWARM_WORKER_SETTINGS` | next | JSON merged over the user's settings via `--settings`. The meters status-line tap is added unless this JSON sets its own `statusLine`. Register `scripts/stop-hook.py` here as a `Stop` hook to get recaps (see below). `""` passes no settings. |
 | `effort` | `"high"` | `SWARM_WORKER_EFFORT` | next | `claude --effort` for every worker: one of `low`, `medium`, `high`, `xhigh` or `max`. `""` inherits the user's setting. |
-| `done_grace_s` | `0` | `SWARM_DONE_GRACE` | next | Seconds a worker keeps its slot after `swarm done` before the supervisor is poked. A detached child sleeps and then delivers the poke, so `swarm done` itself returns at once. |
+| `done_grace_s` | `0` | `SWARM_DONE_GRACE` | hot | Seconds a worker keeps its slot after `swarm done` before the supervisor is poked. A detached child sleeps and then delivers the poke, so `swarm done` itself returns at once. |
 | `park_after` | `120` | `SWARM_PARK_AFTER` | hot | Seconds any session — worker, operator job or Overseer pass — may sit in `swarm waiting` before it is parked, alive, to its own window, freeing what it held (a worker's slot, the operator window, the master pane). `0` disables parking. |
 
 Registering the Stop hook (the path is wherever this repo lives):
@@ -79,7 +82,7 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `notify` | `<this repo>/scripts/notify.sh` | | hot | The sender. It is called with the message as `$1`. The bundled script reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's `.env`, or from the file named by `SWARM_TG_ENV`. |
-| `pings` | `"necessary"` | `SWARM_TG_PINGS` | hot | `"necessary"` sends only what needs you: questions, holds you must clear, flagged operator outcomes, a `fail` after the Overseer's retry, a push owed past the grace, errors, the cadence summary and the finish. Everything else is logged to `notifications.jsonl` marked `suppressed` and not sent. `"all"` sends every ping, as the swarm did before this setting existed (it also makes `[operator].notify = "attention"` send every outcome). Any other value counts as `"necessary"`. A worker's own `done`/`waiting` reads its mirror's copy, so for it the change lands at the next launch. The full list is in [components.md](components.md#telegram-and-asking-the-owner). |
+| `pings` | `"necessary"` | `SWARM_TG_PINGS` | hot | `"necessary"` sends only what needs you: questions, holds you must clear, flagged operator outcomes, a `fail` after the Overseer's retry, a push owed past the grace, errors, the cadence summary and the finish. Everything else is logged to `notifications.jsonl` marked `suppressed` and not sent. `"all"` sends every ping, as the swarm did before this setting existed (it also makes `[operator].notify = "attention"` send every outcome). Any other value counts as `"necessary"`. A worker's own `done`/`waiting` reads this file too. The full list is in [components.md](components.md#telegram-and-asking-the-owner). |
 | `push_owed_grace_s` | `3600` | `SWARM_PUSH_OWED_GRACE` | hot | Under `"necessary"`, a repo owing a push pings once it has owed one this long (checked after every integration and on the watchdog tick). The "pushed" ping follows only if that one went out. |
 | `commands` | `true` | `SWARM_TG_COMMANDS` | restart | Start the bot's command listener at `swarm up`, so `/usage` and `/help` sent to the bot are answered. It reads the token and chat id from the file the sender reads, answers only that chat, and is not started when the file lacks them. |
 
@@ -201,12 +204,12 @@ should not exceed the cores); never copy them from another machine's file.
 
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
-| `enabled` | `false` | `SWARM_OPERATOR` | next | Opt-in. `true` lets the swarm open an unattended session with your authority. While `false`, nothing is queued and each `operator` hand-off is telegrammed to you as a to-do. |
+| `enabled` | `false` | `SWARM_OPERATOR` | hot | Opt-in. `true` lets the swarm open an unattended session with your authority. While `false`, nothing is queued and each `operator` hand-off is telegrammed to you as a to-do. |
 | `cmd` | `""` | `SWARM_OPERATOR_CMD` | next | Replaces the built-in session command. With it set, no brief is typed in. |
 | `model` | `""` | | next | `--model` for operator sessions. `""` inherits the user's setting. |
-| `triage_model` | `"haiku"` | | next | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
+| `triage_model` | `"haiku"` | | hot | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
 | `later_wait_s` | `10800` | | hot | The longest a job triaged `later` waits. It normally opens when a worker slot is free that no ready phase wants; with a deep backlog that never happens, so once it has been queued this long it opens anyway, oldest first, one session at a time, never before its phase has merged. The session takes no worker slot. `0` means no cap. |
-| `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | next | Which `operator-done` outcomes ping you. `"attention"` pings only an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed); a decision only you can make is asked separately, with `swarm waiting <job> "<question>"`, before the job finishes. `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions and abandoned jobs always ping. Any other value counts as `"attention"`. |
+| `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | hot | Which `operator-done` outcomes ping you. `"attention"` pings only an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed); a decision only you can make is asked separately, with `swarm waiting <job> "<question>"`, before the job finishes. `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions and abandoned jobs always ping. Any other value counts as `"attention"`. |
 
 ## `[overseer]`
 

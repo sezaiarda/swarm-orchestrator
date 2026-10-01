@@ -78,10 +78,14 @@ Each worker's environment carries:
 
 - `SWARM_PHASE`, `SWARM_SESSION_ID=worker:<phase>` and `SWARM_STATE_DIR`
   (everything it starts dies with it: see [Processes](#processes-everything-dies-with-its-session-swarm-keep-is-the-exception));
+- `SWARM_PROJECT`, the canonical project. The session's `swarm` commands read
+  the settings and the ledger from it, whatever folder they are run from: a
+  component repo has no `.swarm.toml`, and a mirror's ledger is the copy
+  branched at launch. An explicit `--project-dir` wins;
 - a private `TMPDIR` on disk under `<state>/tmp/<phase>`;
 - `CARGO_INCREMENTAL=0`;
-- under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN`, `SWARM_PROJECT`
-  and the build-gate limits.
+- under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN` and the
+  build-gate limits.
 
 The folder-trust dialog is accepted ahead of time for every new mirror. The prompt
 is typed in (pasted, for a slash command), then checked: it must actually appear

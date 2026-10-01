@@ -292,12 +292,17 @@ def session_env(
     here: it names the phase a *worker* builds, and an operator carrying it
     would look like that phase's worker to anything keyed on it.
 
+    ``SWARM_PROJECT`` is the canonical project path, whatever the isolation: the
+    session's ``swarm`` commands read the settings and the ledger from it
+    (:func:`config.session_project`), so they answer for the project from a
+    component repo or any other cwd the session works in.
+
     Under ``isolation = worktree`` the worker also gets ``SWARM_WORKTREE`` (its
     cwd — a full isolated mirror of the whole workspace on branch
-    ``swarm/<phase>``, umbrella + every component repo at its real path),
-    ``SWARM_MAIN`` (the integration target branch) and ``SWARM_PROJECT`` (the
-    canonical project path). The worker just works inside the mirror as if it
-    were the real project; the integrator merges whatever repos it changed.
+    ``swarm/<phase>``, umbrella + every component repo at its real path) and
+    ``SWARM_MAIN`` (the integration target branch). The worker just works inside
+    the mirror as if it were the real project; the integrator merges whatever
+    repos it changed.
 
     ``CARGO_INCREMENTAL=0`` because incremental state is pure dead weight here:
     every phase builds a *different* source tree against one shared ``target/``,
@@ -311,7 +316,7 @@ def session_env(
     ``worker:<phase>``): everything the session starts inherits it, and when the
     session ends whatever still carries it is ended (:func:`session.reap_session`).
     """
-    env = {"SWARM_STATE_DIR": str(cfg.state_dir)}
+    env = {"SWARM_STATE_DIR": str(cfg.state_dir), "SWARM_PROJECT": str(cfg.project_dir)}
     if session:
         env[SESSION_ENV] = session
     if tmp:
@@ -324,12 +329,11 @@ def session_env(
     if worktree is not None:
         env["SWARM_WORKTREE"] = str(worktree)
         env["SWARM_MAIN"] = cfg.git_main_branch
-        env["SWARM_PROJECT"] = str(cfg.project_dir)
         # Worktree mode only (the parallel-build OOM problem is worktree-specific):
-        # carry the build-gate config so `swarm build` honours it from a worktree
-        # cwd (no .swarm.toml there), and cap raw `cargo` fan-out as a backstop for
-        # any build not routed through `swarm build`. In-place (`isolation="none"`)
-        # workers keep their full build parallelism untouched.
+        # freeze the build-gate config for the session, and cap raw `cargo`
+        # fan-out as a backstop for any build not routed through `swarm build`.
+        # In-place (`isolation="none"`) workers keep their full build parallelism
+        # untouched.
         env["SWARM_BUILD_MAX"] = str(cfg.build_max_concurrent)
         env["SWARM_BUILD_JOBS"] = str(cfg.build_jobs)
         if cfg.build_jobs:

@@ -157,6 +157,18 @@ def pytest_configure(config) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_session_project(monkeypatch):
+    """No test inherits a project from the session that runs the suite.
+
+    A ``swarm`` command with no ``--project-dir`` reads the project named by
+    ``SWARM_PROJECT``. Run from inside a swarm session, the suite would
+    otherwise point every such command, ledger writes included, at that
+    session's live project. A test of the rule sets it itself.
+    """
+    monkeypatch.delenv("SWARM_PROJECT", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _overseer_off(monkeypatch):
     """The Overseer is on by default in a real project; in the suite it is off.
 

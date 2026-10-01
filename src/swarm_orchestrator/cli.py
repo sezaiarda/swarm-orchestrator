@@ -59,7 +59,7 @@ from . import todo as todo_mod
 from . import usage as usage_mod
 from .resources import view as resources_view
 from .web import lifecycle as web_lifecycle
-from .config import SETTINGS, Config, load
+from .config import SETTINGS, Config, load, session_project
 from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
@@ -1409,16 +1409,9 @@ def cmd_build(cfg: Config, argv: list[str], *, status: bool = False, as_json: bo
     """Run a build command through the swarm-wide gate (see :mod:`buildsem`).
 
     A worker's cwd is a worktree, whose ``.swarm.toml`` may not be the project's:
-    the project's own file is read when ``SWARM_PROJECT`` names it, so a
-    ``[build]`` edit reaches the next call (frozen env overrides still win).
+    :func:`_load_config` reads the project's own file for it, so a ``[build]``
+    edit reaches the next call (frozen env overrides still win).
     """
-    project = os.environ.get("SWARM_PROJECT")
-    if project and Path(project).resolve() != cfg.project_dir and \
-            (Path(project) / ".swarm.toml").is_file():
-        try:
-            cfg = load(project_dir=project)
-        except (ValueError, OSError):
-            pass
     if status:
         from . import buildstatus
 
@@ -2223,7 +2216,8 @@ def cmd_resources(cfg: Config, as_json: bool = False, hours: float = 24.0,
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarm", description=__doc__)
     p.add_argument("--config", help="path to .swarm.toml (default: ./.swarm.toml)")
-    p.add_argument("--project-dir", help="project directory (default: cwd)")
+    p.add_argument("--project-dir",
+                   help="project directory (default: $SWARM_PROJECT in a launched session, else cwd)")
     sub = p.add_subparsers(dest="command", required=True)
 
     up = sub.add_parser("up", help="set up + start the supervisor, then attach")
@@ -2658,6 +2652,31 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _load_config(explicit: str | None, project_dir: str | None) -> Config:
+    """The config a command runs under: ``--project-dir``, else the project the
+    session belongs to (:func:`config.session_project`), else the cwd.
+
+    A launched session runs its commands from its mirror, a component repo
+    inside it or an external checkout, and every one of them reads and writes
+    the project's run state. Read from the cwd, a component repo answers with
+    the defaults (lanes off, so ``swarm widen`` records nothing) and a mirror
+    with the ledger branched at launch (so ``swarm follow-up`` accepts an id
+    main has taken since).
+
+    The project's file is the owner's live one and may be mid-edit. When it
+    does not load, the command says so and falls back to the cwd rather than
+    fail a worker's ``swarm done`` over a file the worker does not own.
+    """
+    project = None if project_dir else session_project()
+    if project is not None:
+        try:
+            return load(explicit=explicit, project_dir=str(project))
+        except (ValueError, OSError) as exc:
+            print(f"swarm: the config of {project} does not load ({exc});"
+                  " reading the current directory's instead", file=sys.stderr)
+    return load(explicit=explicit, project_dir=project_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse args, load config, dispatch. Returns the process exit code.
 
@@ -2673,7 +2692,7 @@ def main(argv: list[str] | None = None) -> int:
     if extra and not getattr(args, "tolerant", False):
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
     try:
-        cfg = load(explicit=args.config, project_dir=args.project_dir)
+        cfg = _load_config(args.config, args.project_dir)
     except (ValueError, OSError) as exc:
         # A broken .swarm.toml must not brick `down`/`status` — the commands you
         # reach for precisely when the config is what you just broke.

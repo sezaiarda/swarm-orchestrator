@@ -272,6 +272,7 @@ def test_a_woken_holder_counts_again_and_blocks_new_starts(gate):
     end_b, start_l = g.wait_event("end", "P-b"), g.wait_event("start", "P-l")
     assert woke["idle_s"] == pytest.approx(woke["ts"] - y["ts"], abs=0.01)
     assert set(woke) == KEYS and woke["id"] == y["id"]
+    assert woke["why"] == "it is using CPU again"  # the log says what was seen
     assert end_b["ts"] > woke["ts"] and end_b["exit"] == 0  # the one beside it kept running
     assert end_b["ts"] < end_h["ts"]
     # b ended while h was still working: one build counts, so the slot is full
@@ -691,3 +692,107 @@ def test_the_measured_tree_includes_detached_children_holding_the_seat(tmp_path)
             os.kill(orphan, signal.SIGKILL)
         except (OSError, UnboundLocalError):
             pass
+
+
+# -- a holder that is ending --------------------------------------------------
+def _set_aside(cfg, bid: str, now: float) -> None:
+    """``bid`` was set aside half a minute ago and last measured one sample ago."""
+    then = now - buildidle.sample_every(cfg)
+    buildidle._save(cfg, {"ts": then, "h": {bid: {"t": then, "cpu": 0.0, "io": 0,
+                                                  "quiet": now - 60, "yielded": now - 30,
+                                                  "ok": True}}})
+
+
+def test_a_process_that_is_ending_is_not_one_that_cannot_be_measured(tmp_path, monkeypatch):
+    """The kernel refuses the IO counters of a process that is exiting, as it
+    does another user's. A sample that catches a set-aside holder between the
+    scan and the read must not log a build that only finished as counting again."""
+    cfg = _cfg_for(tmp_path, monkeypatch)
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        table = ptree.scan()  # the look that still saw it alive
+        me = os.getpid()
+        rec = {"id": "b1", "pid": child.pid, "pid_start": table[child.pid].start, "gate_pid": me,
+               "gate_start": table[me].start, "start_ts": time.time() - 100, "seat_path": None}
+        child.kill()
+        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)  # ended, not yet reaped
+        sample = buildidle.measure(rec, None, table, ptree.children(table))
+        assert sample.busy is None and sample.procs == 1
+        now = time.time()
+        _set_aside(cfg, "b1", now)
+        monkeypatch.setattr(buildidle.ptree, "scan", lambda root=ptree.PROC: table)
+        st, changes = buildidle.update(cfg, [rec], now)
+        assert changes == [] and st["h"]["b1"]["yielded"] and st["ts"] == pytest.approx(now)
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_only_a_live_process_that_cannot_be_read_keeps_a_holder_busy(tmp_path):
+    """Told apart by a second look at ``stat``: a process that has given up its
+    memory (it still reads as running for a moment) is ending; one that has
+    memory is someone else's, and its work cannot be ruled out."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads every file: nothing here is refused")
+
+    def busy(pid: int, state: str, vsize: int) -> str | None:
+        proc = tmp_path / str(pid)
+        proc.mkdir()
+        (proc / "stat").write_text(f"{pid} (cc) {state} 1 " + "0 " * 17 + f"77 {vsize} 0\n")
+        (proc / "io").write_text("read_bytes: 1\nwrite_bytes: 1\n")
+        (proc / "io").chmod(0)
+        table = ptree.scan(tmp_path)
+        rec = {"pid": pid, "pid_start": 77, "gate_pid": 1}
+        return buildidle.measure(rec, None, table, ptree.children(table), tmp_path).busy
+
+    assert busy(500, "R", 0) is None  # exiting: its memory is gone, it is not a zombie yet
+    assert busy(501, "D", 0) is None
+    assert busy(502, "S", 4096) == "a process in its tree cannot be measured"
+    assert busy(503, "R", 4096) == "a process in its tree cannot be measured"
+
+
+GATE = """\
+import os, subprocess, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR)  # the seat, held as a `swarm build` holds it
+child = subprocess.Popen(["true"])
+child.wait()  # the command has ended and is reaped; the seat is not released yet
+print(child.pid, flush=True)
+time.sleep(60)
+"""
+
+
+def test_a_command_that_has_ended_is_not_at_work_while_its_gate_closes_it(tmp_path, monkeypatch):
+    """Between a command's exit and the release of its seat another waiter may
+    measure: the command is gone and only its ``swarm build`` holds the seat.
+    Nothing is at work, so a set-aside holder is not logged as counting again.
+    A command not started yet, or a seat nobody can be seen on, counts as ever."""
+    cfg = _cfg_for(tmp_path, monkeypatch)
+    seat = tmp_path / "seat0"
+    seat.write_text("{}")
+    gate = subprocess.Popen([sys.executable, "-c", GATE, str(seat)], stdout=subprocess.PIPE,
+                            text=True)
+    try:
+        ended = int(gate.stdout.readline())
+        table = ptree.scan()
+        kids = ptree.children(table)
+        rec = {"id": "b1", "pid": ended, "pid_start": -1, "gate_pid": gate.pid,
+               "gate_start": table[gate.pid].start, "start_ts": time.time() - 100,
+               "seat_path": seat}
+        sample = buildidle.measure(rec, seat, table, kids)
+        assert sample.busy is None and sample.procs == 0
+        now = time.time()
+        _set_aside(cfg, "b1", now)
+        st, changes = buildidle.update(cfg, [rec], now)
+        assert changes == [] and st["h"]["b1"]["yielded"] and st["ts"] == pytest.approx(now)
+
+        unseen = "its processes cannot be seen"
+        starting = dict(rec, pid=None, pid_start=None)  # the record before the command runs
+        assert buildidle.measure(starting, seat, table, kids).busy == unseen
+        assert buildidle.measure(rec, None, table, kids).busy == unseen  # no seat to look at
+        gate.kill()
+        gate.wait()
+        table = ptree.scan()  # the gate is gone: whoever holds the seat now is not seen
+        assert buildidle.measure(rec, seat, table, ptree.children(table)).busy == unseen
+    finally:
+        gate.kill()
+        gate.wait()

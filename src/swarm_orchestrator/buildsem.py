@@ -532,7 +532,7 @@ def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False
                        pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=rec.get("slot"),
                        cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
                        run_s=now - (rec.get("start_ts") or now), idle_s=c.idle_s,
-                       repo=rec.get("repo"), ts=now)
+                       repo=rec.get("repo"), why=c.why or None, ts=now)
     return st
 
 

@@ -51,6 +51,11 @@ any holder while one of :data:`buildclass.DAEMON_CLIENTS` is alive in its
 tree, which covers a script whose contents could not be read. A tree with a
 process whose IO cannot be read (another user's) is never idle either.
 
+**An ending is not work.** A process that is exiting refuses its IO counters
+too, and a command that has just ended leaves nothing to see while its
+``swarm build`` still holds the seat. Neither makes a holder count again: a
+build that ends while set aside gets its ``end``, never an ``unyield`` first.
+
 **Nothing can leak.** The yield mark names a build id and is only honoured for
 a holder whose seat lock is still held, and only while the sample behind it is
 fresh: a build starts beside a set-aside holder only on a sample at most
@@ -152,12 +157,41 @@ def members(rec: dict, seat: Path | None, table: dict[int, ptree.Proc],
     return found
 
 
+def _ending(pid: int, root: Path) -> bool:
+    """Is ``pid`` on its way out? The kernel refuses the IO counters of a
+    process that has given up its memory, exactly as it refuses another user's,
+    and such a process still reads as running for a moment before it is a
+    zombie. A second look tells them apart: gone, a zombie, or no memory left."""
+    try:
+        text = (root / str(pid) / "stat").read_bytes().decode(errors="replace")
+    except OSError:
+        return True
+    rest = text[text.rfind(")") + 2:].split()  # rest[0]: state, rest[20]: vsize
+    return len(rest) > 20 and (rest[0] in ("Z", "X") or rest[20] == "0")
+
+
+def _closing(rec: dict, seat: Path | None, table: dict[int, ptree.Proc], root: Path) -> bool:
+    """Has the command ended while its own ``swarm build`` still holds the
+    seat? Between the command's exit and the release of its seat nothing of the
+    build is left to see. That is a build being closed, not one at work."""
+    pid, gate = rec.get("pid"), rec.get("gate_pid")
+    if not isinstance(pid, int) or not isinstance(gate, int) or gate == pid or seat is None:
+        return False
+    proc, waiting = table.get(pid), table.get(gate)
+    if proc is not None and proc.start == rec.get("pid_start"):
+        return False
+    if waiting is None or waiting.start != rec.get("gate_start") or waiting.state in ("Z", "X"):
+        return False
+    return _has_open(gate, os.path.realpath(seat), root)
+
+
 def measure(rec: dict, seat: Path | None, table: dict[int, ptree.Proc],
             kids: dict[int, list[int]], root: Path = ptree.PROC) -> Sample:
     pids = members(rec, seat, table, kids, root)
     s = Sample(procs=len(pids))
     if not pids:
-        s.busy = "its processes cannot be seen"
+        if not _closing(rec, seat, table, root):
+            s.busy = "its processes cannot be seen"
         return s
     for pid in pids:
         proc = table.get(pid)
@@ -174,7 +208,8 @@ def measure(rec: dict, seat: Path | None, table: dict[int, ptree.Proc],
         try:
             text = (root / str(pid) / "io").read_text()
         except PermissionError:
-            s.busy = s.busy or "a process in its tree cannot be measured"
+            if not _ending(pid, root):
+                s.busy = s.busy or "a process in its tree cannot be measured"
             continue
         except OSError:
             continue  # gone between the scan and the read

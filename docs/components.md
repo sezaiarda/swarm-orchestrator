@@ -771,7 +771,10 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
   `buck2`, `gradle`, `nix` and the like. Where the command could not be read (a
   script with `$(…)`), the holder is not quiet while one of those programs is
   alive in its tree. A tree with a process whose IO cannot be read (another
-  user's, after `sudo`) is never quiet either. **Not covered:** containers a
+  user's, after `sudo`) is never quiet either; a process that is exiting
+  refuses its IO counters too, and is told apart (it has no memory left), so a
+  build that ends while set aside is not logged as counting again first.
+  **Not covered:** containers a
   build started and then only waits for with `sleep`. Nothing of theirs is in
   the build's tree, so such a holder yields, unless it was started with
   `--hold`.
@@ -965,7 +968,7 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 | `end` | it finished | as in its `start`/`bypass` | `run_s`; `exit` (signal N → 128+N, `--timeout` → 124) |
 | `preflight_fail` | refused before queueing; nothing ran | `swarm build` | |
 | `yield` | a running build was set aside as idle; it keeps running | as in its `start` | `idle_s` = how long its tree was quiet; `run_s` = how long it had run |
-| `unyield` | a set-aside build is working again and counts again | as in its `start` | `idle_s` = how long it was set aside |
+| `unyield` | a set-aside build is working again and counts again | as in its `start` | `idle_s` = how long it was set aside; `why` = what the measurement saw (`it is using CPU again`) |
 | `passed` | a pairing rule held this waiter back and a younger one started ahead of it | the waiting `swarm build` | `why` = the rule (`same repo as slot 0 (lib)`); `by` = the `id` of the build that started |
 | `alone` | a running build was found to hold a command that runs alone; nothing starts beside it from now on | as in its `start` | `why` = what was seen; `run_s` = how long it had run |
 

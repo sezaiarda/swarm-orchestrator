@@ -39,8 +39,8 @@ is a contract other tools read. Every line has exactly these keys::
   had been quiet, ``run_s`` how long it had run. Written by the waiter that
   measured it.
 - ``unyield``: a set-aside build is working again and counts again; ``idle_s``
-  is how long it was set aside. A build that ends while set aside gets no
-  ``unyield``: its ``end`` closes the stretch.
+  is how long it was set aside, ``why`` what the measurement saw. A build that
+  ends while set aside gets no ``unyield``: its ``end`` closes the stretch.
 
 - ``passed``: under ``[build].pair`` a pairing rule held this waiter back and
   a younger one started ahead of it: ``id``, ``pid`` and ``argv`` are the

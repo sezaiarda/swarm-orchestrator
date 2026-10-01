@@ -362,10 +362,15 @@ flowchart TD
 ### Build gate (`swarm build`)
 
 - **Is:** a swarm-wide gate over heavy builds. At most `[build].max_concurrent`
-  run at once (one `flock` per slot); the rest wait in a queue, served in
-  arrival order. A build that usually takes under `[build].short_s` may pass a
-  long one, but no long one is passed more than `[build].overtake` times. For
-  `cargo` it also sets `CARGO_BUILD_JOBS` to `[build].jobs`.
+  run at once; the rest wait in a queue, served in arrival order. A build that
+  usually takes under `[build].short_s` may pass a long one, but no long one is
+  passed more than `[build].overtake` times. For `cargo` it also sets
+  `CARGO_BUILD_JOBS` to `[build].jobs`.
+- **Idle holders yield:** a build whose whole process tree does nothing for
+  `[build].idle_yield_s` (150 s) is set aside. It is never stopped; it just
+  stops counting, so the next build starts beside it, and it counts again if it
+  wakes up. At most `[build].idle_yield_max` are set aside at once. Commands
+  whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield.
 - **Light commands skip it:** `git`, `ls`, `cargo update`/`metadata`/`fmt`/`tree`,
   `docker buildx bake --print`, python scripts that start no processes. Unknown
   commands count as heavy; `[build].heavy`/`light` add patterns.
@@ -375,11 +380,11 @@ flowchart TD
   ETA from past runs (stderr); then the wait and run times.
   `swarm build --status` shows the gate, and every call is logged to
   `buildsem/events.jsonl`.
-- **How:** the build inherits the slot's lock, so a killed build frees its slot,
-  and an older `swarm build` still shares the same cap. Workers wrap their gates
-  in it (`swarm build cargo nextest run`; several steps in one turn with
-  `swarm build -- sh -c 'a && b'`). Automatic gc takes every slot first, so it
-  never runs during a build.
+- **How:** the build inherits its locks (a seat of its own, and its slot,
+  shared), so a killed build frees them, and an older `swarm build` still shares
+  the same cap. Workers wrap their gates in it (`swarm build cargo nextest run`;
+  several steps in one turn with `swarm build -- sh -c 'a && b'`). Automatic gc
+  takes every slot to itself first, so it never runs while a build is alive.
 
 ### Resource tracking (`swarm resources`)
 
@@ -391,7 +396,7 @@ flowchart TD
   `[swarm].max_workers` is decided from measured peaks, not guessed.
   `swarm resources` shows now, the last day, the worst builds and the capacity
   arithmetic. A build that holds a slot idle for 10 minutes is reported (never
-  killed). Details: [components.md](docs/components.md#resource-tracking-swarm-resources).
+  killed), with what the gate did about it. Details: [components.md](docs/components.md#resource-tracking-swarm-resources).
 
 ### Stop hook, recaps, notes, report
 
@@ -854,9 +859,10 @@ project path, so two projects with the same folder name never share state.
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
-| `git/<repo>.lock`, `buildsem/slot<N>` | Per-repo integration locks, build-gate slots (each slot file also holds a record of its current build). |
+| `git/<repo>.lock`, `buildsem/slot<N>`, `buildsem/seat<K>` | Per-repo integration locks; build-gate slots (shared by the builds on them, taken whole by gc) and seats (one per build alive, with its record). |
 | `buildsem/queue/`, `queue.json`, `queue.lock` | The build gate's waiting tickets, sequence and overtake counts. |
-| `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail` (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
+| `buildsem/idle.json` | The waiters' running measurement of each holder: when it went quiet, and whether it is set aside as idle. |
+| `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail`, and `yield`/`unyield` for an idle holder set aside or counted again (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
 | `console.json`, `console.lock` | The owner console's conversation id (what the next start resumes), and the lock that keeps two opens from racing. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |

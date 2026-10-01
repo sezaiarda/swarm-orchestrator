@@ -568,14 +568,25 @@ N workers in N worktrees means N independent builds. `swarm build <cmd…>` lets
 at most `[build].max_concurrent` heavy builds run at once, swarm-wide; the rest
 wait their turn. For `cargo` it also sets `CARGO_BUILD_JOBS` to `[build].jobs`.
 
-**Slots.** One `flock` per slot, `<state>/buildsem/slot<N>`. The lock is taken on
-a descriptor the build inherits, so the build's whole process tree holds the
-slot: however the build ends (exit, crash, SIGKILL, a tool timeout), the slot
-frees when its last process is gone. There is no daemon and no counter to leak.
-A `swarm build` from before the queue existed takes the same slot locks, so old
-and new callers together still never exceed the cap. The slot file also holds a
-small record of its current build (id, phase, pid, command, start), which is
-what `--status` and the waiting line show.
+**Slots and seats.** A build holds two `flock`s, both on descriptors it
+inherits, so its whole process tree holds them: however the build ends (exit,
+crash, SIGKILL, a tool timeout), they free when its last process is gone. There
+is no daemon and no counter to leak.
+
+- A **seat**, `<state>/buildsem/seat<K>`, held exclusively: one per build alive.
+  There are `max_concurrent + idle_yield_max` of them, so the kernel caps the
+  builds the gate can have alive at once. The seat file holds a small record of
+  its build (id, phase, pid, command, start), which is what `--status` and the
+  waiting line show.
+- A **slot**, `<state>/buildsem/slot<N>` (`N < max_concurrent`), held *shared*.
+  Whatever needs a slot to itself takes it exclusively and so waits for every
+  build on it: gc, and a `swarm build` from before seats existed. Old and new
+  callers together therefore still never exceed the cap. The slot file carries
+  a copy of the record of the last build that started on it.
+
+A build may start when fewer than `max_concurrent` builds *count* (alive and not
+set aside as idle, see below), a seat is free, and some slot has no counted
+build on it.
 
 **The queue.** A heavy command takes a ticket, `buildsem/queue/<seq>-<id>.json`,
 numbered under `queue.lock` and locked by its waiter for as long as it waits.
@@ -593,6 +604,57 @@ counts the times it is passed (`queue.json`), and once it has been passed
 after at most the waiters older than it plus `overtake` short ones: nobody
 starves, and a 30-second targeted test does not sit behind a 15-minute browser
 suite. Unknown commands are never "short". `overtake = 0` is plain FIFO.
+
+**Idle yield.** A command can hold a slot and do nothing: a script waiting out
+a 20-minute timeout, a test runner waiting on a server that never comes up.
+Such a holder is never stopped or signalled; it ends when it ends. Instead it is
+*set aside*: once its whole process tree has been quiet for
+`[build].idle_yield_s` (default 150) it stops counting against
+`max_concurrent`, and the next waiter starts beside it, on the same slot.
+
+- *Quiet* means, over one measurement (every 5 s), under 5% of one core and
+  under 256 KiB/s of disk IO, summed over the build's process tree: its root and
+  every descendant, plus any process that still has its seat file open (a child
+  that detached). Any other measurement restarts the clock, so the pauses a
+  working build has (between compile and test, behind a lock, while linking)
+  never add up to a window.
+- *Waking up.* A set-aside holder that uses half a core (or 4 MiB/s of disk)
+  over a measurement counts again from then on: no new build starts while the
+  builds that count fill the slots. A build that already started beside it keeps
+  running, so for that time more than `max_concurrent` builds work at once.
+  The clock restarts, so it cannot be set aside again before another full
+  window; between the two thresholds nothing changes, so a holder hovering at
+  the edge does not flip back and forth.
+- *Work that happens elsewhere is never idle.* `docker build`,
+  `docker buildx bake` and `docker compose build` do their work in the docker
+  daemon, and the client waits at 0% CPU. A command read as such (through the
+  same wrappers and scripts the light/heavy rules read) never yields; the same
+  goes for `podman`, `nerdctl`, `buildctl`, `kubectl`, `sccache`, `bazel`,
+  `buck2`, `gradle`, `nix` and the like. Where the command could not be read (a
+  script with `$(…)`), the holder is not quiet while one of those programs is
+  alive in its tree. A tree with a process whose IO cannot be read (another
+  user's, after `sudo`) is never quiet either. **Not covered:** containers a
+  build started and then only waits for with `sleep`. Nothing of theirs is in
+  the build's tree, so such a holder yields. If such a step must keep the box
+  to itself, have it keep a `docker` client attached (`docker compose up`
+  without `-d`, `docker wait <container>`) instead of sleeping.
+- *The caps.* At most `[build].idle_yield_max` (default 2) holders are set aside
+  at once; a further idle holder keeps counting and the queue waits, as it does
+  with `idle_yield_s = 0`. The seats bound the builds alive at
+  `max_concurrent + idle_yield_max` whatever happens.
+- *Who measures.* The waiters, from `/proc`, under `queue.lock`, keeping the
+  running figures in `buildsem/idle.json`. It needs no supervisor and no daemon:
+  when nobody waits, nobody needs the answer. The counters compared are the
+  kernel's cumulative ones, so a waiter that dies loses nothing: the next one
+  carries on from its last sample, and a build's start is itself a sample (zero
+  used). A set-aside holder's own `swarm build` keeps measuring while nobody
+  waits, so its wake-up is logged when it happens. A build never starts beside
+  a set-aside holder on a measurement older than a second.
+- *Crashes.* The mark that a holder is set aside names its build id and is only
+  honoured while that build's seat lock is held and the measurement behind it is
+  fresh. A killed holder's seat is free and its mark is dropped; a killed waiter
+  leaves a ticket that is pruned; a killed measurer leaves figures the next one
+  checks again before using them.
 
 **Light commands skip the gate.** The command is read the way the shell would
 run it. Wrappers are looked through (`env`, `timeout`, `nice`, `flock FILE cmd`,
@@ -619,8 +681,14 @@ the queue. Only checks nothing earlier in the command could have made true (a
   (phase, command, how long, how long it usually takes) and an estimated start;
   on joining, also that queue time does not count toward `--timeout` and how to
   batch steps;
-- `queued 3m12s, starting on slot 0: cargo nextest run`;
+- `queued 3m12s, starting on slot 0: cargo nextest run`, and when an idle holder
+  made the room:
+  ``… — beside P-7 `bash wait.sh`, idle 2m30s: its slot was yielded``;
 - `ran 2m03s, exit 0 (queued 3m12s)`.
+
+The waiting line also says when a holder has been quiet for a while (`idle
+1m40s (yields its slot at 2m30s)`), which holder never yields and why, and
+lists the holders already set aside.
 
 **Batching and timeouts.** `swarm build -- sh -c 'a && b'` or
 `swarm build --script FILE` (run with `bash -e -o pipefail`) runs several steps
@@ -637,7 +705,8 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 ```json
 {"ts": 1790000000.123, "event": "start", "id": "3f2a9c01be44", "phase": "P-1",
  "pid": 4242, "slot": 0, "cls": "heavy", "argv": "cargo nextest run",
- "cwd": "/…/wt/P-1/lib", "wait_s": 12.5, "run_s": null, "exit": null}
+ "cwd": "/…/wt/P-1/lib", "wait_s": 12.5, "run_s": null, "exit": null,
+ "idle_s": null}
 ```
 
 | event | when | `pid` | notes |
@@ -647,23 +716,34 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 | `bypass` | a light command (or any, gate off) started unqueued | the command's process | `slot` null |
 | `end` | it finished | as in its `start`/`bypass` | `run_s`; `exit` (signal N → 128+N, `--timeout` → 124) |
 | `preflight_fail` | refused before queueing; nothing ran | `swarm build` | |
+| `yield` | a running build was set aside as idle; it keeps running | as in its `start` | `idle_s` = how long its tree was quiet; `run_s` = how long it had run |
+| `unyield` | a set-aside build is working again and counts again | as in its `start` | `idle_s` = how long it was set aside |
 
 `phase` is `$SWARM_PHASE` (null outside a worker); `argv` is at most 300
-characters. A `queued` with no `start` gave up while waiting. A `start` whose
+characters. `yield` and `unyield` carry the `id`, `pid` and `slot` of the build
+they are about and are written by whoever measured it; a build that ends while
+set aside gets no `unyield` (its `end` closes the stretch), and a `yield` after
+a build's `end` is a process that build left behind, set aside in its turn. A
+`queued` with no `start` gave up while waiting. A `start` whose
 `end` never came and whose `pid` is gone died unrecorded: the gate writes a
 synthetic `end` with `exit` null as soon as it notices (when a waiter reports,
 or when the slot is next taken).
 
 **`swarm build --status [--json]`** shows the holders, the queue in the order it
 would start with ETAs, and the last builds with their wait and run times;
-`swarm status` and `swarm doctor` carry a one-line summary. A slot that is busy
-with no current record is an older `swarm build` or a process a build left
-behind; `--status` names the pids holding it open.
+`swarm status` and `swarm doctor` carry a one-line summary. Holders that were
+set aside are listed apart (`yielded: P-7 … yielded after 2m30s idle, still
+running 12m`; `yielded` in `--json`, and every build alive under `builds`), a
+build that ended while one of its processes still holds the slot is marked so,
+and a recent build that was set aside says for how long. A slot that is busy
+with no current record is gc, an older `swarm build` or a process such a build
+left behind; `--status` names the pids holding it open.
 
 Workers are told to wrap their gates in it (`swarm build cargo nextest run`), and
 to give those commands a generous timeout, since they may queue. Automatic gc
-takes every build slot before it deletes anything, so it never runs during a
-build. The landing's lane check queues like any other build.
+takes every build slot (exclusively) before it deletes anything, so it never
+runs while any build is alive, set aside or not. The landing's lane check
+queues like any other build.
 
 **Sizing.** `[build].jobs` and `max_concurrent` describe the host the swarm runs
 on. Derive them from that machine's cores and memory (one build's peak memory
@@ -699,8 +779,11 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   resolved), and the growth per hour between two measurements.
 - **Builds** (`resources/builds.py`): the build holding each slot comes from the
   gate's event log, `buildsem/events.jsonl` (`queued`, `start` with the build's
-  pid, `end` with its run time and exit code; a `start` whose process is gone
-  counts as ended, since a SIGKILLed build writes no `end`). Without that log,
+  pid, `end` with its run time and exit code, `yield`/`unyield` when the gate
+  sets an idle build aside or counts it again; a `start` whose process has been
+  gone for five seconds counts as ended, since a SIGKILLed build writes no
+  `end`, while a build that just exited is waited for, because the gate writes
+  its `end`, with the exit code, a moment after the process is gone). Without that log,
   the slot file's `flock` holder, read from `/proc/locks`, is the build. Each
   sample sums over the build's process tree: CPU seconds (live processes'
   `utime+stime+cutime+cstime`, which counts reaped compiler processes once),
@@ -719,22 +802,30 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   and per build/worker average cores and peak anon, kept 30 days. Each finished
   heavy build gets a row in `meters/builds.jsonl`: id, phase, argv, cwd, wait,
   run time, exit, CPU seconds, average and peak cores, peak anon and total RSS of
-  the tree, the lowest `MemAvailable` and the highest pressure during it, IO.
+  the tree, the lowest `MemAvailable` and the highest pressure during it, IO,
+  and `yielded_s`: how long the gate had it set aside as idle.
   Byte caps (48, 32 and 8 MiB) win over the age limits. `<state>/resources-now.json`
   holds the latest sample, what is running and the sampler's own cost.
 - **Idle holders.** A heavy build that holds a slot for `[resources].idle_s`
   (default 600) with its whole tree under 1% of a core shows in `swarm status`,
   as a `swarm doctor` WARN, in the dashboard's resources box, and pings once
-  (again hourly while it stays idle). The gate's own holder record
-  (`buildsem/slotN`) confirms it first: a record naming another build, or saying
-  it ended, means the sampler missed an `end` and nothing is reported; a matching
-  one supplies the phase and command. Nothing is killed.
+  (again hourly while it stays idle). The report says what the gate did about
+  it: its slot was released (the gate set it aside, so builds start beside it),
+  or it was kept and why (a command that never yields). This is a report only;
+  setting a holder aside is the gate's own doing, by its own measurement, long
+  before this warning. The gate's own holder record (`buildsem/seatK`, or
+  `slotN` for a gate from before seats) confirms it first: a record saying the
+  build ended, or naming another build, means the sampler missed an `end` and
+  nothing is reported; a matching one supplies the phase and command. Nothing
+  is killed.
 - **Cost.** The thread's CPU time (`time.thread_time`) and `du`'s (from
   `wait4`) are published in the snapshot, with the bytes written per day. On a
   24-core host with a few hundred processes a full sample costs about 5 ms, so
   1 s sampling is about half a percent of one core while building.
-- **`swarm resources`** prints now (host, each build, each session), the last
-  day as sparklines, the finished builds with the worst peaks, and a capacity
+- **`swarm resources`** prints now (host, each build, each session; a build the
+  gate has set aside reads `YIELDED 12m`), the last day as sparklines, the
+  finished builds with the worst peaks (with a `yielded` column), the builds
+  that sat idle longest and how long in all, and a capacity
   section: p95 per heavy build and per worker, and what 2 concurrent builds, 8
   workers or doubled jobs would have needed against this host's RAM (85% of it,
   the rest left to page cache and the kernel) and cores, with the arithmetic shown
@@ -981,8 +1072,8 @@ strip at the top lists them; the footer keeps the other keys, and `?` lists all)
      (the last day of 5-hour, the current week) with the caps drawn across it;
    - **resources:** the resource sampler's latest reading: CPU, memory
      (available, anon, page cache), swap, pressure, disk write rate and free
-     space, and each running build (an idle holder in red). History and capacity
-     are `swarm resources`;
+     space, and each running build (an idle holder in red, or in yellow once
+     the gate has released its slot). History and capacity are `swarm resources`;
    - **alerts & notifications:** what needs you (`◆`), what is wrong now (the
      footer's list, and any warning or failure from the last doctor run), then
      every ping newest first: `✓` delivered, `·` held, `✗` never arrived.
@@ -1140,6 +1231,7 @@ with `--attention`; a decision it needs first is asked with
 - a usage cap pausing or stopping the swarm, and a usage pause lifting;
 - a heavy build holding a build slot with its whole process tree idle
   (`[resources].idle_s`, default 10 minutes), again hourly while it stays idle;
+  the message says whether the gate released its slot;
 - the bot's answers to your `/usage` and `/help`.
 
 **Logged, not sent:** routine operator outcomes (the Overseer's digest lists

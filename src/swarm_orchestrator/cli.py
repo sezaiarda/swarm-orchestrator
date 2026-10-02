@@ -2285,6 +2285,8 @@ def _phase_standing(cfg: Config, st) -> dict:
 
     :func:`tui.campaign.summarise` over the launcher's done view, so this line,
     the TUI header and the web board can never disagree about what is done.
+    ``done``, ``running``, ``asking``, ``ready``, ``blocked``, ``dated`` and
+    ``failed`` are disjoint and add up to ``total``.
     """
     from .tui import campaign
 
@@ -2294,22 +2296,26 @@ def _phase_standing(cfg: Config, st) -> dict:
     dated = ledgerw.dated(cfg)
     # At work: in a slot, or parked and working on the owner's answer.
     busy = {s.phase for s in st.busy_slots() if s.phase} | set(st.working_parked())
+    # Its worker waits on the owner, in its slot or parked: the launcher will
+    # not start it, so it is never ready, and it builds nothing until answered.
+    asking = set(st.on_owner())
     landed = ledger_mod.with_ticked(st.done, ticked, busy | set(st.parked) | set(st.waiting))
     t = campaign.overall(campaign.summarise(graph, landed, busy, set(cfg.exclude or []), ticked,
-                                            dated))
+                                            dated, asking))
     return {"done": t.built, "total": t.live_total, "held": t.held, "running": len(t.running),
-            "ready": len(t.ready), "blocked": t.blocked, "dated": t.dated, "failed": t.failed,
-            "excluded": t.excluded,
+            "asking": len(t.asking), "ready": len(t.ready), "blocked": t.blocked,
+            "dated": t.dated, "failed": t.failed, "excluded": t.excluded,
             "dates": {p: d for p, d in sorted(dated.items(), key=lambda kv: kv[::-1])
-                      if p in graph and p not in busy}}
+                      if p in graph and p not in busy and p not in asking}}
 
 
 def _standing_line(n: dict) -> str:
     held = (f" ({n['held']} of them done by the swarm, still open in the ledger)"
             if n["held"] else "")
-    words = {"dated": "waiting for a date"}
+    words = {"asking": "waiting on you", "dated": "waiting for a date"}
     rest = " · ".join(f"{n[k]} {words.get(k, k)}"
-                      for k in ("running", "ready", "blocked", "dated", "failed") if n.get(k))
+                      for k in ("running", "asking", "ready", "blocked", "dated", "failed")
+                      if n.get(k))
     excluded = f" · {n['excluded']} yours to do, not counted" if n["excluded"] else ""
     return (f"phases: {n['done']} of {n['total']} done{held}"
             f"{' · ' + rest if rest else ''}{excluded}")

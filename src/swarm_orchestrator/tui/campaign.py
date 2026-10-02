@@ -13,8 +13,9 @@ campaign is 6 of 23 done, and these four are ready next*. The **active** campaig
 is the one with work in flight or ready; everything else is history and is
 summarised in a line rather than averaged into the headline.
 
-Nothing here reads the filesystem: it takes the graph and the done map and
-returns dataclasses, so it is trivially testable and cannot fail a render.
+Nothing here reads the filesystem: it takes the graph and the done map (or a
+dashboard that already holds them, :func:`standings`) and returns dataclasses,
+so it is trivially testable and cannot fail a render.
 """
 
 from __future__ import annotations
@@ -52,6 +53,11 @@ class Campaign:
     skipped: int = 0      # of those, `skip` rows: seeded, never built by anyone
     failed: int = 0
     running: list[str] = field(default_factory=list)
+    #: Rows whose worker waits on the owner: it asked a question, on its park
+    #: timer in its slot or parked in a window of its own, and no answer came
+    #: yet. Its session is alive, so the launcher never starts the row: it is
+    #: not ready, and it does not build until the owner answers.
+    asking: list[str] = field(default_factory=list)
     ready: list[str] = field(default_factory=list)
     blocked: int = 0
     #: Rows whose dependencies have landed but whose ``after:`` date is ahead.
@@ -64,7 +70,12 @@ class Campaign:
     @property
     def active(self) -> bool:
         """Is this campaign the one being worked right now?"""
-        return bool(self.running or self.ready)
+        return bool(self.running or self.asking or self.ready)
+
+    @property
+    def manned(self) -> bool:
+        """Does a worker hold one of its rows, building it or asking about it?"""
+        return bool(self.running or self.asking)
 
     @property
     def live_total(self) -> int:
@@ -92,6 +103,7 @@ def summarise(
     excluded: set[str] | None = None,
     ticked: set[str] | None = None,
     deferred: dict[str, str] | set[str] | None = None,
+    asking: set[str] | None = None,
 ) -> list[Campaign]:
     """Campaign standings, active first, then by size.
 
@@ -109,9 +121,15 @@ def summarise(
     row that waits for a date still ahead (``deferred``, as
     :func:`ledgerw.dated` reads it): the launcher leaves it alone, so it is
     ``dated``, never ready, and never failed either, even while the record of
-    its ``later`` finish is still there (:func:`ledgerw.not_failed`).
+    its ``later`` finish is still there (:func:`ledgerw.not_failed`). Nor is a
+    row whose worker waits on the owner (``asking``, as
+    :meth:`state.State.on_owner` reads it): its session is alive, so the
+    launcher leaves it alone too. It is ``asking`` wherever that worker sits, in
+    its slot on the park timer or parked, as on the web board; a parked row the
+    owner has answered is at work again and belongs in ``busy``.
     """
     busy = busy or set()
+    asking = asking or set()
     excluded = excluded or set()
     deferred = deferred or set()
     done = ledgerw.not_failed(done, deferred)
@@ -122,12 +140,14 @@ def summarise(
         name = campaign_of(phase)
         b = buckets.setdefault(
             name,
-            {"total": 0, "built": 0, "skipped": 0, "failed": 0,
-             "running": [], "ready": [], "blocked": 0, "dated": 0, "excluded": 0, "held": 0},
+            {"total": 0, "built": 0, "skipped": 0, "failed": 0, "running": [], "asking": [],
+             "ready": [], "blocked": 0, "dated": 0, "excluded": 0, "held": 0},
         )
         b["total"] += 1
         status = done.get(phase)
-        if phase in busy:
+        if phase in asking:
+            b["asking"].append(phase)
+        elif phase in busy:
             b["running"].append(phase)
         elif status in SATISFIED:
             b["built"] += 1  # a finished owner-run row too, as on the web board
@@ -152,6 +172,7 @@ def summarise(
             skipped=b["skipped"],
             failed=b["failed"],
             running=sorted(b["running"]),
+            asking=sorted(b["asking"]),
             ready=sorted(b["ready"]),
             blocked=b["blocked"],
             dated=b["dated"],
@@ -163,8 +184,41 @@ def summarise(
     # A finished campaign is never the headline while one with work left idles,
     # and one merely ready never while another has a worker on it: the headline
     # names what is being built, not the biggest campaign that could be.
-    out.sort(key=lambda c: (not c.active, not c.running, c.complete, -c.live_total, c.name))
+    out.sort(key=lambda c: (not c.active, not c.manned, c.complete, -c.live_total, c.name))
     return out
+
+
+#: The kinds of a dashboard's blockers (``data.Blocker.kind``) that are a worker
+#: asking the owner: on its park timer, or parked with no answer yet.
+ASKING_KINDS = frozenset({"waiting", "parked"})
+
+
+def at_work(dash) -> set[str]:
+    """The phases a worker is at work on: in a busy slot, or parked and at work on
+    the owner's answer in a window of its own (``Dash.working_parked``)."""
+    return ({s.phase for s in dash.snapshot.slots if s.busy and s.phase}
+            | {w.phase for w in getattr(dash, "working_parked", None) or ()})
+
+
+def asking(dash) -> set[str]:
+    """The phases whose worker waits on the owner, as the dashboard's own list
+    of what waits on the owner has them (``Snapshot.blockers``)."""
+    return {b.phase for b in getattr(dash.snapshot, "blockers", None) or ()
+            if b.kind in ASKING_KINDS and b.phase}
+
+
+def standings(dash) -> list[Campaign]:
+    """:func:`summarise` over what a dashboard holds. Every panel that counts
+    the ledger calls this, so the headline and the status bar cannot differ."""
+    return summarise(
+        getattr(dash, "graph", None) or {},
+        dict(dash.snapshot.landed),
+        at_work(dash),
+        set(getattr(getattr(dash, "cfg", None), "exclude", None) or []),
+        getattr(dash, "ticked", None),
+        getattr(dash, "deferred", None),
+        asking(dash),
+    )
 
 
 def active(campaigns: list[Campaign]) -> Campaign | None:
@@ -184,6 +238,7 @@ def overall(campaigns: list[Campaign]) -> Campaign:
         skipped=sum(c.skipped for c in campaigns),
         failed=sum(c.failed for c in campaigns),
         running=sorted(p for c in campaigns for p in c.running),
+        asking=sorted(p for c in campaigns for p in c.asking),
         ready=sorted(p for c in campaigns for p in c.ready),
         blocked=sum(c.blocked for c in campaigns),
         dated=sum(c.dated for c in campaigns),

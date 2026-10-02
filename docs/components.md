@@ -1466,7 +1466,11 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
 - campaign progress: everything done (built, ticked in the ledger or skipped) over
   everything the campaign schedules, the same count as the web board and
   `swarm status`. An excluded row counts once it is done and is out of the count
-  until then. The headline says how many done rows the ledger still shows `[ ]`;
+  until then. The headline says how many done rows the ledger still shows `[ ]`.
+  The campaign named is one a worker holds a row of, building it or asking you
+  about it, before one that is only ready. A row whose worker waits on your
+  answer is counted "waiting on you" in the headline and in `swarm status`,
+  never ready or running; a row waiting for its date is not ready either;
 - the ETA, from the forecast engine (`swarm_orchestrator.eta`): 500 seeded
   replays of the swarm working through the open ledger with the supervisor's own
   pick (`ledger.ready`, in ledger order), each row's work time drawn from a

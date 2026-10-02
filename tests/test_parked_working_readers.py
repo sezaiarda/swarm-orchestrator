@@ -171,8 +171,9 @@ def test_swarm_status_says_a_parked_session_is_working_and_counts_nothing_on_the
 @STILL_ASKING
 def test_swarm_status_keeps_its_line_and_its_count_for_a_session_that_asks(cfg, capsys, mark):
     run(cfg, mark)
+    # The count has it waiting on the owner: not ready to launch, and not at work.
     standing = cli._phase_standing(cfg, state_mod.read(cfg))
-    assert (standing["running"], standing["ready"]) == (1, 1)
+    assert (standing["running"], standing["asking"], standing["ready"]) == (1, 1, 0)
     assert cli.cmd_status(cfg) == 0
     out = capsys.readouterr().out
     assert "waiting=[] parked=['P1']\n" in out and "working=" not in out

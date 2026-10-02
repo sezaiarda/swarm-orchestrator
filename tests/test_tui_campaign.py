@@ -44,3 +44,31 @@ def test_a_row_waiting_for_its_after_date_is_dated_not_ready():
     assert perf.ready == [] and perf.dated == 1 and perf.blocked == 1
     assert not perf.active
     assert campaign.overall([perf]).dated == 1
+
+
+def test_a_row_whose_worker_waits_on_the_owner_is_asking_not_ready_or_running():
+    """Its session is alive, so the launcher leaves the row alone: wherever the
+    worker sits, in its slot (so in ``busy`` too) or parked, the row is asking."""
+    graph = {"a-W1": set(), "a-W2": set(), "a-W3": set(), "a-W4": {"a-W2"}, "a-W5": set()}
+    (a,) = campaign.summarise(graph, {}, busy={"a-W1", "a-W3"}, asking={"a-W2", "a-W3"})
+    assert a.asking == ["a-W2", "a-W3"]
+    assert (a.running, a.ready, a.blocked) == (["a-W1"], ["a-W5"], 1)
+    total = campaign.overall([a])
+    assert total.asking == ["a-W2", "a-W3"]
+    assert (total.built + len(total.running) + len(total.asking) + len(total.ready)
+            + total.blocked + total.dated + total.failed) == total.live_total == 5
+
+
+def test_a_campaign_with_only_a_question_open_is_still_the_one_being_worked():
+    graph = {"ask-W1": set(), "big-W1": set(), "big-W2": set(), "idle-W1": {"ask-W1"}}
+    ask, big, idle = campaign.summarise(graph, {}, asking={"ask-W1"})
+    # A worker holds a row of it: it leads the bigger campaign that is only ready.
+    assert (ask.name, big.name, idle.name) == ("ask", "big", "idle")
+    assert ask.active and ask.manned and big.active and not big.manned and not idle.active
+    assert campaign.active([ask, big, idle]) is ask
+
+
+def test_a_phase_nobody_asks_about_counts_as_it_did():
+    graph = {"a-W1": set(), "a-W2": set()}
+    assert campaign.summarise(graph, {}, busy={"a-W1"}) == campaign.summarise(
+        graph, {}, busy={"a-W1"}, asking={"not-in-the-ledger"})

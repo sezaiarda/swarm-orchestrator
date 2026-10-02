@@ -58,7 +58,7 @@ from . import probes
 from . import timeline as tl
 from . import resourcebox
 from . import usagebox
-from .campaign import active, overall, summarise
+from .campaign import active, at_work, overall, standings
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
 from .data import (
     CONTEXT_BUDGET,
@@ -196,13 +196,6 @@ def set_text(widget, text: str) -> None:
 
 
 # -- headline -------------------------------------------------------------
-def at_work(dash) -> set[str]:
-    """The phases a worker is at work on: in a busy slot, or parked and at work on
-    the owner's answer in a window of its own (``Dash.working_parked``)."""
-    return ({s.phase for s in dash.snapshot.slots if s.busy and s.phase}
-            | {w.phase for w in getattr(dash, "working_parked", None) or ()})
-
-
 def headline(dash, width: int = 76, compact: bool = False) -> str:
     """The page title, one answer: how far along the open phase books are, when
     all of them are done, and what is moving.
@@ -216,11 +209,8 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     headline is three lines at every size.
     """
     snap = dash.snapshot
-    busy = at_work(dash)
-    excluded = set(getattr(dash.cfg, "exclude", None) or [])
     camps = [
-        c for c in summarise(dash.graph or {}, snap.landed, busy, excluded,
-                             getattr(dash, "ticked", None), getattr(dash, "deferred", None))
+        c for c in standings(dash)
         if c.live_total > c.skipped  # a campaign of nothing but skips is noise
     ]
     if not camps:
@@ -235,7 +225,7 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
 
     now = time.time()
     left = finish_text(dash, now)
-    fill = OK if cur.complete else (INFO if cur.running or cur.ready else MUTED)
+    fill = OK if cur.complete else (INFO if cur.active else MUTED)
     left = clip(left, max(10, inner - 12))
     second = (
         f"{PAD}{paint(bar(cur.built, max(1, cur.live_total), max(10, inner - len(left) - 2)), fill)}"
@@ -245,6 +235,9 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     counts = []
     if cur.running:
         counts.append(paint(f"{len(cur.running)} running", INFO))
+    if cur.asking:
+        # Its worker asked and waits: not ready to start, and not building.
+        counts.append(paint(f"{len(cur.asking)} waiting on you", YOU))
     if cur.ready:
         counts.append(paint(f"{len(cur.ready)} ready", READY))
     if cur.failed:
@@ -526,8 +519,7 @@ def next_lines(dash, width: int = 44, limit: int = 6) -> list[str]:
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     dated = getattr(dash, "deferred", None) or {}
     graph = dash.graph or {}
-    camps = summarise(graph, snap.landed, busy, excluded, deferred=dated)
-    cur = active(camps)
+    cur = active(standings(dash))
     waiting = {b.phase for b in snap.blockers}
     items = tl.upcoming(graph, snap.landed, busy, excluded | set(dated), waiting,
                         prefer=cur.name if cur else None, limit=limit)

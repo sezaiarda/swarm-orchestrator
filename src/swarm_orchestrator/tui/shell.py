@@ -75,13 +75,8 @@ class StatusBar(Static):
         # 3. The headline number -- the ACTIVE campaign, never the whole ledger.
         # A count over the whole ledger is true and useless: most rows are skips seeded from
         # campaigns that ended long ago, so the number could not move.
-        cs = camp.summarise(
-            getattr(dash, "graph", {}) or {},
-            dict(snap.landed),
-            {s.phase for s in snap.slots if s.busy and s.phase},
-            set(getattr(self.app.cfg, "exclude", []) or []),
-        )
-        act = camp.active(cs)
+        # Counted as home's headline counts it (:func:`campaign.standings`).
+        act = camp.active(camp.standings(dash))
         if act:
             parts.append(
                 f"[{COLOR[ACCENT]}]{act.name}[/] {act.built}/{act.live_total}"

@@ -581,9 +581,13 @@ def kept_later(cfg: Config) -> set[str]:
     return phases
 
 
-def _unkeep_later(cfg: Config, phase: str, log: Log) -> None:
+def unkeep_later(cfg: Config, phase: str, log: Log) -> bool:
     """A row closed some other way no longer waits for its kept work: it goes
-    to the attic, so a rerun of the row never starts from it."""
+    to the attic, so a rerun of the row never starts from it. Which rows those
+    are is the caller's to say (:func:`reconcile` for a phase recorded done,
+    :func:`ledgerw.release_kept` for a row closed in the ledger). True when
+    nothing is kept for the phase any more; a ref the attic refused stays."""
+    gone = True
     for repo, main in _repos(cfg):
         with repo_lock(cfg, repo):
             tip = _tip(repo, later_ref(phase))
@@ -591,6 +595,9 @@ def _unkeep_later(cfg: Config, phase: str, log: Log) -> None:
                 continue
             if _contains(repo, main, tip) or _to_attic(repo, phase, tip, log, "its row is closed"):
                 _git(repo, "update-ref", "-d", later_ref(phase), check=False)
+            else:
+                gone = False
+    return gone
 
 
 def set_aside(cfg: Config, phase: str, log: Log) -> bool:
@@ -1457,7 +1464,10 @@ def reconcile(
     ``later`` are the phases that finished ``later`` and wait for a date. One
     whose branch is still here reported while no supervisor ran: its work is
     kept for its date (:func:`keep_later`), not sent to the attic. Work kept for
-    a phase since recorded done some other way goes to the attic.
+    a phase the done map has since recorded done (``swarm skip``, for one) goes
+    to the attic. A row closed in the ledger (``swarm record <phase> done``, a
+    tick by hand) leaves no record here: the caller runs
+    :func:`ledgerw.release_kept` for those, as the supervisor's sweep does.
     """
     sentinels = sentinel_done(cfg)
     operator = operator or {}
@@ -1509,7 +1519,7 @@ def reconcile(
             log.line(f"RECONCILE-DISCARD {phase} interrupted with nothing to keep")
     for phase in sorted(kept_later(cfg) - set(later)):
         if done_phases.get(phase, statuses.FAIL) != statuses.FAIL:
-            _unkeep_later(cfg, phase, log)
+            unkeep_later(cfg, phase, log)
     return ReconcileResult(
         integrated=integrated,
         held=held,

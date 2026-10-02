@@ -679,9 +679,15 @@ committed and everything that landed since. If the two no longer merge cleanly,
 the branch is put back where the work left it (`... as it was`), as for a resumed
 interrupted attempt, and the landing meets the conflict the usual way. The ref is
 removed once the work is on the branch. `swarm up` keeps the work of a `later`
-whose worker reported while no supervisor ran, and moves kept work to the attic
-when its row has been closed some other way. A `blocked` or dateless finish goes
-to the attic as before: nothing says when, or whether, that work is wanted.
+whose worker reported while no supervisor ran. Kept work goes to the attic when
+its row has been closed some other way (`swarm record <phase> done`, or a tick by
+hand), logged as `LATER-CLOSED`: at once on the record, on the supervisor's next
+sweep for a tick, and on `swarm up`. The row decides as committed on the target
+branch, with no report about it still queued and no worker on it; a row that
+still waits for its date is never touched. Work that is on main already is
+dropped with no attic copy. `swarm up` does the same for a phase the run has
+since recorded done (`swarm skip`). A `blocked` or dateless finish goes to the
+attic as before: nothing says when, or whether, that work is wanted.
 
 [The integration flow diagram](../README.md#integrator-and-merge-conflict-resolver) is in the README.
 

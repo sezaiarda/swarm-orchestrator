@@ -1010,10 +1010,12 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
     _hold_relaned(cfg, total.relaned, log)
     if total.released:
         # `swarm record <phase> done` on a phase that failed: the tick just
-        # committed closes it, so its failure record goes with this write. The
-        # write itself stands whatever happens here; the watchdog sweeps again.
+        # committed closes it, so its failure record goes with this write, and
+        # so does work kept for its date. The write itself stands whatever
+        # happens here; the watchdog sweeps again.
         try:
             release_closed(cfg, log)
+            release_kept(cfg, log)
         except (gitq.GitError, OSError) as exc:
             log.line(f"FAIL-CLOSED-ERROR {exc}")
     return total
@@ -1146,9 +1148,41 @@ def closable(cfg: Config, st) -> set[str]:
     failed = {p for p, s in st.done.items() if s == statuses.FAIL}
     if not failed:
         return set()  # the usual sweep: no git
+    return settled(cfg, st) & failed
+
+
+def settled(cfg: Config, st) -> set[str]:
+    """The rows the ledger speaks for as closed: closed (:func:`closed_rows`)
+    as committed on the target branch, with no report about them still queued
+    and no worker on them. What is left over from such a row's earlier attempts
+    (a failure record, work kept for a date) is let go."""
     text = gitq.committed_text(cfg, cfg.ledger)
-    rows = (closed_rows(text) if text else set()) & failed
+    rows = closed_rows(text) if text else set()
     return rows - reported(cfg) - {*st.claimed_phases(), *st.integrating()}
+
+
+def release_kept(cfg: Config, log: Log) -> list[str]:
+    """Send to the attic the work kept for each ``later`` row closed since.
+
+    A ``later`` finish keeps its work for its date (:func:`gitq.keep_later`) and
+    leaves no record once the row carries that date. A row then closed some
+    other way (``swarm record <phase> done``, or a tick by hand) is therefore
+    known only to the ledger, and the same rule as for a failure record decides
+    (:func:`settled`): its kept work goes to the attic, so nothing restarts from
+    it and no ref stays for good. A row that still waits for its date is never
+    touched. Returns the phases whose kept work is gone.
+    """
+    from . import state as state_mod
+
+    kept = gitq.kept_later(cfg) - set(dated(cfg))
+    if not kept:
+        return []  # the usual sweep: every kept row waits for its date
+    released = []
+    for pid in sorted(kept & settled(cfg, state_mod.read(cfg))):
+        if gitq.unkeep_later(cfg, pid, log):
+            released.append(pid)
+            log.line(f"LATER-CLOSED {pid} its row is closed in the ledger: nothing is kept for its date any more")
+    return released
 
 
 def release_dated(cfg: Config, log: Log) -> list[str]:

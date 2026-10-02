@@ -206,12 +206,14 @@ def test_swarm_up_keeps_a_later_finish_the_supervisor_never_saw(ws):
     assert _refs(project, ATTIC) == [] and not _has(project, "refs/heads/swarm/a-W2")
 
 
-def test_kept_work_of_a_row_closed_some_other_way_goes_to_the_attic(ws):
+def test_kept_work_of_a_phase_the_done_map_calls_done_goes_to_the_attic(ws):
+    """A done record made since (``swarm skip``). A row closed in the ledger
+    leaves no such record: ``tests/test_later_closed.py``."""
     cfg, project, sup = ws
     _build(cfg, sup)
     _finish(cfg, sup, "a-W2", "later", FAR)
 
-    gitq.reconcile(cfg, {"a-W2": "ok"}, sup.log)  # closed by hand since
+    gitq.reconcile(cfg, {"a-W2": "skip"}, sup.log)
 
     assert _refs(project, KEPT) == [] and len(_refs(project, ATTIC)) == 1
 

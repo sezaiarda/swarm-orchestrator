@@ -1239,9 +1239,15 @@ class Supervisor:
         each one whose row carries its date (:func:`ledgerw.release_dated`), and
         run the launcher when a date that was ahead at the last look has come.
         The same sweep retires the failure record of a row closed since it
-        failed (:meth:`_release_closed`). True when the done map or the ready
-        set changed. Never raises."""
+        failed (:meth:`_release_closed`), and sends the work kept for a row
+        closed since to the attic (:func:`ledgerw.release_kept`), which makes
+        nothing ready. True when the done map or the ready set changed. Never
+        raises."""
         closed = self._release_closed()
+        try:
+            ledgerw.release_kept(self.cfg, self.log)
+        except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
+            self.log.line(f"LATER-CLOSED-ERROR {exc!r}")
         try:
             released = ledgerw.release_dated(self.cfg, self.log)
             ahead = set(ledgerw.dated(self.cfg))

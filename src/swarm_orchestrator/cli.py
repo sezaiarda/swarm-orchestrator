@@ -161,9 +161,11 @@ def _reconcile_orphans(cfg: Config) -> None:
                     # `needs-owner` as a clean success the moment its branch merged.
                     s.mark_done(phase, seed.get(phase, "ok"))
         # A `<phase>.fail` left beside a row closed since must not come back
-        # as a failure: the seed above read it, this retires it for good.
+        # as a failure: the seed above read it, this retires it for good. Work
+        # kept for the date of a row closed since goes to the attic with it.
         try:
             ledgerw.release_closed(cfg, log)
+            ledgerw.release_kept(cfg, log)
         except (gitq.GitError, OSError) as exc:
             log.line(f"FAIL-CLOSED-ERROR {exc}")
         if result.integrated:

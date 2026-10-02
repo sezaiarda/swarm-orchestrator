@@ -304,7 +304,9 @@ def test_a_closed_row_with_a_report_still_queued_keeps_its_work_until_it_lands(w
     if report == "its own":
         (ledgerw.queue_dir(cfg) / "a-W2.json").unlink()  # withdrawn
     else:
-        sup._handle("ledger")  # the note lands; the row stays closed
+        sup._handle("ledger")  # a note waits to share a commit: still queued
+        assert _still_kept(cfg, project, tip)
+        sup._flush_ledger({}, hold=False)  # the note lands; the row stays closed
     sup._release_dated()
     assert _in_the_attic(cfg, project, tip)
 

@@ -771,6 +771,8 @@ class Applied:
     carry_skipped: list[str] = field(default_factory=list)
     #: Phases in flight a reshape gave a new lane: ``{phase: (new, held when filed)}``.
     relaned: dict[str, tuple[list[str], list[str]]] = field(default_factory=dict)
+    #: When the notes and lessons this flush left queued are due (0.0 = none held).
+    held_until: float = 0.0
 
 
 def _run_gate(cfg: Config, root: Path) -> str:
@@ -939,7 +941,28 @@ def _summary(due: list[str], queued: dict[str, dict]) -> str:
     return "; ".join(parts)[:200] or "reports"
 
 
-def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
+def quiet(op: dict) -> bool:
+    """A report that changes no row's state and makes nothing ready: a note or
+    a lesson. It can share a commit with whatever the swarm writes next."""
+    kind = op.get("kind")
+    return kind == "lesson" or (kind == "record" and op.get("outcome") == "note")
+
+
+def _held_until(data: dict, hold_s: float, urgent: frozenset[str] | set[str]) -> float:
+    """When :data:`NOW`'s reports are due if they may wait, else 0.0 (now).
+
+    They may wait when every one is :func:`quiet` and none is about a phase in
+    ``urgent``; they wait ``hold_s`` from the oldest one."""
+    ops = data.get("ops") or []
+    if hold_s <= 0 or not ops or not all(quiet(op) for op in ops):
+        return 0.0
+    if any(op.get("phase") in urgent for op in ops):
+        return 0.0
+    return min(float(op.get("ts") or 0.0) for op in ops) + hold_s
+
+
+def flush(cfg: Config, log: Log, finished: dict[str, str], *, hold_s: float = 0.0,
+          urgent: frozenset[str] | set[str] = frozenset()) -> Applied:
     """Apply every queued report that is due, and commit it on the target branch.
 
     Due: :data:`NOW`, and each phase in ``finished`` (``{phase: status}`` as the
@@ -947,12 +970,23 @@ def flush(cfg: Config, log: Log, finished: dict[str, str]) -> Applied:
     its main branch, mid-merge, or someone left the ledger edited) stays queued
     and the next flush tries again. A bare-format ledger has no rows to write:
     its reports are dropped.
+
+    With ``hold_s``, notes and lessons alone do not make a commit of their own:
+    they stay queued until something else is due (a phase landing, a row filed,
+    reshaped or recorded), until the oldest has waited ``hold_s``, or until one
+    names a phase in ``urgent`` (a session is about to read that row's history).
+    :attr:`Applied.held_until` then says when to look again.
     """
     total = Applied()
     queued = pending(cfg)
     due = [k for k in queued if k == NOW or k in finished]
     if not due:
         return total
+    if due == [NOW]:
+        wait = _held_until(queued[NOW], hold_s, urgent)
+        if wait > time.time():
+            total.held_until = wait
+            return total
     if not is_checklist(cfg):
         for k in due:
             (queue_dir(cfg) / f"{k}.json").unlink(missing_ok=True)

@@ -85,7 +85,9 @@ and the lessons file. Sessions report; the supervisor applies each report on the
 target branch in the project checkout, under the umbrella's merge lock, and
 commits and pushes it itself. A worker's reports land with its phase: after the
 merge for an outcome that integrates, at once for one that does not. Everything
-else lands at once. See [components.md](components.md#the-ledger-writer).
+else lands at once, except a note or a lesson: it changes no row, so it waits up
+to `[tasks].ledger_batch_s` to share the next ledger commit instead of making one
+of its own. See [components.md](components.md#the-ledger-writer).
 
 | command | what it does |
 |---|---|

@@ -107,6 +107,7 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | `history_split_kb` | `256` | | hot | A family file that grows past this many KB becomes a directory with one file per phase (`<history>/api/api-W12.md`). `0` never splits. |
 | `lessons` | `"tasks/lessons.md"` | | hot | The file `swarm lesson` appends to. |
 | `ledger_gate` | `""` | | hot | A command that checks the ledger, run in the project checkout with `SWARM_LEDGER` set to the ledger's path each time the swarm adds a follow-up row. If it exits non-zero the row is not added and the refusal goes into the filing phase's history. |
+| `ledger_batch_s` | `1800` | | hot | How long a note (`swarm record <row> note`) or a lesson filed outside its phase may wait to share a commit. It is written with the next ledger commit (a phase landing, a row filed, reshaped or recorded), before a worker or an Overseer pass starts, at once when an operator job for the row it names is due, and otherwise once the oldest has waited this long. `0` commits each one at once. |
 
 ## `[telegram]`
 

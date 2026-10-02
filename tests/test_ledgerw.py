@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -458,3 +459,81 @@ def test_with_lanes_on_a_follow_up_needs_touches_and_a_tick_carries_nothing(tmp_
     assert "a-W2" in ledger_mod.ticked(out)
     assert ledger_mod.parse(out)["a-W3"] == {"a-W2"}  # b-W1 was not carried
     assert "CARRY-SKIPPED a-W2 lanes" in cfg.supervisor_log.read_text()
+
+
+def _note(cfg, phase: str, text: str) -> None:
+    ledgerw.queue(cfg, ledgerw.NOW, {"kind": "record", "phase": phase, "outcome": "note",
+                                     "note": text, "by": "overseer"})
+
+
+def test_notes_and_lessons_wait_to_share_one_commit(tmp_path, monkeypatch):
+    cfg, project, _origin = _project(tmp_path, monkeypatch)
+    log = Log(cfg.supervisor_log)
+    try:
+        head = _git(project, "rev-parse", "HEAD").strip()
+        _note(cfg, "a-W2", "first finding")
+        ledgerw.queue(cfg, ledgerw.NOW, {"kind": "lesson", "phase": "a-W2", "text": "Measure.",
+                                         "title": ""})
+        got = ledgerw.flush(cfg, log, {}, hold_s=600)
+        assert got.touched == [] and got.held_until > time.time()
+        assert _git(project, "rev-parse", "HEAD").strip() == head and ledgerw.pending(cfg)
+        # A phase landing takes them along: one commit for all three.
+        ledgerw.queue(cfg, "b-W1", {"kind": "outcome", "outcome": "ok", "note": "built"})
+        got = ledgerw.flush(cfg, log, {"b-W1": "ok"}, hold_s=600)
+        assert got.held_until == 0.0 and ledgerw.pending(cfg) == {}
+        assert _git(project, "rev-list", "--count", f"{head}..HEAD").strip() == "1"
+        assert "first finding" in ledgerw.history_text(project, cfg.history_dir, "a-W2")
+        assert "Measure." in (project / "tasks" / "lessons.md").read_text()
+    finally:
+        log.close()
+
+
+def test_a_held_note_is_written_when_its_wait_is_over_or_its_row_is_urgent(tmp_path, monkeypatch):
+    cfg, project, _origin = _project(tmp_path, monkeypatch)
+    log = Log(cfg.supervisor_log)
+    try:
+        _note(cfg, "a-W2", "for the operator job")
+        assert ledgerw.flush(cfg, log, {}, hold_s=600, urgent={"a-W3"}).held_until
+        assert ledgerw.flush(cfg, log, {}, hold_s=600, urgent={"a-W2"}).held_until == 0.0
+        assert "for the operator job" in ledgerw.history_text(project, cfg.history_dir, "a-W2")
+        _note(cfg, "a-W3", "an old one")
+        time.sleep(0.05)
+        assert ledgerw.flush(cfg, log, {}, hold_s=0.01).held_until == 0.0
+        assert "an old one" in ledgerw.history_text(project, cfg.history_dir, "a-W3")
+    finally:
+        log.close()
+
+
+def test_a_report_that_changes_a_row_is_never_held(tmp_path, monkeypatch):
+    cfg, project, _origin = _project(tmp_path, monkeypatch)
+    log = Log(cfg.supervisor_log)
+    try:
+        _note(cfg, "a-W2", "rides along")
+        ledgerw.queue(cfg, ledgerw.NOW, {"kind": "record", "phase": "b-W1", "outcome": "done",
+                                         "note": "the owner picked B", "by": "owner"})
+        got = ledgerw.flush(cfg, log, {}, hold_s=600)
+        assert got.released and got.held_until == 0.0 and ledgerw.pending(cfg) == {}
+        assert "rides along" in ledgerw.history_text(project, cfg.history_dir, "a-W2")
+    finally:
+        log.close()
+
+
+def test_the_supervisor_holds_a_note_and_writes_it_before_a_launch(tmp_path, monkeypatch):
+    from swarm_orchestrator.supervisor import Supervisor
+
+    cfg, project, _origin = _project(tmp_path, monkeypatch)
+    assert cfg.ledger_batch_s == 1800
+    state_mod.init_state(cfg)
+    sup = Supervisor(cfg)
+    try:
+        head = _git(project, "rev-parse", "HEAD").strip()
+        _note(cfg, "a-W2", "read me first")
+        assert sup._flush_ledger({}) is False
+        assert sup._ledger_held_until and _git(project, "rev-parse", "HEAD").strip() == head
+        sup._ledger_held_tick()  # still inside its wait
+        assert _git(project, "rev-parse", "HEAD").strip() == head
+        assert sup._flush_ledger({}, hold=False) is False
+        assert sup._ledger_held_until == 0.0
+        assert "read me first" in ledgerw.history_text(project, cfg.history_dir, "a-W2")
+    finally:
+        sup.log.close()

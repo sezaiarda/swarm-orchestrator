@@ -135,6 +135,9 @@ class Supervisor:
         # works against a config that predates the field.
         self.watchdog_s = max(0.0, float(getattr(cfg, "watchdog_s", 300) or 0))
         self._last_sweep = 0.0
+        # When the notes and lessons held for a shared commit are due (0.0 =
+        # none held): see `_flush_ledger`.
+        self._ledger_held_until = 0.0
         # (slot id -> phase) seen dead on the PREVIOUS sweep. A slot is only
         # reaped after two consecutive sightings, so the claim-then-respawn
         # window in `launch` can never be mistaken for a dead worker.
@@ -1220,19 +1223,36 @@ class Supervisor:
                     self.log.line(f"END-WORKER-RESPAWN-FAIL {phase} {exc}")
         session_mod.reap_session(self.cfg, "worker", phase, self.log)
 
-    def _flush_ledger(self, finished: dict[str, str]) -> bool:
+    def _flush_ledger(self, finished: dict[str, str], *, hold: bool = True) -> bool:
         """Apply the sessions' queued ledger reports on the target branch.
 
         ``finished`` is ``{phase: status}`` for the phases whose reports are
         due (see :func:`ledgerw.flush`). True when a row was ticked or added,
         which can make new work ready. Never raises: a report that cannot be
         written stays queued and the watchdog tries it again.
+
+        Notes and lessons with nothing else to land with wait up to
+        ``[tasks].ledger_batch_s`` for a shared commit, except one about a row
+        whose operator job is due: that session reads the row's history as
+        committed. ``hold=False`` writes them now.
         """
         try:
-            return ledgerw.flush(self.cfg, self.log, finished).released
+            hold_s = float(self.cfg.ledger_batch_s) if hold else 0.0
+            urgent = ({opqueue.owning_phase(i.phase) for i in opqueue.ready(self.cfg)}
+                      if hold_s > 0 else set())
+            got = ledgerw.flush(self.cfg, self.log, finished, hold_s=hold_s, urgent=urgent)
+            self._ledger_held_until = got.held_until
+            return got.released
         except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
             self.log.line(f"LEDGER-ERROR {exc!r}")
             return False
+
+    def _ledger_held_tick(self) -> None:
+        """Look again at the notes and lessons held for a shared commit: their
+        wait may be over, or an operator job for a row they name may be due.
+        Runs before every sweep of the operator queue, so on every wake."""
+        if self._ledger_held_until:
+            self._flush_ledger({})
 
     def _release_dated(self) -> bool:
         """Keep the ``later`` rows on their dates: drop the failure record of
@@ -1548,6 +1568,7 @@ class Supervisor:
         ``idle < watchdog_s``, and :meth:`_handle` refreshes the idle clock on
         every FIFO line, so a swarm that is moving never reaches the quiet point
         — and the queue would drain only once the run was already over."""
+        self._ledger_held_tick()  # a job reads its row's history as committed
         operator_mod.sweep(self.cfg, self.log, room=self._operator_room)
 
     def _operator_room(self) -> bool:
@@ -1676,6 +1697,8 @@ class Supervisor:
         bp = self.bigpic.next_deadline(now)
         if bp is not None:
             stamps.append(bp)
+        if self._ledger_held_until:
+            stamps.append(max(now, self._ledger_held_until))
         if not stamps:
             return None
         return max(0.0, min(stamps) - time.time())
@@ -2338,11 +2361,17 @@ class Supervisor:
                     continue
                 picks.append(phase)
             self._launching.update(picks)
+        refill = False
         if picks:
             self._publish_launches()
             self.log.line(f"LAUNCH-READY {' '.join(picks)} ({reason})")
+            if self._ledger_held_until:
+                # A worker reads its row's history as committed when it starts.
+                refill = self._flush_ledger({}, hold=False)
         for phase in picks:
             self._start_launch(phase)
+        if refill:  # a report that arrived beside the held ones made work ready
+            picks += self._fill_slots("ledger updated")
         return picks
 
     def _start_launch(self, phase: str) -> None:
@@ -2586,6 +2615,9 @@ class Supervisor:
         A worktree mirror (one per repo) and a claude boot take tens of
         seconds, which the loop must never spend: the thread reports back as
         ``overseer-spawned <id> ok|failed``, exactly as a launch does."""
+        if self._ledger_held_until:
+            # The pass reads the histories as committed, its own last notes included.
+            self._flush_ledger({}, hold=False)
         mem = self.overseer.mem
         since = mem.last_pass_at or mem.anchor or now
         prior = ovrecord.load_passes(self.cfg, limit=1)

@@ -1580,11 +1580,16 @@ def cmd_note(cfg: Config, phase: str, text: str, kind: str) -> int:
     return 0
 
 
-def _report_queued(cfg: Config, key: str, what: str) -> int:
+def _report_queued(cfg: Config, key: str, what: str, *, quiet: bool = False) -> int:
+    """Say when a queued report is written. ``quiet``: a note or a lesson, which
+    shares a commit with what the swarm writes next (``[tasks].ledger_batch_s``)."""
     if key == ledgerw.NOW:
         poked = _poke(cfg, "ledger")
+        wait = cfg.ledger_batch_s if quiet else 0
+        when = (f" with its next ledger commit, within {max(1, round(wait / 60))} min"
+                if wait else " now")
         print(f"{what}: queued; the swarm writes it on the target branch"
-              + (" now" if poked else " when it next runs (no supervisor is reading)"))
+              + (when if poked else " when it next runs (no supervisor is reading)"))
     else:
         print(f"{what}: queued with {key}; the swarm writes it when {key} lands")
     print("  (the swarm is the ledger's only writer: do not edit the ledger,"
@@ -1610,7 +1615,7 @@ def cmd_record(cfg: Config, phase: str, outcome: str, note: str, after: str) -> 
     by = os.environ.get("SWARM_SESSION_ID", "") or "owner"
     ledgerw.queue(cfg, ledgerw.NOW, {"kind": "record", "phase": phase, "outcome": outcome,
                                      "note": note, "after": after, "by": by})
-    return _report_queued(cfg, ledgerw.NOW, f"{phase} {outcome}")
+    return _report_queued(cfg, ledgerw.NOW, f"{phase} {outcome}", quiet=outcome == "note")
 
 
 def _ids(value: str | None) -> list[str]:
@@ -1655,7 +1660,7 @@ def cmd_lesson(cfg: Config, phase: str, text: str, title: str) -> int:
         return 2
     key = ledgerw.key_for(phase)
     ledgerw.queue(cfg, key, {"kind": "lesson", "phase": phase, "text": text, "title": title})
-    return _report_queued(cfg, key, "lesson")
+    return _report_queued(cfg, key, "lesson", quiet=True)
 
 
 def cmd_build(cfg: Config, argv: list[str], *, status: bool = False, as_json: bool = False,

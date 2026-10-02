@@ -686,8 +686,9 @@ sweep for a tick, and on `swarm up`. The row decides as committed on the target
 branch, with no report about it still queued and no worker on it; a row that
 still waits for its date is never touched. Work that is on main already is
 dropped with no attic copy. `swarm up` does the same for a phase the run has
-since recorded done (`swarm skip`). A `blocked` or dateless finish goes to the
-attic as before: nothing says when, or whether, that work is wanted.
+since recorded done (`swarm skip`), once its row no longer waits for a date. A
+`blocked` or dateless finish goes to the attic as before: nothing says when, or
+whether, that work is wanted.
 
 [The integration flow diagram](../README.md#integrator-and-merge-conflict-resolver) is in the README.
 

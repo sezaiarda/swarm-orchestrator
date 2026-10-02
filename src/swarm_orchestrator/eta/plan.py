@@ -79,6 +79,9 @@ class Plan:
     rows: dict[str, Row] = field(default_factory=dict)
     #: row -> seconds its worker has worked so far.
     running: dict[str, float] = field(default_factory=dict)
+    #: Running rows that hold no seat: each works in a window of its own (a
+    #: parked worker the owner has answered).
+    outside: frozenset[str] = frozenset()
     #: Rows whose worker finished and whose work is being merged.
     finishing: tuple[str, ...] = ()
     #: row -> when its ``after:`` date opens (epoch seconds).
@@ -115,15 +118,18 @@ def build(graph: dict[str, set[str]], text: str, landed: dict[str, str], *,
           merging: set[str] | frozenset[str] = frozenset(),
           excluded: set[str] | frozenset[str] = frozenset(), workers: int = 1,
           build_slots: int = 0, park_after: float = 900.0,
-          dated: dict[str, str] | None = None) -> Plan:
+          dated: dict[str, str] | None = None,
+          outside: set[str] | frozenset[str] = frozenset()) -> Plan:
     """The plan for ``graph`` (:func:`ledger.parse`) and ledger ``text``.
 
     ``landed`` is the launcher's done view (:func:`ledger.with_ticked`); ``busy``
     maps each running row to when its worker started; ``asking`` are the rows
-    whose worker waits on the owner (``waiting`` or ``parked``); ``merging`` the
-    rows whose worker finished and are in the merge queue; ``dated`` the rows
-    that wait for a date (:func:`ledgerw.dated`), read from ``text`` when a
-    caller has nothing else.
+    whose worker waits on the owner (``waiting``, or ``parked`` with a question
+    the owner has not answered); ``merging`` the rows whose worker finished and
+    are in the merge queue; ``dated`` the rows that wait for a date
+    (:func:`ledgerw.dated`), read from ``text`` when a caller has nothing else;
+    ``outside`` the ``busy`` rows whose worker is in no slot (parked, answered,
+    and at work in its own window), so each runs without taking a seat.
     """
     dirs = ledger_mod.dirs(text)
     satisfied = {p for p, s in landed.items() if s in statuses.SATISFIES_DEPS}
@@ -161,6 +167,7 @@ def build(graph: dict[str, set[str]], text: str, landed: dict[str, str], *,
         now=now,
         rows=rows,
         running={p: max(0.0, now - t) for p, t in busy.items() if p in rows},
+        outside=frozenset(p for p in outside if p in busy and p in rows),
         finishing=tuple(p for p in open_rows if p in merging and p in rows),
         gates={p: day_start(d) for p, d in dated.items() if p in rows},
         stuck=stuck,

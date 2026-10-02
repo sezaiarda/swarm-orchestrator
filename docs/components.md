@@ -38,8 +38,11 @@ drives the merge queue.
 - **Draining.** While `swarm down --drain` holds, nothing launches and no
   operator job or Overseer pass opens. On every event it records what the stop
   still waits for (`State.drain`, shown by `status`, the dashboard and the
-  board). When that is nothing it telegrams once and starts `swarm _drain-down`
-  in a session of its own, which runs `swarm down` and then the after-command
+  board). A parked session the owner has answered (`State.answered`) holds no
+  slot but is at work, so it is waited for and named: `1 worker (P3 in its own
+  window)`; one that still asks is not. When that is nothing it telegrams once
+  and starts `swarm _drain-down` in a session of its own, which runs
+  `swarm down` and then the after-command
   (in a `systemd-run --user --scope` where it can, so neither the tmux teardown
   nor a logout takes it).
 
@@ -156,6 +159,15 @@ after-command. A session waiting on you would die with the tmux session, so:
 | `--wait-questions` | The drain waits for them too (`N questions` in `status`). |
 | `--keep-questions` | Each is carried across alive. |
 | `--force` | Closed with the session. Its work is kept (`swarm up` sets it aside). |
+
+A parked session the owner has answered does not wait on anyone: the drain
+waits for it as for a worker in a slot, under every one of the four. The
+supervisor says it can do that with `drain-parked` in its mark file. Under one
+that started before it could (the command runs the code on disk, the supervisor
+the code it started with), such a session is still listed with the questions as
+`working on your answer`, the default still refuses for it, and a full restart
+told to go ahead replaces the supervisor in place first, then drains. With no
+supervisor running nothing waits for anything, and it is listed too.
 
 Carrying one across: once the drain is over the supervisor parks every session
 that asked and is still in its home pane; the windows are moved to a holding

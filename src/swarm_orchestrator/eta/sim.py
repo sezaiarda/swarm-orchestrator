@@ -13,6 +13,7 @@ Constraints the replay honours, each the way the swarm does it:
 
 * ``max_workers`` seats; with owner questions switched on, a worker that waits
   on the owner past ``park_after`` gives its seat back and finishes on its own;
+  a row already at work outside the slots (:attr:`Plan.outside`) takes none;
 * ``[build].max_concurrent`` heavy builds at once, when switched on: a phase
   spends :data:`BUILD_SHARE` of its work in ``swarm build``, split into
   :data:`BUILD_CHUNKS` builds that queue first come, first served;
@@ -185,6 +186,8 @@ class _Replay:
         self.work: dict[str, list] = {}
         self.wait: dict[str, float] = {}
         self.seats = 0
+        #: Rows at work that hold no seat (:attr:`Plan.outside`), until each ends.
+        self.away: set[str] = set()
         builds = plan.build_slots if opts.build_share > 0 else 0
         self.build_free = builds if builds > 0 else None
         self.build_queue: deque = deque()
@@ -212,6 +215,8 @@ class _Replay:
                 self.pending[row.id] = row.needs
         for row, age in plan.running.items():
             self.cause[row] = None
+            if row in plan.outside:
+                self.away.add(row)
             self._start(row, age)
         for gate in plan.gates.values():
             if gate > plan.now:
@@ -307,7 +312,12 @@ class _Replay:
             else:
                 self._wake(until)
         for cap in self.caps:
-            self._wake(cap.next_change(self.t, self.seats))
+            self._wake(cap.next_change(self.t, self._busy()))
+
+    def _busy(self) -> int:
+        """Workers burning usage now: the seats taken, and the rows at work in a
+        window of their own."""
+        return self.seats + len(self.away)
 
     def _wake(self, at: float) -> None:
         if self.t < at <= self.end and at not in self.woken:
@@ -324,7 +334,7 @@ class _Replay:
 
     def _advance_caps(self, t: float) -> None:
         for cap in self.caps:
-            cap.advance(self.caps_at, t, self.seats)
+            cap.advance(self.caps_at, t, self._busy())
         self.caps_at = t
 
     # -- one row's life ----------------------------------------------------------
@@ -344,7 +354,8 @@ class _Replay:
         if self.opts.owner and uniform(key, _OWNER) < self.hz.owner_p:
             wait = self.hz.owner_wait(uniform(key, _WAIT))
         self.wait[row] = wait
-        self.seats += 1
+        if row not in self.away:
+            self.seats += 1
         if self.build_free is None:
             self.work[row] = []
             self._push(self.t + lost + work, _THINK, row)
@@ -362,7 +373,10 @@ class _Replay:
             self._push(self.t + think, _THINK, row)
             return
         wait = self.wait[row]
-        self._push(self.t + min(wait, self.plan.park_after), _SEAT, row)
+        if row in self.away:
+            self.away.discard(row)  # its work is over, and it has no seat to give back
+        else:
+            self._push(self.t + min(wait, self.plan.park_after), _SEAT, row)
         self._push(self.t + wait, _FIN, row)
 
     def _request_build(self, row: str) -> None:

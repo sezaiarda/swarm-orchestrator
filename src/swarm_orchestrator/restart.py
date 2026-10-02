@@ -90,8 +90,10 @@ FORCE = "force"
 #: ``keep-later``: it keeps the work of a phase that finishes ``later`` for its
 #: date, so ``swarm done`` may tell the worker so. ``reap-stopped``: its sweep
 #: frees a busy slot whose pane is still there with no worker in it, so ``swarm
-#: doctor`` may say such a slot will be reaped.
-CAPS = ("handover", "restart-at", "keep-later", "reap-stopped")
+#: doctor`` may say such a slot will be reaped. ``drain-parked``: its drain
+#: waits for a parked session that is at work on the owner's answer, so a full
+#: restart need not refuse for one.
+CAPS = ("handover", "restart-at", "keep-later", "reap-stopped", "drain-parked")
 
 #: How long a restart waits for a safe moment, then for the old supervisor to
 #: be gone. Past it the restart fails and says what it was still waiting for;
@@ -206,8 +208,8 @@ def requester(cfg: Config, env=None) -> str:
 # -- who waits on the owner ---------------------------------------------------
 @dataclass(frozen=True)
 class Question:
-    """One session a full restart would close: waiting on the owner, or parked
-    and working on the owner's answer."""
+    """One session a stop would close: waiting on the owner, or parked and
+    working on the owner's answer with nothing to wait for it."""
 
     key: str
     who: str
@@ -219,21 +221,32 @@ class Question:
     asking: bool = True
 
 
+def drain_waits_for_parked(cfg: Config, st: state_mod.State) -> bool:
+    """Whether a drain started now waits for a parked session at work.
+
+    The supervisor does the waiting, with the code it started on: one from
+    before ``drain-parked`` counts busy slots only, and with none running
+    nothing waits at all."""
+    return capable(cfg, live_supervisor(cfg, st), "drain-parked")
+
+
 def questions(cfg: Config, st: state_mod.State) -> list[Question]:
     """Every session that waits on the owner right now: a worker that asked, a
     parked one, an operator job that asked, an Overseer pass that asked. A
-    parked session the owner has answered is listed too, as working
-    (``asking=False``): it holds no slot, so no drain waits for it, and a full
-    restart closes it like the others."""
+    parked session the owner has answered is at work, and a drain waits for it
+    like any worker (:func:`drain.waiting_for`), so it is not listed. Where no
+    drain would (:func:`drain_waits_for_parked`), a stop closes it like the
+    others, and it is listed as working (``asking=False``)."""
     from . import doctor as doctor_mod  # lazy: doctor reads the plan too
     from . import owner as owner_mod
 
-    keys = list(dict.fromkeys([*st.waiting, *st.parked]))
+    working = set(st.working_parked())
+    waited_for = working if drain_waits_for_parked(cfg, st) else set()
+    keys = [k for k in dict.fromkeys([*st.waiting, *st.parked]) if k not in waited_for]
     for item in opqueue.load_all(cfg):
         key = state_mod.waiter_key(state_mod.OPERATOR, item.phase)
         if item.state == opqueue.WAITING and key not in keys:
             keys.append(key)  # parking is off, or the poke has not landed yet
-    working = set(st.working_parked())
     out: list[Question] = []
     for key in keys:
         kind, ident = state_mod.waiter(key)
@@ -286,10 +299,10 @@ def standing(qs: list[Question], are: str = "") -> str:
 def counts(st: state_mod.State) -> tuple[int, int]:
     """``(workers at work, sessions waiting on the owner)`` from the state alone.
 
-    A parked session the owner has answered is in neither: it asks nothing, and
-    it works outside the slots, where no drain waits for it."""
+    A parked worker the owner has answered asks nothing and is at work in its
+    own window: it is a worker, as it is to a drain."""
     workers = sum(1 for s in st.busy_slots() if s.phase not in st.waiting)
-    return workers, len(st.on_owner())
+    return workers + _workers_apart(st.working_parked()), len(st.on_owner())
 
 
 def counts_of(state: dict) -> tuple[int, int]:
@@ -299,7 +312,13 @@ def counts_of(state: dict) -> tuple[int, int]:
     answered = state.get("answered") or {}
     workers = sum(1 for s in state.get("slots") or []
                   if isinstance(s, dict) and s.get("busy") and s.get("phase") not in waiting)
-    return workers, len(set(waiting) | {k for k in parked if k not in answered})
+    return (workers + _workers_apart(k for k in parked if k in answered),
+            len(set(waiting) | {k for k in parked if k not in answered}))
+
+
+def _workers_apart(keys) -> int:
+    """How many of the parked sessions at work in ``keys`` are workers."""
+    return sum(1 for k in keys if state_mod.waiter(k)[0] == state_mod.WORKER)
 
 
 def _n(n: int, word: str) -> str:
@@ -1097,8 +1116,9 @@ def _run_full(cfg: Config, plan: dict, log: Log) -> int:
              + " --wait-questions or --keep-questions", log)
         return 1
     old = live_supervisor(cfg, st)
-    if old is not None and not capable(cfg, old):
-        # Only a supervisor on this code waits for questions or parks them.
+    if old is not None and not capable(cfg, old, "drain-parked"):
+        # Only a supervisor on this code waits for questions or parks them, and
+        # waits for a parked session that is at work.
         outcome, detail = in_place(cfg, plan, log)
         if outcome != OK:
             fail(cfg, plan, f"could not load the new supervisor first: {detail}", log,

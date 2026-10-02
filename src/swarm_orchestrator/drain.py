@@ -8,11 +8,13 @@ the owner's after-command, if any, in a session of its own.
 
 Waited for: workers at work (a finished worker holds its slot through its done
 grace), launches in flight, the merge queue while it moves, a merge-conflict
-resolver, a running operator job, the init pass and an Overseer pass. Not waited
-for: anything waiting on the owner — a worker that asked, a parked one, an
-operator job that asked, a queue held on a dirty tree. The down takes those as
-they are; it keeps their work, and ends the sessions, so what they asked is
-gone from the screen. ``swarm down --drain`` says so when it is scheduled.
+resolver, a running operator job, the init pass and an Overseer pass. A parked
+session the owner has answered is at work too, in a window of its own: it holds
+no slot, so it is waited for by name. Not waited for: anything waiting on the
+owner — a worker that asked, a parked one that still asks, an operator job that
+asked, a queue held on a dirty tree. The down takes those as they are; it keeps
+their work, and ends the sessions, so what they asked is gone from the screen.
+``swarm down --drain`` says so when it is scheduled.
 
 ``swarm restart --full`` drains the same way and is the safe form of the old
 ``--then 'swarm up'``: it refuses while a session waits on the owner unless told
@@ -49,24 +51,37 @@ def waiting_for(cfg: Config, st: state_mod.State, *, launching: int = 0,
     ``launching``, ``overseer`` and ``init_pass`` are the supervisor's own
     knowledge; ``state.json`` alone cannot tell them."""
     now = time.time() if now is None else now
-    workers = sum(1 for s in st.busy_slots() if s.phase not in st.waiting) + launching
+    # A parked session the owner has answered works on in its own window. No
+    # slot shows it, so each is named: the reader must be able to find it.
+    apart = [state_mod.waiter(key) for key in st.working_parked()]
+    own = [ident for kind, ident in apart if kind == state_mod.WORKER]
+    workers = (sum(1 for s in st.busy_slots() if s.phase not in st.waiting) + launching
+               + len(own))
     out: list[str] = []
     if workers:
-        out.append(f"{workers} worker{'' if workers == 1 else 's'}")
+        text = f"{workers} worker{'' if workers == 1 else 's'}"
+        if own:
+            where = "its own window" if len(own) == 1 else "their own windows"
+            text += f" ({_join(own)} in {where})"
+        out.append(text)
     if st.integ_queue and st.integ_blocked is None:
         out.append("the merge queue")
     if st.integ_blocked is not None and f"resolve:{st.integ_blocked}" in st.windows:
         out.append("a merge-conflict resolver")
     if st.operator_busy(now) and not _operator_asking(cfg, st.operator_phase):
         out.append("an operator job")
+    out.extend(f"operator job {ident} in its own window"
+               for kind, ident in apart if kind == state_mod.OPERATOR)
     if init_pass:
         out.append("the start-up pass")
     if overseer:
         out.append("an Overseer pass")
+    if any(kind == state_mod.OVERSEER for kind, _ in apart):
+        out.append("an Overseer pass in its own window")
     if st.drain.get("questions") == "wait":
         # A restart told to wait for the answers: every session that waits on
         # the owner holds the stop until it is answered and finishes.
-        asked = set(st.waiting) | set(st.parked)
+        asked = set(st.on_owner())
         if st.operator_phase and _operator_asking(cfg, st.operator_phase):
             asked.add(state_mod.waiter_key(state_mod.OPERATOR, st.operator_phase))
         if asked:

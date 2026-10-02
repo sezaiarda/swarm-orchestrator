@@ -23,11 +23,11 @@ RUNS = sim.Options(runs=3)
 
 
 def plan_of(text: str, workers: int = 2, busy: dict | None = None, build_slots: int = 0,
-            now: float = NOW, excluded=()) -> plan.Plan:
+            now: float = NOW, excluded=(), outside=()) -> plan.Plan:
     graph = ledger.parse(text)
     landed = ledger.with_ticked({}, ledger.ticked(text), set(busy or ()))
     return plan.build(graph, text, landed, now=now, busy=busy or {}, workers=workers,
-                      build_slots=build_slots, excluded=set(excluded))
+                      build_slots=build_slots, excluded=set(excluded), outside=set(outside))
 
 
 def finishes(p: plan.Plan, calendar: holds.Holds = holds.Holds(), opts=RUNS,
@@ -127,6 +127,44 @@ def test_a_running_row_carries_on_from_its_age():
     busy = {"a-W1": NOW - 0.25 * H}
     got = finishes(plan_of(CHAIN, workers=1, busy=busy))
     assert near(got, {"a-W1": 0.75, "a-W2": 1.75, "a-W3": 2.75})
+
+
+SIX = "".join(f"- [ ] `s-W{i}` · dir:`r{i}` · needs:—\n" for i in range(1, 7))
+
+
+def test_a_row_at_work_outside_the_slots_takes_no_seat():
+    """A parked worker the owner has answered works on in a window of its own:
+    it finishes like any running row, and its seat is free for the next one."""
+    busy = {"s-W1": NOW, "s-W2": NOW}
+    seated = finishes(plan_of(SIX, workers=2, busy=busy))
+    assert near(seated, {"s-W1": 1, "s-W2": 1, "s-W3": 2, "s-W4": 2, "s-W5": 3, "s-W6": 3})
+    p = plan_of(SIX, workers=2, busy=busy, outside={"s-W2"})
+    assert p.outside == frozenset({"s-W2"}) and set(p.running) == {"s-W1", "s-W2"}
+    got = finishes(p)
+    # s-W3 has the free seat now; when s-W2 ends it gives back no seat it never
+    # held, so two rows start each hour, never three.
+    assert near(got, {"s-W1": 1, "s-W2": 1, "s-W3": 1, "s-W4": 2, "s-W5": 2, "s-W6": 3})
+
+
+def test_a_row_outside_the_slots_is_one_only_while_it_runs():
+    """Named outside but not running (it landed, or was never started): it is an
+    ordinary row, and takes a seat when its turn comes."""
+    p = plan_of(SIX, workers=2, busy={"s-W1": NOW}, outside={"s-W2", "s-W9"})
+    assert p.outside == frozenset()
+    assert near(finishes(p), {"s-W1": 1, "s-W2": 1, "s-W3": 2})
+
+
+def test_a_row_outside_the_slots_burns_usage_like_one_in_a_seat():
+    """Two at work burn 2 points an hour: 88.5% crosses 90% before the hour is
+    out and the next row waits for the reset. One would have left room for it."""
+    three = "".join(f"- [ ] `u-W{i}` · dir:`r{i}` · needs:—\n" for i in range(1, 4))
+    cap = holds.Cap("five_hour", pct=88.5, at=90.0, resets_at=NOW + 10 * H, burn=1.0)
+    busy = {"u-W1": NOW, "u-W2": NOW}
+    got = finishes(plan_of(three, workers=1, busy=busy, outside={"u-W2"}),
+                   holds.Holds(caps=(cap,)))
+    assert near(got, {"u-W1": 1, "u-W2": 1, "u-W3": 11})
+    alone = finishes(plan_of(three, workers=1, busy={"u-W1": NOW}), holds.Holds(caps=(cap,)))
+    assert near(alone, {"u-W1": 1, "u-W2": 2})
 
 
 def test_the_same_seed_gives_the_same_forecast_and_an_unrelated_row_moves_nothing():

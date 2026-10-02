@@ -175,7 +175,8 @@ def plan_of(inputs: Inputs) -> plan_mod.Plan:
         inputs.graph, inputs.text, inputs.landed, now=inputs.now, busy=busy,
         asking=set(st.on_owner()), merging=st.integrating(),
         excluded=set(inputs.exclude), workers=inputs.workers,
-        build_slots=inputs.build_slots, park_after=inputs.park_after, dated=inputs.dated)
+        build_slots=inputs.build_slots, park_after=inputs.park_after, dated=inputs.dated,
+        outside=set(st.working_parked()))
 
 
 @dataclass(frozen=True)

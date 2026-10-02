@@ -2292,7 +2292,8 @@ def _phase_standing(cfg: Config, st) -> dict:
     graph = ledger_mod.load(path)
     ticked = ledger_mod.load_ticked(path)
     dated = ledgerw.dated(cfg)
-    busy = {s.phase for s in st.busy_slots() if s.phase}
+    # At work: in a slot, or parked and working on the owner's answer.
+    busy = {s.phase for s in st.busy_slots() if s.phase} | set(st.working_parked())
     landed = ledger_mod.with_ticked(st.done, ticked, busy | set(st.parked) | set(st.waiting))
     t = campaign.overall(campaign.summarise(graph, landed, busy, set(cfg.exclude or []), ticked,
                                             dated))

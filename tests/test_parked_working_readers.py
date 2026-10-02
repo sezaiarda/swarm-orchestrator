@@ -16,9 +16,11 @@ did.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import time
+from dataclasses import replace
 from datetime import datetime
 
 import pytest
@@ -30,7 +32,11 @@ from swarm_orchestrator import state as state_mod
 from swarm_orchestrator import why as why_mod
 from swarm_orchestrator.config import load
 from swarm_orchestrator.eta import engine
+from swarm_orchestrator.eta import hazards as hazards_mod
+from swarm_orchestrator.eta import holds as holds_mod
+from swarm_orchestrator.eta import model as model_mod
 from swarm_orchestrator.eta import plan as plan_mod
+from swarm_orchestrator.eta import sim as sim_mod
 from swarm_orchestrator.logutil import Log
 from swarm_orchestrator.state import State
 from swarm_orchestrator.tui import books, data
@@ -109,6 +115,21 @@ def test_the_forecast_schedules_an_answered_parked_row_as_running(cfg):
     assert plan.running == {"P0": 3 * H, "P1": 3 * H}  # from its launch, like a slot's
     assert set(plan.rows) == {"P0", "P1", "P2"}  # and the row behind it is timed again
     assert plan.books["P1"].running == ("P1",) and plan.books["P1"].behind == 0
+    assert plan.outside == frozenset({"P1"})  # it runs in its own window, not in a seat
+
+
+def test_the_forecast_gives_the_seat_an_answered_parked_row_left_to_the_next_row(cfg):
+    """Two seats, one worker in a slot and one parked and at work: a seat is
+    free now, and the forecast starts the next ready row in it."""
+    ledger = LEDGER + "- [ ] `P3` · needs:—\n"
+    (cfg.project_dir / "docs" / "PHASE-LEDGER.md").write_text(ledger, encoding="utf-8")
+    inputs = engine.from_files(cfg, run(cfg, WORKING), now=NOW)
+    plan = engine.plan_of(replace(inputs, started={}))  # both just started: an hour each
+    hour = model_mod.Durations(mu=math.log(H), sigma=1e-9, shared=0.0)
+    (future,) = sim_mod.simulate(plan, hour, hazards_mod.Hazards(follow_all=0.0),
+                                 holds_mod.Holds(), sim_mod.Options(runs=1))
+    hours = {row: round((t - NOW) / H, 3) for row, t in future.finish.items()}
+    assert hours == {"P0": 1.0, "P1": 1.0, "P3": 1.0, "P2": 2.0}
 
 
 @STILL_ASKING
@@ -116,6 +137,7 @@ def test_the_forecast_leaves_out_a_parked_row_that_still_asks(cfg, mark):
     plan = engine.plan_of(engine.from_files(cfg, run(cfg, mark), now=NOW))
     assert [(s.row, s.why, s.behind) for s in plan.stuck] == [("P1", plan_mod.ASKED, ("P2",))]
     assert plan.running == {"P0": 3 * H} and set(plan.rows) == {"P0"}
+    assert plan.outside == frozenset()
 
 
 def test_the_forecast_is_remade_when_the_owner_answers(cfg):
@@ -140,11 +162,17 @@ def test_swarm_status_says_a_parked_session_is_working_and_counts_nothing_on_the
     assert "waiting=[] parked=['P1'] working=['P1']" in out
     assert "wait on you" not in out and "waiting on you" not in out
     assert "eta: 3 rows left" in out
+    # The ledger's count has it running, as the dashboard's headline does, not
+    # ready to launch.
+    standing = cli._phase_standing(cfg, state_mod.read(cfg))
+    assert (standing["running"], standing["ready"]) == (2, 0)
 
 
 @STILL_ASKING
 def test_swarm_status_keeps_its_line_and_its_count_for_a_session_that_asks(cfg, capsys, mark):
     run(cfg, mark)
+    standing = cli._phase_standing(cfg, state_mod.read(cfg))
+    assert (standing["running"], standing["ready"]) == (1, 1)
     assert cli.cmd_status(cfg) == 0
     out = capsys.readouterr().out
     assert "waiting=[] parked=['P1']\n" in out and "working=" not in out
@@ -219,12 +247,12 @@ def test_skip_says_a_session_that_asked_was_waiting_on_the_owner(cfg, capsys, ma
 
 
 # -- swarm restart ---------------------------------------------------------------------
-def test_a_restart_counts_an_answered_parked_session_as_no_question(cfg):
+def test_a_restart_counts_an_answered_parked_session_as_a_worker_and_no_question(cfg):
     st = run(cfg, WORKING)
-    assert restart_mod.counts(st) == (1, 0)
-    assert restart_mod.counts_of(raw(cfg)) == (1, 0)
+    assert restart_mod.counts(st) == (2, 0)
+    assert restart_mod.counts_of(raw(cfg)) == (2, 0)
     plan = restart_mod.new_plan(cfg, restart_mod.SUPERVISOR, NOW + H, "owner terminal", now=NOW)
-    assert "1 worker and 0 questions carry on untouched" in restart_mod.line(
+    assert "2 workers and 0 questions carry on untouched" in restart_mod.line(
         plan, *restart_mod.counts(st), NOW)
 
 
@@ -235,10 +263,11 @@ def test_a_restart_counts_a_parked_session_that_asks_as_a_question(cfg, mark):
     assert restart_mod.counts_of(raw(cfg)) == (1, 1)
 
 
-def test_a_full_restart_still_refuses_for_a_working_session_and_says_it_is_working(
+def test_with_no_supervisor_to_wait_for_it_a_full_restart_refuses_for_a_working_session(
         cfg, capsys):
-    """Nothing waits for a session outside the slots, so a full restart would
-    close it mid-work: it is still named, as what it is."""
+    """A drain waits for a session at work outside the slots, and the supervisor
+    is what drains. With none running nothing would wait, so a full restart
+    would close it mid-work: it is still named, as what it is."""
     st = run(cfg, WORKING)
     (q,) = restart_mod.questions(cfg, st)
     assert (q.key, q.who, q.parked, q.asking, q.text) == ("P1", "the worker on P1", True, False, "")

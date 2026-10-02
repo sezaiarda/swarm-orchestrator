@@ -167,6 +167,25 @@ def test_cards_say_why_they_sit_where_they_do(feed):
     assert cards["al-W1"]["t"] == "ready now."
 
 
+def test_an_operator_card_says_the_time_its_job_is_held_to(feed):
+    """A session at declared long work, and a job put back until later, both say until when."""
+    now = time.time()
+    clock = time.strftime("%H:%M", time.localtime(now + 1800))
+    op = feed.cfg.operator_dir
+    (op / "al-W7.json").write_text(json.dumps(_item(
+        "al-W7", opqueue.RUNNING, hold_until=now + 1800, hold_why="a long build")))
+    (op / "op-1790000000.json").write_text(json.dumps(_item(
+        "op-1790000000", opqueue.QUEUED, run_after=now + 1800)))
+    fresh = Feed(feed.cfg)  # a new reader: the queue files were rewritten in place
+    fresh.refresh(force=True)
+    cards = _cards(fresh.board)
+    if time.localtime(now).tm_yday == time.localtime(now + 1800).tm_yday:
+        assert cards["al-W7"]["sub"] == f"operator running, at long work until {clock}"
+        assert cards["op-1790000000"]["sub"] == f"operator queued, not before {clock}"
+    assert cards["al-W7"]["sub"].endswith(clock)
+    assert cards["op-1790000000"]["sub"].endswith(clock)
+
+
 def test_non_phase_cards_join_the_board(feed):
     cards = _cards(feed.board)
     assert cards["op-1790000000"]["col"] == "operator"

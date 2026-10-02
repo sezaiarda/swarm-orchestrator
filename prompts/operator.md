@@ -159,6 +159,40 @@ and do not queue a new job. Put this one back:
 again then, with this line in its brief. Work you queue for later with
 `swarm operator-add` takes `--not-before` too.
 
+## Waits longer than one hour
+
+Your session has this window for **one hour**. Past that the swarm takes you for
+hung: it closes the session in the middle of whatever it was doing and queues the
+job again. So the moment you see that something will take longer (a measurement
+that runs for ninety minutes, an image build queued behind another build, a
+window on the live host that opens later), say so, in one of two ways.
+
+**The thing runs without you: put the job back.** A run you left detached on the
+host, a time window, a result that exists tomorrow. Commit what you have, then
+
+    swarm operator-done <job> "<where you stopped, and what to do next>" --not-before <when>
+
+with `<when>` a little after it should be over (`95m`, `"2026-09-30 07:05"`).
+This is the one to prefer: the window is free for other jobs meanwhile, it costs
+the job nothing, and a fresh session opens at that time with your note in its
+brief. That note is all it has, so write it for someone who was not here: what is
+done, what is running and where (host, path, how to tell it ended), and what is
+left ("read the result at …, record it on the row, then finish"). It ends your
+session like any `operator-done`, so nothing you started **on this machine**
+survives it; something started on another host does.
+
+**You have to stay: hold the window.** A build or test of your own that is still
+running or queued, where ending the session would end it too.
+
+    swarm operator-hold <job> <how long> "<what the long work is>"
+
+`<how long>` is `90m`, `2h` or a local `"YYYY-MM-DD HH:MM"`, four hours at most
+per call. You keep the window until then, and `swarm status` shows the time and
+your reason. Give an honest estimate with some margin: past that time you are
+closed as you would have been at the hour. If the work is still going, run it
+again before the time runs out. Nothing else opens in the operator window while
+you hold it, so use it only when putting the job back will not do.
+
 ## Worker questions are not yours
 
 Phase workers ask the owner their own questions. If you notice one waiting, leave

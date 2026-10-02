@@ -271,6 +271,21 @@ def test_an_operator_row_shows_its_state_triage_and_age():
     assert "queued/now" in text and data.fmt_ago(NOW - 300, NOW) in text
 
 
+def test_an_operator_row_shows_the_time_a_job_is_held_to():
+    """Long work a session declared, or a job put back until later, is not a stuck queue."""
+    until = opqueue.hhmm(NOW + 600, NOW)
+    queue = [item("P1", opqueue.RUNNING, hold_until=NOW + 600, hold_why="a long build"),
+             item("P2", run_after=NOW + 600, triage={"when": "later"}),
+             item("P3", run_after=NOW + 5 * 86400)]
+    held, put_back, days = (plain(r.text) for r in drawer.operator_rows(
+        FakeDash(snap(operator=queue)), now=NOW))
+    age = data.fmt_ago(NOW - 300, NOW)  # still readable beside it, not clipped away
+    assert len(until) == 5 and f"running to {until} · {age}" in held
+    assert f"queued to {until} · {age}" in put_back
+    day = data.datetime.fromtimestamp(NOW + 5 * 86400).strftime("%m-%d")
+    assert f"queued to {day} · {age}" in days
+
+
 def test_a_drained_queue_has_no_heading():
     assert drawer.operator_head(FakeDash(snap(operator=[item("P1", opqueue.DONE)]))) == ""
     assert drawer.operator_head(FakeDash()) == ""

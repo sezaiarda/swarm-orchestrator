@@ -261,6 +261,17 @@ flowchart TD
   `swarm operator-done <job> "<why>" --not-before <when>` means the job's
   moment has not come yet: it goes back in the queue until `<when>` instead of
   finishing, and the attempt is not counted.
+- **Waits longer than the hour:** a session still there when its lease runs out
+  is closed and its job queued again, so a session says when it needs longer.
+  If the thing it waits on runs without it (a measurement left running on a
+  host, a time window), it puts the job back with `operator-done --not-before`
+  and a note of where it stopped: the window is free meanwhile, and the job
+  opens again at that time, whatever its triage said, with the note in its
+  brief. If the session itself has to stay (a build of its own queued behind
+  another), `swarm operator-hold <job> <how long> "<why>"` moves its lease, by
+  up to 4 h per call; only that session can, and `status` and the dashboards
+  show until when. Past the time it gave it is reclaimed as before, without an
+  attempt being counted (three times at most per job).
 - **Decides:** how to do the job. It checks first whether the work is already
   done, narrates each action, and prefers the step it can undo.
 - **May not:**
@@ -280,8 +291,9 @@ stateDiagram-v2
   Waiting --> Parked: park_after runs out<br/>own window (wait:op-&lt;job&gt;), operator window freed
   Parked --> Running: swarm resumed
   Running --> Done: operator-done (--attention pings; a decision is asked first)
+  Running --> Running: operator-hold (declared long work, lease up to 4 h)
   Running --> Queued: operator-done --not-before (attempt not counted)
-  Running --> Queued: lease expired or session would not start<br/>(eligible again after 5 min)
+  Running --> Queued: lease expired or session would not start<br/>(eligible again after 5 min; a declared hold that ran out is not an attempt)
   Running --> Queued: swarm up (the old run is gone)
   Waiting --> Queued: swarm up
   Queued --> Abandoned: 3 attempts used (owner pinged once)

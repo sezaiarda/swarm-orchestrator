@@ -32,6 +32,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
+from .. import opqueue
 from .data import fmt_ago, fmt_clock, open_drops, question_index
 from .theme import BAD, COLOR, GLYPH, MUTED, OK, YOU, paint, token
 from .timeline import NEED_LABEL, blocker_since
@@ -309,6 +310,13 @@ def operator_rows(dash, width: int = WIDTH - 4, now: float | None = None) -> lis
     for item in owed(dash)[:MAX_OPERATOR]:
         when = str((item.triage or {}).get("when", ""))
         state = f"{item.state}/{when}" if when else item.state
+        held = opqueue.held_to(item, now)
+        if held:
+            # A session at declared long work, or a job put back until later,
+            # is not one nothing is draining: the time says so, in the room
+            # the triage would have had (the day alone when it is not today).
+            clock = opqueue.hhmm(held, now)
+            state = f"{item.state} to {clock if len(clock) == 5 else clock[5:10]}"
         room = width - _OPERATOR_GUTTER
         age = fmt_ago(item.queued_at or None, now)
         tail = clip(f"{state} · {age}", max(8, room - 6))

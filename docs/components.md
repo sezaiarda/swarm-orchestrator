@@ -367,6 +367,33 @@ since the session takes no slot). It never waits longer than
 The lease lasts 1 h, or 7 days while waiting on you. A job gets 3 attempts, with
 5 minutes between them. After that it is `abandoned` and you are told once.
 
+**Waits longer than the hour:** a session still there when its lease runs out is
+taken for hung: it is closed, and its job is queued again with the attempt
+spent. A wait is not a hang, so the session says which kind it has:
+
+- *The thing runs without it* (a measurement left running on a host, a time
+  window): it puts the job back with
+  `swarm operator-done <job> "<where it stopped>" --not-before <when>`. The
+  window is free for other jobs, the attempt is given back, and the job opens
+  again at `<when>` even if triage said `later`: that only decided when to open
+  it first. The note is kept on the item (`resume_note`) apart from the last
+  error, so a reopening that fails cannot lose it, and it is in the next brief.
+  The job does not reopen while its own mirror is still in the merge queue.
+- *The session has to stay* (a build of its own queued behind another, which
+  ending the session would end): `swarm operator-hold <job> <how long> "<why>"`
+  moves the item lease and the state lease together to the time it gives. It is
+  bounded (4 h per call, `opqueue.HOLD_MAX_S`; a session still at work runs it
+  again, which a hung one cannot), it never shortens a lease, only the session
+  carrying the job out may run it (`SWARM_OPERATOR_JOB`), and it is logged
+  (`OPERATOR-HOLD`) and shown by `swarm status` and both dashboards. An answer
+  from you in the middle does not cut it short.
+
+Past the time a session declared, it is reclaimed exactly as at the hour. That
+expiry does not count as an attempt, up to three times per job
+(`opqueue.MAX_LAPSES`): after that it counts like any other, so a job whose
+sessions only ever declare a wait and hang still reaches the cap and you.
+A session that declared nothing is reclaimed at the hour, as before.
+
 **Where it works:** under worktree isolation, in its own mirror `op-<job>` (reused
 by a retry), merged through the ordinary queue on `operator-done`. Without
 worktree isolation, it works in the project itself.
@@ -387,7 +414,7 @@ again; `"none"` pings none. Questions and abandoned jobs always ping.
 `swarm operator-done <job> "<why>" --not-before <when>` means the job's moment
 has not come yet: it goes back in the queue until `<when>` (`90m`, `6h`, `3d`,
 `2026-09-30`, `"2026-09-30 08:00"`) instead of finishing, the attempt is not
-counted, and its next brief says why the last attempt ended.
+counted, and its next brief says where the last session stopped.
 `swarm operator-add --not-before <when> ...` holds a new ad-hoc job the same
 way.
 

@@ -1044,9 +1044,11 @@ def cmd_operator(cfg: Config, phase: str) -> int:
     if item.terminal:
         print(f"swarm operator: {phase} hand-off is already {item.state}", file=sys.stderr)
         return 1
-    if operator_mod.deferred(item):
+    if str((item.triage or {}).get("when", "")) == opqueue.LATER:
         # Asking by hand is the owner saying it cannot keep: a `later` triage
-        # must not hold it past its merge.
+        # must not hold it past its merge. Read off the triage itself, not
+        # `deferred()`: a supervisor started before a job could be put back
+        # mid-work still defers on the triage alone.
         opqueue.set_triage(cfg, phase, when=opqueue.NOW, why="opened by hand",
                            group=str(item.triage.get("group", "")), source="owner")
     heard = _poke(cfg, f"operator {phase}")
@@ -1132,6 +1134,55 @@ def cmd_operator_done(
     print(f"operator-done {phase}")
     print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
     print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
+    return 0
+
+
+def cmd_operator_hold(cfg: Config, job: str, span: str, why: str) -> int:
+    """The session declares long work it has to sit through: a longer lease.
+
+    A lease is one hour, and a session still there when it ran out was closed
+    in the middle of its work. This moves it to the time the session gives,
+    with what the work is; ``swarm status`` shows both, and the lease is
+    reclaimed past that time as it was past the hour. Only the session carrying
+    the job out may run it (it is told its job in ``SWARM_OPERATOR_JOB``), and
+    never for longer than :data:`opqueue.HOLD_MAX_S` at once: a longer wait is
+    one the session does not have to sit through, and goes back to the queue
+    with ``operator-done --not-before``.
+    """
+    why = " ".join((why or "").split())
+    now = time.time()
+    try:
+        until = opqueue.parse_not_before(span, now)
+    except ValueError as exc:
+        print(f"swarm operator-hold: {exc}", file=sys.stderr)
+        return 2
+    limit = opqueue.HOLD_MAX_S
+    if not why or until <= now or until > now + limit:
+        problem = (
+            "say what the long work is" if not why
+            else f"{span!r} is not in the future" if until <= now
+            else f"{span!r} is longer than {limit / 3600:g}h, the most one call may hold."
+                 " If the wait needs no session, put the job back instead: swarm"
+                 f' operator-done {job} "<where you stopped>" --not-before <when>.'
+                 " If it does, hold for less and run this again before it runs out"
+        )
+        print(f"swarm operator-hold: {problem}", file=sys.stderr)
+        return 2
+    if os.environ.get(operator_mod.JOB_ENV) != job:
+        print(f"swarm operator-hold: only the session carrying out {job} can hold its lease",
+              file=sys.stderr)
+        return 1
+    log = Log(cfg.supervisor_log)
+    try:
+        item = operator_mod.hold(cfg, job, until, why, log, now)
+    finally:
+        log.close()
+    if item is None:
+        print(f"swarm operator-hold: no running operator job {job}", file=sys.stderr)
+        return 1
+    print(f"operator-hold {job}: yours until {_clock(item.lease_until)} — {item.hold_why}")
+    print("  past that time the session is closed and the job queued again;")
+    print("  run this again before then if the work needs longer")
     return 0
 
 
@@ -2248,13 +2299,15 @@ def _operator_lines(cfg: Config, st: state_mod.State) -> list[str]:
             lines.append(f"  {i.phase} [WAITING ON YOU in {state_mod.wait_window(key)}]:"
                          f" {i.question}")
         elif i.state == opqueue.QUEUED and i.run_after > time.time():
-            lines.append(f"  {i.phase} [not before {_clock(i.run_after)}] — {_job_brief(i.note)}")
+            # A job a session put back mid-work says where it stopped, not its brief.
+            lines.append(f"  {i.phase} [not before {_clock(i.run_after)}] — "
+                         f"{_job_brief(i.resume_note or i.note)}")
     current = next((i for i in items if i.phase == st.operator_phase), None)
     if current is not None:
         what = (
             f"WAITING ON YOU: {current.question}"
             if current.state == opqueue.WAITING
-            else current.state
+            else opqueue.standing(current)
         )
         lines.append(f"  current: {current.phase} [{what}] — {_job_brief(current.note)}")
     elif st.operator_phase:
@@ -2870,6 +2923,14 @@ def _build_parser() -> argparse.ArgumentParser:
         func=lambda cfg, a: cmd_operator_done(
             cfg, a.phase, " ".join(a.outcome), a.attention, a.not_before),
         tolerant=True)
+
+    ohp = sub.add_parser(
+        "operator-hold", help="this operator job's session declares long work: a longer lease")
+    ohp.add_argument("phase", help="the operator job id")
+    ohp.add_argument("span", metavar="HOW-LONG", help="90m, 2h, or a local 'YYYY-MM-DD HH:MM'")
+    ohp.add_argument("why", nargs="+", help="one line: what the long work is")
+    ohp.set_defaults(
+        func=lambda cfg, a: cmd_operator_hold(cfg, a.phase, a.span, " ".join(a.why)))
 
     oad = sub.add_parser(
         "operator-add", help="queue an ad-hoc operator job")

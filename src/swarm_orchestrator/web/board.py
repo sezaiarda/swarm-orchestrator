@@ -264,7 +264,8 @@ def _place(pid, graph, done, satisfied, excluded, waiting, parked, busy, queue, 
         return MERGING, {"sub": "merged; the push is retried", "held": True}
     live = [j for j in mine if j.state in (opqueue.QUEUED, opqueue.RUNNING)]
     if live:
-        return OPERATOR, {"sub": f"operator {live[0].state}", "job": live[0].phase}
+        return OPERATOR, {"sub": f"operator {opqueue.standing(live[0], why=False)}",
+                          "job": live[0].phase}
     if status in statuses.SATISFIES_DEPS:
         if status == statuses.SKIP:
             sub = "skipped"
@@ -378,7 +379,8 @@ def _job_cards(jobs: dict, graph: dict, parked: list = ()) -> list[dict]:
                             "sub": "operator job gave up; yours to do by hand",
                             "q": clip(job.last_error, _QUESTION_CHARS)})
             elif job.state in (opqueue.QUEUED, opqueue.RUNNING):
-                out.append({**base, "col": OPERATOR, "sub": f"operator {job.state}"})
+                out.append({**base, "col": OPERATOR,
+                            "sub": f"operator {opqueue.standing(job, why=False)}"})
     return out
 
 

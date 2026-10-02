@@ -58,6 +58,7 @@ from . import probes
 from . import timeline as tl
 from . import resourcebox
 from . import usagebox
+from .. import opqueue
 from .campaign import active, at_work, overall, standings
 from .charts import area, axis, axis_time, hold_last, meter, time_grid
 from .data import (
@@ -739,12 +740,15 @@ def job_detail(item) -> str:
     state = token(item.state)
     lines = [
         f"{paint(GLYPH.get(state, '·'), state)} [b]operator job {escape(item.phase)}[/b]  "
-        + paint(escape(item.state), state),
+        + paint(escape(opqueue.standing(item)), state),
         paint(f"queued {fmt_stamp(item.queued_at or None)} · done "
               f"{fmt_stamp(item.done_at or None)} · {item.attempts} attempt(s)", MUTED),
     ]
+    # A job put back mid-work: that note is in "where it stopped", once.
+    error = item.last_error if item.last_error != item.resume_note else ""
     for title, body, st in (("the job", item.note, None), ("outcome", item.outcome, None),
-                            ("last error", item.last_error, BAD),
+                            ("where it stopped", item.resume_note, None),
+                            ("last error", error, BAD),
                             ("it asked you", item.question, YOU), ("your answer", item.answer, None)):
         if body and body.strip():
             lines += [section(title, state=st), escape(body.strip())]

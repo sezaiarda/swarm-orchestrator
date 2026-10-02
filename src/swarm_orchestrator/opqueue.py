@@ -92,6 +92,15 @@ RETRY_BACKOFF_S = 300.0
 #: meanwhile would let the sweep kill a session that is doing exactly what it
 #: should. A week, not forever: a session that truly vanished must still let go.
 WAIT_LEASE_S = 7 * 24 * 3600.0
+#: The furthest ahead a session may move its own lease when it declares long
+#: work (:func:`hold`). The hour stops being the same for every job; a bound
+#: stays, because a session that hangs after declaring must still let go. A
+#: session that is alive past it declares again, which a hung one cannot do.
+HOLD_MAX_S = 4 * 3600.0
+#: How many declared waits of one job may run out without costing an attempt.
+#: Without a bound, a job whose every session declares a wait and then hangs
+#: would hold the window for ever and never reach the owner.
+MAX_LAPSES = MAX_ATTEMPTS
 
 #: ``Item.source`` of a job queued by ``swarm operator-add`` rather than left by a
 #: phase's ``swarm done ... operator``. ``""`` (every older item) is the latter.
@@ -182,6 +191,20 @@ class Item:
     mirror: str = ""
     #: ``""`` = a phase's ``operator`` finish; :data:`ADDED` = ``swarm operator-add``.
     source: str = ""
+    #: Epoch the live session declared its long work will be over by
+    #: (``swarm operator-hold``). 0 = it declared nothing: the ordinary lease.
+    hold_until: float = 0.0
+    #: What that long work is, in the session's words.
+    hold_why: str = ""
+    #: Declared waits that ran out with the session still there (see
+    #: :data:`MAX_LAPSES`).
+    lapses: int = 0
+    #: Where the session that put the job back (``operator-done --not-before``)
+    #: had got to: the next session's starting point. Kept apart from
+    #: ``last_error``, which the next failed start overwrites.
+    resume_note: str = ""
+    #: When it was put back. 0 = never.
+    put_back_at: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -204,6 +227,51 @@ class Item:
         """Is this leasable right now?"""
         now = time.time() if now is None else now
         return self.state == QUEUED and self.run_after <= now
+
+
+def _let_go(item: Item) -> None:
+    """No session holds ``item`` any more: its lease and what it declared end."""
+    item.run_id = ""
+    item.lease_until = 0.0
+    item.hold_until = 0.0
+    item.hold_why = ""
+
+
+def standing(item: Item, now: float | None = None, *, why: bool = True) -> str:
+    """An item's state in words, with the time it is held to when it has one.
+
+    One wording for ``swarm status`` and the dashboards: ``running, at long
+    work until 08:55: <why>`` for a declared wait (``why=False`` leaves the
+    reason out, for a line with no room), ``queued, not before 07:00`` for a
+    job that waits for its time.
+    """
+    now = time.time() if now is None else now
+    until = held_to(item, now)
+    if until and item.state == RUNNING:
+        reason = f": {item.hold_why}" if why and item.hold_why else ""
+        return f"running, at long work until {hhmm(until, now)}{reason}"
+    if until:
+        return f"queued, not before {hhmm(until, now)}"
+    return item.state
+
+
+def held_to(item: Item, now: float | None = None) -> float:
+    """The time ``item`` is held to, or 0: the end of long work its session
+    declared, or the moment a queued job may open."""
+    now = time.time() if now is None else now
+    if item.state == RUNNING and item.hold_until > now:
+        return item.hold_until
+    if item.state == QUEUED and item.run_after > now:
+        return item.run_after
+    return 0.0
+
+
+def hhmm(ts: float, now: float | None = None) -> str:
+    """A local clock time, with its date when that is not today's."""
+    now = time.time() if now is None else now
+    then, today = time.localtime(ts), time.localtime(now)
+    same_day = (then.tm_year, then.tm_yday) == (today.tm_year, today.tm_yday)
+    return time.strftime("%H:%M" if same_day else "%Y-%m-%d %H:%M", then)
 
 
 def group_of(item: Item) -> str:
@@ -542,14 +610,42 @@ def release(
         item.last_error = " ".join((error or "").split())
         if item.attempts < MAX_ATTEMPTS:
             item.state = QUEUED
-            item.run_id = ""
-            item.lease_until = 0.0
+            _let_go(item)
             item.run_after = now + RETRY_BACKOFF_S
             _write(cfg, item)
             return item
         _abandon(cfg, item, item.last_error or "attempt cap reached")
     _tell_abandoned(cfg, item)
     return item
+
+
+def expire(cfg: Config, phase: str, now: float | None = None) -> Item | None:
+    """A lease ran out with its session still holding it: queue the job again.
+
+    A session that declared nothing sat past the ordinary hour, and that is an
+    attempt spent (:func:`release`). One that had declared long work
+    (:func:`hold`) was waiting, as it said it would, and a wait is not a crash:
+    its attempt is given back, so a job that needs three such waits is not
+    abandoned as a crash loop. :data:`MAX_LAPSES` bounds that.
+
+    The refund is for a declared wait that ran out, not for having declared
+    one: the lease that expired must be the one the hold set. A hold shorter
+    than the hour, or one long past when the owner's answer put the session
+    back on an ordinary lease, leaves the expiry an attempt like any other.
+    """
+    now = time.time() if now is None else now
+    error = "the operator session outlived its lease"
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.state not in LEASED:
+            return None
+        if item.hold_until >= item.lease_until > 0 and item.lapses < MAX_LAPSES:
+            item.lapses += 1
+            item.attempts = max(0, item.attempts - 1)
+            error = (f"it declared long work until {hhmm(item.hold_until, now)}"
+                     f" ({item.hold_why}) and was still at it when that time passed")
+            _write(cfg, item)
+    return release(cfg, phase, error, now)
 
 
 def complete(
@@ -561,8 +657,7 @@ def complete(
         if item is None or item.terminal:
             return None
         item.state = DONE
-        item.run_id = ""
-        item.lease_until = 0.0
+        _let_go(item)
         item.outcome = " ".join((outcome or "").split())
         item.attention = bool(attention)
         item.done_at = time.time()
@@ -570,7 +665,10 @@ def complete(
     return item
 
 
-def later(cfg: Config, phase: str, not_before: float, outcome: str = "") -> Item | None:
+def later(
+    cfg: Config, phase: str, not_before: float, outcome: str = "",
+    now: float | None = None,
+) -> Item | None:
     """Not yet: put a leased job back in the queue until ``not_before``.
 
     For a job whose precondition is a date or a state that has not arrived (a
@@ -579,17 +677,47 @@ def later(cfg: Config, phase: str, not_before: float, outcome: str = "") -> Item
     queued again with no gate and ran at once, to the same no-op. The attempt it
     just used is given back: waiting for a date is not a failure, so it must
     never walk the job to the abandon cap.
+
+    It is also how a session in the middle of its work waits for something that
+    runs without it (a measurement left running on the host): the window is free
+    meanwhile, and ``outcome`` is where it stopped. That goes in
+    ``resume_note`` as well as ``last_error``, because the next start that
+    fails rewrites ``last_error`` and the note is all the next session has.
     """
     with _locked(cfg):
         item = load(cfg, phase)
         if item is None or item.state not in LEASED:
             return None
         item.state = QUEUED
-        item.run_id = ""
-        item.lease_until = 0.0
+        _let_go(item)
         item.run_after = not_before
         item.attempts = max(0, item.attempts - 1)
         item.last_error = " ".join((outcome or "").split())
+        item.resume_note = item.last_error
+        item.put_back_at = time.time() if now is None else now
+        _write(cfg, item)
+    return item
+
+
+def hold(
+    cfg: Config, phase: str, until: float, why: str, now: float | None = None
+) -> Item | None:
+    """The live session declares long work: its lease runs to ``until``.
+
+    For work the session itself must sit through (a build of its own queued
+    behind another), where an hour is not a verdict. ``None`` unless the job is
+    running. The lease only ever moves later, so declaring ten minutes cannot
+    cost the hour, and never past :data:`HOLD_MAX_S` from now. The caller moves
+    the state lease to match (:func:`operator.hold`).
+    """
+    now = time.time() if now is None else now
+    with _locked(cfg):
+        item = load(cfg, phase)
+        if item is None or item.state != RUNNING:
+            return None
+        item.hold_until = max(item.hold_until, min(until, now + HOLD_MAX_S))
+        item.hold_why = " ".join((why or "").split())
+        item.lease_until = max(item.lease_until, item.hold_until)
         _write(cfg, item)
     return item
 
@@ -643,7 +771,8 @@ def resume(
     """The owner answered: the session carries on under an ordinary lease.
 
     ``lease_s`` is longer for a parked job: it runs on in its own window,
-    outside the operator window's lease, and only its end releases it.
+    outside the operator window's lease, and only its end releases it. Long
+    work the session declared before it asked (:func:`hold`) still stands.
     """
     now = time.time() if now is None else now
     with _locked(cfg):
@@ -652,7 +781,7 @@ def resume(
             return None
         item.state = RUNNING
         item.answer = " ".join((answer or "").split())
-        item.lease_until = now + lease_s
+        item.lease_until = max(now + lease_s, item.hold_until)
         _write(cfg, item)
     return item
 
@@ -672,8 +801,7 @@ def _abandon(cfg: Config, item: Item, reason: str) -> Item:
     """The terminal transition. The caller holds the lock and sends
     :func:`_tell_abandoned` once it has let go of it."""
     item.state = ABANDONED
-    item.run_id = ""
-    item.lease_until = 0.0
+    _let_go(item)
     item.last_error = " ".join((reason or "").split())
     _write(cfg, item)
     return item
@@ -768,8 +896,7 @@ def _reconcile(cfg: Config, current: str, changed: list[str]) -> None:
         # stands.
         if item.state in LEASED and item.run_id != current:
             item.state = QUEUED
-            item.run_id = ""
-            item.lease_until = 0.0
+            _let_go(item)
             _write(cfg, item)
             changed.append(f"requeued {item.phase}")
     for phase in _orphan_sentinels(cfg):

@@ -178,7 +178,14 @@ def brief(cfg: Config, item: opqueue.Item, cwd: Path | None = None) -> str:
     if item.question:
         answered = f" The owner answered: {item.answer}" if item.answer else " It was not answered."
         earlier = f" An earlier attempt asked the owner: {item.question}.{answered}"
-    if item.last_error:
+    if item.resume_note:
+        at = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.put_back_at))
+        earlier += (
+            f" An earlier session put this job back in the queue at {at} to wait,"
+            f" and left this note of where it stopped: {item.resume_note.rstrip('.')}."
+            " Carry on from there; check what it says is done rather than redo it."
+        )
+    if item.last_error and item.last_error != item.resume_note:
         earlier += f" The last attempt ended: {item.last_error.rstrip('.')}."
     return (
         f"Read {prompt_file} and follow it exactly. You are operator job {job}:"
@@ -187,8 +194,11 @@ def brief(cfg: Config, item: opqueue.Item, cwd: Path | None = None) -> str:
         f' finished run `swarm operator-done {job} "<one-line outcome>"`, adding'
         f" `--attention` only if the owner must act, something is still owed or a"
         f" check came back bad (see the prompt). If what the job waits on has not"
-        f' happened yet, run `swarm operator-done {job} "<why>" --not-before <when>`'
-        f" instead. If you hit a genuine decision, run"
+        f" happened yet, or will run on without you for longer than this session's"
+        f' hour, run `swarm operator-done {job} "<where you stopped>" --not-before'
+        f" <when>` instead; if you must stay through long work yourself, run"
+        f' `swarm operator-hold {job} <how long> "<why>"` (see the prompt).'
+        f" If you hit a genuine decision, run"
         f' `swarm waiting {job} "<the question, one line>"`, ask it with'
         f' AskUserQuestion, then `swarm resumed {job} "<answer>"`.'
         " Anything for the owner is plain English about the system, not the code."
@@ -286,7 +296,8 @@ def hold_lease(cfg: Config, job: str, until: float) -> bool:
     """Move the state lease's expiry for ``job``'s live session to ``until``.
 
     The item and the state lease must expire together (see :func:`_reclaim`), so
-    whatever stretches one — waiting on the owner — stretches the other. False
+    whatever stretches one — waiting on the owner, long work the session
+    declared (:func:`hold`) — stretches the other. False
     when the lease is not ``job``'s: a CLI run after the session was reclaimed
     must not resurrect it.
     """
@@ -295,6 +306,27 @@ def hold_lease(cfg: Config, job: str, until: float) -> bool:
             return False
         st.operator_lease_until = until
     return True
+
+
+def hold(
+    cfg: Config, job: str, until: float, why: str, log: Log | None = None,
+    now: float | None = None,
+) -> opqueue.Item | None:
+    """``job``'s live session declares long work it must sit through.
+
+    The item lease moves to ``until`` (bounded: :func:`opqueue.hold`) and the
+    state lease with it, so the sweep reclaims neither at the ordinary hour and
+    both when the declared time has passed. ``None`` when the job is not
+    running. A parked job, in a window of its own, has only the item side.
+    """
+    item = opqueue.hold(cfg, job, until, why, now)
+    if item is None:
+        return None
+    hold_lease(cfg, job, item.lease_until)
+    if log is not None:
+        until = time.strftime("%Y-%m-%dT%H:%M", time.localtime(item.lease_until))
+        log.line(f"OPERATOR-HOLD {job} until={until} {item.hold_why}".rstrip())
+    return item
 
 
 def integration_for(cfg: Config, job: str) -> str | None:
@@ -403,8 +435,17 @@ def outstanding(cfg: Config) -> list[str]:
 
 # -- the drains -----------------------------------------------------------
 def deferred(item: opqueue.Item) -> bool:
-    """Did triage ask for this to wait rather than open the moment work lands?"""
-    return str((item.triage or {}).get("when", "")) == opqueue.LATER
+    """Did triage ask for this to wait rather than open the moment work lands?
+
+    Never once a session has put the job back itself (``operator-done
+    --not-before``): triage said when to open it first, and from then on the
+    time the session gave is the one that rules. A wait in the middle of the
+    work ends when the thing waited for does, not when a slot happens to be free.
+    """
+    return (
+        str((item.triage or {}).get("when", "")) == opqueue.LATER
+        and not item.put_back_at
+    )
 
 
 def on_finished(cfg: Config, phase: str, log: Log) -> bool:
@@ -494,10 +535,16 @@ def _overdue(cfg: Config, item: opqueue.Item, now: float) -> bool:
 
 
 def _in_flight(st: state_mod.State, phase: str) -> bool:
-    """Is ``phase`` still building or waiting to merge?"""
+    """Is ``phase`` still building or waiting to merge?
+
+    Its job's own mirror counts: a job put back in the middle of its work left
+    commits there, and it must not open again before they are on main, in a
+    mirror the merge is about to remove.
+    """
+    merging = {phase, mirror_name(phase)}
     return (
-        phase in st.integ_queue
-        or st.integ_blocked == phase
+        not merging.isdisjoint(st.integ_queue)
+        or st.integ_blocked in merging
         or any(s.busy and s.phase == phase for s in st.slots)
     )
 
@@ -514,6 +561,10 @@ def _reclaim(cfg: Config, log: Log, now: float) -> None:
     too — never merely because the owner has not reached a keyboard yet. A
     parked job holds only the item side; reclaiming it also drops it from the
     parked set, or the run could never finish.
+
+    A session that declared long work (:func:`hold`) is reclaimed when the time
+    it gave has passed, on both sides like any other, and
+    :func:`opqueue.expire` does not count that as an attempt.
     """
     with state_mod.transaction(cfg) as st:
         stale = st.operator_phase if (
@@ -524,7 +575,7 @@ def _reclaim(cfg: Config, log: Log, now: float) -> None:
         release(cfg, log)
     for item in opqueue.load_all(cfg):
         if item.state in opqueue.LEASED and 0 < item.lease_until <= now:
-            opqueue.release(cfg, item.phase, "the operator session outlived its lease")
+            opqueue.expire(cfg, item.phase, now)
             key = state_mod.waiter_key(state_mod.OPERATOR, item.phase)
             with state_mod.transaction(cfg) as st:
                 st.clear_pending(key)

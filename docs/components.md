@@ -66,6 +66,19 @@ periodic poll. On each sweep it:
   still running, is left alone, and `swarm doctor` says which. A tmux that
   errors, hangs or has lost the session reaps nothing. A worker that dies 3
   times within an hour is not restarted again, and you are told;
+- settles a parked session that is gone, once seen on two sweeps in a row. A
+  parked session is in no slot, so the check above never sees it, and it
+  leaves `parked` only by reporting. It is gone when its `wait:` window is
+  gone or nothing runs in it any more, and, where no window says, when no
+  process of its session is left. Each kind is settled the way it is when it
+  dies anywhere else, with its marks and its window cleared, whatever of it
+  still runs ended, and its work kept: a worker like one that died in its slot
+  (started again on its branch, held after 3 deaths in an hour), an operator
+  job back to its queue for another attempt in the same mirror, an Overseer
+  pass as `interrupted` with what it committed landed. A worker that has
+  reported and is waiting for its work to land is not gone, nor is a session a
+  restart is carrying, nor one tmux could not be asked about. The supervisor
+  says it does this with `reap-parked` in its mark file;
 - relaunches when the swarm has been idle for a full interval with free slots and
   ready phases;
 - finishes a run that has settled;
@@ -424,6 +437,10 @@ Overseer's owner trigger (once per unanswered question), `swarm doctor`'s
 `owner.blocking`, the digest, `swarm status` and the boards. A parked key with
 neither mark, from a state file written before they existed, reads as asking.
 
+A parked session that dies in its window, or whose window is closed by hand,
+never reports. The watchdog's sweep settles it (see **Watchdog**), so it stops
+reading as at work or as a question for you, and a drain stops waiting for it.
+
 **Owner-run rows** (`[tasks].exclude`) are never sessions, so nothing ever asks
 about them. A ready one (its dependencies have landed, it is not done or
 ticked) that is holding other rows up shows up in "Needs you" in the dashboard
@@ -699,6 +716,7 @@ Everything the session starts inherits them, so a child that detached itself
 | operator | `operator-done`, a lease that expired, the run stopping | respawns the operator pane to idle, then reaps `operator:<job>` |
 | Overseer | `overseer-done`, or its timeout | clears the master pane, then reaps `overseer:<pass>` |
 | resolver | `swarm resolved` closing its window | kills the window, then reaps `resolver:<phase>` |
+| any of the first three, parked | its usual report, or the watchdog finding it gone from its `wait:` window | kills the window, then reaps the session |
 
 Reaping is `swarm down`'s code narrowed to the session's markers within this run:
 SIGHUP, then SIGTERM, then SIGKILL to what outlived each, process groups
@@ -1358,6 +1376,10 @@ and exits 1 if any check FAILs. It checks:
   finished with ready work, free slots beside ready phases (a phase waiting to
   be retried after a failed launch is named, not offered; one given up on is
   named as that), no event for 90 minutes;
+- **parked:** every parked session is still there (`parked.sessions`). One
+  that is gone is a WARN while the running supervisor's sweep will settle it,
+  and a FAIL, with what settles it by hand, under a supervisor that started
+  before it could or with the watchdog off;
 - **integration:** hold age, owed pushes;
 - **owner:** questions waiting on you (`owner.blocking`, a WARN, never a FAIL);
 - **ledger:** cycles and unknown dependencies;

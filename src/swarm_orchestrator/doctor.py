@@ -59,6 +59,7 @@ from . import session as session_mod
 from . import state as state_mod
 from . import statuses
 from . import telegram, tgbot
+from . import tmux
 from .config import Config
 from .logutil import parse_ts, read_all
 from .master import build_context
@@ -854,6 +855,175 @@ def _check_watchdog(cfg: Config, probe: PaneProbe) -> Check:
         "run.watchdog",
         OK,
         "watchdog disabled (purely event-driven) and no dead panes",
+    )
+
+
+# -- parked sessions: in a window of their own, in no slot --------------------
+class Gone(NamedTuple):
+    """A parked session with nothing of it left (:func:`_parked_session`)."""
+
+    key: str
+    what: str  # who it is, and what is missing
+    kept: str | None  # why the watchdog's sweep leaves it; None when it settles it
+
+
+_OLD_PARKED_SWEEP = (
+    "the running supervisor is older than the rule that settles it and never looks at a"
+    " parked session; `swarm restart` loads the rule"
+)
+_NO_SWEEP = "the watchdog is off, so nothing looks"
+_NO_SUPERVISOR = "no supervisor is running, so nothing looks until one is started"
+
+
+def _who(key: str) -> str:
+    """A parked session in words."""
+    kind, ident = state_mod.waiter(key)
+    if kind == state_mod.OPERATOR:
+        return f"operator job {ident}"
+    if kind == state_mod.OVERSEER:
+        return f"Overseer pass {ident}"
+    return f"the worker on {ident}"
+
+
+def window_states(cfg: Config) -> dict[str, bool] | None:
+    """``{window_id: something still runs in it}`` for every window of the
+    run's tmux session; ``None`` when tmux cannot answer (server down, hung, or
+    the session gone). A window missing from a real answer is gone; ``None``
+    means nothing is known, and nothing may be inferred."""
+    try:
+        out = tmux.run(
+            ["list-panes", "-s", "-t", f"={cfg.session}", "-F", "#{window_id} #{pane_dead}"])
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    states: dict[str, bool] = {}
+    for line in out.stdout.splitlines():
+        win, _, dead = line.partition(" ")
+        if win:
+            states[win] = states.get(win, False) or dead.strip() == "0"
+    return states
+
+
+def _parked_sweep_keeps(cfg: Config, st: State, sweeper: bool) -> str | None:
+    """Why the watchdog's sweep leaves a parked session that is gone, or
+    ``None`` when it settles it. ``sweeper`` is the sweep itself asking; anyone
+    else asks what the running supervisor said of itself, since the supervisor
+    keeps the code it started on until its next restart."""
+    if sweeper:
+        return None
+    if not int(getattr(cfg, "watchdog_s", 0) or 0):
+        return _NO_SWEEP
+    if not _pid_alive(st.supervisor_pid):
+        plan = restart_mod.load(cfg)
+        if plan.get("stage") in (restart_mod.STOPPING, restart_mod.RESTARTING) \
+                and _pid_alive(plan.get("runner_pid")):
+            return None  # between two supervisors: the next starts on this code
+        return _NO_SUPERVISOR
+    if not restart_mod.capable(cfg, st.supervisor_pid, "reap-parked"):
+        return _OLD_PARKED_SWEEP
+    return None
+
+
+def _parked_session(
+    cfg: Config, st: State, key: str, windows: dict[str, bool] | None, sweeper: bool = False
+) -> str | Gone:
+    """What became of the parked session ``key``: landing, working, unreadable,
+    or :class:`Gone`.
+
+    The one rule ``swarm doctor``, the dashboard and the supervisor's sweep
+    (``Supervisor._reap_gone_parked``) share, so that each calls gone exactly
+    what the sweep settles. ``windows`` is :func:`window_states`, read once for
+    every key.
+
+    A parked session holds no slot and no pane the sweep of the slots looks
+    at, and it leaves ``parked`` only by reporting. So one that crashed, or
+    whose window was closed by hand, would stay for good. It is gone when its
+    window is, or when nothing runs in that window any more (the pane of a
+    session that exited stays, dead), and, where no window says, when no
+    process of its session is left. A worker that has reported is not gone:
+    its session is ended on purpose and its key stays until its work has
+    landed. Neither is a session a restart is carrying across.
+    """
+    kind, ident = state_mod.waiter(key)
+    if kind == state_mod.WORKER and _reported(cfg, st, ident):
+        return _LANDING
+    markers = session_mod.session_markers(cfg, kind, ident)
+    if set(markers) & set(restart_mod.kept_markers(cfg)):
+        return _WORKING
+    name = state_mod.wait_window(key)
+    win = st.windows.get(name) if cfg.driver == "tmux" else None
+    if win and windows is None:
+        return _UNREADABLE
+    if win and win not in windows:
+        missing = f"its window {name} is gone"
+    elif win and not windows[win]:
+        missing = f"nothing runs in its window {name}"
+    elif not session_mod.session_alive(cfg, markers):
+        missing = "no process of its session is left"
+    else:
+        return _WORKING
+    return Gone(key, f"{_who(key)} ({missing})", _parked_sweep_keeps(cfg, st, sweeper))
+
+
+def parked_probe(cfg: Config, st: State, sweeper: bool = False) -> tuple[list[Gone], int]:
+    """``(the parked sessions that are gone, how many could not be read)``."""
+    if not st.parked:
+        return [], 0
+    windows = window_states(cfg) if cfg.driver == "tmux" else None
+    gone: list[Gone] = []
+    unknown = 0
+    for key in st.parked:
+        found = _parked_session(cfg, st, key, windows, sweeper)
+        if isinstance(found, Gone):
+            gone.append(found)
+        elif found == _UNREADABLE:
+            unknown += 1
+    return gone, unknown
+
+
+def _check_parked(cfg: Config, st: State) -> Check:
+    """Every parked session is still there.
+
+    A parked session is alive in a window of its own until it reports. One
+    that died there still reads as running, or as a question for the owner,
+    and a drain waits for it. The watchdog's sweep settles it on its second
+    sighting, which is said only of a supervisor that told of it in its mark
+    file; under an earlier one, or with the watchdog off, each is named with
+    what settles it by hand.
+    """
+    if not st.parked:
+        return Check("parked.sessions", OK, "no parked sessions")
+    gone, unknown = parked_probe(cfg, st)
+    if not gone:
+        detail = f"{len(st.parked)} parked session(s), "
+        detail += f"{unknown} unreadable (no answer from tmux)" if unknown else "all still there"
+        return Check("parked.sessions", OK, detail)
+    names = "; ".join(g.what for g in gone)
+    kept = [g for g in gone if g.kept]
+    if not kept:
+        watchdog = int(getattr(cfg, "watchdog_s", 0) or 0)
+        return Check(
+            "parked.sessions",
+            WARN,
+            f"parked session gone: {names}. The watchdog's sweep ({watchdog}s) settles it on"
+            " its second sighting: its work is kept, its window and its marks go, and the"
+            " phase or job is started again by the usual rules. Nothing to do",
+        )
+    workers = [state_mod.waiter(g.key)[1] for g in kept
+               if state_mod.waiter(g.key)[0] == state_mod.WORKER]
+    hint = "swarm restart  # the new supervisor's sweep settles it"
+    if kept[0].kept == _NO_SWEEP:
+        hint = (f"swarm free {workers[0]}  # then relaunch it" if workers
+                else "set `watchdog_s = 300` under [swarm]")
+    elif kept[0].kept == _NO_SUPERVISOR:
+        hint = "swarm up  # the new run starts without it; its work is kept"
+    return Check(
+        "parked.sessions",
+        FAIL,
+        f"parked session gone and nothing settles it: {names}. It reads as running or as"
+        f" asking you, and a drain waits for it for good: {kept[0].kept}",
+        hint,
     )
 
 
@@ -1864,6 +2034,7 @@ def run_checks(cfg: Config) -> list[Check]:
     checks.extend(_check_supervisor(cfg, st))
     checks.append(_check_panes(cfg, st, probe))
     checks.append(_check_watchdog(cfg, probe))
+    checks.append(_check_parked(cfg, st))
     checks.append(_check_activity(cfg, st))
     checks.append(_check_integration(cfg, st))
     checks.append(_check_push_owed(st))

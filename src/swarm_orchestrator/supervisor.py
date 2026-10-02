@@ -139,6 +139,8 @@ class Supervisor:
         # reaped after two consecutive sightings, so the claim-then-respawn
         # window in `launch` can never be mistaken for a dead worker.
         self._suspect: dict[int, str] = {}
+        # Parked sessions seen gone on the PREVIOUS sweep: two sightings too.
+        self._suspect_parked: set[str] = set()
         self._crashes: dict[str, list[float]] = {}  # phase -> recent reap times
         self._pinged: dict[str, float] = {}  # ping key -> last send (cooldown)
         # The launcher. A launch blocks for up to two READY_TIMEOUTs (worktree
@@ -1731,6 +1733,9 @@ class Supervisor:
         * a busy slot whose worker is gone (its pane, or everything that ran in
           it: :meth:`_reap_dead_panes`) -> free it, keep its work for the next
           attempt, ping (never when tmux itself cannot answer);
+        * a parked session that is gone from its own window
+          (:meth:`_reap_gone_parked`) -> settle it the way its kind is settled
+          when it dies anywhere else, its work kept;
         * idle, unpaused, unblocked, with a free slot and ready phases -> run the
           launcher again, past a hung init master and a launch-retry backoff
           (only a phase given up on after :data:`LAUNCH_GIVE_UP` failures stays
@@ -1760,6 +1765,8 @@ class Supervisor:
         )
         if self._reap_dead_panes(st):
             st = state_mod.read(self.cfg)  # slots changed under us
+        if self._reap_gone_parked(st):
+            st = state_mod.read(self.cfg)
         if st.push_owed:
             pushowed.retry(self.cfg, self.log, min_gap=pushowed.TICK_RETRY_S)
         if st.landing and st.integ_queue and st.integ_blocked is None:
@@ -1890,6 +1897,76 @@ class Supervisor:
             else:
                 self._reap(phase, why)
         return [phase for phase, _, _ in reaped]
+
+    def _reap_gone_parked(self, st: state_mod.State) -> list[str]:
+        """Settle every parked session that is gone. Returns their keys.
+
+        A parked session holds no slot, so :meth:`_reap_dead_panes` never
+        looks at it, and it leaves ``parked`` only by reporting. One that
+        crashed in its window, or whose window was closed by hand, read as at
+        work (or as a question for the owner) for good, and a drain waited
+        for it without end. Gone is judged by ``doctor._parked_session``, the
+        rule ``swarm doctor`` and the dashboard read too.
+
+        Two consecutive sightings, as for a slot. A session tmux could not be
+        asked about is not called gone, so its sightings start over.
+        """
+        gone, _unreadable = doctor_mod.parked_probe(self.cfg, st, sweeper=True)
+        suspect: set[str] = set()
+        settled: list[doctor_mod.Gone] = []
+        for found in gone:
+            if found.key not in self._suspect_parked:
+                suspect.add(found.key)  # first sighting; confirm next sweep
+                self.log.line(f"WATCHDOG-SUSPECT {found.key} parked: {found.what}")
+                continue
+            settled.append(found)
+        self._suspect_parked = suspect
+        for found in settled:
+            self.log.line(f"WATCHDOG-REAP-PARKED {found.key} {found.what}")
+            self._settle_parked(found.key)
+        return [found.key for found in settled]
+
+    def _settle_parked(self, key: str) -> None:
+        """Settle a parked session that is gone, each kind by the rule it
+        already has for a session that ended without reporting. Its marks and
+        its window go, whatever of it still runs is ended, its work is kept.
+
+        A worker is reaped like one that died in a slot (:meth:`_reap`): the
+        phase is started again from its branch, or held after too many deaths.
+        An operator job goes back to its queue for another attempt in the same
+        mirror, unless it had finished and only its report was lost. An
+        Overseer pass ends as interrupted and what it committed is landed.
+        """
+        kind, ident = state_mod.waiter(key)
+        if kind == state_mod.OVERSEER:
+            self._end_overseer_pass(ident, ovrecord.INTERRUPTED)
+            return
+        if kind == state_mod.OPERATOR:
+            item = opqueue.load(self.cfg, ident)
+            if item is not None and item.state == opqueue.DONE:
+                self._on_operator_done(ident)  # it had finished: land what it made
+                return
+            if item is not None and item.state in opqueue.LEASED:
+                opqueue.release(
+                    self.cfg, ident, "the operator session stopped without finishing")
+            self._end_parked(key)
+            launch_mod.drop_session_tmp(self.cfg, operator_mod.mirror_name(ident))
+            self._check_operator_queue()
+            self._finish_if_settled()
+            return
+        with state_mod.transaction(self.cfg) as st:
+            st.clear_pending(key)
+            win = st.windows.pop(state_mod.wait_window(key), None)
+        if win and self.cfg.driver == "tmux":
+            tmux.kill_window(win)
+        if session_mod.session_alive(
+            self.cfg, session_mod.session_markers(self.cfg, "worker", key)
+        ):
+            # Its window went and something of it outlived that: end it before
+            # its mirror is saved, so nothing writes into it afterwards.
+            session_mod.reap_session(
+                self.cfg, "worker", key, self.log, grace=0.0, background=False)
+        self._reap(key, "parked-gone")
 
     @staticmethod
     def _pane_cmd(pane: str) -> str:

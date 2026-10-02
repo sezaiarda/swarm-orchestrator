@@ -292,6 +292,21 @@ def session_processes(
     return found
 
 
+def session_alive(cfg: Config, markers: tuple[str, ...]) -> set[int]:
+    """Every live process of the one session ``markers`` name: is it still there?
+
+    The question :func:`session_processes` cannot answer. That one lists what
+    may be ended, so it leaves out the caller and its ancestors and every
+    session a restart carries; asked from inside the session, or of a carried
+    one, it finds nothing of a session that is plainly alive. Here only what
+    ``swarm keep`` holds is left out: a kept process is meant to outlive its
+    session, so it does not show that the session is still there.
+    """
+    table = procs.table()
+    found = _descendants(table, _marked(cfg, table, markers))
+    return found - _descendants(table, keep_mod.live_pids(cfg) & set(table))
+
+
 def end_processes(
     cfg: Config, pids: set[int], wait: float | None = None, markers: tuple[str, ...] = ()
 ) -> tuple[int, list[int]]:

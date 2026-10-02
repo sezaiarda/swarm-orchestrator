@@ -92,8 +92,9 @@ FORCE = "force"
 #: frees a busy slot whose pane is still there with no worker in it, so ``swarm
 #: doctor`` may say such a slot will be reaped. ``drain-parked``: its drain
 #: waits for a parked session that is at work on the owner's answer, so a full
-#: restart need not refuse for one.
-CAPS = ("handover", "restart-at", "keep-later", "reap-stopped", "drain-parked")
+#: restart need not refuse for one. ``reap-parked``: its sweep settles a parked
+#: session that is gone, so ``swarm doctor`` may say such a session will be.
+CAPS = ("handover", "restart-at", "keep-later", "reap-stopped", "drain-parked", "reap-parked")
 
 #: How long a restart waits for a safe moment, then for the old supervisor to
 #: be gone. Past it the restart fails and says what it was still waiting for;

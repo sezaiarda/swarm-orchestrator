@@ -279,6 +279,7 @@ TALL_BOOKS = 10
 #: The rows a slot beyond the usual four costs the box.
 BASE_SLOTS = 4
 #: Working now shows this many slots; past it the box scrolls like the books.
+#: The parked workers after them are shown too, each a row more.
 WORK_VIS = 4
 MIN_BOOKS = 3
 
@@ -384,17 +385,18 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
     exists. A slot whose phase is in ``blockers`` is repainted as waiting, so the
     row and the blocker drawer can never disagree.
 
-    After the slots comes a row per parked worker at work on the owner's answer
-    (``Dash.working_parked``): it runs in a tmux window of its own, which the row
-    names, and holds no slot, so its ``slot_id`` is ``None`` and there is nothing
-    to select or jump to.
+    After the slots comes a row per parked worker, asking the owner or at work on
+    the answer (``Dash.parked_rows``), read like a slot's: it runs in a tmux
+    window of its own, which the row names, and holds no slot, so its
+    ``slot_id`` is ``None`` and there is nothing to select or jump to.
 
     Returns rows rather than one blob because the caller mounts a widget per row;
     a click has to land on the row it hit.
     """
     snap = dash.snapshot
     slots = list(dash.slot_rows())
-    parked = list(getattr(dash, "working_parked", None) or ())
+    parked_rows = getattr(dash, "parked_rows", None)
+    parked = list(parked_rows()) if callable(parked_rows) else []
     if not slots and not parked:
         return [(paint(snap.reason or "no workers yet — `swarm up` starts them", MUTED), None, None)]
 
@@ -442,31 +444,45 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
     # A parked worker whose session is gone, by the dashboard's own probe
     # (``Dash.parked_gone``): it is tagged ``gone`` and goes red like a slot.
     lost = getattr(dash, "parked_gone", None) or {}
-    for worker in parked:
+    for row in parked:
+        worker, status, waiting_for, ctx = row[0], row[1], row[2], row[3]
         gone = worker.phase in lost
-        gauge, pct = context_cells(meters.get(worker.phase), None)
+        if gone:
+            status = "gone"
+        elif status == "unknown":
+            status = "busy"  # as a slot's: nothing contradicts that it works
+        state = token(status)
+        gauge, pct = context_cells(meters.get(worker.phase), ctx)
+        tag = "" if status in ("busy", "running") else " " + paint(status, state)
         line = (
-            f"  [{COLOR[BAD if gone else INFO]}]{'—':<2}[/]  "
+            f"  [{COLOR[state]}]{'—':<2}[/]  "
             f"{clip(escape(worker.phase), phase_w):<{phase_w}} "
             f"{fmt_duration(worker.elapsed_s):>6} {eta_cell(eta_runs_of(dash), worker.elapsed_s)}"
-            f"  {gauge} {pct}" + (" " + paint("gone", BAD) if gone else "")
+            f"  {gauge} {pct}{tag}"
         )
+        if gone:
+            said = "its session is gone, it does no work"
+        elif not worker.answered:
+            said = waiting_for or "waits on your answer"
+        else:
+            said = "works on your answer"
         # The window leads the note, so a narrow box clips the words and not the name.
-        note = f"tmux window {worker.window} · " + (
-            "its session is gone, it does no work" if gone else "works on your answer")
+        note = f"tmux window {worker.window} · {said}"
         line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}",
                              BAD if gone else MUTED)
         out.append((line, worker.phase, None))
     return out
 
 
-def work_hint(rows: list[tuple], top: int) -> str:
-    """What working now has scrolled out of sight, for the box's border.
+def work_hint(rows: list[tuple], top: int, vis: int = WORK_VIS) -> str:
+    """What working now has scrolled out of sight, for the box's border, when it
+    shows ``vis`` rows.
 
-    A parked worker at work comes after the slots, so with four slots it is
-    below the fold: it is named here, where the owner looks for what is running.
+    A parked worker comes after the slots, so past :data:`WORK_VIS` slots it can
+    be below the fold: it is named here, where the owner looks for what is
+    running.
     """
-    below = rows[top + WORK_VIS:]
+    below = rows[top + vis:]
     more = f"↓ {len(below)} more" if below else ""
     apart = [phase for _, phase, slot_id in below if phase and slot_id is None]
     if apart:
@@ -777,16 +793,18 @@ TALL_ROWS = 46
 MID_BOOKS = 5
 
 
-def grid_layout(width: int, height: int, slots: int = BASE_SLOTS) -> dict:
+def grid_layout(width: int, height: int, slots: int = BASE_SLOTS, parked: int = 0) -> dict:
     """How home is cut at ``width`` columns (inside its padding) and ``height`` rows.
 
     Pure, so every size is testable without booting the app: whether the grid
     stands in two columns (``single`` when not), the main and side columns'
     widths, whether working now and phases done stack (``narrow``), whether the
-    phases-done chart shows at all, how many phase-book rows the (scrolling) box
-    shows — fewer as ``slots`` grows past four, since working now shows every
-    slot — and how many rows the usage charts get (0 = none).
+    phases-done chart shows at all, how many rows working now shows (``work``:
+    up to :data:`WORK_VIS` slots, then every one of the ``parked`` workers), how
+    many phase-book rows the (scrolling) box shows — fewer as working now grows
+    past four rows — and how many rows the usage charts get (0 = none).
     """
+    work = max(WORK_VIS, min(slots, WORK_VIS) + parked)
     short = 0 < height < SHORT_ROWS
     single = width < GRID_COLS
     side = width if single else max(SIDE_MIN, min(SIDE_MAX, round(width * SIDE_SHARE)))
@@ -803,8 +821,9 @@ def grid_layout(width: int, height: int, slots: int = BASE_SLOTS) -> dict:
         "main": main,
         "narrow": narrow,
         "chart": not short and (single or not narrow or tall),
+        "work": work,
         "books": max(MIN_BOOKS, (SHORT_BOOKS if short else TALL_BOOKS if tall else MID_BOOKS)
-                     - max(0, min(slots, WORK_VIS) - BASE_SLOTS)),
+                     - max(0, work - BASE_SLOTS)),
         "usage_chart": 0 if short else (5 if tall else 3),
     }
 
@@ -934,7 +953,7 @@ class BookPanel(Panel):
 class Home(Vertical):
     """The default tab: headline, then a grid of what is running and what wants you.
 
-    Left, the work: working now (every slot, then each parked worker at work in a
+    Left, the work: working now (every slot, then each parked worker in a
     window of its own, beside phases done), the phase books (a fixed-height
     scrolling box), the feed. Right,
     the run's surroundings: usage with its chart, alerts & notifications, the
@@ -1040,6 +1059,7 @@ class Home(Vertical):
         self._book_top = 0
         self._book_vis = 0
         self._work_top = 0
+        self._work_vis = WORK_VIS
 
     def compose(self):
         yield Body(id="headline")
@@ -1149,15 +1169,15 @@ class Home(Vertical):
     # -- refresh ----------------------------------------------------------
     def layout_for(self, width: int, height: int) -> dict:
         """:func:`grid_layout` — a method so a test can pin it."""
-        return grid_layout(width, height, self._slot_count())
+        return grid_layout(width, height, *self._work_count())
 
-    def _slot_count(self) -> int:
-        """The rows working now lists: every slot, and each parked worker at work."""
+    def _work_count(self) -> tuple[int, int]:
+        """``(slots, parked workers)``: the rows working now lists."""
         try:
-            parked = getattr(self._dash, "working_parked", None) or ()
-            return max(BASE_SLOTS, len(self._dash.snapshot.slots) + len(parked))
+            parked = getattr(self._dash, "parked_workers", None) or ()
+            return len(self._dash.snapshot.slots), len(parked)
         except Exception:  # noqa: BLE001 - no snapshot yet
-            return BASE_SLOTS
+            return BASE_SLOTS, 0
 
     def _book_names(self) -> list[str]:
         return [t[1] for t in self._targets if t[0] == "book"]
@@ -1174,8 +1194,8 @@ class Home(Vertical):
                 index = ids.index(got[1])
                 if index < self._work_top:
                     self._work_top = index
-                elif index >= self._work_top + WORK_VIS:
-                    self._work_top = index - WORK_VIS + 1
+                elif index >= self._work_top + self._work_vis:
+                    self._work_top = index - self._work_vis + 1
             return
         if not got or got[0] != "book" or self._book_vis <= 0:
             return
@@ -1193,7 +1213,7 @@ class Home(Vertical):
             self.scroll_books(event.delta)
 
     def scroll_workers(self, delta: int) -> None:
-        """Scroll working now by ``delta`` rows (only past :data:`WORK_VIS` of them)."""
+        """Scroll working now by ``delta`` rows (only past the rows it shows)."""
         self._work_top += delta
         if self._dash is not None:
             self.update(self._dash)
@@ -1268,13 +1288,14 @@ class Home(Vertical):
                             "soonest first · enter opens" if total else "")
 
         every = self._build(lambda: worker_rows(dash, half, key if kind == "work" else None))
-        self._work_top = max(0, min(self._work_top, len(every) - WORK_VIS))
+        self._work_vis = vis = cut["work"]
+        self._work_top = max(0, min(self._work_top, len(every) - vis))
         wtop = self._work_top
-        work = every[wtop:wtop + WORK_VIS]
+        work = every[wtop:wtop + vis]
         self._rows("#work-rows", work, "work")
         work_panel = self._panel("#p-work")
         if work_panel is not None:
-            work_panel.set_title("working now", work_hint(every, wtop))
+            work_panel.set_title("working now", work_hint(every, wtop, vis))
 
         work_lines = sum(text.count("\n") + 1 for text, _, _ in work)
         height = max(4, work_lines - 1)

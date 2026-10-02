@@ -10,8 +10,8 @@ detail to what the dashboard's probe finds of that session, by the rule
 Every test reads one real state file through a real ``Dash`` and one real
 ``Dash.probe``, in the shapes of ``tests/test_parked_working_readers.py``. A
 worker whose session is gone is the case. One whose session still runs, and one
-tmux gave no answer about, are the control: each reads ``in window`` exactly as
-before.
+tmux gave no answer about, are the control: each reads as a worker at work in
+its window, as before.
 """
 
 from __future__ import annotations
@@ -142,9 +142,10 @@ def history_detail(dash) -> str:
 
 
 def reads_in_window(tab) -> None:
-    """P1's row, the head and the detail read as they did before any probe."""
+    """P1's row, the head and the detail read as they did before any probe:
+    no claude here, so ``unknown``, as a slot's worker would."""
     row = tab["cells"][PARKED_ROW]
-    assert col(row, "live").strip() == tables.IN_WINDOW and col(row, "branch").strip() == WINDOW
+    assert col(row, "live").strip() == "unknown"
     assert col(row, "phase").strip() == "P1" and COLOR[BAD] not in row[2]
     assert "1/2 slots busy" in tab["head"] and "1 in own window" in tab["head"]
     assert "GONE" not in tab["head"] and not tab["bad"]
@@ -158,8 +159,7 @@ def reads_gone(tab, missing: str) -> None:
     marker, _, phase, live = tab["cells"][PARKED_ROW][:4]
     assert plain(marker).strip() == "✖" and plain(live).strip() == "GONE"
     assert plain(phase).strip() == "P1" and COLOR[BAD] in phase
-    assert not any(tables.IN_WINDOW in plain(c) for c in tab["cells"][PARKED_ROW])
-    assert col(tab["cells"][PARKED_ROW], "branch").strip() == WINDOW  # where it was
+    assert f"window          {WINDOW}" in tab["detail"]  # where it was
     assert "1/2 slots busy" in tab["head"] and "1 PARKED WORKER GONE" in tab["head"]
     assert "in own window" not in tab["head"]
     assert missing in tab["detail"] and "GONE" in tab["detail"]
@@ -204,13 +204,24 @@ def test_the_detail_of_a_gone_parked_worker_says_the_sweep_settles_it(cfg, monke
 
 
 @STILL_ASKING
-def test_a_parked_worker_that_asks_is_no_workers_row_whatever_became_of_it(
-        cfg, monkeypatch, mark):
+def test_a_parked_worker_that_asks_and_is_gone_reads_gone_not_waiting(cfg, monkeypatch, mark):
     run(cfg, mark)
-    tab = workers_tab(probed(cfg, monkeypatch), visit=(SLOT_ROW,))
-    assert tab["keys"] == ["slot-0", "slot-1"]
-    assert tab["head"] == "1/2 slots busy" and not tab["bad"]
-    assert tab["titles"] == ["slot"]
+    tab = workers_tab(probed(cfg, monkeypatch))
+    assert tab["keys"] == ["slot-0", "slot-1", "parked-P1"]
+    assert col(tab["cells"][PARKED_ROW], "live").strip() == "GONE"
+    assert "1 PARKED WORKER GONE" in tab["head"] and "waiting on you" not in tab["head"]
+    assert "counts P1 as asking you" in tab["detail"] and tab["bad"]
+
+
+@STILL_ASKING
+def test_a_parked_worker_that_asks_and_is_there_reads_waiting(cfg, monkeypatch, mark):
+    run(cfg, mark)
+    with session_of(cfg):
+        tab = workers_tab(probed(cfg, monkeypatch))
+    assert col(tab["cells"][PARKED_ROW], "live").strip() == "waiting"
+    assert "1 waiting on you" in tab["head"] and "GONE" not in tab["head"]
+    assert f"waits on your answer in tmux window {WINDOW}" in tab["detail"]
+    assert tab["titles"] == ["parked worker"] and not tab["bad"]
 
 
 # -- under tmux: the window says ----------------------------------------------------

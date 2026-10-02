@@ -93,38 +93,60 @@ PASSES = 12
 
 @dataclass(frozen=True)
 class ParkedWorker:
-    """A parked worker the owner has answered: at work again, in a tmux window
-    of its own and in no slot, so no slot row shows it."""
+    """A parked worker: in a tmux window of its own and in no slot, so no slot
+    row shows it. It asks the owner, or the owner has answered and it is at
+    work again."""
 
     phase: str
     #: The window it works in (:func:`state.wait_window`).
     window: str
     #: When its run was launched, if the log still says.
     started_at: float | None = None
+    #: The owner has answered it (``State.answered``): at work again, not asking.
+    answered: bool = True
+    #: Its window's tmux id (``State.windows``), the way to its pane.
+    window_id: str | None = None
+    #: Where it builds, as a slot's worker does (``isolation = worktree`` only).
+    worktree: str | None = None
+    branch: str | None = None
 
     @property
     def elapsed_s(self) -> float | None:
         return None if self.started_at is None else max(0.0, time.time() - self.started_at)
 
 
-def working_parked(state: dict | None, history: list[PhaseRun]) -> list[ParkedWorker]:
-    """The parked workers at work on the owner's answer, in the order they parked.
+def parked_workers(state: dict | None, history: list[PhaseRun],
+                   launched: dict[str, float] | None = None,
+                   wt_dir: Path | None = None) -> list[ParkedWorker]:
+    """Every parked worker, asking the owner or at work on the answer, in the
+    order they parked.
 
-    The one rule every view lists them by: a key in ``parked`` and in
-    ``answered`` (:meth:`state.State.working_parked`) that is a worker's. An
-    operator job or an Overseer pass is listed from its own record, never as a
-    worker. A state file from before the marks has no ``answered``, and lists
-    none.
+    The one rule every view lists them by: a key in ``parked`` that is a
+    worker's. An operator job or an Overseer pass is listed from its own record,
+    never as a worker. It is answered while its key is in ``answered``
+    (:meth:`state.State.working_parked`); a state file from before the marks has
+    no ``answered``, and every one asks. It is aged from its launch the way a
+    slot's worker is (``launched``, :func:`data.launch_times`), else from its run
+    in ``history``: a supervisor restart closes the run there, not the launch.
+    ``wt_dir`` is where its worktree is, under ``isolation = worktree``.
     """
     state = state if isinstance(state, dict) else {}
-    answered = state.get("answered")
-    if not isinstance(answered, dict) or not isinstance(state.get("parked"), list):
+    if not isinstance(state.get("parked"), list):
         return []
+    answered = state.get("answered") if isinstance(state.get("answered"), dict) else {}
+    windows = state.get("windows") if isinstance(state.get("windows"), dict) else {}
     started = {r.phase: r.started_at for r in history if r.running}
-    return [ParkedWorker(key, state_mod.wait_window(key), started.get(key))
-            for key in state["parked"]
-            if isinstance(key, str) and key in answered
-            and state_mod.waiter(key)[0] == state_mod.WORKER]
+    out = []
+    for key in state["parked"]:
+        if not isinstance(key, str) or state_mod.waiter(key)[0] != state_mod.WORKER:
+            continue
+        window = state_mod.wait_window(key)
+        out.append(ParkedWorker(
+            key, window, (launched or {}).get(key) or started.get(key),
+            answered=key in answered, window_id=windows.get(window) or None,
+            worktree=str(wt_dir / key) if wt_dir is not None else None,
+            branch=f"swarm/{key}" if wt_dir is not None else None))
+    return out
 
 
 class Dash:
@@ -151,8 +173,11 @@ class Dash:
         self.operator: list[opqueue.Item] = []
         self.history: list[PhaseRun] = []
         #: Parked workers at work on the owner's answer, each in its own window
-        #: (:func:`working_parked`): running, but in no slot.
+        #: (the answered ones of :func:`parked_workers`): running, but in no slot.
         self.working_parked: list[ParkedWorker] = []
+        #: Every parked worker, asking or at work (:func:`parked_workers`): the
+        #: Workers tab and working now list each like a slot's.
+        self.parked_workers: list[ParkedWorker] = []
         #: The parked sessions the last probe found gone, by parked key (a
         #: worker's is its phase): what ``swarm doctor`` and the supervisor's
         #: sweep call gone (:func:`doctor.parked_probe`). Found by
@@ -321,6 +346,7 @@ class Dash:
             # kept even if it has not rendered since the epoch.
             active = {s.phase for s in self.snapshot.slots if s.busy and s.phase}
             active |= {b.phase for b in self.snapshot.blockers if b.phase}
+            active |= {w.phase for w in self.parked_workers}
             self.meters = live_meters(self._all_meters, self.epoch, active)
             self.limits = load_limits(self.meters, self.meters_dir / LIMITS_LOG)
         ledger_moved = self._changed("ledger", Path(self.cfg.project_dir) / self.cfg.ledger)
@@ -503,11 +529,12 @@ class Dash:
                   if kind == state_mod.OVERSEER}
         live = {st["overseer_pass"]} if st.get("overseer_pass") else set()
         self._live_pass = tuple(sorted(parked | live))
+        launched = launch_times(events)
         self.snapshot = build_snapshot(
             self.cfg,
             state,
             graph=self.graph,
-            launch_times=launch_times(events),
+            launch_times=launched,
             questions=question_index(self.notifications, self.sentinels),
             started_at=run_started_at(events),
             operator=self.operator,
@@ -518,7 +545,9 @@ class Dash:
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes,
             state=state if isinstance(state, dict) else None, ticked=self.ticked,
         )
-        self.working_parked = working_parked(state, self.history)
+        wt_dir = self.cfg.wt_dir if self.cfg.git_isolation == "worktree" else None
+        self.parked_workers = parked_workers(state, self.history, launched, wt_dir)
+        self.working_parked = [w for w in self.parked_workers if w.answered]
         # The probe runs every few seconds and this on every change: a session
         # that left ``parked`` since is not gone, whatever the last probe found.
         parked = st.get("parked") or ()
@@ -534,20 +563,25 @@ class Dash:
         Context no longer comes from scraping it — the meters tap writes the
         exact figure (:meth:`context_pct`). The git half runs every
         :data:`REPO_PROBE_S`, or at once for a busy phase it has not seen yet.
-        A parked session has no pane here to look at, so it is asked after
+        A parked worker is looked at like a slot's, through the pane in its own
+        window (:meth:`parked_pane`). Whether its session is gone is asked
         apart (:meth:`_parked_gone`).
         """
         now = time.time() if now is None else now
         self.parked_gone = self._parked_gone()
         busy = [s for s in self.snapshot.slots if s.busy and s.pane_id]
-        running = frozenset(s.phase for s in busy)
+        parked = list(self.parked_workers)
+        running = frozenset(s.phase for s in busy) | {w.phase for w in parked}
         if now - self._agents_at >= AGENTS_PROBE_S or running != self._agents_for:
             self._agents_at, self._agents_for = now, running
             self.agents = probes.agents()
         self.panes = probes.panes()
         main = getattr(self.cfg, "git_main_branch", "master")
         self.tails = {s.pane_id: probes.capture(s.pane_id) for s in busy}
+        for pane in filter(None, map(self.parked_pane, parked)):
+            self.tails[pane.pane_id] = probes.capture(pane.pane_id)
         wanted = {s.phase: s.worktree for s in busy if s.phase and s.worktree}
+        wanted |= {w.phase: w.worktree for w in parked if w.worktree}
         if now - self._repos_at >= REPO_PROBE_S or set(wanted) - set(self.repos):
             self._repos_at = now
             self.repos = {p: probes.repo_stat(wt, main) for p, wt in wanted.items()}
@@ -583,6 +617,38 @@ class Dash:
         if m is None or not m.context_tokens or not m.context_window:
             return None
         return min(100.0, 100.0 * m.context_tokens / m.context_window)
+
+    def parked_pane(self, worker: ParkedWorker):
+        """The pane in a parked worker's window, as the last probe saw it."""
+        if not worker.window_id:
+            return None
+        return next((p for p in self.panes.values() if p.window_id == worker.window_id), None)
+
+    def parked_rows(self) -> list[tuple]:
+        """Parked workers joined with live probe data, the shape of
+        :meth:`slot_rows`: ``(worker, live_status, waiting_for, ctx, pane)``.
+
+        One whose session the probe found gone reads ``gone``; one asking the
+        owner reads ``waiting``, as a waiting slot's worker does, with its
+        question; one at work reads what ``claude agents`` says of it.
+        """
+        questions = {b.phase: b.question for b in self.snapshot.blockers if b.kind == "parked"}
+        rows = []
+        for worker in self.parked_workers:
+            agent = probes.match_agent(self.agents, worker.phase, worker.worktree)
+            if worker.phase in self.parked_gone:
+                status = "gone"
+            elif not worker.answered:
+                status = "waiting"
+            elif agent is not None:
+                status = agent.status
+            else:
+                status = "unknown"
+            waiting = (agent.waiting_for if agent else "") or (
+                "" if worker.answered else questions.get(worker.phase, ""))
+            rows.append((worker, status, waiting, self.context_pct(worker.phase),
+                         self.parked_pane(worker)))
+        return rows
 
     def slot_rows(self) -> list[tuple]:
         """Slots joined with live probe data: ``(slot, live_status, waiting_for, ctx)``."""

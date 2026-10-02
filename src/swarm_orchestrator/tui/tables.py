@@ -225,9 +225,6 @@ WORKER_PRIORITY = (0, 0, 0, 0, 2, 3, 1, 4, 4, 5)
 #: died leaves the run looking perfectly healthy everywhere else, which is why it
 #: gets the one shouting cell on the screen.
 GONE = "gone"
-#: The ``live`` word of a parked worker at work on the owner's answer: it runs,
-#: in a tmux window of its own instead of a slot's pane.
-IN_WINDOW = "in window"
 
 
 def unpack_slot_row(entry) -> tuple[SlotView, str, str, float | None, object]:
@@ -259,20 +256,48 @@ def elapsed_state(seconds: float | None) -> str | None:
     return None
 
 
+def parked_of(entry) -> ParkedWorker | None:
+    """The parked worker a Workers row is of (a :meth:`Dash.parked_rows` entry,
+    or the worker alone), or ``None`` for a slot's row."""
+    if isinstance(entry, (list, tuple)) and entry:
+        entry = entry[0]
+    return entry if isinstance(entry, ParkedWorker) else None
+
+
+def unpack_parked_row(entry) -> tuple[ParkedWorker, str, str, float | None, object]:
+    """Normalise one :meth:`Dash.parked_rows` entry, as :func:`unpack_slot_row`
+    does a slot's. A worker alone is one no probe has looked at yet."""
+    items = tuple(entry) if isinstance(entry, (list, tuple)) else (entry,)
+    items = items + (None,) * 5
+    worker, status, waiting, ctx, pane = items[:5]
+    if not isinstance(ctx, (int, float)) or isinstance(ctx, bool):
+        ctx = None
+    return worker, str(status or "unknown"), str(waiting or ""), ctx, pane
+
+
 def worker_key(entry) -> str:
     """Stable row key: a slot's identity is its number, whatever is in it. A
-    parked worker at work holds no slot, and is its phase."""
-    if isinstance(entry, ParkedWorker):
-        return f"parked-{entry.phase}"
+    parked worker holds no slot, and is its phase."""
+    worker = parked_of(entry)
+    if worker is not None:
+        return f"parked-{worker.phase}"
     slot, *_ = unpack_slot_row(entry)
     return f"slot-{slot.id}"
 
 
 def worker_phase(entry) -> str | None:
     """The phase a Workers row shows, in a slot or in a window of its own."""
-    if isinstance(entry, ParkedWorker):
-        return entry.phase
+    worker = parked_of(entry)
+    if worker is not None:
+        return worker.phase
     return unpack_slot_row(entry)[0].phase
+
+
+def worker_status(entry) -> str:
+    """The ``live`` status of a Workers row, a slot's or a parked worker's."""
+    if parked_of(entry) is not None:
+        return unpack_parked_row(entry)[1]
+    return unpack_slot_row(entry)[1]
 
 
 def parked_workers(dash) -> list[ParkedWorker]:
@@ -280,17 +305,26 @@ def parked_workers(dash) -> list[ParkedWorker]:
     return list(getattr(dash, "working_parked", None) or ())
 
 
+def parked_rows(dash) -> list[tuple]:
+    """Every parked worker, asking or at work, joined with the live probes
+    (:meth:`Dash.parked_rows`)."""
+    rows = getattr(dash, "parked_rows", None)
+    return list(rows()) if callable(rows) else []
+
+
 def parked_gone(dash, entry) -> Gone | None:
     """What the dashboard's probe found missing of a parked worker's session
     (``Dash.parked_gone``): ``None`` while it is there, and for a slot's row."""
-    if not isinstance(entry, ParkedWorker):
+    worker = parked_of(entry)
+    if worker is None:
         return None
-    return (getattr(dash, "parked_gone", None) or {}).get(entry.phase)
+    return (getattr(dash, "parked_gone", None) or {}).get(worker.phase)
 
 
 def parked_where(worker: ParkedWorker) -> str:
-    """Where a parked worker at work is, in the one sentence every detail says."""
-    return f"works on your answer in tmux window {worker.window}, and holds no slot"
+    """Where a parked worker is, in the one sentence every detail says."""
+    doing = "works on your answer" if worker.answered else "waits on your answer"
+    return f"{doing} in tmux window {worker.window}, and holds no slot"
 
 
 def parked_line(worker: ParkedWorker, gone: Gone | None = None) -> str:
@@ -310,7 +344,8 @@ def parked_line(worker: ParkedWorker, gone: Gone | None = None) -> str:
         after = f"Nothing settles it: {gone.kept}."
     return paint(
         escape(f"✖ WORKER GONE — {gone.what}. The swarm still counts {worker.phase} as"
-               f" running, and it does no work until this is settled. {after}"),
+               f" {'running' if worker.answered else 'asking you'}, and it does no work"
+               f" until this is settled. {after}"),
         BAD,
     )
 
@@ -334,24 +369,29 @@ def worker_row(entry, repo=None, meter=None, history=None, gone=None) -> tuple[s
     and the word in caps — because it is the failure mode that otherwise looks
     identical to a healthy run and the one this tab exists to surface.
 
-    A parked worker at work on the owner's answer is a row too, with no slot
-    number and its window where a slot's worker shows its branch. One whose
-    session is gone (``gone``, from :func:`parked_gone`) gets the same three
-    tells, and keeps the window it was in.
+    A parked worker, asking or at work on the owner's answer, is a row like a
+    slot's worker's, with no slot number. One whose session is gone (``gone``,
+    from :func:`parked_gone`) gets the same three tells.
     """
-    if isinstance(entry, ParkedWorker):
-        over = phase_eta(history or [], entry.elapsed_s)[1]
+    worker = parked_of(entry)
+    if worker is not None:
+        _, status, _, ctx, _ = unpack_parked_row(entry)
+        live = "GONE" if gone else status
+        state = BAD if gone else token(live)
+        over = phase_eta(history or [], worker.elapsed_s)[1]
+        commits = getattr(repo, "commits", None)
+        dirty = getattr(repo, "dirty", 0) or 0
         return (
-            paint("✖", BAD) if gone else glyph("busy"),
+            paint("✖", BAD) if gone else glyph(live),
             "—",
-            cell(entry.phase, 20, BAD if gone else None),
-            paint("GONE", BAD) if gone else paint(IN_WINDOW, token("busy")),
-            cell(fmt_duration(entry.elapsed_s), 8, elapsed_state(entry.elapsed_s)),
-            cell(fmt_phase_eta(history or [], entry.elapsed_s), 12, WARN if over else MUTED),
-            context_cell(None, meter),
-            paint("—", MUTED),
-            paint("—", MUTED),
-            cell(entry.window, 26),
+            cell(worker.phase, 20, BAD if gone else None),
+            paint(live, state),
+            cell(fmt_duration(worker.elapsed_s), 8, elapsed_state(worker.elapsed_s)),
+            cell(fmt_phase_eta(history or [], worker.elapsed_s), 12, WARN if over else MUTED),
+            context_cell(ctx, meter),
+            paint("—" if commits is None else str(commits), MUTED if not commits else OK),
+            paint(str(dirty) if dirty else "—", WARN if dirty else MUTED),
+            cell(worker.branch or "—", 26, MUTED),
         )
     slot, status, waiting, ctx, pane = unpack_slot_row(entry)
     gone = status == GONE
@@ -451,27 +491,54 @@ def _record_lines(dash, phase: str | None) -> list[str]:
     return lines
 
 
-def parked_detail(worker: ParkedWorker, dash) -> str:
-    """A parked worker at work in full: the window it is in and why, then what it
-    decided. Its pane is not probed, so there are no last lines to show here; the
-    window has them. Of one whose session is gone: what is missing, and what
-    settles it (:func:`parked_line`)."""
+def _work_lines(dash, phase: str | None, elapsed_s: float | None, ctx: float | None,
+                waiting: str, pane_id: str | None) -> list[str]:
+    """A live worker past where it is: its eta and meters, what it waits for,
+    its branch work, what it has said, and the last lines in its pane."""
+    lines: list[str] = []
+    history = eta_runs_of(dash)
+    left_s, over = phase_eta(history, elapsed_s)
+    if left_s is not None:
+        lines.append(field("eta", fmt_phase_eta(history, elapsed_s) + " vs the typical phase",
+                           state=WARN if over else None))
+    lines.extend(_meter_lines(dash, phase, ctx))
+    if waiting:
+        lines.append(field("waiting for", escape(clip(waiting, 160)), state=WARN))
+
+    repo = (dash.repos or {}).get(phase or "")
+    if repo is not None:
+        ahead = "—" if repo.commits is None else str(repo.commits)
+        lines.append(field("branch work", f"{ahead} commit(s), {repo.dirty} dirty file(s)"))
+
+    lines.extend(_record_lines(dash, phase))
+
+    tail = (dash.tails or {}).get(pane_id or "", "")
+    body = [ln for ln in tail.splitlines() if ln.strip()][-6:]
+    if body:
+        lines.append(section("last lines in its pane"))
+        lines.extend(f"  [{COLOR[MUTED]}]{escape(clip(ln, 160))}[/]" for ln in body)
+    return lines
+
+
+def parked_detail(entry, dash) -> str:
+    """A parked worker in full, as a slot's: the window it is in and why, then
+    the pane there, what it decided and what it just printed. Of one whose
+    session is gone: what is missing, and what settles it (:func:`parked_line`)."""
+    worker, status, waiting, ctx, pane = unpack_parked_row(entry)
     gone = parked_gone(dash, worker)
-    live = paint("GONE", BAD) if gone else paint(IN_WINDOW, token("busy"))
+    live = "GONE" if gone else status
     lines = [
-        f"{glyph(GONE if gone else 'busy')} [bold]{escape(worker.phase)}[/]  "
-        f"{live}  [{COLOR[MUTED]}]no slot[/]",
+        f"{glyph(GONE if gone else status)} [bold]{escape(worker.phase)}[/]  "
+        f"{paint(live, BAD if gone else token(status))}  [{COLOR[MUTED]}]no slot[/]",
         parked_line(worker, gone),
+        field("pane", escape(getattr(pane, "pane_id", "") or "—")),
         field("window", escape(worker.window)),
+        field("branch", escape(worker.branch or "—")),
+        field("worktree", escape(worker.worktree or "—")),
         field("started", fmt_ago(worker.started_at)),
     ]
-    history = eta_runs_of(dash)
-    left_s, over = phase_eta(history, worker.elapsed_s)
-    if left_s is not None:
-        lines.append(field("eta", fmt_phase_eta(history, worker.elapsed_s) + " vs the typical phase",
-                           state=WARN if over else None))
-    lines.extend(_meter_lines(dash, worker.phase, None))
-    lines.extend(_record_lines(dash, worker.phase))
+    lines.extend(_work_lines(dash, worker.phase, worker.elapsed_s, ctx, waiting,
+                             getattr(pane, "pane_id", None)))
     return join_rows(*lines)
 
 
@@ -483,10 +550,10 @@ def worker_detail(entry, dash) -> str:
     the answer to "what is this thing actually doing", which used to require
     switching to its tmux pane and reading.
 
-    A parked worker at work on the owner's answer has no slot: its row says which
-    window it is in instead (:func:`parked_detail`).
+    A parked worker has no slot: its detail says which window it is in instead
+    (:func:`parked_detail`).
     """
-    if isinstance(entry, ParkedWorker):
+    if parked_of(entry) is not None:
         return parked_detail(entry, dash)
     slot, status, waiting, ctx, pane = unpack_slot_row(entry)
     gone = status == GONE
@@ -513,27 +580,7 @@ def worker_detail(entry, dash) -> str:
     lines.append(field("branch", escape(slot.branch or "—")))
     lines.append(field("worktree", escape(slot.worktree or "—")))
     lines.append(field("started", fmt_ago(slot.started_at)))
-    history = eta_runs_of(dash)
-    left_s, over = phase_eta(history, slot.elapsed_s)
-    if left_s is not None:
-        lines.append(field("eta", fmt_phase_eta(history, slot.elapsed_s) + " vs the typical phase",
-                           state=WARN if over else None))
-    lines.extend(_meter_lines(dash, slot.phase, ctx))
-    if waiting:
-        lines.append(field("waiting for", escape(clip(waiting, 160)), state=WARN))
-
-    repo = (dash.repos or {}).get(slot.phase or "")
-    if repo is not None:
-        ahead = "—" if repo.commits is None else str(repo.commits)
-        lines.append(field("branch work", f"{ahead} commit(s), {repo.dirty} dirty file(s)"))
-
-    lines.extend(_record_lines(dash, slot.phase))
-
-    tail = (dash.tails or {}).get(slot.pane_id or "", "")
-    body = [ln for ln in tail.splitlines() if ln.strip()][-6:]
-    if body:
-        lines.append(section("last lines in its pane"))
-        lines.extend(f"  [{COLOR[MUTED]}]{escape(clip(ln, 160))}[/]" for ln in body)
+    lines.extend(_work_lines(dash, slot.phase, slot.elapsed_s, ctx, waiting, slot.pane_id))
     return join_rows(*lines)
 
 
@@ -990,15 +1037,15 @@ class TableTab(Vertical):
 # -- workers tab -----------------------------------------------------------
 class Workers(TableTab):
     """One row per slot: what is in it, how far along, and whether it is alive.
-    Then one per parked worker at work on the owner's answer, which runs in a
-    window of its own and in no slot.
+    Then one per parked worker, asking the owner or at work on the answer, which
+    runs in a window of its own and in no slot.
 
     The ``live`` column is the reason this is a table. It joins three sources the
     owner otherwise has to reconcile by hand — ``state.json`` (is the slot
     claimed), ``claude agents`` (is the agent busy, idle or waiting on an answer)
     and ``tmux`` (is anything running in the pane at all) — and a disagreement
-    between them is exactly what a stalled run looks like. A parked worker has
-    no pane these look at: whether its session is still there is what the
+    between them is exactly what a stalled run looks like. A parked worker's are
+    the pane in its own window; whether its session is still there is what the
     dashboard's probe found of it (``Dash.parked_gone``).
     """
 
@@ -1013,12 +1060,12 @@ class Workers(TableTab):
 
     def _update(self, dash) -> None:
         slots = list(dash.slot_rows())
-        parked = parked_workers(dash)
+        parked = parked_rows(dash)
         rows = slots + parked
         gone = [r for r in slots if unpack_slot_row(r)[1] == GONE]
         lost = [w for w in parked if parked_gone(dash, w)]
         busy = [r for r in slots if unpack_slot_row(r)[0].busy]
-        waiting = [r for r in slots if unpack_slot_row(r)[1] == "waiting"]
+        waiting = [r for r in rows if worker_status(r) == "waiting"]
 
         self.sync(
             rows,
@@ -1062,7 +1109,7 @@ class Workers(TableTab):
         except Exception:  # noqa: BLE001 - not mounted yet
             return
         panes, parked = self._gone
-        if isinstance(self.selected, ParkedWorker):
+        if parked_of(self.selected) is not None:
             counts = ((parked, "gone"), (panes, "pane gone"))
         else:
             counts = ((panes, "gone"), (parked, "parked gone"))
@@ -1073,7 +1120,7 @@ class Workers(TableTab):
     def detail_title(self) -> str:
         """A slot's row is a slot. A parked worker holds none, and is called
         what it is."""
-        return self.PARKED_TITLE if isinstance(self.selected, ParkedWorker) else self.DETAIL_TITLE
+        return self.PARKED_TITLE if parked_of(self.selected) is not None else self.DETAIL_TITLE
 
     def detail_text(self, dash) -> str:
         row = self.selected

@@ -10,8 +10,9 @@ phase that no slot row shows can still be found.
 
 Every test reads one real state file through a real ``Dash``, in the three
 shapes of ``tests/test_parked_working_readers.py``. The answered session is the
-case; the other two are the control, and read as they always did: no worker
-row, no window in History, the same forecast key.
+case; the other two are the control: the same forecast key, and no window in
+History. A parked worker that still asks has its row on the Workers tab and in
+working now too, reading ``waiting`` (``tests/test_parked_worker_rows.py``).
 """
 
 from __future__ import annotations
@@ -157,12 +158,13 @@ def test_home_names_a_working_parked_phase_that_is_below_the_fold(cfg, monkeypat
 
 
 @STILL_ASKING
-def test_home_lists_no_worker_for_a_parked_phase_that_asks(cfg, monkeypatch, mark):
+def test_home_lists_a_parked_phase_that_asks_as_waiting_with_its_window(cfg, monkeypatch, mark):
     run(cfg, mark)
     dash, _ = dash_of(cfg, monkeypatch)
     rows = home.worker_rows(dash, 60)
-    assert [(phase, slot) for _, phase, slot in rows] == [("P0", 0), (None, 1)]
-    assert not any(WINDOW in plain(text) for text, _, _ in rows)
+    assert [(phase, slot) for _, phase, slot in rows] == [("P0", 0), (None, 1), ("P1", None)]
+    text = plain(rows[-1][0])
+    assert WINDOW in text and "waiting" in text and "works on your answer" not in text
 
 
 def test_home_does_not_open_or_select_a_working_parked_row(cfg, monkeypatch):
@@ -270,7 +272,7 @@ def test_the_workers_tab_lists_a_working_parked_phase_with_its_window(cfg, monke
     row, ages = aged(lambda: tables.worker_row(tab["rows"][-1]))
     assert len(row) == len(tables.WORKER_COLUMNS)
     assert col(row, "slot").strip() == "—" and col(row, "phase").strip() == "P1"
-    assert col(row, "live").strip() == "in window" and col(row, "branch").strip() == WINDOW
+    assert col(row, "live").strip() == "unknown"  # no claude here: as a slot's would
     assert col(row, "elapsed").strip() in ages  # aged from its launch
     # The head still counts slots, and says what works outside them.
     assert "1/2 slots busy" in tab["head"] and "1 in own window" in tab["head"]
@@ -280,14 +282,14 @@ def test_the_workers_tab_lists_a_working_parked_phase_with_its_window(cfg, monke
 
 
 @STILL_ASKING
-def test_the_workers_tab_lists_only_slots_while_a_parked_phase_asks(cfg, monkeypatch, mark):
+def test_the_workers_tab_lists_a_parked_phase_that_asks_as_waiting(cfg, monkeypatch, mark):
     run(cfg, mark)
     dash, _ = dash_of(cfg, monkeypatch)
     tab = workers_tab(dash)
-    assert tab["keys"] == ["slot-0", "slot-1"]
-    assert tab["head"] == "1/2 slots busy"
-    cells = [plain(c) for r in tab["rows"] for c in tables.worker_row(r)]
-    assert not any(WINDOW in c for c in cells) and WINDOW not in tab["detail"]
+    assert tab["keys"] == ["slot-0", "slot-1", "parked-P1"]
+    assert col(tables.worker_row(tab["rows"][-1]), "live").strip() == "waiting"
+    assert "1 in own window" in tab["head"] and "1 waiting on you" in tab["head"]
+    assert f"waits on your answer in tmux window {WINDOW}" in tab["detail"]
 
 
 # -- History --------------------------------------------------------------------------

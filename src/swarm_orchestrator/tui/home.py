@@ -196,6 +196,13 @@ def set_text(widget, text: str) -> None:
 
 
 # -- headline -------------------------------------------------------------
+def at_work(dash) -> set[str]:
+    """The phases a worker is at work on: in a busy slot, or parked and at work on
+    the owner's answer in a window of its own (``Dash.working_parked``)."""
+    return ({s.phase for s in dash.snapshot.slots if s.busy and s.phase}
+            | {w.phase for w in getattr(dash, "working_parked", None) or ()})
+
+
 def headline(dash, width: int = 76, compact: bool = False) -> str:
     """The page title, one answer: how far along the open phase books are, when
     all of them are done, and what is moving.
@@ -209,7 +216,7 @@ def headline(dash, width: int = 76, compact: bool = False) -> str:
     headline is three lines at every size.
     """
     snap = dash.snapshot
-    busy = {s.phase for s in snap.slots if s.busy and s.phase}
+    busy = at_work(dash)
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     camps = [
         c for c in summarise(dash.graph or {}, snap.landed, busy, excluded,
@@ -383,12 +390,18 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
     exists. A slot whose phase is in ``blockers`` is repainted as waiting, so the
     row and the blocker drawer can never disagree.
 
+    After the slots comes a row per parked worker at work on the owner's answer
+    (``Dash.working_parked``): it runs in a tmux window of its own, which the row
+    names, and holds no slot, so its ``slot_id`` is ``None`` and there is nothing
+    to select or jump to.
+
     Returns rows rather than one blob because the caller mounts a widget per row;
     a click has to land on the row it hit.
     """
     snap = dash.snapshot
     slots = list(dash.slot_rows())
-    if not slots:
+    parked = list(getattr(dash, "working_parked", None) or ())
+    if not slots and not parked:
         return [(paint(snap.reason or "no workers yet — `swarm up` starts them", MUTED), None, None)]
 
     blocked = {b.phase: b for b in snap.blockers}
@@ -432,7 +445,33 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         if note:
             line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}", MUTED)
         out.append((line, slot.phase, slot.id))
+    for worker in parked:
+        gauge, pct = context_cells(meters.get(worker.phase), None)
+        line = (
+            f"  [{COLOR[INFO]}]{'—':<2}[/]  "
+            f"{clip(escape(worker.phase), phase_w):<{phase_w}} "
+            f"{fmt_duration(worker.elapsed_s):>6} {eta_cell(eta_runs_of(dash), worker.elapsed_s)}"
+            f"  {gauge} {pct}"
+        )
+        # The window leads the note, so a narrow box clips the words and not the name.
+        note = f"tmux window {worker.window} · works on your answer"
+        line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}", MUTED)
+        out.append((line, worker.phase, None))
     return out
+
+
+def work_hint(rows: list[tuple], top: int) -> str:
+    """What working now has scrolled out of sight, for the box's border.
+
+    A parked worker at work comes after the slots, so with four slots it is
+    below the fold: it is named here, where the owner looks for what is running.
+    """
+    below = rows[top + WORK_VIS:]
+    more = f"↓ {len(below)} more" if below else ""
+    apart = [phase for _, phase, slot_id in below if phase and slot_id is None]
+    if apart:
+        more += f" ({', '.join(apart)} in own window)"
+    return " · ".join(([f"↑ {top} above"] if top else []) + ([more] if more else []))
 
 
 # -- phases done ----------------------------------------------------------
@@ -477,7 +516,7 @@ def next_lines(dash, width: int = 44, limit: int = 6) -> list[str]:
     blocked ones with what they are waiting for.
     """
     snap = dash.snapshot
-    busy = {s.phase for s in snap.slots if s.busy and s.phase}
+    busy = at_work(dash)
     excluded = set(getattr(dash.cfg, "exclude", None) or [])
     dated = getattr(dash, "deferred", None) or {}
     graph = dash.graph or {}
@@ -893,8 +932,9 @@ class BookPanel(Panel):
 class Home(Vertical):
     """The default tab: headline, then a grid of what is running and what wants you.
 
-    Left, the work: working now (every slot, always fully visible, beside phases
-    done), the phase books (a fixed-height scrolling box), the feed. Right,
+    Left, the work: working now (every slot, then each parked worker at work in a
+    window of its own, beside phases done), the phase books (a fixed-height
+    scrolling box), the feed. Right,
     the run's surroundings: usage with its chart, alerts & notifications, the
     kept shells. Under :data:`GRID_COLS` the right column moves under the feed,
     and ``needs you`` comes back as a strip at the top, where it cannot be missed.
@@ -1110,8 +1150,10 @@ class Home(Vertical):
         return grid_layout(width, height, self._slot_count())
 
     def _slot_count(self) -> int:
+        """The rows working now lists: every slot, and each parked worker at work."""
         try:
-            return max(BASE_SLOTS, len(self._dash.snapshot.slots))
+            parked = getattr(self._dash, "working_parked", None) or ()
+            return max(BASE_SLOTS, len(self._dash.snapshot.slots) + len(parked))
         except Exception:  # noqa: BLE001 - no snapshot yet
             return BASE_SLOTS
 
@@ -1149,7 +1191,7 @@ class Home(Vertical):
             self.scroll_books(event.delta)
 
     def scroll_workers(self, delta: int) -> None:
-        """Scroll working now by ``delta`` slots (only past :data:`WORK_VIS` of them)."""
+        """Scroll working now by ``delta`` rows (only past :data:`WORK_VIS` of them)."""
         self._work_top += delta
         if self._dash is not None:
             self.update(self._dash)
@@ -1230,10 +1272,7 @@ class Home(Vertical):
         self._rows("#work-rows", work, "work")
         work_panel = self._panel("#p-work")
         if work_panel is not None:
-            below = max(0, len(every) - wtop - WORK_VIS)
-            hint = " · ".join(([f"↑ {wtop} above"] if wtop else [])
-                              + ([f"↓ {below} more"] if below else []))
-            work_panel.set_title("working now", hint)
+            work_panel.set_title("working now", work_hint(every, wtop))
 
         work_lines = sum(text.count("\n") + 1 for text, _, _ in work)
         height = max(4, work_lines - 1)

@@ -50,6 +50,7 @@ from textual.widgets import DataTable
 from .. import statuses
 from . import data
 from .campaign import campaign_of
+from .dash import ParkedWorker
 from .data import (
     CONTEXT_BUDGET,
     Notification,
@@ -223,6 +224,9 @@ WORKER_PRIORITY = (0, 0, 0, 0, 2, 3, 1, 4, 4, 5)
 #: died leaves the run looking perfectly healthy everywhere else, which is why it
 #: gets the one shouting cell on the screen.
 GONE = "gone"
+#: The ``live`` word of a parked worker at work on the owner's answer: it runs,
+#: in a tmux window of its own instead of a slot's pane.
+IN_WINDOW = "in window"
 
 
 def unpack_slot_row(entry) -> tuple[SlotView, str, str, float | None, object]:
@@ -255,9 +259,29 @@ def elapsed_state(seconds: float | None) -> str | None:
 
 
 def worker_key(entry) -> str:
-    """Stable row key: a slot's identity is its number, whatever is in it."""
+    """Stable row key: a slot's identity is its number, whatever is in it. A
+    parked worker at work holds no slot, and is its phase."""
+    if isinstance(entry, ParkedWorker):
+        return f"parked-{entry.phase}"
     slot, *_ = unpack_slot_row(entry)
     return f"slot-{slot.id}"
+
+
+def worker_phase(entry) -> str | None:
+    """The phase a Workers row shows, in a slot or in a window of its own."""
+    if isinstance(entry, ParkedWorker):
+        return entry.phase
+    return unpack_slot_row(entry)[0].phase
+
+
+def parked_workers(dash) -> list[ParkedWorker]:
+    """The parked workers at work on the owner's answer (``Dash.working_parked``)."""
+    return list(getattr(dash, "working_parked", None) or ())
+
+
+def parked_where(worker: ParkedWorker) -> str:
+    """Where a parked worker at work is, in the one sentence every detail says."""
+    return f"works on your answer in tmux window {worker.window}, and holds no slot"
 
 
 def context_cell(ctx: float | None, m=None) -> str:
@@ -278,7 +302,24 @@ def worker_row(entry, repo=None, meter=None, history=None) -> tuple[str, ...]:
     ``gone`` gets three separate tells — the marker glyph, the phase turning red
     and the word in caps — because it is the failure mode that otherwise looks
     identical to a healthy run and the one this tab exists to surface.
+
+    A parked worker at work on the owner's answer is a row too, with no slot
+    number and its window where a slot's worker shows its branch.
     """
+    if isinstance(entry, ParkedWorker):
+        over = phase_eta(history or [], entry.elapsed_s)[1]
+        return (
+            glyph("busy"),
+            "—",
+            cell(entry.phase, 20),
+            paint(IN_WINDOW, token("busy")),
+            cell(fmt_duration(entry.elapsed_s), 8, elapsed_state(entry.elapsed_s)),
+            cell(fmt_phase_eta(history or [], entry.elapsed_s), 12, WARN if over else MUTED),
+            context_cell(None, meter),
+            paint("—", MUTED),
+            paint("—", MUTED),
+            cell(entry.window, 26),
+        )
     slot, status, waiting, ctx, pane = unpack_slot_row(entry)
     gone = status == GONE
     live = status
@@ -339,6 +380,65 @@ def _note_block(notes: list, limit: int, width: int, stamp) -> list[str]:
     return out
 
 
+def _meter_lines(dash, phase: str | None, ctx: float | None) -> list[str]:
+    """A worker's context, spend and effort, from its meters file (else the pane's %)."""
+    lines: list[str] = []
+    m = (getattr(dash, "meters", None) or {}).get(phase or "")
+    if m is not None and m.context_tokens:
+        w = m.context_window or 0
+        window = f" of {w / 1e6:.1f}M" if w >= 1e6 else (f" of {w / 1000:.0f}k" if w else "")
+        lines.append(field("context", f"{m.context_tokens / 1000:.0f}k{window}",
+                           state=BAD if m.context_tokens >= CONTEXT_BUDGET else None))
+        if m.peak_tokens:
+            note = (" — past the ~300k budget: this phase may be too big for one worker"
+                    if m.peak_tokens >= CONTEXT_BUDGET else "")
+            lines.append(field("peak", f"{m.peak_tokens / 1000:.0f}k{note}",
+                               state=WARN if note else None))
+    elif ctx is not None:
+        lines.append(
+            field("context", f"{ctx:.0f}% {bar(ctx, 100, 16)}", state=meter_state(ctx))
+        )
+    if m is not None and m.cost_usd is not None:
+        burn = f" · ≈${m.burn_per_h:.2f}/h" if m.burn_per_h is not None else ""
+        lines.append(field("spend", f"≈${m.cost_usd:.2f} API-equivalent{burn}"))
+    if m is not None and m.effort:
+        lines.append(field("effort", m.effort))
+    return lines
+
+
+def _record_lines(dash, phase: str | None) -> list[str]:
+    """What a live worker has said so far: its recap, then its recorded calls."""
+    lines: list[str] = []
+    recap = (dash.recaps or {}).get(phase or "")
+    if recap is not None and recap.summary:
+        lines.append(section("recap"))
+        lines.append(escape(clip(recap.summary, 600)))
+    notes = (dash.notes or {}).get(phase or "") or []
+    lines.extend(_note_block(notes, 6, 140, fmt_clock))
+    return lines
+
+
+def parked_detail(worker: ParkedWorker, dash) -> str:
+    """A parked worker at work in full: the window it is in and why, then what it
+    decided. Its pane is not probed, so there are no last lines to show here; the
+    window has them."""
+    lines = [
+        f"{glyph('busy')} [bold]{escape(worker.phase)}[/]  "
+        f"{paint(IN_WINDOW, token('busy'))}  [{COLOR[MUTED]}]no slot[/]",
+        paint(escape(f"parked: it {parked_where(worker)}"), INFO),
+        field("window", escape(worker.window)),
+        field("started", fmt_ago(worker.started_at)),
+    ]
+    history = eta_runs_of(dash)
+    left_s, over = phase_eta(history, worker.elapsed_s)
+    if left_s is not None:
+        lines.append(field("eta", fmt_phase_eta(history, worker.elapsed_s) + " vs the typical phase",
+                           state=WARN if over else None))
+    lines.extend(_meter_lines(dash, worker.phase, None))
+    lines.extend(_record_lines(dash, worker.phase))
+    return join_rows(*lines)
+
+
 def worker_detail(entry, dash) -> str:
     """The selected slot in full: where it is, what it decided, what it just printed.
 
@@ -346,7 +446,12 @@ def worker_detail(entry, dash) -> str:
     recap and the notes are the only places its past ones are. Together they are
     the answer to "what is this thing actually doing", which used to require
     switching to its tmux pane and reading.
+
+    A parked worker at work on the owner's answer has no slot: its row says which
+    window it is in instead (:func:`parked_detail`).
     """
+    if isinstance(entry, ParkedWorker):
+        return parked_detail(entry, dash)
     slot, status, waiting, ctx, pane = unpack_slot_row(entry)
     gone = status == GONE
     head = (
@@ -377,26 +482,7 @@ def worker_detail(entry, dash) -> str:
     if left_s is not None:
         lines.append(field("eta", fmt_phase_eta(history, slot.elapsed_s) + " vs the typical phase",
                            state=WARN if over else None))
-    m = (getattr(dash, "meters", None) or {}).get(slot.phase or "")
-    if m is not None and m.context_tokens:
-        w = m.context_window or 0
-        window = f" of {w / 1e6:.1f}M" if w >= 1e6 else (f" of {w / 1000:.0f}k" if w else "")
-        lines.append(field("context", f"{m.context_tokens / 1000:.0f}k{window}",
-                           state=BAD if m.context_tokens >= CONTEXT_BUDGET else None))
-        if m.peak_tokens:
-            note = (" — past the ~300k budget: this phase may be too big for one worker"
-                    if m.peak_tokens >= CONTEXT_BUDGET else "")
-            lines.append(field("peak", f"{m.peak_tokens / 1000:.0f}k{note}",
-                               state=WARN if note else None))
-    elif ctx is not None:
-        lines.append(
-            field("context", f"{ctx:.0f}% {bar(ctx, 100, 16)}", state=meter_state(ctx))
-        )
-    if m is not None and m.cost_usd is not None:
-        burn = f" · ≈${m.burn_per_h:.2f}/h" if m.burn_per_h is not None else ""
-        lines.append(field("spend", f"≈${m.cost_usd:.2f} API-equivalent{burn}"))
-    if m is not None and m.effort:
-        lines.append(field("effort", m.effort))
+    lines.extend(_meter_lines(dash, slot.phase, ctx))
     if waiting:
         lines.append(field("waiting for", escape(clip(waiting, 160)), state=WARN))
 
@@ -405,13 +491,7 @@ def worker_detail(entry, dash) -> str:
         ahead = "—" if repo.commits is None else str(repo.commits)
         lines.append(field("branch work", f"{ahead} commit(s), {repo.dirty} dirty file(s)"))
 
-    recap = (dash.recaps or {}).get(slot.phase or "")
-    if recap is not None and recap.summary:
-        lines.append(section("recap"))
-        lines.append(escape(clip(recap.summary, 600)))
-
-    notes = (dash.notes or {}).get(slot.phase or "") or []
-    lines.extend(_note_block(notes, 6, 140, fmt_clock))
+    lines.extend(_record_lines(dash, slot.phase))
 
     tail = (dash.tails or {}).get(slot.pane_id or "", "")
     body = [ln for ln in tail.splitlines() if ln.strip()][-6:]
@@ -449,8 +529,9 @@ def history_key(run: PhaseRun) -> str:
 
 
 def history_status(run: PhaseRun) -> str:
-    """``running`` only while a busy slot holds the phase; else how it is held or
-    how it ended, in words (``lost`` reads "worker gone")."""
+    """``running`` only while its worker is at work: a busy slot holds the phase,
+    or it is parked and at work on the owner's answer in a window of its own.
+    Else how it is held or how it ended, in words (``lost`` reads "worker gone")."""
     if run.running:
         return "running"
     return run.hold or data.run_word(run.status) or "?"
@@ -498,12 +579,16 @@ def history_detail(run: PhaseRun, dash) -> str:
         f"  [{COLOR[MUTED]}]took[/] {fmt_duration(run.duration_s)}",
     ]
     camp = campaign_of(run.phase or "")
+    # Running, but in no slot: parked, and at work on the owner's answer.
+    where = next((w for w in parked_workers(dash) if run.running and w.phase == run.phase), None)
     meta = [f"{fmt_stamp(run.started_at)} → {fmt_stamp(run.ended_at)}", f"campaign {camp}"]
-    if run.slot:
+    if run.slot and where is None:
         meta.append(f"slot {run.slot}")
     if run.parked:
         meta.append("parked")
     lines.append(paint(escape(" · ".join(meta)), MUTED))
+    if where is not None:
+        lines.append(paint(escape(f"parked: it {parked_where(where)}"), INFO))
     ended = _ended_line(run)
     if ended:
         lines.append(paint(escape(ended), WARN if run.status == data.LOST else MUTED))
@@ -865,6 +950,8 @@ class TableTab(Vertical):
 # -- workers tab -----------------------------------------------------------
 class Workers(TableTab):
     """One row per slot: what is in it, how far along, and whether it is alive.
+    Then one per parked worker at work on the owner's answer, which runs in a
+    window of its own and in no slot.
 
     The ``live`` column is the reason this is a table. It joins three sources the
     owner otherwise has to reconcile by hand — ``state.json`` (is the slot
@@ -879,23 +966,27 @@ class Workers(TableTab):
     EMPTY_DETAIL = "no workers yet — `swarm up` starts them"
 
     def _update(self, dash) -> None:
-        rows = list(dash.slot_rows())
-        gone = [r for r in rows if unpack_slot_row(r)[1] == GONE]
-        busy = [r for r in rows if unpack_slot_row(r)[0].busy]
-        waiting = [r for r in rows if unpack_slot_row(r)[1] == "waiting"]
+        slots = list(dash.slot_rows())
+        parked = parked_workers(dash)
+        rows = slots + parked
+        gone = [r for r in slots if unpack_slot_row(r)[1] == GONE]
+        busy = [r for r in slots if unpack_slot_row(r)[0].busy]
+        waiting = [r for r in slots if unpack_slot_row(r)[1] == "waiting"]
 
         self.sync(
             rows,
             [worker_key(r) for r in rows],
             lambda r: worker_row(
                 r,
-                (dash.repos or {}).get(unpack_slot_row(r)[0].phase or ""),
-                (getattr(dash, "meters", None) or {}).get(unpack_slot_row(r)[0].phase or ""),
+                (dash.repos or {}).get(worker_phase(r) or ""),
+                (getattr(dash, "meters", None) or {}).get(worker_phase(r) or ""),
                 eta_runs_of(dash),
             ),
         )
 
-        head = [f"{len(busy)}/{len(rows)} slots busy"]
+        head = [f"{len(busy)}/{len(slots)} slots busy"]
+        if parked:
+            head.append(paint(f"{len(parked)} in own window", INFO))
         if waiting:
             head.append(paint(f"{len(waiting)} waiting on you", WARN))
         if gone:
@@ -915,7 +1006,7 @@ class Workers(TableTab):
 
     def selected_phase(self) -> str | None:
         row = self.selected
-        return None if row is None else unpack_slot_row(row)[0].phase
+        return None if row is None else worker_phase(row)
 
 
 # -- history tab -----------------------------------------------------------

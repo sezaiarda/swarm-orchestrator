@@ -1496,7 +1496,11 @@ strip at the top lists them; the footer keeps the other keys, and `?` lists all)
    Under 110 columns the right column moves under the feed and needs you
    returns as a strip at the top.
 2. **workers:** one row per slot. A busy slot whose pane died shows `gone`.
-3. **history:** every phase run, with what it did.
+   A parked worker you have answered is at work in no slot: it has a row of
+   its own (`in window`, with its `wait:<phase>` window), as it has in home's
+   working now box.
+3. **history:** every phase run, with what it did. A run that is parked and at
+   work names its window.
 4. **alerts:** the whole notification log with each ping's detail. `F`
    cycles all, failed and delivered.
 5. **disk:** sizes of mirrors, caches and the state dir. Scanned on demand (`r`).

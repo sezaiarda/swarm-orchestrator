@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .. import bigpic, ledgerw, opqueue, ovrecord
@@ -90,6 +91,42 @@ KEEP_RECHECK_S = 10.0
 PASSES = 12
 
 
+@dataclass(frozen=True)
+class ParkedWorker:
+    """A parked worker the owner has answered: at work again, in a tmux window
+    of its own and in no slot, so no slot row shows it."""
+
+    phase: str
+    #: The window it works in (:func:`state.wait_window`).
+    window: str
+    #: When its run was launched, if the log still says.
+    started_at: float | None = None
+
+    @property
+    def elapsed_s(self) -> float | None:
+        return None if self.started_at is None else max(0.0, time.time() - self.started_at)
+
+
+def working_parked(state: dict | None, history: list[PhaseRun]) -> list[ParkedWorker]:
+    """The parked workers at work on the owner's answer, in the order they parked.
+
+    The one rule every view lists them by: a key in ``parked`` and in
+    ``answered`` (:meth:`state.State.working_parked`) that is a worker's. An
+    operator job or an Overseer pass is listed from its own record, never as a
+    worker. A state file from before the marks has no ``answered``, and lists
+    none.
+    """
+    state = state if isinstance(state, dict) else {}
+    answered = state.get("answered")
+    if not isinstance(answered, dict) or not isinstance(state.get("parked"), list):
+        return []
+    started = {r.phase: r.started_at for r in history if r.running}
+    return [ParkedWorker(key, state_mod.wait_window(key), started.get(key))
+            for key in state["parked"]
+            if isinstance(key, str) and key in answered
+            and state_mod.waiter(key)[0] == state_mod.WORKER]
+
+
 class Dash:
     """Everything on disk, re-read only when it changed.
 
@@ -113,6 +150,9 @@ class Dash:
         self.notes: dict = {}
         self.operator: list[opqueue.Item] = []
         self.history: list[PhaseRun] = []
+        #: Parked workers at work on the owner's answer, each in its own window
+        #: (:func:`working_parked`): running, but in no slot.
+        self.working_parked: list[ParkedWorker] = []
         self.graph: dict = {}
         self.ticked: set[str] = set()
         self.agents: list = []
@@ -358,7 +398,8 @@ class Dash:
         state = self._state
         if not isinstance(state, dict) or not self.eta.drives(self):
             return
-        busy = any(s.busy for s in self.snapshot.slots)
+        # A parked worker at work on the owner's answer ages like one in a slot.
+        busy = any(s.busy for s in self.snapshot.slots) or bool(self.working_parked)
         every = eta_mod.RECOMPUTE_S if busy else eta_mod.IDLE_RECOMPUTE_S
         real, soft = self._eta_inputs(state, now)
         if not self.eta.gate.due(real, soft, now, every):
@@ -390,7 +431,8 @@ class Dash:
             got = state.get(key)
             return tuple(sorted(map(str, got))) if isinstance(got, (dict, list)) else ()
 
-        soft = (names("parked"), names("waiting"), names("integ_queue"),
+        # ``answered``: the owner answering a parked session puts it back to work.
+        soft = (names("parked"), names("waiting"), names("answered"), names("integ_queue"),
                 str(state.get("integ_blocked") or ""), bool(state.get("paused")),
                 bool(state.get("drain")), state.get("pause_at"), names("usage_hold"),
                 names("usage_override"), self._mtimes.get("config"), self._deferred_day,
@@ -471,6 +513,7 @@ class Dash:
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes,
             state=state if isinstance(state, dict) else None, ticked=self.ticked,
         )
+        self.working_parked = working_parked(state, self.history)
         self.eta_runs, _ = eta_sample(self.history, self.epoch)
         self.finished, self.bulk = finish_times(
             self.snapshot.landed, self.ticked, self.ledger_history, self.history)

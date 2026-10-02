@@ -920,6 +920,7 @@ project path, so two projects with the same folder name never share state.
 | `buildsem/pair.json` | Under `[build].pair = "distinct-repo"`: the running builds found to hold a command that runs alone (a script that turned out to build an image). |
 | `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail`, `yield`/`unyield` for an idle holder set aside or counted again, and `passed`/`alone` under the pairing rules (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
+| `.cargo/config.toml`, `.cargo/rustc-wrap` | With `[build].cache`: the cargo config every build under the state dir reads, and the rustc wrapper it names. The wrapper makes the build paths a Rust test compiles in the cache's own, so a test built in one mirror still starts its binary after that mirror is removed (see [components.md](docs/components.md#worktree-isolation-and-mirrors)). Checked whenever a mirror is made, and removed when the cache is turned off. |
 | `console.json`, `console.lock` | The owner console's conversation id (what the next start resumes), and the lock that keeps two opens from racing. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |

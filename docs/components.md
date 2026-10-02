@@ -818,6 +818,49 @@ time, one nesting level at a time. `[git].repos` globs pick the component repos
 - With `[build].cache`, a Rust worktree's `target/` is a symlink to one shared
   per-repo cache, so only changed crates recompile. This happens only where the
   repo gitignores `target`.
+  - A cache outlives the mirrors that build into it, and a Rust test compiles in
+    paths that cargo spells through the worktree it ran in and never rebuilds
+    for: `env!("CARGO_BIN_EXE_<name>")` (the binary it starts) and
+    `env!("CARGO_TARGET_TMPDIR")`, both under `target/`, and
+    `env!("CARGO_MANIFEST_DIR")` (where it finds its fixtures). Left alone, the
+    next mirror runs a test that starts its binary, or reads its fixtures,
+    through the mirror that built it, and every such test fails once that mirror
+    is removed.
+  - So making a mirror writes `<state>/.cargo/config.toml`, which sets
+    `build.rustc-wrapper` to `<state>/.cargo/rustc-wrap`. cargo reads the config
+    of every directory above the one it runs in, so this reaches every build in
+    every mirror, started in a repo or at the mirror root with `--manifest-path`,
+    and puts no file in any checkout. The wrapper rewrites the two paths under
+    `target/` to their real path, the cache itself: the same string in every
+    mirror, and one that stays. It changes nothing else, costs a few
+    milliseconds per compiled crate, and adding or removing it rebuilds nothing.
+  - The wrapper is a short Python script: under `/usr/bin/python3` where that
+    runs it, else under the interpreter the swarm itself runs on. It is tried
+    each time a mirror is made, and a new one before it replaces the old. While
+    none works the config is removed and the log says `RUSTC-WRAP-SKIP`: builds
+    then run without it, as before. Should the interpreter it names go away in
+    between, builds under the state dir fail to start their compiler until the
+    next mirror is made, or until you delete `<state>/.cargo/config.toml`.
+  - It does not reach a build with `RUSTC_WRAPPER` or `CARGO_BUILD_RUSTC_WRAPPER`
+    set in its environment (they win over any config; empty turns the wrapper
+    off), or one started outside the state dir. Inside the state dir it replaces
+    a `build.rustc-wrapper` from your own `~/.cargo/config.toml` (`sccache`).
+    With `[build].cache = false` the next mirror made removes the config, and
+    each worktree has a `target/` of its own.
+  - The sources' path is the worktree's own, so no wrapper can make it last, and
+    an executable already in a cache keeps the paths it was built with. So when
+    a mirror is made, resumed or removed, each cache is swept: an executable
+    whose dep-info (`deps/<name>-<hash>.d`) records one of the three paths
+    through a directory that no longer exists is deleted, and cargo rebuilds it
+    on its next run (`TARGET-CACHE-STALE <repo> dropped N …` in the log). One
+    built through a mirror that still exists is left alone: it works, and may be
+    running.
+  - What this does not cure: a shared cache still holds whatever was built
+    last. If another mirror built the same crate after your last edit, its
+    artifacts are newer than your sources and cargo runs them, and a test that
+    reads fixtures by `CARGO_MANIFEST_DIR` reads that mirror's while it exists.
+    Before a run you will report, touch the files you changed (or
+    `cargo clean -p <crate>`).
 
 Operator jobs (`op-<job>`) and Overseer passes (`ovs-<id>`) get mirrors the
 same way.

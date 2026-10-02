@@ -38,9 +38,12 @@ from __future__ import annotations
 
 import calendar
 import fcntl
+import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -507,6 +510,10 @@ def _gc(cfg: Config, repo: Path, phase: str, log: Log, *, later: bool = False) -
         _git(repo, "worktree", "prune", check=False, timeout=_GC_TIMEOUT_S)
         if _branch_exists(repo, branch):
             _git(repo, "branch", "-D", branch, check=False)
+        if cfg.build_cache:
+            # What this worktree built into the shared cache must not outlive it
+            # pointing back here: other worktrees are running from that cache now.
+            _drop_stale_executables(cfg.build_cache_dir / _slug(repo), repo, log)
     except GitError as exc:
         # Loud in the log, invisible to the queue.
         log.line(f"WORKTREE-GC-FAILED {phase} {repo.name}: {exc}")
@@ -657,9 +664,15 @@ def _link_target_cache(cfg: Config, wt: Path, repo: Path, log: Log) -> None:
     lanes in one repo do build at once, and share it; ``[lanes] per_repo`` bounds
     how many, and the cache saved is still worth more than the thrash. Cross-repo
     phases use separate caches and don't interact.
+
+    A cache outlives the worktrees that build into it, so what one of them left
+    there must not point back at it: see :func:`_pin_test_paths` and
+    :func:`_drop_stale_executables`, which runs here for every worktree made or resumed.
     """
     if not cfg.build_cache or not (wt / "Cargo.toml").exists():
         return
+    shared = cfg.build_cache_dir / _slug(repo)
+    _drop_stale_executables(shared, repo, log)
     link = wt / "target"
     if link.exists() or link.is_symlink():
         return  # a fresh worktree shouldn't have one; don't clobber if it does
@@ -667,7 +680,6 @@ def _link_target_cache(cfg: Config, wt: Path, repo: Path, log: Log) -> None:
         # `target` isn't ignored here — linking would risk committing the symlink.
         log.line(f"TARGET-CACHE-SKIP {repo.name} target-not-ignored")
         return
-    shared = cfg.build_cache_dir / _slug(repo)
     try:
         # resolve(): the cache entry may itself be a symlink to the main
         # checkout's target/, dangling once that target is cleaned or evicted.
@@ -675,6 +687,195 @@ def _link_target_cache(cfg: Config, wt: Path, repo: Path, log: Log) -> None:
         link.symlink_to(shared)
     except OSError as exc:
         log.line(f"TARGET-CACHE-SKIP {repo.name} {exc}")
+
+
+# -- the build paths a test compiles in -----------------------------------
+# cargo hands a test target absolute paths at compile time, spelled through the
+# directory it was started in: the package's own binaries
+# (``CARGO_BIN_EXE_<name>``) and a scratch dir (``CARGO_TARGET_TMPDIR``), both
+# under ``<worktree>/target/…``, and the package's sources
+# (``CARGO_MANIFEST_DIR``). A test that reads one with ``env!`` keeps that
+# spelling for good, and cargo does not rebuild it when another worktree would
+# spell it differently. In a shared cache the next worktree therefore runs a
+# test that starts the binary, or reads its fixtures, through the worktree that
+# built it, which works only until that worktree is removed.
+
+#: The rustc wrapper :func:`_pin_test_paths` installs: cargo runs it as
+#: ``<wrapper> <rustc> <args…>``. It replaces each of the two paths under
+#: ``target/`` by its real path (the cache itself), which is the same string in
+#: every worktree and outlives all of them. ``-S -E``: it runs once per compiled
+#: crate, so it loads nothing it does not need and ignores the session's
+#: ``PYTHON*`` variables. Python by shebang and no shell in between: a binary's
+#: name may hold a hyphen (``CARGO_BIN_EXE_my-svc``), and ``dash`` drops a
+#: variable so named from the environment it passes on, which fails the compile.
+_RUSTC_WRAP = '''\
+#!{python} -SE
+"""Installed by swarm-orchestrator as cargo's build.rustc-wrapper (see the
+config.toml beside this file). Rewrites the build paths a test compiles in to
+their real path, so a test built in one worktree of a shared target cache still
+finds its binary after that worktree is removed. Everything else is rustc's."""
+import os
+import signal
+import sys
+
+for key, value in list(os.environ.items()):
+    if (key.startswith("CARGO_BIN_EXE_") or key == "CARGO_TARGET_TMPDIR") and os.path.isabs(value):
+        os.environ[key] = os.path.realpath(value)
+for ignored_by_python in (signal.SIGPIPE, signal.SIGXFSZ):
+    signal.signal(ignored_by_python, signal.SIG_DFL)  # the compiler gets them as cargo gave them
+os.execvp(sys.argv[1], sys.argv[1:])
+'''
+
+#: Interpreters the wrapper may name before the tool's own, most lasting first.
+#: The system's outlives a reinstall of this tool; while the named one is away
+#: every build under the state dir fails to start its compiler.
+_WRAP_PYTHONS = ("/usr/bin/python3",)
+
+_CARGO_CONFIG = """\
+# Written by swarm-orchestrator, and checked whenever a worktree mirror is made.
+# cargo reads the config of every directory above the one it runs in, so this
+# reaches every build under this state dir, whichever repo or directory it is
+# started from. RUSTC_WRAPPER in the environment still wins over it.
+[build]
+rustc-wrapper = {wrapper}
+"""
+
+#: A dep-info line recording a path through the building worktree that rustc
+#: compiled in: which variable, and the path.
+_BAKED_PATH = re.compile(
+    rb"^# env-dep:(CARGO_BIN_EXE_[^=\n]*|CARGO_TARGET_TMPDIR|CARGO_MANIFEST_DIR)=(.+)$", re.M
+)
+
+
+def _text(path: Path) -> str | None:
+    """The file's text, or None when it is absent or not readable as text."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+
+
+def _wrapper_fault(script: Path, home: Path) -> str | None:
+    """Why ``script`` cannot serve as the rustc wrapper, or None when it can: it
+    is run the way cargo runs it, on a path it must rewrite."""
+    probe = "import os; print(os.environ['CARGO_TARGET_TMPDIR'])"
+    trial = subprocess.run(
+        [str(script), sys.executable, "-c", probe],
+        env={**os.environ, "CARGO_TARGET_TMPDIR": f"{home}{os.sep}."},
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    if trial.returncode == 0 and trial.stdout.strip() == os.path.realpath(home):
+        return None
+    said = (trial.stderr.strip() or trial.stdout.strip())[:200]
+    return f"its trial run exited {trial.returncode}: {said}"
+
+
+def _install_wrapper(wrapper: Path, home: Path) -> None:
+    """Put a working :data:`_RUSTC_WRAP` at ``wrapper``, or raise ``OSError``.
+
+    One that is already there and still works is left untouched: a build may be
+    running it. A new one is tried under another name first and renamed in only
+    once it works, so no build ever starts a wrapper that was not seen to run."""
+    fault = "no interpreter to run it"
+    for python in dict.fromkeys((*_WRAP_PYTHONS, sys.executable)):
+        text = _RUSTC_WRAP.format(python=python)
+        fresh = wrapper.with_name(f"{wrapper.name}.{os.getpid()}.tmp")  # two processes may be here
+        script = wrapper if _text(wrapper) == text else fresh
+        try:
+            if script is fresh:
+                fresh.write_text(text, encoding="utf-8")
+                fresh.chmod(0o755)
+            fault = _wrapper_fault(script, home)
+            if fault is None:
+                if script is fresh:
+                    os.replace(fresh, wrapper)
+                return
+        except (OSError, subprocess.SubprocessError) as exc:
+            fault = str(exc)
+        fresh.unlink(missing_ok=True)
+    raise OSError(fault)
+
+
+def _pin_test_paths(cfg: Config, log: Log) -> None:
+    """Make every build under the state dir compile the same, lasting build
+    paths into its tests, by a cargo config that names :data:`_RUSTC_WRAP`.
+
+    The config sits in ``<state>/.cargo``, above every mirror and outside every
+    checkout, because cargo looks for config upwards from the directory it runs
+    in: it covers a build started in a repo and one started at the mirror root
+    with ``--manifest-path`` alike, and puts no untracked file in any worktree.
+    A per-repo ``target-dir`` cannot do that, and ``CARGO_TARGET_DIR`` is one
+    value for a session that builds in many repos.
+
+    The config names the wrapper only while the wrapper is seen to work
+    (:func:`_install_wrapper`), and is removed otherwise and when the shared
+    cache is off: a wrapper that cannot run would fail every build, where a
+    missing one only leaves the paths as cargo spelled them. **Never raises**:
+    this runs on the way to a worker's mirror.
+    """
+    home = cfg.state_dir / ".cargo"
+    wrapper, config = home / "rustc-wrap", home / "config.toml"
+    why: Exception | None = None
+    try:
+        if cfg.build_cache:
+            home.mkdir(parents=True, exist_ok=True)
+            _install_wrapper(wrapper, home)
+            text = _CARGO_CONFIG.format(wrapper=json.dumps(str(wrapper)))
+            if _text(config) != text:
+                fresh = config.with_name(f"{config.name}.{os.getpid()}.tmp")
+                fresh.write_text(text, encoding="utf-8")
+                os.replace(fresh, config)
+            return
+    except (OSError, ValueError) as exc:
+        why = exc
+    try:
+        config.unlink(missing_ok=True)
+    except OSError as exc:
+        why = why or exc
+    if why is not None:
+        log.line(f"RUSTC-WRAP-SKIP {why}")
+
+
+def _drop_stale_executables(shared: Path, repo: Path, log: Log) -> None:
+    """Delete the cache's executables that were built through a directory which
+    is gone; cargo rebuilds a missing one, through a path that is there.
+
+    These are tests, and binaries, that compiled in a path through a worktree
+    since removed: its ``target/`` (built before the wrapper was in place, or
+    around it: ``RUSTC_WRAPPER`` set, cargo run from outside the state dir), or
+    its sources (``CARGO_MANIFEST_DIR``, which is the worktree's own and so
+    cannot be pinned). Which paths a unit was built with is read from rustc's
+    dep-info beside it (``deps/<name>-<hash>.d``). Only a path that no longer
+    resolves counts: a test built through a worktree that still exists works,
+    and may be running. **Never raises.**
+    """
+    try:
+        root = shared.resolve()
+    except (OSError, RuntimeError):  # a link that loops
+        return
+    dropped = 0
+    for pattern in ("*/deps/*.d", "*/*/deps/*.d"):  # <profile>/ and <triple>/<profile>/
+        for dep in root.glob(pattern):
+            try:
+                baked = _BAKED_PATH.findall(dep.read_bytes())
+                if any(_gone(var, os.fsdecode(path)) for var, path in baked):
+                    dep.with_suffix("").unlink()
+                    dropped += 1
+            except OSError:
+                continue  # unreadable, or a library: it has no file of that name
+    if dropped:
+        log.line(
+            f"TARGET-CACHE-STALE {repo.name} dropped {dropped} executable(s) "
+            "built through a worktree that is gone"
+        )
+
+
+def _gone(var: bytes, path: str) -> bool:
+    """The directory a compiled-in path runs through no longer exists: the
+    sources themselves, or the directory a binary or the scratch dir sits in."""
+    if not os.path.isabs(path):
+        return False  # `cargo check` passes a placeholder, not a path
+    return not os.path.isdir(path if var == b"CARGO_MANIFEST_DIR" else os.path.dirname(path))
 
 
 def _mirror_base(repo: Path, main: str) -> str:
@@ -775,6 +976,7 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
     root = cfg.project_dir.resolve()
     components = [(r, m) for (r, m) in _repos(cfg) if r.resolve() != root]
     cfg.wt_dir.mkdir(parents=True, exist_ok=True)
+    _pin_test_paths(cfg, log)
     try:
         _add_one(cfg, cfg.project_dir, cfg.git_main_branch, phase, log)
         by_depth: dict[int, list[tuple[Path, str]]] = {}

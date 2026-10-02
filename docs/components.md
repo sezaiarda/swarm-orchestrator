@@ -1520,7 +1520,11 @@ strip at the top lists them; the footer keeps the other keys, and `?` lists all)
 2. **workers:** one row per slot. A busy slot whose pane died shows `gone`.
    A parked worker you have answered is at work in no slot: it has a row of
    its own (`in window`, with its `wait:<phase>` window), as it has in home's
-   working now box.
+   working now box. If its session is gone (its window closed, or nothing of
+   it left running: the rule the watchdog's sweep settles it by) the row says
+   `GONE` like a slot's, and its detail says what is missing and whether the
+   running supervisor's sweep settles it. The detail's border names the
+   selected row: `slot`, or `parked worker` for one that holds none.
 3. **history:** every phase run, with what it did. A run that is parked and at
    work names its window.
 4. **alerts:** the whole notification log with each ping's detail. `F`

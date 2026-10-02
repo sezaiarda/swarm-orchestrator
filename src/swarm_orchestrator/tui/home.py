@@ -445,17 +445,23 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
         if note:
             line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}", MUTED)
         out.append((line, slot.phase, slot.id))
+    # A parked worker whose session is gone, by the dashboard's own probe
+    # (``Dash.parked_gone``): it is tagged ``gone`` and goes red like a slot.
+    lost = getattr(dash, "parked_gone", None) or {}
     for worker in parked:
+        gone = worker.phase in lost
         gauge, pct = context_cells(meters.get(worker.phase), None)
         line = (
-            f"  [{COLOR[INFO]}]{'—':<2}[/]  "
+            f"  [{COLOR[BAD if gone else INFO]}]{'—':<2}[/]  "
             f"{clip(escape(worker.phase), phase_w):<{phase_w}} "
             f"{fmt_duration(worker.elapsed_s):>6} {eta_cell(eta_runs_of(dash), worker.elapsed_s)}"
-            f"  {gauge} {pct}"
+            f"  {gauge} {pct}" + (" " + paint("gone", BAD) if gone else "")
         )
         # The window leads the note, so a narrow box clips the words and not the name.
-        note = f"tmux window {worker.window} · works on your answer"
-        line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}", MUTED)
+        note = f"tmux window {worker.window} · " + (
+            "its session is gone, it does no work" if gone else "works on your answer")
+        line += "\n" + paint(f"      {clip(escape(note), max(10, width - 6))}",
+                             BAD if gone else MUTED)
         out.append((line, worker.phase, None))
     return out
 

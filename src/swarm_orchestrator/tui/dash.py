@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import bigpic, ledgerw, opqueue, ovrecord
+from .. import bigpic, doctor, ledgerw, opqueue, ovrecord
 from .. import pace as pace_mod
 from .. import restart as restart_mod
 from .. import runs as runs_mod
@@ -153,6 +153,11 @@ class Dash:
         #: Parked workers at work on the owner's answer, each in its own window
         #: (:func:`working_parked`): running, but in no slot.
         self.working_parked: list[ParkedWorker] = []
+        #: The parked sessions the last probe found gone, by parked key (a
+        #: worker's is its phase): what ``swarm doctor`` and the supervisor's
+        #: sweep call gone (:func:`doctor.parked_probe`). Found by
+        #: :meth:`probe`, and dropped the moment the session leaves ``parked``.
+        self.parked_gone: dict[str, doctor.Gone] = {}
         self.graph: dict = {}
         self.ticked: set[str] = set()
         self.agents: list = []
@@ -514,6 +519,10 @@ class Dash:
             state=state if isinstance(state, dict) else None, ticked=self.ticked,
         )
         self.working_parked = working_parked(state, self.history)
+        # The probe runs every few seconds and this on every change: a session
+        # that left ``parked`` since is not gone, whatever the last probe found.
+        parked = st.get("parked") or ()
+        self.parked_gone = {k: g for k, g in self.parked_gone.items() if k in parked}
         self.eta_runs, _ = eta_sample(self.history, self.epoch)
         self.finished, self.bulk = finish_times(
             self.snapshot.landed, self.ticked, self.ledger_history, self.history)
@@ -525,8 +534,11 @@ class Dash:
         Context no longer comes from scraping it — the meters tap writes the
         exact figure (:meth:`context_pct`). The git half runs every
         :data:`REPO_PROBE_S`, or at once for a busy phase it has not seen yet.
+        A parked session has no pane here to look at, so it is asked after
+        apart (:meth:`_parked_gone`).
         """
         now = time.time() if now is None else now
+        self.parked_gone = self._parked_gone()
         busy = [s for s in self.snapshot.slots if s.busy and s.pane_id]
         running = frozenset(s.phase for s in busy)
         if now - self._agents_at >= AGENTS_PROBE_S or running != self._agents_for:
@@ -547,6 +559,23 @@ class Dash:
                 self.todos = todo_mod.collect(self.cfg).items
             except Exception:  # noqa: BLE001 - a count must never take the probe down
                 pass
+
+    def _parked_gone(self) -> dict[str, doctor.Gone]:
+        """The parked sessions that are gone, by parked key.
+
+        Read from the state the rows on screen were made of. Nothing is looked
+        at while nothing is parked: the rule walks the process table, and an
+        idle dashboard must cost nothing. A session tmux gave no answer about
+        is not called gone. A look that failed keeps what the last one found.
+        """
+        state = self._state
+        if not isinstance(state, dict) or not state.get("parked"):
+            return {}
+        try:
+            gone, _ = doctor.parked_probe(self.cfg, state_mod.State.from_dict(state))
+        except Exception:  # noqa: BLE001 - a look must never take the probe down
+            return self.parked_gone
+        return {g.key: g for g in gone}
 
     def context_pct(self, phase: str | None) -> float | None:
         """A worker's context use in percent, from its meters file."""

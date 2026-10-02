@@ -48,6 +48,7 @@ from textual.message import Message
 from textual.widgets import DataTable
 
 from .. import statuses
+from ..doctor import Gone
 from . import data
 from .campaign import campaign_of
 from .dash import ParkedWorker
@@ -279,9 +280,39 @@ def parked_workers(dash) -> list[ParkedWorker]:
     return list(getattr(dash, "working_parked", None) or ())
 
 
+def parked_gone(dash, entry) -> Gone | None:
+    """What the dashboard's probe found missing of a parked worker's session
+    (``Dash.parked_gone``): ``None`` while it is there, and for a slot's row."""
+    if not isinstance(entry, ParkedWorker):
+        return None
+    return (getattr(dash, "parked_gone", None) or {}).get(entry.phase)
+
+
 def parked_where(worker: ParkedWorker) -> str:
     """Where a parked worker at work is, in the one sentence every detail says."""
     return f"works on your answer in tmux window {worker.window}, and holds no slot"
+
+
+def parked_line(worker: ParkedWorker, gone: Gone | None = None) -> str:
+    """A parked worker in the one line every detail says: where it works, or,
+    of one that is gone, what is missing and what settles it.
+
+    The sweep is named only where the running supervisor's settles the session
+    by itself (``gone.kept`` is ``None``). Otherwise the reason nothing does is
+    repeated as it was found, and nothing more is promised.
+    """
+    if gone is None:
+        return paint(escape(f"parked: it {parked_where(worker)}"), INFO)
+    if gone.kept is None:
+        after = ("The supervisor's sweep settles it on its second sighting: its work is kept,"
+                 " and the phase is started again by the usual rules.")
+    else:
+        after = f"Nothing settles it: {gone.kept}."
+    return paint(
+        escape(f"✖ WORKER GONE — {gone.what}. The swarm still counts {worker.phase} as"
+               f" running, and it does no work until this is settled. {after}"),
+        BAD,
+    )
 
 
 def context_cell(ctx: float | None, m=None) -> str:
@@ -296,7 +327,7 @@ def context_cell(ctx: float | None, m=None) -> str:
     return paint(f"{ctx:3.0f}% {bar(ctx, 100, 8)}", meter_state(ctx))
 
 
-def worker_row(entry, repo=None, meter=None, history=None) -> tuple[str, ...]:
+def worker_row(entry, repo=None, meter=None, history=None, gone=None) -> tuple[str, ...]:
     """One Workers row, one cell per :data:`WORKER_COLUMNS` entry.
 
     ``gone`` gets three separate tells — the marker glyph, the phase turning red
@@ -304,15 +335,17 @@ def worker_row(entry, repo=None, meter=None, history=None) -> tuple[str, ...]:
     identical to a healthy run and the one this tab exists to surface.
 
     A parked worker at work on the owner's answer is a row too, with no slot
-    number and its window where a slot's worker shows its branch.
+    number and its window where a slot's worker shows its branch. One whose
+    session is gone (``gone``, from :func:`parked_gone`) gets the same three
+    tells, and keeps the window it was in.
     """
     if isinstance(entry, ParkedWorker):
         over = phase_eta(history or [], entry.elapsed_s)[1]
         return (
-            glyph("busy"),
+            paint("✖", BAD) if gone else glyph("busy"),
             "—",
-            cell(entry.phase, 20),
-            paint(IN_WINDOW, token("busy")),
+            cell(entry.phase, 20, BAD if gone else None),
+            paint("GONE", BAD) if gone else paint(IN_WINDOW, token("busy")),
             cell(fmt_duration(entry.elapsed_s), 8, elapsed_state(entry.elapsed_s)),
             cell(fmt_phase_eta(history or [], entry.elapsed_s), 12, WARN if over else MUTED),
             context_cell(None, meter),
@@ -421,11 +454,14 @@ def _record_lines(dash, phase: str | None) -> list[str]:
 def parked_detail(worker: ParkedWorker, dash) -> str:
     """A parked worker at work in full: the window it is in and why, then what it
     decided. Its pane is not probed, so there are no last lines to show here; the
-    window has them."""
+    window has them. Of one whose session is gone: what is missing, and what
+    settles it (:func:`parked_line`)."""
+    gone = parked_gone(dash, worker)
+    live = paint("GONE", BAD) if gone else paint(IN_WINDOW, token("busy"))
     lines = [
-        f"{glyph('busy')} [bold]{escape(worker.phase)}[/]  "
-        f"{paint(IN_WINDOW, token('busy'))}  [{COLOR[MUTED]}]no slot[/]",
-        paint(escape(f"parked: it {parked_where(worker)}"), INFO),
+        f"{glyph(GONE if gone else 'busy')} [bold]{escape(worker.phase)}[/]  "
+        f"{live}  [{COLOR[MUTED]}]no slot[/]",
+        parked_line(worker, gone),
         field("window", escape(worker.window)),
         field("started", fmt_ago(worker.started_at)),
     ]
@@ -588,7 +624,7 @@ def history_detail(run: PhaseRun, dash) -> str:
         meta.append("parked")
     lines.append(paint(escape(" · ".join(meta)), MUTED))
     if where is not None:
-        lines.append(paint(escape(f"parked: it {parked_where(where)}"), INFO))
+        lines.append(parked_line(where, parked_gone(dash, where)))
     ended = _ended_line(run)
     if ended:
         lines.append(paint(escape(ended), WARN if run.status == data.LOST else MUTED))
@@ -895,6 +931,10 @@ class TableTab(Vertical):
     def detail_text(self, dash) -> str:
         return ""
 
+    def detail_title(self) -> str:
+        """What the selected row is called, on the detail it opens."""
+        return self.DETAIL_TITLE
+
     def _degrade(self, exc: Exception) -> None:
         """Show the failure in this tab instead of taking the app down with it."""
         try:
@@ -944,7 +984,7 @@ class TableTab(Vertical):
             body = self.detail_text(self._dash)
         except Exception as exc:  # noqa: BLE001
             body = paint(f"detail unavailable: {escape(str(exc))}", BAD)
-        self.post_message(OpenDetail(self.DETAIL_TITLE, body, self.selected_phase()))
+        self.post_message(OpenDetail(self.detail_title(), body, self.selected_phase()))
 
 
 # -- workers tab -----------------------------------------------------------
@@ -957,19 +997,26 @@ class Workers(TableTab):
     owner otherwise has to reconcile by hand — ``state.json`` (is the slot
     claimed), ``claude agents`` (is the agent busy, idle or waiting on an answer)
     and ``tmux`` (is anything running in the pane at all) — and a disagreement
-    between them is exactly what a stalled run looks like.
+    between them is exactly what a stalled run looks like. A parked worker has
+    no pane these look at: whether its session is still there is what the
+    dashboard's probe found of it (``Dash.parked_gone``).
     """
 
     COLUMNS = WORKER_COLUMNS
     PRIORITY = WORKER_PRIORITY
     DETAIL_TITLE = "slot"
+    #: What the detail calls a parked worker's row: it holds no slot.
+    PARKED_TITLE = "parked worker"
     EMPTY_DETAIL = "no workers yet — `swarm up` starts them"
+    #: How many slots have a dead pane, and how many parked workers are gone.
+    _gone: tuple[int, int] = (0, 0)
 
     def _update(self, dash) -> None:
         slots = list(dash.slot_rows())
         parked = parked_workers(dash)
         rows = slots + parked
         gone = [r for r in slots if unpack_slot_row(r)[1] == GONE]
+        lost = [w for w in parked if parked_gone(dash, w)]
         busy = [r for r in slots if unpack_slot_row(r)[0].busy]
         waiting = [r for r in slots if unpack_slot_row(r)[1] == "waiting"]
 
@@ -981,24 +1028,52 @@ class Workers(TableTab):
                 (dash.repos or {}).get(worker_phase(r) or ""),
                 (getattr(dash, "meters", None) or {}).get(worker_phase(r) or ""),
                 eta_runs_of(dash),
+                parked_gone(dash, r),
             ),
         )
 
         head = [f"{len(busy)}/{len(slots)} slots busy"]
-        if parked:
-            head.append(paint(f"{len(parked)} in own window", INFO))
+        if len(parked) > len(lost):
+            head.append(paint(f"{len(parked) - len(lost)} in own window", INFO))
         if waiting:
             head.append(paint(f"{len(waiting)} waiting on you", WARN))
         if gone:
             head.append(paint(f"{len(gone)} PANE GONE", BAD))
+        if lost:
+            head.append(paint(f"{len(lost)} PARKED WORKER GONE", BAD))
         self.set_head("  ·  ".join(head))
-        # The border is the part visible without reading anything: a dead pane
-        # turns the whole panel red from across the room.
+        # The border is the part visible without reading anything: a dead pane,
+        # or a parked worker that is gone, turns the whole panel red from across
+        # the room.
         panel = self.detail_panel
-        panel.set_class(bool(gone), "-bad")
-        panel.set_class(bool(waiting) and not gone, "-warn")
-        set_border(panel, title=f"slot — {len(gone)} gone" if gone else "slot")
+        panel.set_class(bool(gone or lost), "-bad")
+        panel.set_class(bool(waiting) and not (gone or lost), "-warn")
+        self._gone = (len(gone), len(lost))
         self.update_detail(dash)
+
+    def update_detail(self, dash=None) -> None:
+        """The detail pane and its border. The border says what the selected row
+        is, so it is set here, where the cursor's moves arrive too. Then how many
+        rows are gone: the selected kind's count reads bare, as a slot's always
+        did, and the other kind is named."""
+        super().update_detail(dash)
+        try:
+            panel = self.detail_panel
+        except Exception:  # noqa: BLE001 - not mounted yet
+            return
+        panes, parked = self._gone
+        if isinstance(self.selected, ParkedWorker):
+            counts = ((parked, "gone"), (panes, "pane gone"))
+        else:
+            counts = ((panes, "gone"), (parked, "parked gone"))
+        said = ", ".join(f"{n} {what}" for n, what in counts if n)
+        title = self.detail_title()
+        set_border(panel, title=f"{title} — {said}" if said else title)
+
+    def detail_title(self) -> str:
+        """A slot's row is a slot. A parked worker holds none, and is called
+        what it is."""
+        return self.PARKED_TITLE if isinstance(self.selected, ParkedWorker) else self.DETAIL_TITLE
 
     def detail_text(self, dash) -> str:
         row = self.selected

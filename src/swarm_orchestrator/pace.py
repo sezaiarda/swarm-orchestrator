@@ -11,7 +11,9 @@ Two histories are read, both from the project repo:
 
 * the ledger's, for when each row was ticked (and by how big a commit: one that
   ticks thirty rows at once is bookkeeping, not throughput), and when each row
-  was filed (the ETA engine's measure of how campaigns grow while they run);
+  was filed (the ETA engine's measure of how campaigns grow while they run). A
+  merge commit counts for the lines neither of its parents had: a phase's tick
+  is written into the merge that lands it;
 * ``.swarm.toml``'s, for how many workers the swarm had at the time, so a pace
   measured at two workers is not promised to one.
 
@@ -32,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CACHE_NAME = "ledger-history.json"
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
 #: A commit that ticks more rows than this closed a campaign by hand or seeded
 #: the ledger: the rows are done, but they did not take the time between them.
@@ -49,7 +51,8 @@ GIT_TIMEOUT_S = 60.0
 
 _TICK_RE = re.compile(r"^\+\s*[-*]\s+\[([ xX])\]\s+`([^`]+)`")
 _WORKERS_RE = re.compile(r"^\+\s*max_workers\s*=\s*(\d+)")
-_DIFF_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)")
+#: A merge's diff is headed ``diff --cc <path>`` and has a column per parent.
+_DIFF_RE = re.compile(r"^diff --(?:git a/\S+ b/|(cc) )(\S+)")
 
 
 @dataclass(frozen=True)
@@ -81,15 +84,17 @@ class Pace:
 # -- reading git ------------------------------------------------------------
 def fold(log_text: str, ticks: dict, workers: list, ledger: str, config: str,
          added: dict | None = None) -> None:
-    """Apply ``git log --reverse -p -U0`` output to ``ticks``/``workers`` in place.
+    """Apply ``git log --reverse -p --cc -U0`` output to ``ticks``/``workers`` in place.
 
     A row counts from the commit that turned it ``[x]``: an edit to an already
     ticked row keeps its time, a row turned back to ``[ ]`` loses it. ``added``,
     when given, gets each row's first appearance; a later edit or move of the
-    row is not a filing.
+    row is not a filing. Of a merge only the lines neither parent had count
+    (``++``): the rest was read in the commits it came from.
     """
     ts = 0.0
     path = ""
+    merge = False
     new: list[str] = []
     filed: list[str] = []
     added = {} if added is None else added
@@ -103,7 +108,7 @@ def fold(log_text: str, ticks: dict, workers: list, ledger: str, config: str,
         filed.clear()
 
     for line in log_text.splitlines():
-        if line.startswith("@@@"):
+        if line.startswith("@@@") and not line.startswith("@@@ -"):  # not a merge's hunk
             close()
             try:
                 ts = float(line.split()[1])
@@ -112,8 +117,12 @@ def fold(log_text: str, ticks: dict, workers: list, ledger: str, config: str,
             continue
         m = _DIFF_RE.match(line)
         if m:
-            path = m.group(2)
+            merge, path = bool(m.group(1)), m.group(2)
             continue
+        if merge:
+            if not line.startswith("++"):
+                continue
+            line = line[1:]
         if path == ledger:
             m = _TICK_RE.match(line)
             if m is None:
@@ -143,8 +152,10 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess | None:
 
 
 def _log(repo: Path, rev: str, paths: list[str]) -> str | None:
+    # --cc: a plain -p shows nothing for a merge commit, and a phase's tick is
+    # written into the merge that lands it.
     proc = _git(repo, "log", "--date-order", "--reverse", "--no-renames", "--no-color",
-                "--format=@@@ %ct", "-p", "-U0", rev, "--", *paths)
+                "--format=@@@ %ct", "-p", "--cc", "-U0", rev, "--", *paths)
     return proc.stdout if proc is not None and proc.returncode == 0 else None
 
 

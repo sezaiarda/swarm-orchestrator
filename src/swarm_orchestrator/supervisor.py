@@ -1338,7 +1338,7 @@ class Supervisor:
                 continue
             pushes: dict[Path, gitq.PushResult] = {}
             try:
-                result = gitq.integrate(self.cfg, phase, self.log, pushes)
+                result = self._integrate(phase, status, pushes)
             except gitq.GitError as exc:
                 # A git failure must never kill the sole FIFO reader. Hold the
                 # queue for the owner instead of unwinding the loop.
@@ -1383,6 +1383,32 @@ class Supervisor:
                 )
             self._hold(phase, result, repo, None)  # head stays queued, queue held
             return
+
+    def _integrate(
+        self, phase: str, status: str, pushes: dict[Path, gitq.PushResult]
+    ) -> str:
+        """:func:`gitq.integrate` for a phase in the queue.
+
+        With ``[tasks].ledger_in_merge``, a ledger phase's reports ride in the
+        merge commit its landing makes in the project checkout
+        (:class:`ledgerw.Ride`), so the flush in :meth:`_advance_done` has
+        nothing left to commit. An operator job's or an Overseer pass's mirror
+        is no ledger phase and carries none. What follows a ledger write runs
+        here, once the repo lock is released, whatever the landing did after.
+        """
+        ride = None
+        if self.cfg.ledger_in_merge and status not in (
+            operator_mod.INTEG_STATUS, ovrecord.INTEG_STATUS
+        ):
+            ride = ledgerw.Ride(self.cfg, self.log, phase, status)
+        try:
+            return gitq.integrate(self.cfg, phase, self.log, pushes, ride)
+        finally:
+            if ride is not None:
+                try:
+                    ride.settle()
+                except Exception as exc:  # noqa: BLE001 - the sole FIFO reader must survive
+                    self.log.line(f"LEDGER-ERROR {exc!r}")
 
     def _dequeue(self, phase: str) -> None:
         with state_mod.transaction(self.cfg) as st:
@@ -2249,7 +2275,8 @@ class Supervisor:
             f"EVENT done {phase} {status} freed_slot={freed_id} parked={was_parked}"
         )
         # The phase has landed (or been rolled back): its ledger tick, status and
-        # history entry go on the target branch now, and only now.
+        # history entry go on the target branch now, and only now, unless they
+        # rode in its merge commit (`_integrate`), which leaves nothing to write.
         self._flush_ledger({phase: status})
         # A `later` whose row now carries its date waits for that date, not on
         # a failure record: nothing downstream may read it as failed.

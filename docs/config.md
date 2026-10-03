@@ -108,6 +108,7 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | `lessons` | `"tasks/lessons.md"` | | hot | The file `swarm lesson` appends to. |
 | `ledger_gate` | `""` | | hot | A command that checks the ledger, run in the project checkout with `SWARM_LEDGER` set to the ledger's path each time the swarm adds a follow-up row. If it exits non-zero the row is not added and the refusal goes into the filing phase's history. |
 | `ledger_batch_s` | `1800` | | hot | How long a note (`swarm record <row> note`) or a lesson filed outside its phase may wait to share a commit. It is written with the next ledger commit (a phase landing, a row filed, reshaped or recorded), before a worker or an Overseer pass starts, at once when an operator job for the row it names is due, and otherwise once the oldest has waited this long. `0` commits each one at once. |
+| `ledger_in_merge` | `true` | | hot | Under worktree isolation, a phase that lands with a merge commit in the project checkout has its reports written into that commit: its tick and status, its history entry, the lessons and follow-up rows it filed, and the notes and lessons waiting under `ledger_batch_s`. The merge's subject gains what was written (`Merge branch 'swarm/<phase>': <phase> done; follow-up <id>`), and the two are pushed once, so `git log --first-parent` reads one line per landed phase. Everything else keeps the separate `ledger:` commit; see [components.md](components.md#the-ledger-writer). `false` writes a `ledger:` commit after every merge, as before. |
 
 ## `[telegram]`
 

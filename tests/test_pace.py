@@ -66,6 +66,35 @@ def test_a_row_counts_from_the_commit_that_ticked_it():
     assert pace.workers_at(workers, 50) is None and pace.workers_at(workers, 250) == 2
 
 
+MERGE = """\
+@@@ 500
+diff --cc docs/PHASE-LEDGER.md
+index f696603,fe87d2e..9963c94
+--- a/docs/PHASE-LEDGER.md
++++ b/docs/PHASE-LEDGER.md
+@@@ -2,3 -2,2 +2,4 @@@ # Ledger
+--- [ ] `a-W2` · needs:`a-W1`
+++- [x] `a-W2` · needs:`a-W1` · status: done
+ +- [x] `c-W1` · needs:
++ - [ ] `a-W1` · needs:
+++- [ ] `a-W3` · needs:`a-W2`
+diff --cc .swarm.toml
++ max_workers = 9
+"""
+
+
+def test_of_a_merge_only_the_lines_neither_parent_had_count():
+    """A phase's tick is written into the merge that lands it. The lines a
+    merge took from one parent were read in that parent's own commits: read
+    again here, a row reworded on one side would lose the tick of the other."""
+    ticks, workers, added = {}, [], {}
+    pace.fold(LOG + MERGE, ticks, workers, "docs/PHASE-LEDGER.md", ".swarm.toml", added)
+    assert ticks["a-W2"] == (500.0, 1)
+    assert ticks["a-W1"] == (200.0, 1) and "c-W1" not in ticks
+    assert added["a-W3"] == (500.0, 1) and "c-W1" not in added
+    assert workers == [(100.0, 2), (400.0, 1)]
+
+
 def test_a_row_is_filed_by_the_commit_it_first_appears_in():
     """The ETA engine measures growth from filings: an edit, a tick or a reopen of
     a row already filed is not a new row."""
@@ -122,6 +151,23 @@ def test_history_is_cached_by_head_and_extended_when_it_moves(repo, monkeypatch)
     _commit(repo.project_dir, "- [ ] `a-W1`\n- [x] `a-W2`\n", "a-W2 instead")
     got = pace.load(repo)
     assert set(got.ticks) == {"a-W2"} and calls[-1] == got.head
+
+
+def test_a_tick_written_into_a_merge_commit_dates_its_row(repo):
+    """The same on real git: a plain ``git log -p`` shows no diff for a merge,
+    so a tick written into one would never be seen."""
+    project = repo.project_dir
+    _git(project, "checkout", "-q", "-b", "side")
+    (project / "code.txt").write_text("built")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-q", "-m", "work")
+    _git(project, "checkout", "-q", "master")
+    _git(project, "merge", "-q", "--no-ff", "--no-edit", "side")
+    (project / "docs" / "PHASE-LEDGER.md").write_text("- [x] `a-W1`\n- [ ] `a-W2`\n")
+    _git(project, "commit", "-q", "--amend", "--no-edit", "--", "docs/PHASE-LEDGER.md")
+    got = pace.load(repo)
+    assert set(got.ticks) == {"a-W1"} and got.ticks["a-W1"][1] == 1
+    assert got.added["a-W1"][1] == 2  # filed by the seed commit, not by the merge
 
 
 def test_no_repo_is_no_history_not_an_error(tmp_path):

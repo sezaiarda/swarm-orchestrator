@@ -350,8 +350,9 @@ def test_the_supervisor_ticks_only_after_the_merge(tmp_path, monkeypatch):
         assert (project / "code.txt").read_text() == "built"
         text = (project / "docs" / "PHASE-LEDGER.md").read_text()
         assert "a-W2" in ledger_mod.ticked(text)
-        subjects = _git(project, "log", "--format=%s", "-3").splitlines()
-        assert subjects[0].startswith("ledger: a-W2") and "Merge" in subjects[1]
+        # The tick is in the merge commit itself (tests/test_ledger_in_merge.py).
+        subjects = _git(project, "log", "--first-parent", "--format=%s", "-2").splitlines()
+        assert subjects == ["Merge branch 'swarm/a-W2': a-W2 done", "init"]
     finally:
         log.close()
 

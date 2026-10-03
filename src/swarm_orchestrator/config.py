@@ -389,6 +389,10 @@ class Config:
         "tasks", "ledger_batch_s", 1800, HOT, minimum=0,
         doc="a note or lesson waits this long (s); 0 = at once",
         why="the supervisor passes it to the ledger writer on every flush")
+    ledger_in_merge: bool = _k(
+        "tasks", "ledger_in_merge", True, HOT,
+        doc="a phase's tick rides in its own merge commit",
+        why="the supervisor reads it each time a phase lands")
 
     # -- [telegram] -------------------------------------------------------
     # The swarm's OWN sender, resolved from this package: falling back to some

@@ -60,7 +60,7 @@ from inside a session (a mirror's edited prompt, say), pass `--project-dir .`.
 | `retry [phases…] [--all-failed] [--cascade] [--launch] [--keep-branch]` | Put failed phases back in play. Clears their record and sentinels, and discards their branches. |
 | `free <slot\|phase>` | Free a slot whose worker died without `swarm done`, then wake the launcher. |
 | `resolved <phase>` | Release a held merge queue after the conflict or dirty tree is fixed. |
-| `integrate <phase>` | Integrate `swarm/<phase>` by hand, outside the queue. |
+| `integrate <phase>` | Integrate `swarm/<phase>` by hand, outside the queue. It writes nothing to the ledger: the phase's reports stay queued, and go into a `ledger:` commit of their own once the swarm records the phase done. |
 
 ## Inside a worker
 
@@ -84,10 +84,15 @@ The swarm is the only writer of the ledger, the phase history (`[tasks].history`
 and the lessons file. Sessions report; the supervisor applies each report on the
 target branch in the project checkout, under the umbrella's merge lock, and
 commits and pushes it itself. A worker's reports land with its phase: after the
-merge for an outcome that integrates, at once for one that does not. Everything
-else lands at once, except a note or a lesson: it changes no row, so it waits up
-to `[tasks].ledger_batch_s` to share the next ledger commit instead of making one
-of its own. See [components.md](components.md#the-ledger-writer).
+merge for an outcome that integrates, at once for one that does not. Under
+worktree isolation they land in the phase's own merge commit, whose subject then
+says what was written (`Merge branch 'swarm/<phase>': <phase> done`), so a
+finished phase is one commit on the target branch and not a merge and a
+`ledger:` commit (`[tasks].ledger_in_merge`). Everything else lands at once,
+except a note or a lesson: it changes no row, so it waits up to
+`[tasks].ledger_batch_s` to share the next ledger commit, or the next phase's
+merge commit, instead of making one of its own. See
+[components.md](components.md#the-ledger-writer).
 
 | command | what it does |
 |---|---|

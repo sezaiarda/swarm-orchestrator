@@ -12,8 +12,10 @@ dir, and the supervisor applies it on the target branch in the project
 checkout, under the umbrella repo's lock, and commits it itself
 (:func:`gitq.commit_to_target`). A worker's report is applied when its phase
 lands: after the merge succeeds for an outcome that integrates, right away for
-one that does not. Nothing is lost if the swarm stops in between: the queue is
-on disk and the next start applies it.
+one that does not. A landing that makes a merge commit in the project checkout
+takes its reports into that commit (:class:`Ride`), so a finished phase is one
+commit there and not two. Nothing is lost if the swarm stops in between: the
+queue is on disk and the next start applies it.
 
 The ledger keeps state only: box, id, dir, needs, a short bold title, tags, a
 date gate (``after:``) and a short status. What was written about a phase goes
@@ -992,26 +994,14 @@ def flush(cfg: Config, log: Log, finished: dict[str, str], *, hold_s: float = 0.
             (queue_dir(cfg) / f"{k}.json").unlink(missing_ok=True)
         log.line(f"LEDGER-SKIP {' '.join(due)} (not a checklist ledger)")
         return total
-    flushed_path = queue_dir(cfg) / ".flushed.json"
-    try:
-        flushed = json.loads(flushed_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        flushed = {}
-    root = cfg.project_dir
-    paths = [cfg.ledger, cfg.history_dir, cfg.lessons]
+    flushed = _last_flushed(cfg)
 
     def write() -> None:
-        for k in due:
-            got = apply(cfg, root, k, queued[k], finished.get(k), flushed)
-            total.touched += got.touched
-            total.refused += got.refused
-            total.carry_skipped += got.carry_skipped
-            total.relaned.update(got.relaned)
-            total.released |= got.released
+        _apply_due(cfg, due, queued, finished, flushed, total)
 
     what = _summary(due, queued)
     try:
-        result = gitq.commit_to_target(cfg, paths, write, f"ledger: {what}", log)
+        result = gitq.commit_to_target(cfg, _paths(cfg), write, f"ledger: {what}", log)
     except (gitq.GitError, OSError, ReportError) as exc:
         log.line(f"LEDGER-ERROR {what} {exc}")
         return Applied()
@@ -1020,6 +1010,40 @@ def flush(cfg: Config, log: Log, finished: dict[str, str], *, hold_s: float = 0.
         return Applied()
     if result.push is not None:
         pushowed.settle(cfg, f"ledger: {what}", {cfg.project_dir: result.push}, log)
+    _dequeue(cfg, due, queued, flushed)
+    _written(cfg, log, total)
+    return total
+
+
+def _paths(cfg: Config) -> list[str]:
+    """What the writer commits, and nothing else: the ledger, the history
+    directory and the lessons file."""
+    return [cfg.ledger, cfg.history_dir, cfg.lessons]
+
+
+def _last_flushed(cfg: Config) -> dict[str, float]:
+    """When each phase's reports were last written (:func:`_decisions`)."""
+    try:
+        return json.loads((queue_dir(cfg) / ".flushed.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _apply_due(cfg: Config, due: list[str], queued: dict[str, dict],
+               finished: dict[str, str], flushed: dict[str, float], total: Applied) -> None:
+    """:func:`apply` each due key in the project checkout, summed into ``total``."""
+    for k in due:
+        got = apply(cfg, cfg.project_dir, k, queued[k], finished.get(k), flushed)
+        total.touched += got.touched
+        total.refused += got.refused
+        total.carry_skipped += got.carry_skipped
+        total.relaned.update(got.relaned)
+        total.released |= got.released
+
+
+def _dequeue(cfg: Config, due: list[str], queued: dict[str, dict],
+             flushed: dict[str, float]) -> None:
+    """Take the reports that were just committed off the queue."""
     with _locked(cfg):
         now = time.time()
         for k in due:
@@ -1034,7 +1058,12 @@ def flush(cfg: Config, log: Log, finished: dict[str, str], *, hold_s: float = 0.
                 _write(path, data)
             if k != NOW:
                 flushed[k] = now
-        _write(flushed_path, flushed)
+        _write(queue_dir(cfg) / ".flushed.json", flushed)
+
+
+def _written(cfg: Config, log: Log, total: Applied) -> None:
+    """What follows a committed write: its log lines, the lanes a reshape moved,
+    and the records a tick closed. It takes repo locks, so never under one."""
     for line in total.touched:
         log.line(f"LEDGER {line}")
     for line in total.refused:
@@ -1052,7 +1081,60 @@ def flush(cfg: Config, log: Log, finished: dict[str, str], *, hold_s: float = 0.
             release_kept(cfg, log)
         except (gitq.GitError, OSError) as exc:
             log.line(f"FAIL-CLOSED-ERROR {exc}")
-    return total
+
+
+class Ride:
+    """A landing phase's reports, written into its own merge commit.
+
+    :func:`gitq.integrate` calls it once ``swarm/<phase>`` is merged into the
+    project checkout, before the push and under the umbrella's repo lock. What
+    is due with the phase (its own reports and :data:`NOW`'s, the notes and
+    lessons held for a shared commit included) is applied as :func:`flush`
+    applies it, and the merge commit is amended to hold it
+    (:func:`gitq.amend_merge`): the landing is one commit in the target
+    branch's history, pushed once, and the flush that follows it finds nothing
+    left to write.
+
+    Whatever goes wrong, the merge stands as it is and the reports stay queued
+    for that flush, which writes them in a ``ledger:`` commit as it always did.
+    It never raises: a report must not be able to stop a merge. A phase with no
+    report of its own queued is left to the flush as well.
+
+    :meth:`settle` is the rest of a flush (:func:`_written`). It runs once the
+    lock is released, whatever the landing did after the amend.
+    """
+
+    def __init__(self, cfg: Config, log: Log, phase: str, status: str) -> None:
+        self.cfg, self.log, self.phase, self.status = cfg, log, phase, status
+        self.applied: Applied | None = None
+
+    def __call__(self) -> None:
+        cfg, phase = self.cfg, self.phase
+        try:
+            queued = pending(cfg)
+            if phase not in queued or not is_checklist(cfg):
+                return
+            due = [k for k in queued if k in (NOW, phase)]
+            flushed = _last_flushed(cfg)
+            total = Applied()
+            what = _summary(sorted(due, key=lambda k: k == NOW), queued)  # the phase first
+            result = gitq.amend_merge(
+                cfg, phase, _paths(cfg),
+                lambda: _apply_due(cfg, due, queued, {phase: self.status}, flushed, total),
+                what, self.log)
+            if result.status == gitq.HELD:
+                self.log.line(f"LEDGER-RIDE-HELD {what} {result.reason}")
+                return
+            _dequeue(cfg, due, queued, flushed)
+        except Exception as exc:  # noqa: BLE001 - the merge stands, the flush writes it
+            self.log.line(f"LEDGER-RIDE-ERROR {phase} {exc!r}")
+            return
+        self.applied = total
+
+    def settle(self) -> None:
+        if self.applied is not None:
+            _written(self.cfg, self.log, self.applied)
+            self.applied = None
 
 
 def _hold_relaned(cfg: Config, relaned: dict[str, tuple[list[str], list[str]]],

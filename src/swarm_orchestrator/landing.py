@@ -66,6 +66,7 @@ import subprocess
 import time
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Callable
 
 from . import gitq
 from . import launch as launch_mod
@@ -219,7 +220,8 @@ def _release(cfg: Config, phase: str, repo: Path) -> None:
 
 # -- integrate -------------------------------------------------------------
 def integrate(
-    cfg: Config, phase: str, log: Log, pushes: dict[Path, gitq.PushResult] | None = None
+    cfg: Config, phase: str, log: Log, pushes: dict[Path, gitq.PushResult] | None = None,
+    ride: Callable[[], None] | None = None,
 ) -> str:
     """:func:`gitq.integrate` with lanes on. Besides its statuses, returns
     :data:`gitq.LANE_CHECKING` (a check runs; land others meanwhile),
@@ -254,7 +256,7 @@ def integrate(
         return pending
     _flag_undeclared(cfg, phase, changed, log)
     for repo, main in repos:
-        result = gitq._integrate_one(cfg, repo, main, phase, log, pushes)
+        result = gitq._integrate_one(cfg, repo, main, phase, log, pushes, ride)
         if result != gitq.MERGED:
             return result
         if (repo, main) in changed:

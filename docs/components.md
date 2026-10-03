@@ -545,6 +545,41 @@ row is ticked only once its work is on main; a `fail` never ticks. When the
 checkout cannot take it (off main, mid-merge, someone's edit in those files) the
 report is held and the watchdog retries it; nothing is lost across a restart.
 
+**One commit per landed phase** (`[tasks].ledger_in_merge`, on by default). A
+phase that landed used to leave two commits in the project's history, its merge
+and the writer's `ledger:` commit. Now the reports due with it ride in the merge
+(`ledgerw.Ride`): once `swarm/<phase>` is merged into the project checkout, and
+before the repo's `[git].post_merge` command and the push, still under the repo
+lock, the writer applies them exactly as a flush does (the ledger gate included)
+and amends the merge commit with the ledger, the history directory and the
+lessons file, nothing else (`gitq.amend_merge`). The commit keeps its two
+parents and the start of its subject, which gains what was written:
+`Merge branch 'swarm/<phase>': <phase> done; follow-up <id>`. What rides is the
+phase's own reports and everything waiting to be written at once, the notes and
+lessons held under `ledger_batch_s` included. The command and the repo's
+pre-push check then read the tree that is pushed, and it is pushed once. The
+tick is still written only after the phase's merges succeeded and its landing
+check passed: the umbrella merges last.
+
+Each of these keeps the separate `ledger:` commit, written by the flush that
+follows the landing:
+
+- a phase with no commit in the umbrella (its work is in component repos only):
+  there is no merge commit to amend;
+- `isolation = "none"`, and a `swarm integrate` by hand;
+- a merge that conflicted and was finished by a resolver;
+- a phase with no report of its own queued, and an operator job's or an
+  Overseer pass's mirror;
+- any failure of the amend (`LEDGER-RIDE-ERROR`: a hook that refuses it, or a
+  commit someone made in the checkout meanwhile, which is never amended), or
+  files it may not take (`LEDGER-RIDE-HELD`): the merge stands and is pushed as
+  it is, the three paths are put back, and the report stays queued.
+
+A push that loses a race merges origin into main as before; the amended commit
+is under that merge and its reports are already off the queue, so nothing is
+written twice. `pace.py` counts the lines of a merge that neither parent had,
+so a tick inside one still dates its row.
+
 - **The ledger keeps state:** box, id, dir, needs, touches, a short bold title,
   tags, an `after:` date and `status:`. `touches:` is meta, so a tick, a status or
   an `after:` never turns it into prose or a title. With lanes off, a ticked row's

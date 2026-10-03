@@ -50,7 +50,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from . import automerge
 from . import repocmd
@@ -1432,6 +1432,7 @@ def _integrate_one(
     phase: str,
     log: Log,
     pushes: dict[Path, PushResult] | None = None,
+    ride: Callable[[], None] | None = None,
 ) -> str:
     """Land ``swarm/<phase>`` into ``main`` for a single repo. Serialized.
 
@@ -1458,6 +1459,14 @@ def _integrate_one(
     Between the merge and the push the repo's ``[git].post_merge`` command runs
     (:func:`_post_merge`). One that fails leaves the push owed like a push that
     failed, with the command's last lines as the reason.
+
+    ``ride`` is called once this has merged ``swarm/<phase>`` into the project
+    checkout, before that command and the push, still under the repo lock: what
+    it adds to the merge commit (:func:`amend_merge`) is then in the tree the
+    command and the repo's pre-push check read, and in the one commit that is
+    pushed. It is not called for a component repo, nor when nothing is merged
+    here: a phase with no commit in the umbrella, or a merge that conflicted and
+    was finished by a resolver.
     """
     branch = f"swarm/{phase}"
     with repo_lock(cfg, repo):
@@ -1498,6 +1507,8 @@ def _integrate_one(
             merge = _git(repo, "merge", "--no-ff", "--no-edit", branch, check=False)
             if merge.returncode != 0 and not _auto_resolve(cfg, repo, phase, log):
                 return _merge_failed(repo, phase, "INTEGRATE-CONFLICT", log)
+            if ride is not None and repo.resolve() == cfg.project_dir.resolve():
+                ride()
         if _has_remote(repo):
             failed = _post_merge(cfg, repo, phase, log)
             pushed = PushResult(PUSH_FAILED, failed) if failed else _push_result(repo, main, log)
@@ -1514,7 +1525,8 @@ def _integrate_one(
 
 
 def integrate(
-    cfg: Config, phase: str, log: Log, pushes: dict[Path, PushResult] | None = None
+    cfg: Config, phase: str, log: Log, pushes: dict[Path, PushResult] | None = None,
+    ride: Callable[[], None] | None = None,
 ) -> str:
     """Land ``swarm/<phase>`` across every repo the phase mirrored, components
     first then umbrella. Returns :data:`MERGED` only when all repos are clean;
@@ -1527,14 +1539,17 @@ def integrate(
     It is filled even when a later repo conflicts — the earlier repos' merges are
     on local main regardless.
 
+    ``ride`` (when given) is called between the umbrella's merge and its push
+    (see :func:`_integrate_one`).
+
     With ``[lanes] enabled`` the landing re-tests the phase against siblings that
     landed in its repos meanwhile (:func:`landing.integrate`)."""
     if cfg.lanes_enabled:
         from . import landing  # lazy: landing builds on this module
 
-        return landing.integrate(cfg, phase, log, pushes)
+        return landing.integrate(cfg, phase, log, pushes, ride)
     for repo, main in _repos(cfg):
-        result = _integrate_one(cfg, repo, main, phase, log, pushes)
+        result = _integrate_one(cfg, repo, main, phase, log, pushes, ride)
         if result != MERGED:
             return result
     _rmtree_mirror(cfg, phase)  # all repos merged -> drop the empty mirror shell
@@ -1563,6 +1578,20 @@ def _existing(repo: Path, paths: list[str]) -> list[str]:
     tracked = _git(repo, "ls-files", "--", *paths, check=False).stdout.split("\n")
     return [p for p in paths if (repo / p).exists()
             or any(t == p or t.startswith(p.rstrip("/") + "/") for t in tracked if t)]
+
+
+def _put_back(repo: Path, paths: list[str]) -> None:
+    """Drop what a failed write left in ``paths``: staged, edited or new.
+
+    One checkout per path: git refuses them all when one names nothing it
+    tracks (a history directory whose first file was just written), and the
+    ledger would then stay edited and hold every later write."""
+    names = _existing(repo, paths)
+    if names:
+        _git(repo, "reset", "-q", "--", *names, check=False)
+        for name in names:
+            _git(repo, "checkout", "--", name, check=False)
+        _git(repo, "clean", "-fdq", "--", *names, check=False)
 
 
 def commit_to_target(cfg: Config, paths: list[str], write, message: str, log: Log) -> TargetCommit:
@@ -1600,15 +1629,54 @@ def commit_to_target(cfg: Config, paths: list[str], write, message: str, log: Lo
                 return TargetCommit(UNCHANGED)
             _git(repo, "commit", "-q", "-m", message, "--", *names)
         except BaseException:
-            names = _existing(repo, paths)
-            if names:
-                _git(repo, "reset", "-q", "--", *names, check=False)
-                _git(repo, "checkout", "--", *names, check=False)
-                _git(repo, "clean", "-fdq", "--", *names, check=False)
+            _put_back(repo, paths)
             raise
         log.line(f"TARGET-COMMIT {repo.name} {message}")
         push = _push_owed(repo, main, log) if _has_remote(repo) else None
         return TargetCommit(COMMITTED, push=push)
+
+
+def amend_merge(
+    cfg: Config, phase: str, paths: list[str], write, summary: str, log: Log
+) -> TargetCommit:
+    """:func:`commit_to_target` for a phase that is landing: ``write()``'s files
+    go into the merge commit of ``swarm/<phase>`` instead of a commit of their own.
+
+    For :func:`_integrate_one`'s ``ride``: the caller holds the umbrella's repo
+    lock, on the configured main branch, and ``HEAD`` is the merge it just made.
+    A ``HEAD`` that is not that merge is :data:`HELD`, and so are ``paths`` that
+    hold anyone's uncommitted change. The merge is amended to its own tree plus
+    exactly ``paths`` (``git commit --amend -- <paths>``), on the same two
+    parents; its subject keeps what it says and gains ``summary`` after it. A
+    failed write or amend puts ``paths`` back as they were and leaves the merge
+    as it is, and so does a commit someone made here while ``write()`` ran: that
+    one is theirs, never amended. Nothing is pushed here: the landing's own push
+    takes the commit.
+    """
+    repo = cfg.project_dir
+    head, merged = _tip(repo, "HEAD"), _tip(repo, "HEAD^2")
+    if not merged or merged != _tip(repo, f"swarm/{phase}"):
+        return TargetCommit(HELD, f"HEAD is not the merge of swarm/{phase}")
+    if _git(repo, "status", "--porcelain", "--", *paths, check=False).stdout.strip():
+        return TargetCommit(HELD, f"uncommitted changes in {' '.join(paths)}")
+    subject, _, rest = _git(repo, "log", "-1", "--format=%B").stdout.partition("\n")
+    message = f"{subject}: {summary}"
+    try:
+        write()
+        names = _existing(repo, paths)
+        if names:
+            _git(repo, "add", "-A", "--", *names)
+        staged = _git(repo, "diff", "--cached", "--quiet", "--", *names, check=False) if names else None
+        if staged is None or staged.returncode == 0:
+            return TargetCommit(UNCHANGED)
+        if _tip(repo, "HEAD") != head:
+            raise GitError(f"HEAD moved off the merge of swarm/{phase} meanwhile")
+        _git(repo, "commit", "-q", "--amend", "-m", f"{message}\n{rest}", "--", *names)
+    except BaseException:
+        _put_back(repo, paths)
+        raise
+    log.line(f"TARGET-AMEND {repo.name} {message}")
+    return TargetCommit(COMMITTED)
 
 
 def committed_text(cfg: Config, rel: str) -> str:

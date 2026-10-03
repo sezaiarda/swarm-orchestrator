@@ -24,7 +24,11 @@ drives the merge queue.
   board; a recorded `fail` still wins over a tick.
   With `[lanes] enabled` it walks `lanes.pick` instead of the plain ready list:
   rows whose touches overlap nothing in flight launch, waiting rows reserve their
-  touches, and `[lanes] per_repo` caps phases per repo.
+  touches, and `[lanes] per_repo` caps phases per repo. A touch that matches
+  `[lanes] commons` is in none of the three: `lanes.owned` leaves it out, for the
+  pick, the launch backstop, `swarm why`, `swarm widen` and a reshape alike, so it
+  is never held, reserved or counted, and a row that names only commons launches
+  beside anything.
 - **Merging and finishing.** It merges finished phases through the queue, and it
   finishes the run once nothing is busy, waiting, parked, launching, queued, held,
   owed as a push or owed as an operator hand-off, and no Overseer pass is due.

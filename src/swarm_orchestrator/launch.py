@@ -486,7 +486,8 @@ def relane(cfg: Config, st: state_mod.State, phase: str, touches: list[lanes_mod
     flight. Refused (:class:`ledgerw.ReportError`, naming each path) when the
     new lane leaves out a path it has changed in a repo its row names (its
     ``dirs``, its held lane and ``touches``), or a touch it holds where its
-    changes cannot be read, unless that touch is kept or its whole lane is."""
+    changes cannot be read, unless that touch is kept or its whole lane is. A
+    ``[lanes] commons`` touch is never held (:func:`lanes.owned`), so it may go."""
     held = lane_view(cfg, st).held.get(phase)
     if held is None:
         return None
@@ -501,7 +502,8 @@ def relane(cfg: Config, st: state_mod.State, phase: str, touches: list[lanes_mod
         return any(lanes_mod.overlaps(file, t) for t in new)
 
     left = [p for p in changed if not covered(p)]
-    left +=[f"{t} (its changes there cannot be read)" for t in sorted(held)
+    left +=[f"{t} (its changes there cannot be read)"
+             for t in sorted(lanes_mod.owned(held, cfg.lanes_commons))
              if (t.is_resource or t.lane in blind) and t not in new
              and lanes_mod.Touch(t.lane, (lanes_mod.DEEP,)) not in new]
     if left:
@@ -513,7 +515,8 @@ def relane(cfg: Config, st: state_mod.State, phase: str, touches: list[lanes_mod
 def _lane_busy(cfg: Config, st: state_mod.State, phase: str) -> str | None:
     """The lane backstop, under the claiming flock: record ``phase``'s lane, or
     say why it may not launch (its touches do not parse, or a phase in flight
-    holds an overlapping touch — two launch threads raced past the scheduler)."""
+    holds an overlapping touch — two launch threads raced past the scheduler).
+    The lane is recorded as the row names it, ``[lanes] commons`` touches too."""
     view = lane_view(cfg, st)
     held = {p: lane for p, lane in view.held.items() if p != phase}
     lane = view.rows.get(phase)
@@ -522,7 +525,7 @@ def _lane_busy(cfg: Config, st: state_mod.State, phase: str) -> str | None:
             return "lane-invalid"
         lane = lanes_mod.legacy(ledger_mod.home(phase, {}))
     for holder in sorted(held):
-        pair = lanes_mod.collide(lane, held[holder])
+        pair = lanes_mod.collide(lane, held[holder], cfg.lanes_commons)
         if pair is not None:
             return f"lane-busy [{holder} {pair[1]}]"
     st.lanes[phase] = sorted(str(t) for t in lane)

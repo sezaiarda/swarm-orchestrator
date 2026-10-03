@@ -1797,7 +1797,7 @@ def cmd_widen(cfg: Config, phase: str, texts: list[str]) -> int:
             return 2
         st.lanes[phase] = sorted({str(t) for t in (*held[phase], *touches)})
     for holder in sorted(p for p in held if p != phase):
-        pair = lanes_mod.collide(touches, held[holder])
+        pair = lanes_mod.collide(touches, held[holder], cfg.lanes_commons)
         if pair is not None:
             print(f"{holder} holds {pair[1]}: your merge will be re-tested against it"
                   " and may need a resolver")

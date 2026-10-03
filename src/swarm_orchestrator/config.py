@@ -611,7 +611,7 @@ class Config:
     lanes_commons: list[str] = _k(
         "lanes", "commons", [], HOT,
         doc="globs any row may edit without declaring them",
-        why="read by every landing")
+        why="read by every launch decision and every landing")
     lanes_resources: list[str] = _k(
         "lanes", "resources", [], HOT,
         doc="non-file lanes a row may touch as @<name>",

@@ -184,6 +184,15 @@ launch and released when it merges, is discarded or skipped, or is freed. `swarm
 `lanes`, and `swarm why <row>` names the phase a waiting row waits for. A row whose touches do not parse
 never launches and is listed under `ledger_issues`.
 
+A touch that matches `commons` is never part of a lane. A row may name its repo's `CHANGELOG.md` in
+`touches:` to say that it edits it, and that costs nothing: the row neither waits for another row over
+that file nor keeps one waiting, and `swarm why`, `swarm context` and `swarm doctor` never name it as
+held. Two rows whose only common touch is a commons file run together, up to `per_repo`. A row whose
+touches are all commons launches beside anything and counts toward no repo. A touch is compared with
+the globs as it is written, so `web/**` is still a lane with a changelog under it. The lane recorded at
+launch, and `$SWARM_TOUCHES`, keep every touch the row names. Two rows that edit the same lines of a
+commons file meet at landing, as a text conflict.
+
 Landing re-tests the combination. When a finished phase changed a repo whose main gained
 anything but `commons` since the phase branched, the integrator takes that repo's landing lock, merges
 main into the phase's own worktree and runs `check` there, detached (`swarm _lane-check`); the queue
@@ -202,8 +211,8 @@ history and in the next Overseer digest; that never holds a merge.
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `enabled` | `false` | `SWARM_LANES` | restart | Schedule by touches. Off, the launcher is exactly the one-row-per-ready-slot launcher, and `state.json` gains no `lanes` key. |
-| `per_repo` | `2` | | hot | At most this many phases in flight in one repo (the project repo counts as one), however disjoint their touches. Resources do not count. |
-| `commons` | `[]` | | hot | fnmatch globs over `<repo>/<path>` (`./<path>` for the project repo) that any row may edit without declaring them, such as the ledger and every `CHANGELOG.md`. They never count as an overlap. Read at landing. |
+| `per_repo` | `2` | | hot | At most this many phases in flight in one repo (the project repo counts as one), however disjoint their touches. Resources and commons touches do not count. |
+| `commons` | `[]` | | hot | fnmatch globs over `<repo>/<path>` (`./<path>` for the project repo) that any row may edit without declaring them, such as the ledger and every `CHANGELOG.md`. A touch that matches one is not part of its row's lane, so they never count as an overlap. Read by every launch decision and at landing. |
 | `resources` | `[]` | | hot | Names a row may touch as `@<name>`. Two rows touching the same resource never run together. |
 | `external` | `{}` | | hot | Name mapped to the path of a repo outside the project that the swarm does not mirror. Its name is a lane a touch may start with. |
 | `check` | `{}` | | hot | Repo name (`.` for the project repo) mapped to the command that re-tests a phase merged with the lanes that landed beside it. `"*"` is the default for a repo not named. Read at landing. |

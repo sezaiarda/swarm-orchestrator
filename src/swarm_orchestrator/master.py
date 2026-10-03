@@ -145,14 +145,19 @@ def _lanes(cfg: Config, st: State, ready: list[str], order: list[str]) -> tuple[
     (what the supervisor walks), ``held`` by each phase in flight, and ``waits``
     for each ready row held back, with ``why`` ``running`` (a phase in flight or
     launching in this pass holds an overlapping touch), ``reserved`` (an earlier
-    ready row waits for it) or ``per_repo`` (the repo is at ``[lanes] per_repo``)."""
+    ready row waits for it) or ``per_repo`` (the repo is at ``[lanes] per_repo``).
+    A touch matching ``[lanes] commons`` is held by nobody and waited for by
+    nobody (:func:`lanes.owned`)."""
     view = launch_mod.lane_view(cfg, st)
-    picked, waits = lanes_mod.pick(ready, order, view.held, view.rows, cfg.lanes_per_repo)
+    commons = cfg.lanes_commons
+    picked, waits = lanes_mod.pick(ready, order, view.held, view.rows, cfg.lanes_per_repo,
+                                   commons)
     why = {"held": "running", "reserved": "reserved", "per_repo": "per_repo"}
     return picked, {
         "enabled": True,
         "picked": picked,
-        "held": {p: sorted(str(t) for t in lane) for p, lane in sorted(view.held.items())},
+        "held": {p: sorted(str(t) for t in lanes_mod.owned(lane, commons))
+                 for p, lane in sorted(view.held.items())},
         "waits": {
             row: {"holder": w.holder, "touch": str(w.touch), "why": why[w.why]}
             for row, w in waits.items()

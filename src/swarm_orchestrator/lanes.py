@@ -18,6 +18,10 @@ each one whose lane collides with nothing in flight; a row that cannot launch
 later disjoint one still goes. A row with no touches keeps the old behaviour via
 :func:`legacy`: ``<dir>/**``, a per-repo mutex.
 
+A touch that matches a ``[lanes] commons`` glob is never part of a lane. A row
+may name such a file, and it holds nothing there: :func:`owned` decides it, and
+:func:`collide` and :func:`pick` ask it, so no caller compares commons itself.
+
 Pure and stdlib-only: no I/O, no clock, deterministic output for a given input.
 """
 
@@ -26,6 +30,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from itertools import zip_longest
 from typing import NamedTuple
 
@@ -119,10 +124,23 @@ def overlaps(a: Touch, b: Touch) -> bool:
     return True
 
 
-def collide(set_a: Iterable[Touch], set_b: Iterable[Touch]) -> tuple[Touch, Touch] | None:
-    """The first overlapping ``(from a, from b)`` pair in sorted order, or None."""
-    right = sorted(set_b)
-    for a in sorted(set_a):
+def owned(touches: Iterable[Touch], commons: Iterable[str] = ()) -> frozenset[Touch]:
+    """The touches a row holds: ``touches`` without those matching a ``commons``
+    glob. A touch is matched as written, ``<lane>/<path>`` (``./<path>`` in the
+    umbrella), the way landing matches a changed path, so ``repo/**`` is held
+    whole even with a commons file under it. A resource is always held."""
+    globs = list(commons)
+    return frozenset(t for t in touches
+                     if t.is_resource or not any(fnmatch(str(t), g) for g in globs))
+
+
+def collide(set_a: Iterable[Touch], set_b: Iterable[Touch],
+            commons: Iterable[str] = ()) -> tuple[Touch, Touch] | None:
+    """The first overlapping ``(from a, from b)`` pair in sorted order, or None.
+    A touch matching ``commons`` is in no pair (:func:`owned`)."""
+    globs = list(commons)
+    right = sorted(owned(set_b, globs))
+    for a in sorted(owned(set_a, globs)):
         for b in right:
             if overlaps(a, b):
                 return a, b
@@ -148,16 +166,19 @@ class Wait(NamedTuple):
 
 
 def pick(ready: Iterable[str], order: Sequence[str], held: Mapping[str, frozenset[Touch]],
-         lanes: Mapping[str, frozenset[Touch]],
-         per_repo: int) -> tuple[list[str], dict[str, Wait]]:
+         lanes: Mapping[str, frozenset[Touch]], per_repo: int,
+         commons: Iterable[str] = ()) -> tuple[list[str], dict[str, Wait]]:
     """Choose which ready rows launch now.
 
     Returns the launchable ids in walk order, and a :class:`Wait` for every other
-    ready row that has a lane. ``per_repo`` below 1 is treated as 1.
+    ready row that has a lane. ``per_repo`` below 1 is treated as 1. A touch
+    matching ``commons`` holds nothing and counts toward no repo (:func:`owned`),
+    so a row whose touches are all commons launches beside anything.
     """
+    globs = list(commons)
     rank = {pid: i for i, pid in enumerate(order)}
     walk = sorted(set(ready), key=lambda p: (0, rank[p], "") if p in rank else (1, 0, p))
-    running = dict(held)
+    running = {pid: owned(lane, globs) for pid, lane in held.items()}
     counts = Counter(repo for lane in running.values() for repo in repos_of(lane))
     cap = max(per_repo, 1)
     reserved: list[tuple[str, frozenset[Touch]]] = []
@@ -167,6 +188,7 @@ def pick(ready: Iterable[str], order: Sequence[str], held: Mapping[str, frozense
         lane = lanes.get(pid)
         if lane is None:
             continue
+        lane = owned(lane, globs)
         wait = (_first_hit(lane, sorted(running.items()), "held")
                 or _first_hit(lane, reserved, "reserved")
                 or _over_cap(lane, running, counts, cap))

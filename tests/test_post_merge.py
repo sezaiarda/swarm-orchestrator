@@ -325,7 +325,7 @@ def test_without_the_quick_test_the_command_runs_at_every_merge(monkeypatch, tmp
 
 def test_a_quick_test_that_cannot_run_is_a_no_and_is_logged(monkeypatch, tmp_path):
     ws = Ws(monkeypatch, tmp_path)
-    monkeypatch.setattr(gitq, "_IF_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(repocmd, "IF_TIMEOUT_S", 0.2)
     ws.cfg.git_post_merge_if = {".": "sleep 5"}
     ws.worker("P1", {"p1.txt": "1"})
     try:

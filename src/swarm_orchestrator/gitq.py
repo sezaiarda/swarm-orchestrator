@@ -62,14 +62,16 @@ MERGED = "merged"
 CONFLICT = "conflict"
 DIRTY = "dirty"
 PUSH_FAILED = "push_failed"
-# With ``[lanes] enabled`` only (:mod:`landing`): a check runs, or
-# another phase's landing holds a repo -- the queue lands others meanwhile; or a
-# resolver's job on the phase's own worktree, never on the owner's checkout.
+# With ``[lanes] enabled`` only (:mod:`landing`): a check runs, another
+# phase's landing holds a repo, or the phase's worktree could not be made ready
+# for its check -- the queue lands others meanwhile; or a resolver's job on the
+# phase's own worktree, never on the owner's checkout.
 LANE_CHECKING = "lane-checking"
 LANE_WAITING = "lane-waiting"
+LANE_UNPREPARED = "lane-unprepared"
 LANE_CONFLICT = "lane-conflict"
 LANE_RED = "lane-red"
-LANE_PENDING = (LANE_CHECKING, LANE_WAITING)
+LANE_PENDING = (LANE_CHECKING, LANE_WAITING, LANE_UNPREPARED)
 LANE_HOLDS = (LANE_CONFLICT, LANE_RED)
 
 # `swarm done` completion statuses that INTEGRATE (merge into main) rather than
@@ -80,7 +82,6 @@ DONE_INTEGRATE = statuses.INTEGRATES
 
 _GIT_TIMEOUT_S = 120.0
 _CHECK_TIMEOUT_S = 300.0  # an [git].auto_resolve_check run; it holds the repo lock
-_IF_TIMEOUT_S = 30.0  # a [git].post_merge_if test: asked before every push of a merge
 _PUSH_ATTEMPTS = 5
 #: A push the remote turned away after the hook passed (a lock race with another
 #: pusher) is pushed again this many times, this far apart, before it is owed.
@@ -1197,36 +1198,30 @@ def _post_merge(cfg: Config, repo: Path, phase: str | None, log: Log) -> str:
 
     Most merges need nothing, so ``[git].post_merge_if`` is asked first, at once
     and outside the build gate: only when it exits 0 does the command queue for
-    a build slot (:func:`repocmd.run`). The integrator waits on it, so the wait
-    for a slot is bounded too (``post_merge_timeout_s``); behind a long build
-    nothing runs and the push is owed, to be tried again like any owed push. A
-    command that leaves the tree with uncommitted changes has failed, whatever
-    it exited with: the next merge would be held as :data:`DIRTY` for them.
+    a build slot (:func:`repocmd.run_clean`). The integrator waits on it, so the
+    wait for a slot is bounded too (``post_merge_timeout_s``); behind a long
+    build nothing runs and the push is owed, to be tried again like any owed
+    push. A command that leaves the tree with uncommitted changes has failed,
+    whatever it exited with: the next merge would be held as :data:`DIRTY` for
+    them.
     """
     cmd = repocmd.command(cfg, cfg.git_post_merge, repo)
     if not cmd:
         return ""
     test = repocmd.command(cfg, cfg.git_post_merge_if, repo)
-    if test:
-        try:
-            asked = subprocess.run(
-                test, shell=True, cwd=repo, capture_output=True, text=True,
-                timeout=_IF_TIMEOUT_S,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.line(f"POST-MERGE-IF-FAILED {repo.name} {test!r}: {exc}"[:300])
+    try:
+        if not repocmd.wanted(test, repo):
             return ""
-        if asked.returncode != 0:
-            return ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.line(f"POST-MERGE-IF-FAILED {repo.name} {test!r}: {exc}"[:300])
+        return ""
     timeout = cfg.git_post_merge_timeout_s
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
     with _post_merge_log(cfg, repo).open("w", encoding="utf-8") as fh:
         fh.write(f"# post-merge {phase or '(an owed push)'}: `{cmd}` in {repo}\n")
-        ran = repocmd.run(cfg, cmd, repo, fh, timeout_s=timeout, phase=phase, wait_s=timeout)
+        ran = repocmd.run_clean(cfg, cmd, repo, fh, timeout_s=timeout, phase=phase,
+                                wait_s=timeout)
         why = ran.reason
-        if ran.ok and _dirty(repo):
-            names = _git(repo, "diff", "--name-only", "HEAD", check=False).stdout.split()
-            why = f"the command left uncommitted changes: {' '.join(names[:5])}"
         fh.write(f"# result: {why or 'ok'}\n")
     if why:
         log.line(f"POST-MERGE-FAILED {repo.name} {why}")

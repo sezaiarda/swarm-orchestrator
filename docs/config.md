@@ -209,7 +209,9 @@ swarm's own ledger writes, for one): main is merged in once more and the phase l
 check. Anything else main gained starts the check again. The check queues for a build slot like any
 `swarm build`, unless its command is light by the same rules: a check that compiles nothing and is
 cheap to run beside a build (a lint-only gate) can be named in `[build].light`, and then starts at
-once. Files a phase
+once. Before the check, the repo's `prepare` command makes the worktree ready for it, when the repo's
+`prepare_if` test says there is something to do. A `prepare` that fails is not a red check: the queue is
+not held and no resolver opens, and the landing is tried again five minutes later. Files a phase
 changed outside its lane (its touches, anything added with `swarm widen`, and `commons`) are noted in its
 history and in the next Overseer digest; that never holds a merge.
 
@@ -222,6 +224,9 @@ history and in the next Overseer digest; that never holds a merge.
 | `external` | `{}` | | hot | Name mapped to the path of a repo outside the project that the swarm does not mirror. Its name is a lane a touch may start with. |
 | `check` | `{}` | | hot | Repo name (`.` for the project repo) mapped to the command that re-tests a phase merged with the lanes that landed beside it. `"*"` is the default for a repo not named. Read at landing. |
 | `check_timeout_s` | `2700` | | hot | Seconds a landing check may run before it counts as red. |
+| `prepare` | `{}` | | hot | Repo name (`.` for the project repo, `"*"` for every repo not named) mapped to a shell command. It runs in the phase's worktree of that repo before the `check`, through the build gate like any `swarm build`: for what the check reads and git does not hold, such as the dependencies installed beside the checkout. A phase that never built in the repo has none, and a catch-up merge that moves a pin leaves the old ones. A command that fails, times out, or leaves tracked files changed is not a red check: no check runs, no resolver opens and the merge queue is not held. You are told once, with its last lines as the reason; other phases land in that repo meanwhile, and the landing is tried again every five minutes. |
+| `prepare_if` | `{}` | | hot | Repo name mapped to a quick shell test, run in the worktree at once and outside the build gate (30 s at most). `prepare` runs only when it exits 0. Without one the command runs, and queues for a build slot, before every landing check in that repo. |
+| `prepare_timeout_s` | `600` | | hot | Seconds a `prepare` command may run once it has a build slot. Past it the command is stopped and has failed. |
 
 Example:
 
@@ -233,6 +238,8 @@ resources = ["live-box"]
 external  = { "shared-lib" = "~/projects/shared-lib" }
 commons   = ["./docs/PHASE-LEDGER.md", "./docs/phases/**", "*/CHANGELOG.md"]
 check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
+prepare    = { "app" = "sh scripts/sync-deps.sh" }
+prepare_if = { "app" = "sh scripts/sync-deps.sh --check" }
 ```
 
 ## `[build]`

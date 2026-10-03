@@ -7,14 +7,22 @@ names a command per repo, and the swarm runs it where its table says:
 
 - ``[lanes].check``: in a phase's worktree, before the phase lands beside a
   sibling (:mod:`landing`);
+- ``[lanes].prepare``: in that worktree, before the check
+  (:func:`landing._make_ready`);
 - ``[git].post_merge``: in a repo's main checkout, after a merge landed there
   and before the push (:func:`gitq._post_merge`).
 
-Both tables are keyed by the repo's name, ``.`` for the project's own and
+Every table is keyed by the repo's name, ``.`` for the project's own and
 ``"*"`` for every repo without an entry (:func:`command`), and :func:`run` is
 the one way such a command runs: in the checkout it is given, through the build
 gate like any build, with a timeout, its output in the caller's log file. It
 says how it ended (:class:`Outcome`); what a failure means is the caller's.
+
+The last two put right what git does not hold beside a checkout, so they share
+two rules. Most runs would find nothing to do, so each has a quick test beside
+it (``prepare_if``, ``post_merge_if``) that is asked first, at once and in no
+queue (:func:`wanted`). And the command works beside the tree, not in it: one
+that leaves a tracked file changed has failed (:func:`run_clean`).
 
 **A light command takes no build slot.** The command is classified as ``swarm
 build`` classifies one (:mod:`buildclass`, with ``[build].heavy`` and
@@ -43,6 +51,9 @@ TAIL_LINES = 3
 TAIL_CHARS = 300
 _TAIL_BYTES = 8192
 _KILL_GRACE_S = 10.0
+#: A quick test (:func:`wanted`): asked before every run of its command.
+IF_TIMEOUT_S = 30.0
+_GIT_TIMEOUT_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -63,6 +74,18 @@ def command(cfg: Config, table: dict[str, str], repo: Path) -> str:
     table = table or {}
     name = "." if repo.resolve() == cfg.project_dir.resolve() else repo.name
     return table.get(name) or table.get("*") or ""
+
+
+def wanted(test: str, cwd: Path) -> bool:
+    """Whether the quick test ``test`` says its command has work to do in the
+    checkout ``cwd``: it exits 0. It is asked at once, outside the build gate.
+    No test is a yes. One that cannot be asked raises ``OSError`` or
+    ``subprocess.TimeoutExpired``."""
+    if not test:
+        return True
+    asked = subprocess.run(test, shell=True, cwd=cwd, capture_output=True, text=True,
+                           timeout=IF_TIMEOUT_S)
+    return asked.returncode == 0
 
 
 def _light(cfg: Config, cmd: str, cwd: Path) -> str | None:
@@ -167,3 +190,26 @@ def run(cfg: Config, cmd: str, cwd: Path, fh, *, timeout_s: float,
             ok = False
     now = time.time()
     return Outcome(ok, "" if ok else _tail(fh, mark), start - queued, now - start)
+
+
+def _changed(cwd: Path) -> list[str]:
+    """The tracked files of the checkout ``cwd`` with uncommitted changes."""
+    try:
+        out = subprocess.run(["git", "diff", "--name-only", "HEAD"], cwd=cwd,
+                             capture_output=True, text=True, timeout=_GIT_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return out.stdout.splitlines()
+
+
+def run_clean(cfg: Config, cmd: str, cwd: Path, fh, *, timeout_s: float,
+              phase: str | None = None, wait_s: float | None = None) -> Outcome:
+    """:func:`run`, for a command that must leave the checkout's tracked files
+    as git has them. One that leaves any changed has failed, whatever it exited
+    with."""
+    ran = run(cfg, cmd, cwd, fh, timeout_s=timeout_s, phase=phase, wait_s=wait_s)
+    left = _changed(cwd) if ran.ok else []
+    if not left:
+        return ran
+    why = f"the command left uncommitted changes: {' '.join(left[:5])}"
+    return Outcome(False, why, ran.wait_s, ran.run_s)

@@ -27,7 +27,8 @@ R: nobody else lands in R until the entry goes, at the canonical merge (or when
 the phase leaves the queue). The entry, not the process, is what survives a
 supervisor restart; the flock at ``<state>/landing/<repo-slug>.lock`` is taken
 beside it for as long as this process holds the entry, and around every lanes
-merge into R, so no second process can move R's main meanwhile.
+merge into R, so no second process can move R's main meanwhile. An entry that
+only waits for its worktree to be made ready holds nothing (:func:`_holds`).
 
 **Lock order is landing -> build semaphore -> family lock**, and nothing takes a
 landing lock while holding either of the others. The integrator holds landing
@@ -39,6 +40,15 @@ can form.
 the swarm runs for a project does (:func:`repocmd.run`): heavy unless it is
 known to be light or the project declares it so. A light one runs at once,
 beside whatever build holds the slots; every other check queues.
+
+**A worktree is made ready first.** What a check reads is not all in git: the
+dependencies installed beside a checkout are not. Before the check, R's
+``[lanes] prepare`` command runs in the worktree, when R's ``prepare_if`` says
+there is something to do (:func:`_make_ready`). One that fails is not a red
+check: no check ran and there is nothing to merge, so no resolver opens and the
+queue is not held. The phase gives up its hold on R, the owner is told once in
+the command's own words, and the landing is tried again :data:`RETRY_S` later
+(``LANE-UNPREPARED``).
 
 **Outside the lane (D6).** At landing, the files the phase changed that are
 neither in its snapshot lane (``State.lanes``) nor commons are listed: a history
@@ -62,6 +72,7 @@ from . import launch as launch_mod
 from . import ledgerw
 from . import repocmd
 from . import state as state_mod
+from . import telegram
 from .config import Config
 from .lanes import LaneError, Touch, overlaps, parse_touch
 from .logutil import Log
@@ -72,6 +83,11 @@ PASSED = "ok"  # the check passed; land once the branch contains main again
 RED = "red"  # the check failed: a semantic-conflict resolver is on the worktree
 CONFLICT = "conflict"  # the catch-up merge conflicted: a resolver is on the worktree
 AGAIN = "again"  # `swarm resolved`: merge main again and re-check, moved or not
+UNPREPARED = "unprepared"  # the prepare command failed, so no check ran: tried again later
+
+#: How long a landing whose worktree could not be made ready waits before it is
+#: tried again. The queue looks on every event and watchdog tick.
+RETRY_S = 300.0
 
 _MERGED_BRANCH = re.compile(r"swarm/([A-Za-z0-9._-]+)")
 
@@ -144,11 +160,17 @@ def _contains(repo: Path, main: str, branch: str) -> bool:
 _FDS: dict[str, tuple[str, int]] = {}
 
 
+def _holds(st: state_mod.State, phase: str, repo: Path) -> bool:
+    """Whether ``phase``'s landing holds ``repo``: it has an entry there, unless
+    the entry only waits for its worktree to be made ready. Nothing is being
+    tested then, so nobody else is kept out meanwhile."""
+    entry = st.landing.get(phase, {}).get(str(repo))
+    return entry is not None and entry.get("stage") != UNPREPARED
+
+
 def _holder(st: state_mod.State, repo: Path, phase: str) -> str | None:
     """The other phase whose landing holds ``repo``, if any."""
-    key = str(repo)
-    return next((p for p, repos in sorted(st.landing.items())
-                 if p != phase and key in repos), None)
+    return next((p for p in sorted(st.landing) if p != phase and _holds(st, p, repo)), None)
 
 
 def _flock(cfg: Config, repo: Path, phase: str, st: state_mod.State) -> bool:
@@ -159,9 +181,9 @@ def _flock(cfg: Config, repo: Path, phase: str, st: state_mod.State) -> bool:
         owner, fd = held
         if owner == phase:
             return True
-        if str(repo) in st.landing.get(owner, {}):
+        if _holds(st, owner, repo):
             return False
-        _unflock(repo)  # its entry went (merged, dropped): a stale fd
+        _unflock(repo)  # its hold went (merged, dropped, unprepared): a stale fd
     landing_dir(cfg).mkdir(parents=True, exist_ok=True)
     fd = os.open(landing_dir(cfg) / f"{slug}.lock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
@@ -202,8 +224,10 @@ def integrate(
     """:func:`gitq.integrate` with lanes on. Besides its statuses, returns
     :data:`gitq.LANE_CHECKING` (a check runs; land others meanwhile),
     :data:`gitq.LANE_WAITING` (another phase's landing holds a repo this one
-    changed), :data:`gitq.LANE_CONFLICT` and :data:`gitq.LANE_RED` (a resolver's
-    job, on the worktree :func:`blocked` names).
+    changed), :data:`gitq.LANE_UNPREPARED` (a worktree could not be made ready
+    for its check; tried again later), :data:`gitq.LANE_CONFLICT` and
+    :data:`gitq.LANE_RED` (a resolver's job, on the worktree :func:`blocked`
+    names).
 
     Nothing lands until every changed repo is ready, so a phase that spans two
     repos never lands one half while the other half's check is red."""
@@ -219,15 +243,15 @@ def integrate(
             _drop_idle_flocks(cfg, phase, changed)
             return gitq.LANE_WAITING
     mine = st.landing.get(phase, {})
-    pending = False
+    pending = ""
     for repo, main in changed:
         status = _prepare(cfg, phase, repo, main, mine.get(str(repo)) or {}, log)
-        if status == gitq.LANE_CHECKING:
-            pending = True
+        if status in (gitq.LANE_CHECKING, gitq.LANE_UNPREPARED):
+            pending = pending or status
         elif status != gitq.MERGED:
             return status
     if pending:
-        return gitq.LANE_CHECKING
+        return pending
     _flag_undeclared(cfg, phase, changed, log)
     for repo, main in repos:
         result = gitq._integrate_one(cfg, repo, main, phase, log, pushes)
@@ -257,6 +281,10 @@ def _prepare(cfg: Config, phase: str, repo: Path, main: str, entry: dict, log: L
         stage = _collect(cfg, phase, repo, entry, log)
         if stage == CHECKING:
             return gitq.LANE_CHECKING
+        if stage == UNPREPARED:
+            return gitq.LANE_UNPREPARED
+    elif stage == UNPREPARED and time.time() - float(entry.get("at") or 0.0) < RETRY_S:
+        return gitq.LANE_UNPREPARED
     if stage == RED:
         return gitq.LANE_RED
     if stage == CONFLICT:
@@ -268,7 +296,7 @@ def _prepare(cfg: Config, phase: str, repo: Path, main: str, entry: dict, log: L
         if not moved:  # commons only, the ledger writer mostly: the check stands
             return _catch_up(cfg, phase, repo, main, entry.get("base"), log, check=False)
         log.line(f"LANE-MAIN-MOVED {phase} {repo.name} main gained {len(moved)} file(s)")
-    elif stage != AGAIN:
+    elif stage not in (AGAIN, UNPREPARED):
         moved = _moved(cfg, repo, main, branch)
         if not moved:
             return gitq.MERGED
@@ -339,7 +367,8 @@ def _alive(pid: int | None) -> bool:
 
 def _collect(cfg: Config, phase: str, repo: Path, entry: dict, log: Log) -> str:
     """The stage a running check has reached: its result, or a check that died
-    without one counted red."""
+    without one counted red. A worktree that could not be made ready is not
+    red: the entry stops holding the repo, and the owner is told why."""
     try:
         result = _result_path(cfg, phase, repo).read_text(encoding="utf-8").strip()
     except OSError:
@@ -349,6 +378,12 @@ def _collect(cfg: Config, phase: str, repo: Path, entry: dict, log: Log) -> str:
             return CHECKING
         result = "fail"
         log.line(f"LANE-CHECK-LOST {phase} {repo.name} pid={entry.get('pid')}")
+    said, _, why = result.partition(" ")
+    if said == UNPREPARED:
+        _set(cfg, phase, repo, **{**entry, "stage": UNPREPARED})
+        log.line(f"LANE-UNPREPARED {phase} {repo.name} {why}")
+        _tell_unprepared(cfg, phase, repo, why)
+        return UNPREPARED
     stage = PASSED if result == "ok" else RED
     _set(cfg, phase, repo, **{**entry, "stage": stage})
     log.line(f"LANE-CHECKED {phase} {repo.name} {result}")
@@ -360,7 +395,10 @@ def run_check(cfg: Config, phase: str, lane: str) -> int:
     """Run ``lane``'s check in ``phase``'s worktree, write its log and result, and
     poke ``lane-checked``. It goes through the build semaphore unless the command
     is light (:func:`repocmd.run`). A timeout is red. The log of the run before
-    is moved aside first (:func:`kept_log`), and the new log names it."""
+    is moved aside first (:func:`kept_log`), and the new log names it. The
+    worktree is made ready before the check (:func:`_make_ready`); when that
+    fails no check runs, and the result is ``unprepared`` with the reason after
+    it."""
     found = repo_for(cfg, lane)
     if found is None:
         return 2
@@ -379,15 +417,69 @@ def run_check(cfg: Config, phase: str, lane: str) -> int:
         if kept is not None:
             fh.write(f"# the log of the run before this one: {kept}\n")
         fh.flush()
-        ok = repocmd.run(cfg, cmd, wt, fh, timeout_s=cfg.lanes_check_timeout_s,
-                         phase=phase).ok
-        fh.write(f"# result: {'ok' if ok else 'fail'}\n")
+        why = _make_ready(cfg, phase, repo, wt, fh)
+        ok = not why and repocmd.run(cfg, cmd, wt, fh, timeout_s=cfg.lanes_check_timeout_s,
+                                     phase=phase).ok
+        said = "ok" if ok else UNPREPARED if why else "fail"
+        fh.write(f"# result: {said}\n")
     result = _result_path(cfg, phase, repo)
     tmp = result.with_suffix(".tmp")
-    tmp.write_text("ok\n" if ok else "fail\n", encoding="utf-8")
+    tmp.write_text(f"{said} {why}".rstrip() + "\n", encoding="utf-8")
     tmp.replace(result)
-    launch_mod._poke_fifo(cfg, f"lane-checked {phase} {lane} {'ok' if ok else 'fail'}\n")
+    launch_mod._poke_fifo(cfg, f"lane-checked {phase} {lane} {said}\n")
     return 0 if ok else 1
+
+
+def _make_ready(cfg: Config, phase: str, repo: Path, wt: Path, fh) -> str:
+    """Run ``repo``'s ``[lanes].prepare`` command in the worktree ``wt``, before
+    its check. ``""``: check; else why not, in the command's own last lines.
+
+    A worker installs dependencies in the worktree it builds in. A phase that
+    never built in this repo leaves none, and a catch-up merge that moves a pin
+    leaves the ones the old pin named. The check is then red in a second or two
+    for a reason no merge can settle, and a resolver is opened only to run the
+    install. The command is what that resolver would run.
+
+    Most checks need nothing, so ``[lanes].prepare_if`` is asked first, at once
+    and outside the build gate: only when it exits 0 does the command queue for
+    a build slot (:func:`repocmd.run_clean`), to run for at most
+    ``prepare_timeout_s``. A test that cannot be asked is a no, and the log says
+    so. A command that leaves a tracked file changed has failed: the check
+    would test a tree that is not the one that lands."""
+    cmd = repocmd.command(cfg, cfg.lanes_prepare, repo)
+    if not cmd:
+        return ""
+    test = repocmd.command(cfg, cfg.lanes_prepare_if, repo)
+    try:
+        if not repocmd.wanted(test, wt):
+            return ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fh.write(f"# prepare_if `{test}` could not be asked: {exc}\n")
+        return ""
+    fh.write(f"# prepare: `{cmd}`\n")
+    ran = repocmd.run_clean(cfg, cmd, wt, fh, timeout_s=cfg.lanes_prepare_timeout_s,
+                            phase=phase)
+    fh.write(f"# prepared: {ran.reason or 'ok'}\n")
+    return ran.reason
+
+
+def _tell_unprepared(cfg: Config, phase: str, repo: Path, why: str) -> None:
+    """Tell the owner a landing waits on a prepare command that failed: once per
+    phase, not on every retry."""
+    told = telegram.already_sent(cfg.state_dir, ("lane-unprepared",), phase)
+    telegram.notify(
+        cfg.telegram_notify,
+        f"swarm: {phase} cannot land in {repo.name} yet: the command that makes its"
+        f" copy ready for the landing check failed — {why}. No check ran and there is"
+        f" nothing for a resolver: other work keeps merging, and this is tried again"
+        f" about every {RETRY_S / 60:.0f} minutes. Fix what it reports if it keeps failing;"
+        f" its output is in {check_log(cfg, phase, repo)}",
+        kind="lane-unprepared",
+        phase=phase,
+        source="landing._collect",
+        state_dir=cfg.state_dir,
+        suppressed=telegram.hold(cfg, "you were told when it first failed") if told else None,
+    )
 
 
 # -- resolving -------------------------------------------------------------

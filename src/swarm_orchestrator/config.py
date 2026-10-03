@@ -641,6 +641,19 @@ class Config:
         "lanes", "check_timeout_s", 2700, HOT, minimum=1,
         doc="seconds before a landing check counts as red",
         why="read by every landing check when it starts")
+    lanes_prepare: dict[str, str] = _k(
+        "lanes", "prepare", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc="repo -> command run before its landing check",
+        why="read by every landing check when it starts, so the next one runs"
+            " the new command")
+    lanes_prepare_if: dict[str, str] = _k(
+        "lanes", "prepare_if", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc="repo -> quick test: is prepare needed?",
+        why="read by every landing check when it starts")
+    lanes_prepare_timeout_s: int = _k(
+        "lanes", "prepare_timeout_s", 600, HOT, minimum=1,
+        doc="seconds a prepare command may run",
+        why="read by every landing check when it starts")
 
     # -- [operator] -------------------------------------------------------
     # Positive opt-in: the only thing between a test suite and an autonomous

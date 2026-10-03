@@ -209,8 +209,8 @@ class State:
     # Lanes: each phase whose landing re-tests it against a sibling lane,
     # ``{phase: {repo: {"stage": ..., ...}}}`` (see :mod:`landing`). An entry is
     # the phase's hold on that repo's landing lock: nobody else lands there until
-    # it goes. Same compatibility rule as ``lanes``: top-level, written only when
-    # non-empty, released with the lane.
+    # it goes (one at stage ``unprepared`` holds nothing). Same compatibility rule
+    # as ``lanes``: top-level, written only when non-empty, released with the lane.
     landing: dict[str, dict[str, dict]] = field(default_factory=dict)
     # What the supervisor's launcher holds in memory, written out by it so that
     # ``swarm doctor`` reads the same thing: the phases a launch thread of its

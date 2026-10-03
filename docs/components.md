@@ -666,6 +666,35 @@ file(s)`). A conflict at the unchecked merge goes to the resolver on the
 worktree, and what the resolver wrote is checked before it lands. To see how
 often checks are repeated, count both lines in the supervisor log.
 
+**The prepare command** (`[lanes].prepare`, `repocmd.py`): a lane check, like a
+repo's pre-push check, can read things git does not hold. The usual one is the
+dependencies installed beside the checkout. A worker installs them in the
+worktree it builds in, so a phase that never built in a repo has none there, and
+a catch-up merge that moves a pin leaves the ones the old pin named. The check
+was then red within seconds for a reason no merge can settle, the queue was
+held, and a resolver session was opened only to run the install. A project
+names the command that session would run, per repo, and `swarm _lane-check` runs
+it in the worktree before the check:
+
+- `[lanes].prepare_if` is asked first, at once and outside the build gate. Only
+  when it exits 0 does anything run, so a worktree that is ready costs one quick
+  test. One that cannot be asked is a no, and the check's log says so.
+- The command runs through the build gate like the check that follows it, for
+  at most `[lanes].prepare_timeout_s`. Nothing waits on it but this landing: it
+  runs in the detached check, and its output is in the check's log.
+- Passed: the check runs.
+- Failed, timed out, or tracked files left changed (the check would test a tree
+  that is not the one that lands): no check runs, and the result is
+  `unprepared`, not red. `LANE-UNPREPARED <phase> <repo> <reason>` in the
+  supervisor log gives the command's own last lines. No resolver opens and the
+  merge queue is not held. You are pinged once per phase, with the reason and
+  the log's path. The phase stops holding the repo's landing lock, so other
+  phases land there meanwhile.
+- It is tried again five minutes later, at the queue's next look (any event, or
+  the watchdog tick): main is merged in again, the quick test is asked again,
+  and a command that passes is followed by the check. A failure whose cause is
+  gone clears by itself; `swarm resolved` is not needed and does nothing here.
+
 A merge can end four ways:
 
 | outcome | meaning | what happens |
@@ -1936,7 +1965,8 @@ Telegram or ledger failure, or on a *contradicted* finding.
   `[lanes]` is on (see the integrator section).
 - **`repocmd.py`:** runs a project's own command in a checkout the swarm names,
   through the build gate, with a timeout and its output in the caller's log:
-  the landing's lane check and a repo's `[git].post_merge` command.
+  the landing's lane check, the `[lanes].prepare` command before it, and a
+  repo's `[git].post_merge` command.
 - **`pauseat.py`:** `swarm pause --in 12h` / `--at 03:00`, a pause scheduled in
   `state.json` that survives `swarm down` and `up`.
 - **`procs.py`:** reads `/proc` for the process table and process identity (pid plus

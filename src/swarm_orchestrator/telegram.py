@@ -41,6 +41,7 @@ KINDS = (
     "park",  # supervisor: a waiting worker moved to its own window
     "integrate-hold",  # supervisor: merge conflict / dirty tree (push failed: legacy)
     "push-owed",  # pushowed: a repo merged locally but its push failed / was cleared
+    "lane-unprepared",  # landing: a worktree could not be made ready for its lane check
     "finish",  # supervisor: the run is over
     "master-timeout",  # master: never became ready / prompt would not submit
     "master-note",  # cli.notify: the master telling the owner about a blocker it cannot decide

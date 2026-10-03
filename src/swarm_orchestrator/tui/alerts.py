@@ -32,7 +32,8 @@ from .theme import BAD, BRIGHT, GLYPH, MUTED, OK, SOFT, WARN, YOU, paint
 #: Ping kinds that ask something of the owner, and kinds that report a fault.
 ASKS = frozenset({"waiting", "park", "question", "needs-owner", "operator-ask",
                   "operator-todo", "operator-abandoned", "integrate-hold", "blocked"})
-FAULTS = frozenset({"spawn-fail", "master-timeout", "usage-cap", "web-board", "push-owed"})
+FAULTS = frozenset({"spawn-fail", "master-timeout", "usage-cap", "web-board", "push-owed",
+                    "lane-unprepared"})
 
 #: Rows of the ping log the box keeps; the alerts tab holds every one.
 NOTE_ROWS = 60

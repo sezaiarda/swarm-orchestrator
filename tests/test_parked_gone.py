@@ -439,7 +439,8 @@ def test_the_rule_reads_a_real_tmux(cfg, monkeypatch):
         wait_win, _replacement = tmux.park_pane(win, pane, 0, "wait:P1", cfg.session)
         parked(cfg, window=wait_win)
         assert doctor.window_states(cfg)[wait_win] is True
-        assert found() == doctor._WORKING
+        # The pane's process is tmux itself until it has exec'd its command.
+        assert _eventually(lambda: found() == doctor._WORKING)
 
         pid = int(tmux.run(["display-message", "-p", "-t", pane, "#{pane_pid}"]).stdout)
         os.kill(pid, 9)

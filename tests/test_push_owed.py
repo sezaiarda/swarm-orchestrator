@@ -6,6 +6,10 @@ also misread as a non-ff race (fetch+merge+re-run the hook, repeatedly) and
 reported as "remote unreachable?". These tests pin the replacement: the hook
 refusal is classified and its reason captured, the phase integrates anyway, the
 repo owes a push that is retried and cleared, and the owner hears once each way.
+
+A push the remote turns away *after* the hook passed is a third thing: not a
+refusal (the hook's ``ok`` line is not its reason) and not a non-ff. It is
+pushed again as it is, and owed only if the remote keeps turning it away.
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ from swarm_orchestrator.logutil import Log
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
 REASON = "node_modules/orders is 0.16.0 but package.json pins 0.17.0: install the pin"
+OK_LINE = "push-gate: ok - docs only, nothing to build"
+TURNED_AWAY = "! [remote rejected] master -> master"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -77,6 +83,23 @@ def _refusing_hook(repo: Path, runs: Path) -> None:
         f"echo '{REASON}'\n"
         "echo 'push-gate: FAILED — the push was refused.' >&2\n"
         "exit 1\n"
+    )
+    hook.chmod(0o755)
+
+
+def _passing_hook(repo: Path, origin: Path, runs: Path, locked_runs: int) -> None:
+    """A pre-push hook that passes: its ``ok`` line on stdout, exit 0. During its
+    first ``locked_runs`` runs something else holds the lock on origin's master,
+    as another pusher would for a moment, so the remote turns the ref away."""
+    lock = origin / "refs" / "heads" / "master.lock"
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"echo run >> '{runs}'\n"
+        f"echo '{OK_LINE}'\n"
+        f"if [ \"$(wc -l < '{runs}')\" -le {locked_runs} ]; then touch '{lock}';"
+        f" else rm -f '{lock}'; fi\n"
+        "exit 0\n"
     )
     hook.chmod(0o755)
 
@@ -170,6 +193,108 @@ def test_an_unreachable_remote_is_a_failure_not_a_refusal(monkeypatch, tmp_path)
         log.close()
     assert res.status == gitq.PUSH_FAILED and not res.refused
     assert "Could not read from remote repository" in res.reason
+
+
+def test_a_passing_hooks_output_is_never_the_reason():
+    locked = f" {TURNED_AWAY} (cannot lock ref 'refs/heads/master': is at 1111111 but expected 2222222)"
+    tail = "error: failed to push some refs to 'host:team/project.git'\nhint: try again\n"
+    err = f"To host:team/project.git\n{locked}\n{tail}"
+    assert gitq._ref_status(err)
+    assert gitq._push_reason(OK_LINE + "\n", err) == locked.strip()
+    # What the remote said before its verdict is part of the reason; the hook's
+    # own stderr is not.
+    declined = (
+        "push-gate: ok\nremote: branch is protected        \nTo host:team/project.git\n"
+        f" {TURNED_AWAY} (pre-receive hook declined)\n{tail}"
+    )
+    assert gitq._push_reason(OK_LINE + "\n", declined) == (
+        f"remote: branch is protected {TURNED_AWAY} (pre-receive hook declined)"
+    )
+    stale = f" ! [rejected]        master -> master (stale info)\n{tail}"
+    assert gitq._push_reason(OK_LINE + "\n", stale) == "! [rejected]        master -> master (stale info)"
+    # A hook that refused prints no ref-status line: its stdout is the reason.
+    refusal = "push-gate: FAILED — the push was refused.\n" + tail
+    assert not gitq._ref_status(refusal)
+    assert gitq._push_reason(f"== typecheck\n{REASON}\n", refusal) == REASON
+
+
+def _local_commit(tmp_path: Path, monkeypatch):
+    project, origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    (project / "local.txt").write_text("L")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "local")
+    monkeypatch.setattr(gitq, "_REMOTE_RETRY_PAUSE_S", 0.0)
+    return project, origin, cfg
+
+
+def test_a_push_the_remote_turns_away_is_pushed_again_as_it_is(monkeypatch, tmp_path):
+    project, origin, cfg = _local_commit(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    _passing_hook(project, origin, runs, locked_runs=1)
+    head = _git(project, "rev-parse", "HEAD")
+    log = Log(cfg.supervisor_log)
+    try:
+        res = gitq._push_result(project, "master", log)
+    finally:
+        log.close()
+    assert res.status == gitq.MERGED
+    assert _runs(runs) == 2
+    assert _git(origin, "rev-parse", "master") == head  # the same commit: nothing was merged
+    text = cfg.supervisor_log.read_text()
+    assert f"PUSH-RETRY 1 master {TURNED_AWAY}" in text
+    assert "PUSH-REFUSED" not in text and OK_LINE not in text
+
+
+def test_a_push_the_remote_keeps_turning_away_is_owed_and_not_refused(monkeypatch, tmp_path):
+    project, origin, cfg = _local_commit(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    _passing_hook(project, origin, runs, locked_runs=99)
+    state_mod.init_state(cfg)
+    log = Log(cfg.supervisor_log)
+    try:
+        res = gitq.retry_push(cfg, project, log)
+        pushowed.settle(cfg, "P1", {project: res}, log)
+    finally:
+        log.close()
+    assert res.status == gitq.PUSH_FAILED and not res.refused
+    assert res.reason.startswith(TURNED_AWAY) and OK_LINE not in res.reason
+    assert _runs(runs) == 1 + gitq._REMOTE_RETRIES
+    rec = state_mod.read(cfg).push_owed[str(project)]
+    assert not rec["refused"] and rec["reason"] == res.reason
+    text = cfg.supervisor_log.read_text()
+    assert f"PUSH-FAIL master {TURNED_AWAY}" in text
+    assert "PUSH-REFUSED" not in text and OK_LINE not in text
+
+
+@pytest.mark.parametrize("hangs", [1, 2])
+def test_the_fetch_before_an_owed_push_is_short_and_tried_twice(monkeypatch, tmp_path, hangs):
+    project, origin, cfg = _local_commit(tmp_path, monkeypatch)
+    real, fetches = gitq._git, []
+
+    def hanging(repo, *args, **kw):
+        if args[:1] == ("fetch",):
+            fetches.append(kw.get("timeout"))
+            if len(fetches) <= hangs:
+                raise gitq.GitError(f"git fetch origin @ {repo}: timed out after {kw.get('timeout')}s")
+        return real(repo, *args, **kw)
+
+    monkeypatch.setattr(gitq, "_git", hanging)
+    log = Log(cfg.supervisor_log)
+    try:
+        res = gitq.retry_push(cfg, project, log)
+    finally:
+        log.close()
+    assert fetches == [gitq._OWED_FETCH_TIMEOUT_S] * 2
+    # Both tries together cost less than one default wait.
+    assert gitq._OWED_FETCH_TIMEOUT_S * 2 < gitq._GIT_TIMEOUT_S
+    assert "PUSH-FETCH-RETRY master" in cfg.supervisor_log.read_text()
+    pushed = "local.txt" in _git(origin, "ls-tree", "-r", "--name-only", "master")
+    if hangs == 1:
+        assert res.status == gitq.MERGED and pushed
+    else:
+        assert res.status == gitq.PUSH_FAILED and not res.refused and not pushed
+        assert "git fetch origin" in res.reason and "timed out" in res.reason
 
 
 # -- Fix 1: a push failure does not hold the queue -------------------------

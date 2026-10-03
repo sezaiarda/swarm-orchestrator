@@ -16,7 +16,8 @@ Triggers
 --------
 *Events* — a phase finishing ``fail`` (a ``later`` is not one: it waits for its
 date, :func:`ledgerw.dated`); an integration hold no resolver is handling
-(below); a newly owed push; a
+(below); an owed push its repo's own check refused, or any other still owed
+after :data:`PUSH_GRACE_S`; a
 cheap doctor check turning FAIL; a session asking the owner for longer than
 ``[overseer] owner_wait_s`` (once per unanswered question); starvation — free slots and
 nothing launchable while non-excluded backlog remains, sustained for
@@ -74,6 +75,10 @@ FINISHED = "finished"
 EVERY = "every"
 MANUAL = "manual"
 
+#: How long a push that failed without the repo's own check refusing it may stay
+#: owed before it triggers a pass: the next push, seconds later, settles most.
+PUSH_GRACE_S = 120.0
+
 #: A pass triggered by one of these sends its summary to the owner's phone; any
 #: other pass sends it only with ``swarm notify --attention`` (``cli._summary_hold``).
 SUMMARY_TRIGGERS = frozenset({FINISHED, MANUAL})
@@ -125,7 +130,10 @@ class Memory:
     hold_since: float = 0.0
     hold_fired: bool = False
     hold_escalated: str = ""
+    #: The owed pushes that have triggered a pass, and since when each of the
+    #: others has been owed (it triggers if it outlives the grace).
     seen_push: list[str] = field(default_factory=list)
+    push_since: dict[str, float] = field(default_factory=dict)
     owner_since: dict[str, float] = field(default_factory=dict)
     owner_fired: list[str] = field(default_factory=list)
     doctor_failing: list[str] = field(default_factory=list)
@@ -344,17 +352,32 @@ class Policy:
         return dropped
 
     def _observe_push(self, owed: dict[str, dict], now: float) -> list[str]:
-        new = sorted(set(owed) - set(self.mem.seen_push))
-        self.mem.seen_push = sorted(owed)
+        """An owed push, once per debt: at once when the repo's own pre-push
+        check refused it, otherwise only if it is still owed after
+        :data:`PUSH_GRACE_S`.
+
+        A check that refused will refuse the same commits again, so someone has
+        to act. Anything else (a remote that turned the ref away, a fetch that
+        timed out) is usually settled by the next push seconds later, and a pass
+        started for it finds nothing owed. A record with no ``since`` counts as
+        old."""
+        fired = [r for r in self.mem.seen_push if r in owed]
+        self.mem.push_since = {}
         out: list[str] = []
-        for repo in new:
+        for repo in sorted(set(owed) - set(fired)):
             rec = owed.get(repo) or {}
+            since = float(rec.get("since") or 0.0)
+            if not rec.get("refused") and now - since < PUSH_GRACE_S:
+                self.mem.push_since[repo] = since
+                continue
+            fired.append(repo)
             out += self._want(
                 f"{PUSH}:{Path(repo).name}",
                 f"push owed in {Path(repo).name} (since {rec.get('phase')}): {rec.get('reason')}",
                 False,
                 now,
             )
+        self.mem.seen_push = sorted(fired)
         return out
 
     def _observe_owner(self, st, now: float) -> list[str]:
@@ -464,6 +487,7 @@ class Policy:
                 stamps.append(since + self.cfg.overseer_owner_wait_s)
         if self.mem.seen_hold and not self.mem.hold_fired and self.mem.hold_since:
             stamps.append(self.mem.hold_since + self.cfg.overseer_hold_wait_s)
+        stamps.extend(since + PUSH_GRACE_S for since in self.mem.push_since.values())
         future = [s for s in stamps if s > now]
         return min(future) if future else None
 

@@ -199,14 +199,66 @@ def test_recheck_keeps_a_hold_reason_that_still_applies(cfg):
     assert _keys(pol) == ["hold:P2"]
 
 
-def test_a_newly_owed_push_fires_once(cfg):
+def _owed(reason: str, refused: bool, since: float = T0) -> dict:
+    rec = {"phase": "coral-W1", "reason": reason, "since": since, "refused": refused}
+    return {"/p/frontend": rec}
+
+
+def test_a_push_its_repos_check_refused_fires_at_once_and_once(cfg):
     pol = ov.Policy(cfg)
-    owed = {"/p/frontend": {"phase": "coral-W1", "reason": "pre-push hook refused"}}
+    owed = _owed("typecheck: 2 errors in src/app.ts", refused=True)
     pol.observe(_st(push_owed=owed), T0)
     assert _keys(pol) == ["push:frontend"]
+    assert pol.pending[0].text == (
+        "push owed in frontend (since coral-W1): typecheck: 2 errors in src/app.ts"
+    )
     pol.begin(T0 + 1)
     pol.observe(_st(push_owed=owed), T0 + 2)
     assert pol.pending == []
+
+
+@pytest.mark.parametrize("reason", [
+    "! [remote rejected] master -> master (cannot lock ref 'refs/heads/master')",
+    "git fetch origin @ /p/frontend: timed out after 30.0s",
+])
+def test_a_push_owed_that_clears_inside_the_grace_fires_nothing(cfg, reason):
+    pol = ov.Policy(cfg)
+    pol.observe(_st(push_owed=_owed(reason, refused=False)), T0)
+    assert pol.pending == []
+    assert pol.next_deadline(T0) == T0 + ov.PUSH_GRACE_S  # the supervisor looks again then
+    pol.observe(_st(), T0 + 8)  # the next push settled it
+    pol.observe(_st(), T0 + ov.PUSH_GRACE_S)
+    assert pol.pending == [] and pol.mem.push_since == {}
+    pol.observe(_st(push_owed=_owed(reason, refused=False, since=T0 + 900)), T0 + 900)
+    assert pol.pending == []  # a later debt has a grace of its own
+
+
+def test_a_push_still_owed_after_the_grace_fires_once(cfg):
+    pol = ov.Policy(cfg)
+    owed = _owed("git fetch origin @ /p/frontend: timed out after 30.0s", refused=False)
+    pol.observe(_st(push_owed=owed), T0)
+    pol.observe(_st(push_owed=owed), T0 + ov.PUSH_GRACE_S - 1)
+    assert pol.pending == []
+    pol.observe(_st(push_owed=owed), T0 + ov.PUSH_GRACE_S)
+    assert _keys(pol) == ["push:frontend"] and not pol.pending[0].urgent
+    pol.begin(T0 + ov.PUSH_GRACE_S + 1)
+    pol.observe(_st(push_owed=owed), T0 + 900)
+    assert pol.pending == []
+
+
+def test_a_push_the_check_refuses_on_a_retry_fires_inside_the_grace(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_st(push_owed=_owed("fatal: unable to access the remote", refused=False)), T0)
+    assert pol.pending == []
+    pol.observe(_st(push_owed=_owed("typecheck: 2 errors", refused=True)), T0 + 5)
+    assert _keys(pol) == ["push:frontend"] and "typecheck" in pol.pending[0].text
+
+
+def test_an_owed_push_with_no_clock_fires_at_once(cfg):
+    """A record an older supervisor wrote: nothing says how long it has been owed."""
+    pol = ov.Policy(cfg)
+    pol.observe(_st(push_owed={"/p/frontend": {"phase": "coral-W1", "reason": "r"}}), T0)
+    assert _keys(pol) == ["push:frontend"]
 
 
 def test_a_phase_on_the_owner_too_long_fires_once_per_wait(cfg):

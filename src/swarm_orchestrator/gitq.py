@@ -79,6 +79,13 @@ DONE_INTEGRATE = statuses.INTEGRATES
 _GIT_TIMEOUT_S = 120.0
 _CHECK_TIMEOUT_S = 300.0  # an [git].auto_resolve_check run; it holds the repo lock
 _PUSH_ATTEMPTS = 5
+#: A push the remote turned away after the hook passed (a lock race with another
+#: pusher) is pushed again this many times, this far apart, before it is owed.
+_REMOTE_RETRIES = 2
+_REMOTE_RETRY_PAUSE_S = 1.0
+#: The fetch before an owed push runs in the ledger writer's turn, so every
+#: write behind it waits for it: it is given this long, twice.
+_OWED_FETCH_TIMEOUT_S = 30.0
 
 #: Where work is kept instead of deleted: ``refs/swarm-attic/<phase>/<utc-stamp>``.
 #: Not a branch, so reconcile, launch and branch listings never see it.
@@ -1004,10 +1011,11 @@ def worktree_add(cfg: Config, phase: str, log: Log) -> Path:
 class PushResult:
     """One push of a repo's main: how it ended, and in the push's own words why.
 
-    ``refused`` separates a push something *decided* against — a pre-push hook
-    (or a server-side one) said no — from one that could not happen at all
-    (unreachable remote, auth, a timeout). Both leave the merge on local main;
-    they differ in what the owner has to fix, so the reason travels with them.
+    ``refused`` separates a push the repo's own pre-push hook *decided* against
+    from one that did not get through for any other reason (unreachable remote,
+    auth, a timeout, a remote that turned the ref away after the hook passed).
+    Both leave the merge on local main; they differ in what the owner has to
+    fix, so the reason travels with them.
     """
 
     status: str  # MERGED | CONFLICT | PUSH_FAILED
@@ -1037,13 +1045,29 @@ def _non_ff(err: str) -> bool:
     )
 
 
+def _ref_status(err: str) -> bool:
+    """Git printed its own verdict on the ref: a ``!`` line.
+
+    `` ! [rejected] main -> main (fetch first)``, `` ! [remote rejected] main ->
+    main (cannot lock ref ...)``, `` ! [rejected] main -> main (stale info)``.
+    Git prints one only for a push that reached the remote, which is after the
+    local pre-push hook passed: a hook that exits non-zero ends the push before
+    any ref is sent. So a failed push with such a line was not refused by the
+    hook, whatever the hook printed.
+    """
+    return any(ln.strip().startswith("! [") for ln in err.splitlines())
+
+
 def _push_reason(out: str, err: str) -> str:
     """The last few meaningful lines of a failed push, capped for a phone.
 
-    A hook's own stdout is preferred: that is where a check says *what* failed
-    (a repo's gate: ``node_modules/dep is 0.16.0 but package.json pins
-    0.17.0``), while its stderr tends to be the generic ``FAILED — the push was
-    refused``. Git's own ``error:``/``hint:``/``To <url>`` lines are dropped.
+    With a ref-status line (:func:`_ref_status`) the reason is that line and
+    what the remote said before it; a hook that passed and printed ``ok`` is
+    never the reason. Otherwise a hook's own stdout is preferred: that is where
+    a check says *what* failed (a repo's gate: ``node_modules/dep is 0.16.0 but
+    package.json pins 0.17.0``), while its stderr tends to be the generic
+    ``FAILED — the push was refused``. Git's own ``error:``/``hint:``/``To
+    <url>`` lines are dropped.
     """
 
     def meaningful(text: str) -> list[str]:
@@ -1057,7 +1081,10 @@ def _push_reason(out: str, err: str) -> str:
             keep.append(ln)
         return keep
 
-    lines = meaningful(out) or meaningful(err)
+    if _ref_status(err):
+        lines = [ln for ln in meaningful(err) if ln.startswith(("remote:", "! ["))]
+    else:
+        lines = meaningful(out) or meaningful(err)
     reason = " ".join(lines[-_REASON_LINES:]) or (err or out or "").strip()
     if len(reason) > _REASON_CHARS:
         reason = reason[: _REASON_CHARS - 3].rstrip() + "..."
@@ -1077,14 +1104,19 @@ def _push_result(
     out and reported as a failure instead. ``reconcile=False`` pushes without
     ever merging, for a repo not sitting cleanly on ``main``.
 
-    Only a genuine non-ff rejection is retried (:func:`_non_ff`). A hook refusal
-    returns at once with the hook's reason: re-running a check that just failed
-    against the same commits cannot pass. Anything else (unreachable remote,
-    auth, a timeout) is :data:`PUSH_FAILED`, never a :class:`GitError`, so no
-    push can hold the merge queue.
+    A genuine non-ff rejection is merged and retried (:func:`_non_ff`). Any
+    other answer from the remote about the ref (:func:`_ref_status`: a lock race
+    with another pusher, a server-side rejection) is pushed again as it is, up
+    to :data:`_REMOTE_RETRIES` times: if origin moved meanwhile the next answer
+    is a non-ff, and that one is merged. A hook refusal returns at once with the
+    hook's reason: re-running a check that just failed against the same commits
+    cannot pass. Anything else (unreachable remote, auth, a timeout) is
+    :data:`PUSH_FAILED`, never a :class:`GitError`, so no push can hold the
+    merge queue.
     """
     if not _has_remote(repo):
         return PushResult(MERGED)
+    turned_away = 0
     for attempt in range(1, _PUSH_ATTEMPTS + 1):
         try:
             push = _git(repo, "push", "origin", main, check=False)
@@ -1095,10 +1127,18 @@ def _push_result(
             return PushResult(MERGED)
         err = push.stderr or ""
         reason = _push_reason(push.stdout or "", err)
-        if not _non_ff(err):
+        if not _ref_status(err):
             refused = "failed to push some refs" in err
             log.line(f"PUSH-{'REFUSED' if refused else 'FAIL'} {main} {reason}")
             return PushResult(PUSH_FAILED, reason, refused=refused)
+        if not _non_ff(err):
+            if turned_away == _REMOTE_RETRIES:
+                log.line(f"PUSH-FAIL {main} {reason}")
+                return PushResult(PUSH_FAILED, reason)
+            turned_away += 1
+            log.line(f"PUSH-RETRY {attempt} {main} {reason}")
+            time.sleep(_REMOTE_RETRY_PAUSE_S)
+            continue
         if not reconcile:
             log.line(f"PUSH-FAIL {main} non-ff, not on a clean {main} to merge origin")
             return PushResult(
@@ -1138,9 +1178,17 @@ def _push_owed(repo: Path, main: str, log: Log) -> PushResult:
     sits cleanly on ``main`` — the owner may be mid-fix in exactly this checkout
     (fixing the check that refused the last push), and that tree must never be
     merged into or held as DIRTY on behalf of a phase that did not touch it.
+
+    The fetch is short and tried twice (:data:`_OWED_FETCH_TIMEOUT_S`): a fetch
+    that hangs once can go through at once the second time, and a push is owed
+    only when both hang.
     """
     try:
-        _git(repo, "fetch", "origin", check=False)
+        try:
+            _git(repo, "fetch", "origin", check=False, timeout=_OWED_FETCH_TIMEOUT_S)
+        except GitError as exc:
+            log.line(f"PUSH-FETCH-RETRY {main} {exc}")
+            _git(repo, "fetch", "origin", check=False, timeout=_OWED_FETCH_TIMEOUT_S)
         if not _local_ahead_of_origin(repo, main):
             return PushResult(MERGED)  # already on origin (pushed by hand, or level)
         clean = (

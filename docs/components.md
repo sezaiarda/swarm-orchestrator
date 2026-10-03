@@ -295,6 +295,10 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
   triggers a pass only when no resolver opened, the resolver gave up (it messaged
   you, or ran `swarm resolved` on an unfinished merge), or the hold is older than
   `hold_wait_s`. The trigger is checked again just before a pass starts.
+- **Owed pushes:** a push the repo's own pre-push check refused triggers a pass
+  at once. A push that failed any other way (the remote turned it away, a fetch
+  timed out) triggers one only if it is still owed two minutes later; the next
+  push settles most of them within seconds.
 - **What it reads:** before each pass the supervisor writes
   `<state>/overseer/digest-<id>.md` (and `.json`). It holds the trigger, the swarm
   now, every phase finished since the last pass with its recap and notes, every
@@ -726,7 +730,10 @@ you are pinged once if it still owes a push after `[telegram].push_owed_grace_s`
 `[telegram].pings = "all"`). The push is
 retried after every integration and on the watchdog tick, and it clears as soon
 as origin has local main, whoever pushed it. `swarm status` and `swarm doctor`
-show the standing debt.
+show the standing debt. A push the remote turns away after the repo's check
+passed (another push held the branch for a moment) is not a refusal: it is
+pushed again twice, and owed only if the remote still turns it away, with git's
+own line as the reason.
 
 `swarm integrate <phase>` runs the same integration by hand, outside the queue.
 

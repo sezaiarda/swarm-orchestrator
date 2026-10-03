@@ -2589,8 +2589,9 @@ def _build_parser() -> argparse.ArgumentParser:
     svp = sub.add_parser("_supervise")
     svp.add_argument("--adopt", action="store_true")
     svp.set_defaults(func=lambda cfg, a: cmd_supervise(cfg, a.adopt))
-    sub.add_parser("context", help="print the read-only state snapshot (JSON)").set_defaults(
-        func=lambda cfg, a: cmd_context(cfg))
+    cxp = sub.add_parser("context", help="print the read-only state snapshot (JSON)")
+    cxp.add_argument("--json", action="store_true", help="accepted: the output is JSON anyway")
+    cxp.set_defaults(func=lambda cfg, a: cmd_context(cfg))
     sub.add_parser("master-idle", help="signal the master finished a pass").set_defaults(
         func=lambda cfg, a: cmd_master_idle(cfg))
     sub.add_parser("bootstrap", help="ask the supervisor to spawn the init master").set_defaults(

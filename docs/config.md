@@ -156,6 +156,9 @@ Leave the table out for in-place work (`isolation = "none"`).
 | `repos` | `["*"]` | `SWARM_GIT_REPOS` (comma list) | hot, growing only | Globs, relative to the project root, that pick the component repos to mirror. Only directories with a `.git` count, and dot-names never match. A single-repo project matches none and gets an umbrella-only mirror. Dropping a repo while a phase is in flight is refused. |
 | `auto_resolve` | `{}` | | hot | Path glob mapped to `"union"` or `"keyed:<regex>"`. The integrator tries these before it opens a resolver session (see the README). |
 | `auto_resolve_check` | `{}` | | hot | Path glob mapped to a shell command. After `auto_resolve` settles a matching file, the command runs in that repo on the merged text; a non-zero exit (or 5 minutes) puts the conflict back and opens the resolver instead. |
+| `post_merge` | `{}` | | hot | Repo name (`.` for the project repo, `"*"` for every repo not named) mapped to a shell command. The integrator runs it in that repo's main checkout after a merge has landed there and before the push, through the build gate like any `swarm build`: for what the repo's pre-push check reads and git does not hold, such as the dependencies installed beside the checkout. A command that fails, times out, or leaves tracked files changed leaves the push owed with its last lines as the reason; it never holds the merge queue. An owed push's retry runs it again. A repo with a command lands after the component repos without one. |
+| `post_merge_if` | `{}` | | hot | Repo name mapped to a quick shell test, run in the main checkout at once and outside the build gate (30 s at most). `post_merge` runs only when it exits 0. Without one the command runs, and queues for a build slot, at every merge into that repo. |
+| `post_merge_timeout_s` | `300` | | hot | Seconds a `post_merge` command may wait for a build slot, and seconds it may then run. The supervisor does nothing else meanwhile, so past either the command is given up and the push is owed. |
 
 Example:
 
@@ -166,6 +169,8 @@ main_branch  = "master"
 repos        = ["*"]
 auto_resolve = { "docs/PHASE-LEDGER.md" = "keyed:^- \\[[ x]\\] `([A-Za-z0-9_.-]+)`", "CHANGELOG.md" = "union" }
 auto_resolve_check = { "docs/PHASE-LEDGER.md" = "python3 ci/ledger-gate.py" }
+post_merge    = { "app" = "sh scripts/sync-deps.sh" }
+post_merge_if = { "app" = "sh scripts/sync-deps.sh --check" }
 ```
 
 ## `[lanes]`

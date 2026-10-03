@@ -65,6 +65,10 @@ queued), ``end`` when it lets go (``run_s`` is how long no build could run;
 ``alone`` is true. A gc is not a build: readers that count or measure builds
 skip ``cls`` ``"gc"``.
 
+A ``left`` with ``cls`` ``"heavy"`` is a build the swarm runs itself and can
+wait only so long for (:func:`buildsem.slot` with ``wait_s``): no slot came in
+that time, it left the queue and nothing ran.
+
 ``repo`` is the repository a queued build works in, by the swarm's name for it
 (its path in the project, ``.`` for the project's own; see :mod:`buildpair`),
 on every event of that build; null when it has none, and for a light command.

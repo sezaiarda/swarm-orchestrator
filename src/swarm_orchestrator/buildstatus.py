@@ -448,6 +448,11 @@ def render(snap: dict) -> str:
             lines.append(f"  {when} {r.get('phase') or '-'} refused before queueing"
                          f" `{short_cmd(r['argv'], 50)}`")
             continue
+        if r.get("left") and r.get("cls") != buildsem.GC:
+            lines.append(f"  {when} {r.get('phase') or '-'} waited {fmt_s(r.get('wait_s'))}"
+                         f" for a slot and left; nothing ran ({r.get('why') or '?'})"
+                         f" `{short_cmd(r['argv'], 50)}`")
+            continue
         if r.get("left"):
             lines.append(f"  {when} gc waited {fmt_s(r.get('wait_s'))} for the gate to empty"
                          f" and left; it held nothing ({r.get('why') or '?'})")

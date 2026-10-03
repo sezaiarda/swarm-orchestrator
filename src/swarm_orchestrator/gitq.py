@@ -12,8 +12,9 @@ independent git repo that is a direct child of the project root). A single-repo
 project matches none and gets a one-repo mirror.
 
 On ``swarm done ok`` a single serialized integrator merges every repo the phase
-actually changed into its main and pushes; repos it didn't touch are 0 commits
-ahead and are dropped without any network. On ``fail`` (or a launch failure) all
+actually changed into its main and pushes, after the repo's ``[git].post_merge``
+command if it has one; repos it didn't touch are 0 commits ahead and are dropped
+without any network. On ``fail`` (or a launch failure) all
 of the phase's worktrees and branches are removed with no merge — a clean
 rollback. Every repo mutation is serialized by an ``flock`` keyed per repo.
 
@@ -52,6 +53,7 @@ from pathlib import Path
 from typing import Iterator
 
 from . import automerge
+from . import repocmd
 from . import statuses
 from .config import Config
 from .logutil import Log
@@ -78,6 +80,7 @@ DONE_INTEGRATE = statuses.INTEGRATES
 
 _GIT_TIMEOUT_S = 120.0
 _CHECK_TIMEOUT_S = 300.0  # an [git].auto_resolve_check run; it holds the repo lock
+_IF_TIMEOUT_S = 30.0  # a [git].post_merge_if test: asked before every push of a merge
 _PUSH_ATTEMPTS = 5
 #: A push the remote turned away after the hook passed (a lock race with another
 #: pusher) is pushed again this many times, this far apart, before it is owed.
@@ -287,8 +290,13 @@ def _repo_main(cfg: Config, repo: Path) -> str:
 def _repos(cfg: Config) -> list[tuple[Path, str]]:
     """All repos a phase spans: components first, umbrella last. That order lands
     code before the umbrella tick that announces it, and (for cleanup) removes
-    nested worktrees before their parent."""
-    repos = [(r, _repo_main(cfg, r)) for r in discovered_repos(cfg)]
+    nested worktrees before their parent. A component with a ``[git].post_merge``
+    command comes after those without one: what the command installs is mostly a
+    sibling's, and a phase that changed both has then landed the sibling first."""
+    found = discovered_repos(cfg)
+    if cfg.git_post_merge:
+        found.sort(key=lambda r: bool(repocmd.command(cfg, cfg.git_post_merge, r)))
+    repos = [(r, _repo_main(cfg, r)) for r in found]
     repos.append((cfg.project_dir, cfg.git_main_branch))
     return repos
 
@@ -1171,13 +1179,72 @@ def push_with_retry(repo: Path, main: str, log: Log) -> bool:
     return _push(repo, main, log) == MERGED
 
 
-def _push_owed(repo: Path, main: str, log: Log) -> PushResult:
+def _post_merge_log(cfg: Config, repo: Path) -> Path:
+    """Where a repo's last post-merge command wrote its output."""
+    return cfg.log_dir / f"post-merge.{_slug(repo)}.log"
+
+
+def _post_merge(cfg: Config, repo: Path, phase: str | None, log: Log) -> str:
+    """Run ``repo``'s ``[git].post_merge`` command in its main checkout, before a
+    push of what was merged there. ``""``: push; else why not, in the command's
+    own last lines.
+
+    Caller holds the repo lock, on a clean ``main``. What the repo's pre-push
+    check reads is not all in git: a merge that moves a dependency's pin leaves
+    the main checkout's install where it was, since workers install in their
+    mirrors, and the check then refuses every push until someone installs the
+    pin by hand. The command is what that someone would run.
+
+    Most merges need nothing, so ``[git].post_merge_if`` is asked first, at once
+    and outside the build gate: only when it exits 0 does the command queue for
+    a build slot (:func:`repocmd.run`). The integrator waits on it, so the wait
+    for a slot is bounded too (``post_merge_timeout_s``); behind a long build
+    nothing runs and the push is owed, to be tried again like any owed push. A
+    command that leaves the tree with uncommitted changes has failed, whatever
+    it exited with: the next merge would be held as :data:`DIRTY` for them.
+    """
+    cmd = repocmd.command(cfg, cfg.git_post_merge, repo)
+    if not cmd:
+        return ""
+    test = repocmd.command(cfg, cfg.git_post_merge_if, repo)
+    if test:
+        try:
+            asked = subprocess.run(
+                test, shell=True, cwd=repo, capture_output=True, text=True,
+                timeout=_IF_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.line(f"POST-MERGE-IF-FAILED {repo.name} {test!r}: {exc}"[:300])
+            return ""
+        if asked.returncode != 0:
+            return ""
+    timeout = cfg.git_post_merge_timeout_s
+    cfg.log_dir.mkdir(parents=True, exist_ok=True)
+    with _post_merge_log(cfg, repo).open("w", encoding="utf-8") as fh:
+        fh.write(f"# post-merge {phase or '(an owed push)'}: `{cmd}` in {repo}\n")
+        ran = repocmd.run(cfg, cmd, repo, fh, timeout_s=timeout, phase=phase, wait_s=timeout)
+        why = ran.reason
+        if ran.ok and _dirty(repo):
+            names = _git(repo, "diff", "--name-only", "HEAD", check=False).stdout.split()
+            why = f"the command left uncommitted changes: {' '.join(names[:5])}"
+        fh.write(f"# result: {why or 'ok'}\n")
+    if why:
+        log.line(f"POST-MERGE-FAILED {repo.name} {why}")
+    else:
+        log.line(f"POST-MERGE {repo.name} ok queued={ran.wait_s:.0f}s ran={ran.run_s:.0f}s")
+    return why
+
+
+def _push_owed(repo: Path, main: str, log: Log, cfg: Config | None = None) -> PushResult:
     """Push a ``main`` that is ahead of origin with no phase to hold. Never raises.
 
     Caller holds the repo lock. A merge-reconcile is only attempted when the repo
     sits cleanly on ``main`` — the owner may be mid-fix in exactly this checkout
     (fixing the check that refused the last push), and that tree must never be
     merged into or held as DIRTY on behalf of a phase that did not touch it.
+    Only there, and only for a caller that passes ``cfg`` (a retry; never the
+    ledger writer, whose commit is no merge), does the repo's post-merge
+    command run first (:func:`_post_merge`).
 
     The fetch is short and tried twice (:data:`_OWED_FETCH_TIMEOUT_S`): a fetch
     that hangs once can go through at once the second time, and a push is owed
@@ -1197,6 +1264,10 @@ def _push_owed(repo: Path, main: str, log: Log) -> PushResult:
             and not _rebase_in_progress(repo)
             and not _dirty(repo)
         )
+        if clean and cfg is not None:
+            failed = _post_merge(cfg, repo, None, log)
+            if failed:
+                return PushResult(PUSH_FAILED, failed)
         return _push_result(repo, main, log, reconcile=clean, abort_conflict=True)
     except GitError as exc:
         return PushResult(PUSH_FAILED, _push_reason("", str(exc)))
@@ -1211,9 +1282,20 @@ def retry_push(cfg: Config, repo: Path, log: Log) -> PushResult:
     try:
         main = _repo_main(cfg, repo)
         with repo_lock(cfg, repo):
-            return _push_owed(repo, main, log)
+            return _push_owed(repo, main, log, cfg)
     except (GitError, OSError) as exc:
         return PushResult(PUSH_FAILED, _push_reason("", str(exc)))
+
+
+def origin_has(cfg: Config, repo: Path) -> bool:
+    """Whether origin has everything ``repo``'s main has, by the refs this clone
+    holds: no fetch, no hook. A push made by hand from this checkout moves them,
+    so the debt it settled need not wait for the next spaced retry."""
+    try:
+        main = _repo_main(cfg, repo)
+        return _ref_exists(repo, f"origin/{main}") and not _local_ahead_of_origin(repo, main)
+    except GitError:
+        return False
 
 
 # -- integration ----------------------------------------------------------
@@ -1377,6 +1459,10 @@ def _integrate_one(
     that is merely ahead of origin — an owed push, or an owner commit — gets a
     push attempt that can never hold (:func:`_push_owed`), rather than the full
     path's DIRTY check against a tree the owner may be fixing.
+
+    Between the merge and the push the repo's ``[git].post_merge`` command runs
+    (:func:`_post_merge`). One that fails leaves the push owed like a push that
+    failed, with the command's last lines as the reason.
     """
     branch = f"swarm/{phase}"
     with repo_lock(cfg, repo):
@@ -1393,7 +1479,7 @@ def _integrate_one(
         ):
             if has_branch:
                 _gc(cfg, repo, phase, log)
-            pushes[repo] = _push_owed(repo, main, log)
+            pushes[repo] = _push_owed(repo, main, log, cfg)
             return MERGED
         if _merge_in_progress(repo) or _rebase_in_progress(repo):
             return CONFLICT  # a prior op is still mid-resolution
@@ -1418,7 +1504,8 @@ def _integrate_one(
             if merge.returncode != 0 and not _auto_resolve(cfg, repo, phase, log):
                 return _merge_failed(repo, phase, "INTEGRATE-CONFLICT", log)
         if _has_remote(repo):
-            pushed = _push_result(repo, main, log)
+            failed = _post_merge(cfg, repo, phase, log)
+            pushed = PushResult(PUSH_FAILED, failed) if failed else _push_result(repo, main, log)
             if pushes is not None and pushed.status != CONFLICT:
                 pushes[repo] = pushed
                 if pushed.status != MERGED:

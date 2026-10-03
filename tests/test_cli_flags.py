@@ -54,6 +54,16 @@ def test_status_json_is_machine_readable(cfg, capsys):
     assert json.loads(capsys.readouterr().out)["done"]["a-P1"] == "skip"
 
 
+def test_context_accepts_json_and_prints_the_same_snapshot(cfg, capsys):
+    """Prompts written while the flag existed still pass it; the output is JSON
+    with or without."""
+    args = ["--project-dir", str(cfg.project_dir), "context"]
+    assert cli.main(args) == 0
+    plain = json.loads(capsys.readouterr().out)
+    assert cli.main(args + ["--json"]) == 0
+    assert set(json.loads(capsys.readouterr().out)) == set(plain) and "ready" in plain
+
+
 # -- the ledger is the project's, wherever the command runs from ----------
 # Open rows: the fixture's state records a-P0/a-P1 done, and no edge through a
 # done row can hold anyone up.

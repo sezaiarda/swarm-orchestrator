@@ -87,7 +87,8 @@ periodic poll. On each sweep it:
   ready phases;
 - finishes a run that has settled;
 - tells you if a finished run still had ready phases;
-- retries owed pushes, at most every 15 minutes.
+- retries owed pushes, at most every 15 minutes, and clears at once one that
+  was pushed by hand since.
 
 A swarm that is moving is never touched. The sweep exists because a supervisor
 that only reacts to input cannot notice a worker killed out-of-band, which never
@@ -614,7 +615,8 @@ report is held and the watchdog retries it; nothing is lost across a restart.
 
 Under `isolation = "worktree"` a finished phase joins the **merge queue**
 (`integ_queue` in `state.json`). The supervisor lands one phase at a time, repo by
-repo (components first, umbrella last), each under a per-repo `flock`:
+repo (components first, those with a `[git].post_merge` command after the
+others, umbrella last), each under a per-repo `flock`:
 
 - **Untouched repos** (no commits on the branch, main level with origin) are
   pruned with no network at all.
@@ -622,9 +624,10 @@ repo (components first, umbrella last), each under a per-repo `flock`:
   1. Check that the canonical tree has no uncommitted tracked edits.
   2. Merge `origin/main` in.
   3. `merge --no-ff swarm/<phase>`.
-  4. Push. A non-fast-forward rejection is reconciled by merging origin again and
+  4. Run the repo's `[git].post_merge` command, if it has one (below).
+  5. Push. A non-fast-forward rejection is reconciled by merging origin again and
      retrying, up to 5 rounds.
-  5. Remove the worktree and branch.
+  6. Remove the worktree and branch.
 
 Before it opens a session, a conflicted merge is offered to the mechanical
 resolver (`automerge.py`) through `[git].auto_resolve`, a map from a path glob to
@@ -733,11 +736,45 @@ you are pinged once if it still owes a push after `[telegram].push_owed_grace_s`
 (1 h), and once more when it clears (immediately and at clearing under
 `[telegram].pings = "all"`). The push is
 retried after every integration and on the watchdog tick, and it clears as soon
-as origin has local main, whoever pushed it. `swarm status` and `swarm doctor`
-show the standing debt. A push the remote turns away after the repo's check
-passed (another push held the branch for a moment) is not a refusal: it is
-pushed again twice, and owed only if the remote still turns it away, with git's
-own line as the reason.
+as origin has local main, whoever pushed it: a push made by hand from the same
+checkout is seen at the next tick, without waiting for the spaced retry. `swarm
+status` and `swarm doctor` show the standing debt. A push the remote turns away
+after the repo's check passed (another push held the branch for a moment) is
+not a refusal: it is pushed again twice, and owed only if the remote still
+turns it away, with git's own line as the reason.
+
+**The post-merge command** (`[git].post_merge`, `repocmd.py`): a repo's
+pre-push check can read things git does not hold. The usual one is the
+dependencies installed beside the checkout: a phase that moves a pin installs
+it in its own mirror, the merge brings only the manifest to the main checkout,
+and the check then refuses every push until someone installs the pin there by
+hand. A project names the command that someone would run, per repo, and the
+integrator runs it in the main checkout between the merge and the push:
+
+- `[git].post_merge_if` is asked first, at once and outside the build gate.
+  Only when it exits 0 does anything run, so a merge that changes nothing the
+  command cares about costs one quick test. One that cannot be run is a no
+  (`POST-MERGE-IF-FAILED`).
+- The command runs through the build gate, like the landing's lane check:
+  queued unless it is light, on the build event log with the merged phase's
+  name. The supervisor waits on it, so both its wait for a slot and its run are
+  bounded by `[git].post_merge_timeout_s`. With no slot in that time it leaves
+  the queue and nothing ran (a `left` event).
+- Passed: `POST-MERGE <repo> ok queued=Ns ran=Ns`, and the push follows.
+- Failed, timed out, no slot, or tracked files left changed (the next merge
+  would be held as dirty for them): `POST-MERGE-FAILED <repo> <reason>`, no
+  push is tried, and the repo owes a push with that reason, which is the
+  command's own last lines. It is not a refusal, so the Overseer hears of it
+  only if it is still owed two minutes later. The merge queue is never held.
+- An owed push's retry runs the command again when the checkout sits cleanly
+  on main, so a debt whose cause is gone clears by itself. A checkout you are
+  working in is never touched, and neither is a push of the ledger writer's
+  own commit.
+- A repo with a command lands after the component repos without one: what it
+  installs usually comes from a sibling, and a phase that changed both has then
+  landed the sibling first.
+
+The output of a repo's last run is `<state>/logs/post-merge.<repo>.log`.
 
 `swarm integrate <phase>` runs the same integration by hand, outside the queue.
 
@@ -1166,7 +1203,7 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 | `unyield` | a set-aside build is working again and counts again | as in its `start` | `idle_s` = how long it was set aside; `why` = what the measurement saw (`it is using CPU again`) |
 | `passed` | a pairing rule held this waiter back and a younger one started ahead of it | the waiting `swarm build` | `why` = the rule (`same repo as slot 0 (lib)`); `by` = the `id` of the build that started |
 | `alone` | a running build was found to hold a command that runs alone; nothing starts beside it from now on | as in its `start` | `why` = what was seen; `run_s` = how long it had run |
-| `left` | a gc's wait for the gate ran out and it left the queue; it held nothing | the process gc runs in | `wait_s` = how long it waited; `why` = what was still alive |
+| `left` | a gc's wait for the gate ran out and it left the queue; it held nothing. With `cls` `heavy`: a build the supervisor runs itself (a `[git].post_merge` command) got no slot in the time it may wait, and nothing ran | the process gc runs in; the supervisor | `wait_s` = how long it waited; `why` = what was still alive |
 
 `cls` is `heavy` for a queued build, `light` for a command that skipped the
 gate, and `gc` for gc's own turn at the gate (see *gc and the gate* below):
@@ -1253,12 +1290,13 @@ each waiter.
 
 Workers are told to wrap their gates in it (`swarm build cargo nextest run`), and
 to give those commands a generous timeout, since they may queue. The landing's
-lane check queues like any other build, and like any other build it does not queue when
-its command is light: by the built-in rules, or because the project names it in
-`[build].light`. That is for a check that compiles nothing (a lint-only gate
-that takes half a minute should not wait ten behind a compile); its log starts
-with `# light command (...): not queued for a build slot`, and the build event
-log records it as a `bypass`.
+lane check and a repo's `[git].post_merge` command queue like any other build,
+and like any other build they do not queue when the command is light: by the
+built-in rules, or because the project names it in `[build].light`. That is
+for a check that compiles nothing (a lint-only gate that takes half a minute
+should not wait ten behind a compile); its log starts with `# light command
+(...): not queued for a build slot`, and the build event log records it as a
+`bypass`.
 
 **Sizing.** `[build].jobs` and `max_concurrent` describe the host the swarm runs
 on. Derive them from that machine's cores and memory (one build's peak memory
@@ -1894,6 +1932,9 @@ Telegram or ledger failure, or on a *contradicted* finding.
   and the per-pass record (`<state>/overseer/<id>.md` and `.json`).
 - **`landing.py`:** the re-test of a phase against what landed beside it when
   `[lanes]` is on (see the integrator section).
+- **`repocmd.py`:** runs a project's own command in a checkout the swarm names,
+  through the build gate, with a timeout and its output in the caller's log:
+  the landing's lane check and a repo's `[git].post_merge` command.
 - **`pauseat.py`:** `swarm pause --in 12h` / `--at 03:00`, a pause scheduled in
   `state.json` that survives `swarm down` and `up`.
 - **`procs.py`:** reads `/proc` for the process table and process identity (pid plus

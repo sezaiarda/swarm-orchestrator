@@ -309,6 +309,11 @@ stateDiagram-v2
   per-repo `flock`. Untouched repos are pruned with no network. A push that fails
   never holds the queue: the repo **owes a push**, you are pinged once, and it is
   retried after each integration and on the watchdog.
+- **Before a push:** `[git].post_merge` can name a command per repo that the
+  integrator runs in the main checkout between the merge and the push, through
+  the build gate: for what the repo's pre-push check needs and a merge does not
+  bring, such as installed dependencies. One that fails leaves the push owed
+  with its own last lines as the reason.
 - **Conflicts:** a conflicted merge is first offered to `[git].auto_resolve`
   (`automerge.py`), a map from a path glob to a strategy:
   - `union` keeps both sides, for journals;

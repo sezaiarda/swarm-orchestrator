@@ -165,8 +165,10 @@ def retry(
 
     ``skip`` is the repos an integration just pushed (successfully or not) — one
     hook run per repo per integration is enough. ``min_gap`` spaces retries of
-    the same repo by its last attempt. Never raises: :func:`gitq.retry_push`
-    turns every git failure into a result.
+    the same repo by its last attempt; a debt not yet due is still cleared when
+    the clone's own refs say origin has everything (:func:`gitq.origin_has`: the
+    owner pushed by hand), which costs no fetch and no hook run. Never raises:
+    :func:`gitq.retry_push` turns every git failure into a result.
     """
     owed = state_mod.read(cfg).push_owed
     if not owed:
@@ -178,6 +180,8 @@ def retry(
         if key in skipped:
             continue
         if min_gap and now - float(rec.get("tried") or 0.0) < min_gap:
+            if gitq.origin_has(cfg, Path(key)):
+                results[Path(key)] = gitq.PushResult(gitq.MERGED)
             continue
         results[Path(key)] = gitq.retry_push(cfg, Path(key), log)
     settle(cfg, None, results, log)

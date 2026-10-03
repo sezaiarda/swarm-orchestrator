@@ -466,6 +466,31 @@ def test_a_push_made_by_hand_clears_the_debt(monkeypatch, tmp_path):
         log.close()
 
 
+def test_a_push_made_by_hand_clears_the_debt_at_the_next_tick(monkeypatch, tmp_path):
+    """The watchdog spaces its retries, and a retry is what used to notice: for
+    up to that long the debt stood, with a refusal that was no longer true."""
+    project, _origin = _make_project(tmp_path)
+    cfg = _cfg(monkeypatch, tmp_path, project)
+    state_mod.init_state(cfg)
+    (project / "local.txt").write_text("L")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "local")
+    runs = tmp_path / "runs"
+    _refusing_hook(project, runs)
+    log = Log(cfg.supervisor_log)
+    try:
+        pushowed.settle(cfg, "P1", {project: gitq.retry_push(cfg, project, log)}, log)
+        pushowed.retry(cfg, log, min_gap=pushowed.TICK_RETRY_S)  # not due, and still owed
+        assert str(project) in state_mod.read(cfg).push_owed and not gitq.origin_has(cfg, project)
+        _git(project, "push", "--no-verify", "origin", "master")  # the owner, by hand
+        pushowed.retry(cfg, log, min_gap=pushowed.TICK_RETRY_S)
+        assert state_mod.read(cfg).push_owed == {}
+        assert _runs(runs) == 1  # read off the clone's own refs: no push, no hook
+    finally:
+        log.close()
+    assert "PUSH-OWED-CLEARED project" in cfg.supervisor_log.read_text()
+
+
 def test_an_old_push_failed_hold_still_resolves(monkeypatch, tmp_path):
     """A running older supervisor could have left ``push_failed`` as the hold."""
     from swarm_orchestrator.supervisor import Supervisor

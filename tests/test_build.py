@@ -126,14 +126,14 @@ def test_every_session_builds_without_debuginfo_or_incremental(tmp_path, monkeyp
 
 
 def test_the_lane_check_builds_with_the_workers_cargo_env(tmp_path, monkeypatch):
-    from swarm_orchestrator import landing
+    from swarm_orchestrator import repocmd
 
     for key in launch.CARGO_ENV:
         monkeypatch.delenv(key, raising=False)
     out = tmp_path / "out.log"
     with out.open("w") as fh:
-        assert landing._run('echo "debug=$CARGO_PROFILE_TEST_DEBUG inc=$CARGO_INCREMENTAL"',
-                            tmp_path, fh, 30)
+        assert repocmd._spawn('echo "debug=$CARGO_PROFILE_TEST_DEBUG inc=$CARGO_INCREMENTAL"',
+                              tmp_path, fh, 30)
     assert "debug=0 inc=0" in out.read_text()
 
 

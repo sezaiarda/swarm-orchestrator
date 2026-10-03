@@ -821,8 +821,9 @@ def _record(meta: dict, pid: int | None, start_ts: float | None,
 
 
 def _wait_turn(cfg: Config, t: Ticket, hist: buildlog.History | None,
-               announce: bool) -> Claim:
-    """Poll until it is ``t``'s turn and a build may start; report while waiting."""
+               announce: bool, leave_ts: float | None = None) -> Claim | None:
+    """Poll until it is ``t``'s turn and a build may start; report while waiting.
+    With ``leave_ts`` the wait ends there: None, and the ticket is still ``t``'s."""
     overtake, short_s = cfg.build_overtake, cfg.build_short_s
     next_report = 0.0
     while True:
@@ -830,6 +831,8 @@ def _wait_turn(cfg: Config, t: Ticket, hist: buildlog.History | None,
         if got is not None:
             return got
         now = time.time()
+        if leave_ts is not None and now >= leave_ts:
+            return None
         if now >= next_report:
             if announce:
                 if next_report == 0.0:
@@ -1222,11 +1225,15 @@ class Held:
 
 @contextmanager
 def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
-         phase: str | None = None) -> Iterator[Held]:
+         phase: str | None = None, wait_s: float | None = None) -> Iterator[Held]:
     """Hold one build slot for the body, in this process, queueing like any
     ``swarm build``: for a build the swarm runs itself and waits on (a landing's
     lane check). The fds are not inherited, so a daemon the build leaves behind
-    cannot keep the slot. Set ``.exit`` on the yielded object to log it."""
+    cannot keep the slot. Set ``.exit`` on the yielded object to log it.
+
+    ``wait_s`` is for a caller nothing else can go on without (the integrator):
+    with no slot after that long it leaves the queue (a ``left`` event), having
+    held nothing, and :class:`Busy` is raised."""
     held = Held()
     if cfg.build_max_concurrent < 1:
         yield held
@@ -1253,7 +1260,16 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
     ticket = _enqueue(cfg, meta)
     call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued, alone=bool(alone),
              why=alone)
-    claim = _wait_turn(cfg, ticket, hist, announce=False)
+    claim = _wait_turn(cfg, ticket, hist, announce=False,
+                       leave_ts=None if wait_s is None else queued + max(0.0, wait_s))
+    if claim is None:
+        _drop(ticket)
+        now = time.time()
+        holders = live_holders(cfg)
+        why = _alive_text(holders, now) if holders else "older waiters come first"
+        call.log(cfg, "left", pid=os.getpid(), slot=None, wait_s=now - queued,
+                 alone=bool(alone), why=why)
+        raise Busy(f"no build slot within {buildlog.fmt_s(wait_s)} ({why})")
     start = time.time()
     rec = _record(ticket.meta, os.getpid(), start, claim)
     _write_record(claim.seat_fd, rec)
@@ -1272,7 +1288,8 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
 
 # -- gc's turn ------------------------------------------------------------
 class Busy(RuntimeError):
-    """The gate did not empty within the wait (:func:`whole`)."""
+    """The gate did not empty within the wait (:func:`whole`), or gave no slot
+    within it (:func:`slot` with ``wait_s``)."""
 
 
 def _alive_text(holders: list[dict], now: float) -> str:

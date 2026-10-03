@@ -594,6 +594,19 @@ class Config:
         doc="glob -> command that must pass after one",
         why="gitq._auto_resolve reads the check table right after it settles a"
             " conflict, so the next automatic merge runs the new checks")
+    git_post_merge: dict[str, str] = _k(
+        "git", "post_merge", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc="repo -> command run on its main before a push",
+        why="gitq._post_merge reads the table before every push of a merge, so"
+            " the next one runs the new command")
+    git_post_merge_if: dict[str, str] = _k(
+        "git", "post_merge_if", {}, HOT, kind=FROZEN, parse=_str_table,
+        doc="repo -> quick test: is post_merge needed?",
+        why="gitq._post_merge reads the table before every push of a merge")
+    git_post_merge_timeout_s: int = _k(
+        "git", "post_merge_timeout_s", 300, HOT, minimum=1,
+        doc="seconds a post_merge may queue, and then run",
+        why="read by every post-merge command when it starts")
 
     # -- [lanes] ----------------------------------------------------------
     # Lane parallelism: rows that touch different files run at the same time. Off by

@@ -35,10 +35,10 @@ locks and never a build slot; ``swarm _lane-check`` takes a build slot and never
 a landing lock; the family lock is taken inside a check's push gate. So no cycle
 can form.
 
-**A light check takes no build slot.** The check is classified as ``swarm build``
-classifies a command (:mod:`buildclass`, with ``[build].heavy`` and ``light``):
-heavy unless it is known to be light or the project declares it so. A light one
-runs at once, beside whatever build holds the slots; every other check queues.
+**A light check takes no build slot.** The check runs the way every command
+the swarm runs for a project does (:func:`repocmd.run`): heavy unless it is
+known to be light or the project declares it so. A light one runs at once,
+beside whatever build holds the slots; every other check queues.
 
 **Outside the lane (D6).** At landing, the files the phase changed that are
 neither in its snapshot lane (``State.lanes``) nor commons are listed: a history
@@ -52,19 +52,15 @@ import json
 import os
 import re
 import shlex
-import signal
 import subprocess
 import time
-import uuid
 from fnmatch import fnmatch
 from pathlib import Path
 
-from . import buildclass
-from . import buildlog
-from . import buildsem
 from . import gitq
 from . import launch as launch_mod
 from . import ledgerw
+from . import repocmd
 from . import state as state_mod
 from .config import Config
 from .lanes import LaneError, Touch, overlaps, parse_touch
@@ -77,7 +73,6 @@ RED = "red"  # the check failed: a semantic-conflict resolver is on the worktree
 CONFLICT = "conflict"  # the catch-up merge conflicted: a resolver is on the worktree
 AGAIN = "again"  # `swarm resolved`: merge main again and re-check, moved or not
 
-_KILL_GRACE_S = 10.0
 _MERGED_BRANCH = re.compile(r"swarm/([A-Za-z0-9._-]+)")
 
 
@@ -108,8 +103,7 @@ def _result_path(cfg: Config, phase: str, repo: Path) -> Path:
 
 def check_cmd(cfg: Config, repo: Path) -> str:
     """``[lanes].check[R]``, else ``check["*"]``, else ``""`` (nothing to run)."""
-    table = cfg.lanes_check or {}
-    return table.get(lane_name(cfg, repo)) or table.get("*") or ""
+    return repocmd.command(cfg, cfg.lanes_check, repo)
 
 
 def _commons(cfg: Config, lane: str, paths: list[str]) -> list[str]:
@@ -355,33 +349,10 @@ def _collect(cfg: Config, phase: str, repo: Path, entry: dict, log: Log) -> str:
 
 
 # -- the check (``swarm _lane-check``) ------------------------------------
-def _light(cfg: Config, cmd: str, wt: Path) -> str | None:
-    """Why ``cmd`` needs no build slot, by the rules ``swarm build`` goes by, or
-    None: it queues."""
-    try:
-        verdict = buildclass.classify(
-            ["sh", "-c", cmd], str(wt), cfg.build_heavy, cfg.build_light)
-    except Exception:  # noqa: BLE001 -- a classifier bug must not stop a check
-        return None
-    return verdict.why if verdict.cls == buildclass.LIGHT else None
-
-
-def _run_light(cfg: Config, cmd: str, wt: Path, phase: str, fh) -> bool:
-    """Run a light check now, beside any build, on the build log as a bypass."""
-    start = time.time()
-    said = {"id": uuid.uuid4().hex[:12], "phase": phase, "pid": os.getpid(), "slot": None,
-            "cls": buildclass.LIGHT, "argv": cmd, "cwd": str(wt)}
-    buildlog.event(cfg, "bypass", **said, wait_s=0.0, ts=start)
-    ok = _run(cmd, wt, fh, cfg.lanes_check_timeout_s)
-    now = time.time()
-    buildlog.event(cfg, "end", **said, run_s=now - start, exit=0 if ok else 1, ts=now)
-    return ok
-
-
 def run_check(cfg: Config, phase: str, lane: str) -> int:
     """Run ``lane``'s check in ``phase``'s worktree, write its log and result, and
     poke ``lane-checked``. It goes through the build semaphore unless the command
-    is light (:func:`_light`). A timeout is red."""
+    is light (:func:`repocmd.run`). A timeout is red."""
     found = repo_for(cfg, lane)
     if found is None:
         return 2
@@ -392,16 +363,8 @@ def run_check(cfg: Config, phase: str, lane: str) -> int:
     ok = False
     with check_log(cfg, phase, repo).open("w", encoding="utf-8") as fh:
         fh.write(f"# swarm _lane-check {phase} {lane}: `{cmd}` in {wt}\n")
-        fh.flush()
-        light = _light(cfg, cmd, wt)
-        if light is not None:
-            fh.write(f"# light command ({light}): not queued for a build slot\n")
-            fh.flush()
-            ok = _run_light(cfg, cmd, wt, phase, fh)
-        else:
-            with buildsem.slot(cfg, cmd, wt, phase) as held:
-                ok = _run(cmd, wt, fh, cfg.lanes_check_timeout_s)
-                held.exit = 0 if ok else 1
+        ok = repocmd.run(cfg, cmd, wt, fh, timeout_s=cfg.lanes_check_timeout_s,
+                         phase=phase).ok
         fh.write(f"# result: {'ok' if ok else 'fail'}\n")
     result = _result_path(cfg, phase, repo)
     tmp = result.with_suffix(".tmp")
@@ -409,32 +372,6 @@ def run_check(cfg: Config, phase: str, lane: str) -> int:
     tmp.replace(result)
     launch_mod._poke_fifo(cfg, f"lane-checked {phase} {lane} {'ok' if ok else 'fail'}\n")
     return 0 if ok else 1
-
-
-def _run(cmd: str, wt: Path, fh, timeout: float) -> bool:
-    if not cmd:
-        return True
-    try:
-        # The workers' cargo settings: the check builds into the same shared
-        # target, and any other profile would write a second copy of every unit.
-        env = {**os.environ, **launch_mod.cargo_env()}
-        proc = subprocess.Popen(cmd, shell=True, cwd=wt, stdin=subprocess.DEVNULL, env=env,
-                                stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
-    except OSError as exc:  # the worktree went: nothing was tested, so red
-        fh.write(f"\n# could not start: {exc}\n")
-        return False
-    try:
-        return proc.wait(timeout=timeout) == 0
-    except subprocess.TimeoutExpired:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(proc.pid, sig)
-                proc.wait(timeout=_KILL_GRACE_S)
-                break
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                continue
-        fh.write(f"\n# timed out after {timeout}s: counted red\n")
-        return False
 
 
 # -- resolving -------------------------------------------------------------

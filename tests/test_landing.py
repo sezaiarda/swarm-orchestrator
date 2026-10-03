@@ -677,3 +677,41 @@ def test_a_check_declared_light_runs_beside_a_build(monkeypatch, tmp_path):
         assert len(ws.runs()) == 1
     finally:
         ws.close()
+
+
+# -- 12. the log of the run before --------------------------------------------------
+def test_a_red_checks_log_is_kept_when_the_check_runs_again(monkeypatch, tmp_path):
+    ws = Ws(monkeypatch, tmp_path, extra=_ONE_SLOT)
+    try:
+        _sibling_landed(ws)
+        check = ws.ctl / "check.sh"
+        check.write_text(check.read_text().replace(
+            "exit $code", 'echo "the check says $code"\nexit $code'))
+        log = landing.check_log(ws.cfg, "P", ws.repos["pricing"])
+        kept = landing.kept_log(ws.cfg, "P", ws.repos["pricing"])
+        ws.set_exit(1)
+        assert ws.integrate("P") == gitq.LANE_CHECKING
+        assert ws.wait_result("P", "pricing") == "fail"
+        assert ws.integrate("P") == gitq.LANE_RED
+        red = log.read_text()
+        assert "the check says 1" in red and "# result: fail" in red
+        assert not kept.exists()  # the first run had nothing to keep
+
+        ws.set_exit(0)
+        landing.retest(ws.cfg, "P")
+        with buildsem.slot(ws.cfg, "a long build", ws.project, "other"):
+            assert ws.integrate("P") == gitq.LANE_CHECKING
+            end = time.monotonic() + 20
+            while time.monotonic() < end and not (
+                    log.is_file() and str(kept) in log.read_text()):
+                time.sleep(0.05)
+            # Queued for the slot, the new log is its header: it names the kept one.
+            assert str(kept) in log.read_text()
+            assert "the check says" not in log.read_text()
+            assert kept.read_text() == red
+        assert ws.wait_result("P", "pricing") == "ok"
+        assert "the check says 0" in log.read_text()
+        assert kept.read_text() == red
+        ws.land("P")
+    finally:
+        ws.close()

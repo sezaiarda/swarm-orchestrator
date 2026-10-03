@@ -652,7 +652,9 @@ With `[lanes] enabled`, a changed repo whose main moved since the phase branched
 is re-tested first: main is merged into the phase's worktree and `[lanes].check`
 runs there (`swarm _lane-check`, detached) against the sibling lanes that landed.
 Green lands the tested tree; red or a text conflict holds the queue and opens the
-resolver on the worktree.
+resolver on the worktree. Each run writes `<state>/landing/<phase>.<repo>.log`
+afresh and keeps the log of the run before beside it as `.log.prev`, so the
+output of a red check can still be read after `swarm resolved` starts it again.
 
 A check takes minutes and the ledger writer commits to main every few minutes,
 so main has often moved again by the time a check is green. The green check

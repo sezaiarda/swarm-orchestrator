@@ -97,6 +97,13 @@ def check_log(cfg: Config, phase: str, repo: Path) -> Path:
     return landing_dir(cfg) / f"{phase}.{gitq._slug(repo)}.log"
 
 
+def kept_log(cfg: Config, phase: str, repo: Path) -> Path:
+    """Where the log of the run before is kept. Each run starts the log afresh,
+    and why a check was red must stay readable once it is run again."""
+    log = check_log(cfg, phase, repo)
+    return log.with_name(f"{log.name}.prev")
+
+
 def _result_path(cfg: Config, phase: str, repo: Path) -> Path:
     return landing_dir(cfg) / f"{phase}.{gitq._slug(repo)}.result"
 
@@ -352,7 +359,8 @@ def _collect(cfg: Config, phase: str, repo: Path, entry: dict, log: Log) -> str:
 def run_check(cfg: Config, phase: str, lane: str) -> int:
     """Run ``lane``'s check in ``phase``'s worktree, write its log and result, and
     poke ``lane-checked``. It goes through the build semaphore unless the command
-    is light (:func:`repocmd.run`). A timeout is red."""
+    is light (:func:`repocmd.run`). A timeout is red. The log of the run before
+    is moved aside first (:func:`kept_log`), and the new log names it."""
     found = repo_for(cfg, lane)
     if found is None:
         return 2
@@ -361,8 +369,16 @@ def run_check(cfg: Config, phase: str, lane: str) -> int:
     cmd = check_cmd(cfg, repo)
     landing_dir(cfg).mkdir(parents=True, exist_ok=True)
     ok = False
-    with check_log(cfg, phase, repo).open("w", encoding="utf-8") as fh:
+    log, kept = check_log(cfg, phase, repo), kept_log(cfg, phase, repo)
+    try:
+        log.replace(kept)
+    except OSError:  # the first run: nothing to keep
+        kept = None
+    with log.open("w", encoding="utf-8") as fh:
         fh.write(f"# swarm _lane-check {phase} {lane}: `{cmd}` in {wt}\n")
+        if kept is not None:
+            fh.write(f"# the log of the run before this one: {kept}\n")
+        fh.flush()
         ok = repocmd.run(cfg, cmd, wt, fh, timeout_s=cfg.lanes_check_timeout_s,
                          phase=phase).ok
         fh.write(f"# result: {'ok' if ok else 'fail'}\n")

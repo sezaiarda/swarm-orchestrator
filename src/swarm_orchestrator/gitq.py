@@ -1678,6 +1678,29 @@ def resolve_ready(cfg: Config, repo: Path) -> bool:
         )
 
 
+#: The uncommitted paths :func:`unfinished` names before it counts the rest.
+_UNFINISHED_SHOWN = 5
+
+
+def unfinished(repo: Path) -> str:
+    """What a premature ``swarm resolved`` found in ``repo``, in plain words: an
+    unfinished merge or rebase, else the uncommitted changes :func:`_dirty`
+    counts with the first paths named, so a reader can tell the output of a
+    test run from work left half done."""
+    if _merge_in_progress(repo):
+        return "an unfinished merge"
+    if _rebase_in_progress(repo):
+        return "an unfinished rebase"
+    out = _git(repo, "status", "--porcelain", "--untracked-files=no", check=False).stdout
+    paths = [line[3:] for line in out.splitlines() if line.strip()]
+    if not paths:  # the checkout is off main, or it was put right meanwhile
+        return "an unfinished merge or uncommitted changes"
+    shown = paths[:_UNFINISHED_SHOWN]
+    if len(paths) > _UNFINISHED_SHOWN:
+        shown.append(f"+{len(paths) - _UNFINISHED_SHOWN} more")
+    return "uncommitted changes in " + ", ".join(shown)
+
+
 # -- restart reconcile (sentinel-driven, never topology-driven) -----------
 def sentinel_done(cfg: Config) -> dict[str, str]:
     """Rehydrate the ``{phase: status}`` map from durable ``swarm done`` sentinels.

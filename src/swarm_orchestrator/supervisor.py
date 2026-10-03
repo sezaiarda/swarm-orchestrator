@@ -1491,13 +1491,14 @@ class Supervisor:
                  else gitq.resolve_ready(self.cfg, repo))
         if repo is not None and not ready:
             # Resolver / owner signalled early (still mid-merge or dirty): stay blocked.
-            self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked")
+            what = gitq.unfinished(repo)
+            self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked {repo.name}: {what}")
             self.overseer.resolver_escalated(phase)
             telegram.notify(
                 self.cfg.telegram_notify,
-                f"swarm: {phase} still cannot be merged: {repo.name} has an unfinished"
-                f" merge or uncommitted changes, so merging stays paused. Finish and"
-                f" commit it, then run `swarm resolved {phase}` again",
+                f"swarm: {phase} still cannot be merged: {repo.name} has {what}, so"
+                f" merging stays paused. Finish and commit it, then run"
+                f" `swarm resolved {phase}` again",
                 kind="integrate-hold",
                 phase=phase,
                 source="supervisor._on_resolved",

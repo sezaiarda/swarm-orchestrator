@@ -215,6 +215,11 @@ def _drop_landing_flocks():
             pass
 
 
+def _told() -> str:
+    """Everything sent to the owner so far."""
+    return Path(os.environ["SWARM_TG_SINK"]).read_text()
+
+
 # -- 1. main has not moved ----------------------------------------------------
 def test_main_unmoved_lands_without_a_check(ws):
     ws.phase("P")
@@ -418,6 +423,7 @@ def test_catch_up_conflict_leaves_the_worktree_mid_merge_and_the_checkout_clean(
         # Resolving: an early `resolved` stays blocked; a committed merge re-checks.
         sup._on_resolved("P")
         assert state_mod.read(ws.cfg).integ_blocked == "P"
+        assert "pricing has an unfinished merge, so" in _told()
         (wt / "code.txt").write_text("S and P\n")
         _git(wt, "add", "-A")
         _git(wt, "commit", "--no-edit")
@@ -715,3 +721,38 @@ def test_a_red_checks_log_is_kept_when_the_check_runs_again(monkeypatch, tmp_pat
         ws.land("P")
     finally:
         ws.close()
+
+
+# -- 13. an early `resolved` says what is left --------------------------------------
+def test_resolved_on_a_tree_a_test_run_dirtied_names_the_paths(ws):
+    reports = [f"reports/r{i}.txt" for i in range(1, 8)]
+    ws.phase("S")
+    ws.phase("P")
+    ws.commit("S", "pricing", {"other.txt": "S\n"})
+    ws.commit("P", "pricing", {"code.txt": "P\n", **{r: "clean\n" for r in reports}})
+    ws.land("S")
+    wt = ws.wt("P", "pricing")
+    ws.set_exit(1)
+    with state_mod.transaction(ws.cfg) as st:
+        st.integ_queue = ["P"]
+    sup = Supervisor(ws.cfg)
+    try:
+        sup._pump_integrations()
+        assert ws.wait_result("P", "pricing") == "fail"
+        sup._handle("lane-checked P pricing fail")
+        assert state_mod.read(ws.cfg).integ_blocked_kind == gitq.LANE_RED
+
+        # The resolver commits its fix; its own test run rewrote tracked files.
+        ws.commit("P", "pricing", {"code.txt": "P fixed\n"})
+        for r in reports:
+            (wt / r).write_text("from the test run\n")
+        (wt / "scratch.txt").write_text("untracked: not in the way\n")
+        sup._on_resolved("P")
+        assert state_mod.read(ws.cfg).integ_blocked == "P"  # held, as before
+    finally:
+        sup.log.close()
+    named = "uncommitted changes in " + ", ".join(reports[:5]) + ", +2 more"
+    assert f"pricing has {named}, so" in _told()
+    assert "unfinished merge" not in _told() and "scratch.txt" not in _told()
+    assert f"RESOLVED-INCOMPLETE P still-blocked pricing: {named}" in (
+        ws.cfg.supervisor_log.read_text())

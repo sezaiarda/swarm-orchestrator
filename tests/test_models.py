@@ -320,3 +320,21 @@ def test_the_board_counts_rows_by_the_model_that_builds_them(ws):
     models_mod.record_handup(cfg, "a-W2", "sonnet", "opus", WHY)
     assert board._row_models(cfg, parsed)[1] == {}
     assert board._model_counts(cfg, cards, own)["handed_up"] == 1
+
+
+def test_only_rows_launched_on_their_model_speak_for_it_in_the_forecast(ws):
+    """A row given a model after an earlier attempt ran that attempt on the
+    swarm's own: its history must not be read as the model's."""
+    from swarm_orchestrator.eta import engine
+
+    cfg, _project, _sup = ws
+    st = state_mod.read(cfg)
+    quiet = engine.gather(cfg, st, events=[], history=[], ledger_history=engine.pace_mod.History(),
+                          usage=[])
+    assert quiet.models == {"a-W2": "sonnet"} and quiet.ran_models == {}
+    assert quiet.burn_weight == {"sonnet": tiers.BURN_PRIOR}
+
+    events = data_mod.parse_events("2026-01-01 00:00:00.000 1.0 MODEL a-W2 model=sonnet")
+    ran = engine.gather(cfg, st, events=events, history=[],
+                        ledger_history=engine.pace_mod.History(), usage=[])
+    assert ran.ran_models == {"a-W2": "sonnet"}

@@ -114,6 +114,10 @@ class Inputs:
     #: what each such model burns per worker-hour (:func:`tiers.burn_weights`).
     models: dict[str, str] = field(default_factory=dict)
     burn_weight: dict[str, float] = field(default_factory=dict)
+    #: Those of :attr:`models` the log shows were launched on their model
+    #: (``MODEL <row>``). Only their history speaks for the model: a row given a
+    #: model after an earlier attempt ran that attempt on the swarm's own.
+    ran_models: dict[str, str] = field(default_factory=dict)
 
 
 def gather(cfg, state, *, events, history, ledger_history, usage, text: str | None = None,
@@ -138,6 +142,8 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
         if ev.kind in ("launch", "claim") and ev.phase and ev.ts is not None:
             started[ev.phase] = ev.ts
     row_models = _row_models(cfg, text)
+    ran_on = {ev.phase for ev in events if ev.kind == "model" and ev.phase}
+    ran_models = {p: m for p, m in row_models.items() if p in ran_on}
     return Inputs(
         now=now, text=text, graph=graph,
         landed=ledger_mod.with_ticked(ledgerw.not_failed(state.done, dated or {}),
@@ -153,7 +159,9 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
         forecasts=tuple(calibrate_mod.load(calibrate_mod.log_path(cfg))),
         dated=dated,
         models=row_models,
-        burn_weight=tiers.burn_weights(_meters(cfg, graph), row_models) if row_models else {},
+        burn_weight={m: tiers.BURN_PRIOR for m in row_models.values()}
+        | (tiers.burn_weights(_meters(cfg, graph), ran_models) if ran_models else {}),
+        ran_models=ran_models,
     )
 
 
@@ -263,7 +271,7 @@ def fit(inputs: Inputs) -> Fitted:
     dirs = ledger_mod.dirs(inputs.text)
     rec = record_mod.from_sources(inputs.history, inputs.events, inputs.ledger_history)
     durations = model_mod.fit(record_mod.samples(rec, inputs.now),
-                              lambda p: plan_mod.meta_for(p, dirs, inputs.models))
+                              lambda p: plan_mod.meta_for(p, dirs, inputs.ran_models))
     ticks = [t for t, n in rec.ticks.values() if n <= pace_mod.BULK]
     workers = list(rec.workers) or [(0.0, inputs.workers)]
     return Fitted(
@@ -281,9 +289,9 @@ def fit(inputs: Inputs) -> Fitted:
 def burn(inputs: Inputs) -> dict[str, float]:
     """Each usage window's percentage points per busy worker-hour, lately."""
     weight = None
-    if inputs.models:
+    if inputs.ran_models:
         def weight(phase: str) -> float:
-            model = inputs.models.get(phase, "")
+            model = inputs.ran_models.get(phase, "")
             return inputs.burn_weight.get(model, tiers.BURN_PRIOR) if model else 1.0
     return burn_of(inputs.events, inputs.workers, inputs.usage, inputs.now, weight)
 
@@ -348,7 +356,8 @@ def key(inputs: Inputs, fit_id: str) -> str:
                                              inputs.now))
                   for w in ("week", "five")],
         "fit": fit_id,
-        "models": [sorted(inputs.models.items()), sorted(inputs.burn_weight.items())],
+        "models": [sorted(inputs.models.items()), sorted(inputs.burn_weight.items()),
+                   sorted(inputs.ran_models)],
     }
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 

@@ -6,6 +6,8 @@ What is load-bearing here:
   undoes a pause the owner made, and ``swarm resume`` alone never overrides it;
 * a hold lifts only once its window has reset *and* a fresh reading is under the
   limit — a lagging or stale reading can neither lift nor create one;
+* a limit reset inside its window is such a reset, read from the endpoint only:
+  the hold lifts, and an override or a fired ``down`` from before it ends;
 * a ``down`` rule runs ``swarm down`` once per window, with one ping;
 * the usage endpoint is asked only when the tap has nothing fresh, at most once
   per half hour, and its token is never sent once expired and never logged.
@@ -118,9 +120,10 @@ def test_down_acts_once_per_window():
     assert nxt.down is not None
 
 
-def _sample(ts, week=None, five=None, week_reset=WEEK_RESET, five_reset=FIVE_RESET, account=None):
+def _sample(ts, week=None, five=None, week_reset=WEEK_RESET, five_reset=FIVE_RESET, account=None,
+            src=None):
     return usage_mod.Sample(ts=ts, week_pct=week, week_resets_at=week_reset,
-                            five_pct=five, five_resets_at=five_reset, account=account)
+                            five_pct=five, five_resets_at=five_reset, account=account, src=src)
 
 
 # -- accounts ----------------------------------------------------------------------
@@ -195,11 +198,11 @@ def test_readings_never_blend_accounts():
 
 
 def test_a_reading_is_the_highest_fresh_figure_of_the_newest_window():
-    samples = [_sample(NOW - 3000, week=80, five=10),  # stale
+    samples = [_sample(NOW - 3000, week=46, five=10),  # stale
                _sample(NOW - 60, week=47, five=12),
                _sample(NOW - 30, week=44, five=11)]  # a lagging session
     reads = caps.readings(samples, NOW, 1800)
-    assert reads["week"] == caps.Reading(47, WEEK_RESET, NOW - 30)
+    assert reads["week"] == caps.Reading(47, WEEK_RESET, NOW - 30, top=47)
     assert reads["five_hour"].pct == 12
     assert not caps.needs_api(samples, NOW, 1800)
 
@@ -209,6 +212,56 @@ def test_a_window_that_reset_since_its_reading_has_no_reading():
     assert list(caps.readings(samples, NOW, 1800)) == ["week"]
     assert caps.needs_api(samples, NOW, 1800)
     assert caps.needs_api([], NOW, 1800)
+
+
+# -- a limit reset inside its window ---------------------------------------------------
+def test_a_reset_in_place_is_read_from_the_endpoint_and_counts_from_there():
+    """The owner's case: the weekly limit, at 100%, reset on the same account
+    with its reset date unchanged, and sessions that still showed 100%."""
+    samples = [_sample(NOW - 4000, week=100, five=9, account=A, src="api"),
+               _sample(NOW - 900, week=0, five=0, five_reset=None, account=A, src="api"),
+               _sample(NOW - 60, week=1, five=2, five_reset=NOW + 4 * 3600, account=A),
+               _sample(NOW - 30, week=100, five=9, account=A)]  # a session that has not heard yet
+    reads = caps.readings(samples, NOW, 1800)
+    assert reads["week"] == caps.Reading(1, WEEK_RESET, NOW - 60, restarted=NOW - 900, top=1)
+    assert reads["five_hour"].pct == 2
+    assert not caps.needs_api(samples, NOW, 1800)
+
+
+def test_fresh_readings_well_under_the_windows_highest_ask_the_endpoint():
+    # A status line cannot say whether that is a lagging session or a reset.
+    samples = [_sample(NOW - 3000, week=80, five=10), _sample(NOW - 60, week=47, five=12)]
+    reads = caps.readings(samples, NOW, 1800)
+    assert reads["week"] == caps.Reading(47, WEEK_RESET, NOW - 60, top=80)
+    assert caps.needs_api(samples, NOW, 1800)
+    said = samples + [_sample(NOW - 5, week=48, five=12, src="api")]
+    assert caps.readings(said, NOW, 1800)["week"].restarted == NOW - 5
+    assert not caps.needs_api(said, NOW, 1800)
+
+
+def test_a_reset_in_place_lifts_the_hold_and_ends_what_was_decided_before_it():
+    low = caps.Reading(2, WEEK_RESET, NOW + 600, restarted=NOW + 500, top=2)
+    out = _eval({"week": low}, hold=_eval({"week": _r(61)}).hold, now=NOW + 600)
+    assert out.hold == {} and out.lifted == ["week"]
+    out = _eval({"week": low}, override={"week": WEEK_RESET, "week@x": WEEK_RESET,
+                                         "five_hour": FIVE_RESET}, now=NOW + 600)
+    assert out.override == {"week@x": WEEK_RESET, "five_hour": FIVE_RESET}
+    assert out.ended == ["week"]
+    out = _eval({"week": low}, fired={"week:70": WEEK_RESET}, now=NOW + 600)
+    assert out.fired == {} and out.down is None
+    again = _eval({"week": caps.Reading(71, WEEK_RESET, NOW + 900, restarted=NOW + 500, top=71)},
+                  fired=out.fired, now=NOW + 900)
+    assert again.down is not None and again.held == ["week"]
+
+
+def test_what_the_window_reached_again_after_a_reset_in_place_stands():
+    # It filled a second time; a lagging reading must not undo what followed.
+    lagging = caps.Reading(44, WEEK_RESET, NOW + 600, restarted=NOW - 9000, top=75)
+    hold = {"week": {"at": 60, "pct": 61, "resets_at": WEEK_RESET, "since": NOW}}
+    out = _eval({"week": lagging}, hold=hold, fired={"week:70": WEEK_RESET}, now=NOW + 600)
+    assert out.hold == hold and not out.lifted and out.fired == {"week:70": WEEK_RESET}
+    out = _eval({"week": lagging}, override={"week": WEEK_RESET}, now=NOW + 600)
+    assert out.override == {"week": WEEK_RESET} and not out.ended
 
 
 # -- the endpoint --------------------------------------------------------------------
@@ -304,13 +357,14 @@ def sup(cfg, api, monkeypatch):
     s.log.close()
 
 
-def _tap(cfg, week=None, five=None, ago=60.0, week_reset=None, five_reset=None, account=None):
+def _tap(cfg, week=None, five=None, ago=60.0, week_reset=None, five_reset=None, account=None,
+         src=None):
     now = time.time()
     row = usage_mod.sample_row(
         now - ago, None,
         None if five is None else {"pct": five, "resets_at": five_reset or now + 7200},
         None if week is None else {"pct": week, "resets_at": week_reset or now + 3 * 86400},
-        account)
+        account) | ({"src": src} if src else {})
     path = cfg.state_dir / "meters" / "limits.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
@@ -470,6 +524,39 @@ def test_a_lagging_reading_of_the_held_account_keeps_the_hold(sup, cfg, tmp_path
     _tap(cfg, week=5, five=5, ago=0, week_reset=time.time() + 3600)  # untagged: anyone's
     sup._usage_check(time.time())
     assert state_mod.read(cfg).usage_hold["week"]["pct"] == 91
+
+
+def test_a_limit_reset_inside_its_window_lifts_the_hold(sup, cfg, tmp_path, api):
+    reset = time.time() + 3 * 86400
+    _tap(cfg, week=91, five=20, week_reset=reset)
+    sup._usage_check(time.time())
+    assert state_mod.read(cfg).usage_hold["week"]["pct"] == 91
+    _tap(cfg, week=0, five=20, ago=0, week_reset=reset, src="api")  # same reset date, emptied
+    sup._usage_check(time.time())
+    assert state_mod.read(cfg).usage_hold == {}
+    assert "USAGE-LIFT week window reset" in cfg.supervisor_log.read_text()
+    assert _tg(tmp_path)[-1].startswith(
+        "Swarm resumed: the weekly usage window reset and usage is now 0%.")
+    assert sup.stub_launches[:2] == ["P0", "P1"]
+
+
+def test_status_lines_far_under_the_windows_highest_ask_the_endpoint(sup, cfg, api):
+    """Running through the cap when the limit is reset: only status lines are
+    fresh, and they cannot say it. The endpoint does, and the override ends."""
+    now = time.time()
+    reset = now + 3 * 86400
+    _tap(cfg, week=95, five=20, ago=3000, week_reset=reset)
+    _tap(cfg, week=3, five=20, ago=30, week_reset=reset)
+    with state_mod.transaction(cfg) as st:
+        st.usage_override = {"week": reset}
+    api.answer = (usage_mod.sample_row(now, None, {"pct": 20, "resets_at": now + 7200},
+                                       {"pct": 3, "resets_at": reset}) | {"src": "api"}, "ok")
+    sup._usage_check(now)
+    assert len(api.calls) == 1
+    assert state_mod.read(cfg).usage_override == {}
+    assert "USAGE-OVERRIDE-END week" in cfg.supervisor_log.read_text()
+    sup._usage_check(now + 1)  # the endpoint answered: nothing left to ask
+    assert len(api.calls) == 1
 
 
 def test_the_check_is_scheduled_not_polled(sup, cfg):

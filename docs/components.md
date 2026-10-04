@@ -1548,6 +1548,15 @@ or logged; a failed call is logged (`USAGE-API`) and the last reading stands.
   lagging reading of the held account never does. `swarm resume` leaves it in
   place and says so; `swarm resume --override-cap` runs through it until the
   window resets.
+- **a limit reset inside its window:** when an account's limit is reset before
+  the window ends, the window keeps its reset time and the figure falls to zero.
+  From a status line that looks like a lagging reading, so the supervisor asks
+  the endpoint whenever every fresh reading sits well under the window's
+  highest. The endpoint reading 5 points or more under it, same reset, is the
+  reset: the charts drop there, usage counts from it, a hold lifts, and an
+  override or a fired `down` from before it is dropped, so the cap acts again
+  if the window fills a second time. Status lines that still show the figures
+  from before are ignored.
 - **down:** runs `swarm down`, once per window of each account. The swarm stays
   down.
 

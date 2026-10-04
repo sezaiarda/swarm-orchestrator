@@ -7,7 +7,8 @@ cap it will hit (or to its reset, if that comes first).
 
 Readings and account switches are the TUI's, from one place: inside one
 window only the running maximum counts (a lagging session's status line reports
-an older, lower figure), a window that resets drops to zero at its reset, and
+an older, lower figure), a window that resets drops to zero at its reset, one
+reset in place (:func:`usage.restarts`) drops to the reading that found it, and
 :func:`usage.accounts` says when the owner switched accounts. A switch ends the
 line and starts a new segment (the old account is drawn muted), and the newest
 reading and the projection come from the current account only.
@@ -48,8 +49,9 @@ def segments(samples, prefix: str, t0: float, now: float) -> tuple[list[list[lis
     The same reading as the TUI's :func:`tui.usagebox.series`, one segment per
     account (:func:`usage.accounts`): each is ``[[ts, pct], …]`` and starts from
     its own first reading; the last is the current account. ``resets`` are the
-    window resets seen (the line drops to zero there, within its segment);
-    ``breaks`` are the account switches (:func:`usage.switch_times`) in the span.
+    window resets seen (the line drops there, within its segment: to zero, or
+    to the reading that found the limit reset in place); ``breaks`` are the
+    account switches (:func:`usage.switch_times`) in the span.
     """
     samples = list(samples or ())
     segs: list[list[list[float]]] = []
@@ -72,9 +74,11 @@ def segments(samples, prefix: str, t0: float, now: float) -> tuple[list[list[lis
         if at >= t0:
             resets.append(at)
 
-    for s, seg in sorted(zip(samples, usage_mod.accounts(samples)), key=lambda x: x[0].ts):
+    marks = usage_mod.restarts(samples)
+    for s, seg, hit in sorted(zip(samples, usage_mod.accounts(samples), marks),
+                              key=lambda x: x[0].ts):
         pct, rs = getattr(s, f"{prefix}_pct"), getattr(s, f"{prefix}_resets_at")
-        if pct is None or s.ts > now or seg is None:
+        if pct is None or s.ts > now or seg is None or hit is None:
             continue
         if seg != account:
             if cur:
@@ -85,7 +89,12 @@ def segments(samples, prefix: str, t0: float, now: float) -> tuple[list[list[lis
         if res is not None and s.ts >= res:  # the window reset before this reading
             drop(res)
             top = res = None
-        if res is not None and rs is not None:
+        if prefix in hit and top is not None:  # the limit was reset in place
+            point(s.ts, top)
+            if s.ts >= t0:
+                resets.append(s.ts)
+            top = None
+        elif res is not None and rs is not None:
             if rs < res - usage_mod.RESET_JUMP_S:
                 continue  # a reading from a window already over
             if rs > res + usage_mod.RESET_JUMP_S:
@@ -105,10 +114,11 @@ def _reading(samples, prefix: str, now: float):
     """``(ts, pct, resets_at)`` of the newest reading of the current account
     still in its window (readings :func:`usage.accounts` ignores are skipped)."""
     samples = list(samples or ())
-    for s, seg in reversed(sorted(zip(samples, usage_mod.accounts(samples)),
-                                  key=lambda x: x[0].ts)):
+    marks = usage_mod.restarts(samples)
+    for s, seg, hit in reversed(sorted(zip(samples, usage_mod.accounts(samples), marks),
+                                       key=lambda x: x[0].ts)):
         pct, rs = getattr(s, f"{prefix}_pct"), getattr(s, f"{prefix}_resets_at")
-        if pct is not None and seg is not None:
+        if pct is not None and seg is not None and hit is not None:
             if rs is not None and rs <= now:
                 return None
             return s.ts, pct, rs

@@ -164,6 +164,57 @@ def test_a_stale_reading_from_the_previous_window_is_skipped():
     assert pace.windows == 2 and pace.used == pytest.approx(3 + 3)
 
 
+# -- a limit reset inside its window ---------------------------------------------------
+def _reset_in_place(src="api"):
+    """A weekly limit reset in place: the endpoint reads 100%, then 0% under the
+    same reset with the 5-hour window closed; then sessions carry on, one of
+    them still showing the figures from before."""
+    wk, f1, f2 = T0 + 70 * H, T0 + 2 * H, T0 + 6 * H
+
+    def tap(ts, five, five_reset, week):
+        return usage.Sample(ts, five_pct=five, five_resets_at=five_reset, week_pct=week,
+                            week_resets_at=wk, account="a")
+
+    def api(ts, five, five_reset, week):
+        return usage.Sample(ts, five_pct=five, five_resets_at=five_reset, week_pct=week,
+                            week_resets_at=wk, account="a", src=src)
+
+    return [tap(T0 - 2 * H, 5, f1, 95), api(T0 - H, 9, f1, 100), api(T0, 0, None, 0),
+            tap(T0 + 0.5 * H, 1, f2, 0),
+            tap(T0 + 0.6 * H, 9, f1, 100),  # a session that has not heard of the reset
+            tap(T0 + H, 4, f2, 2), api(T0 + 1.5 * H, 6, f2, 3),
+            tap(T0 + 1.6 * H, 5, f2, 2)]  # a status line one point behind the endpoint
+
+
+def test_the_endpoint_reading_far_under_the_top_is_a_reset_in_place():
+    marks = usage.restarts(_reset_in_place())
+    assert marks == [(), (), ("five", "week"), (), None, (), (), ()]
+    # In file order or not, each sample gets its own answer.
+    assert usage.restarts(_reset_in_place()[::-1]) == marks[::-1]
+
+
+def test_a_status_line_alone_never_says_a_limit_was_reset():
+    # The same figures with no endpoint among them: a lagging session, as before.
+    assert usage.restarts(_reset_in_place(src=None)) == [()] * 8
+
+
+def test_the_endpoint_a_point_or_two_under_a_status_line_is_rounding():
+    wk = T0 + 70 * H
+    s = [usage.Sample(T0, week_pct=76, week_resets_at=wk),
+         usage.Sample(T0 + H, week_pct=72, week_resets_at=wk, src="api")]
+    assert usage.restarts(s) == [(), ()]
+
+
+def test_usage_after_a_reset_in_place_counts_and_a_stale_snapshot_does_not():
+    s = _reset_in_place()
+    week = usage.week_pace(s, T0 - 2 * H, T0 + 2 * H)
+    assert week.windows == 2 and week.used == pytest.approx(5 + 3)
+    five = usage.five_pace(s, T0 - 2 * H, T0 + 2 * H)
+    assert five.windows == 2 and five.used == pytest.approx(4 + 6)
+    # Every "now" figure reads past the stale snapshot.
+    assert usage.latest(usage.current(s[:5]), "week", T0 + H) == (0, T0 + 70 * H)
+
+
 def test_week_pace_is_piecewise_too_and_only_counts_inside_the_run():
     wk1, wk2 = T0 + 3 * H, T0 + 171 * H
     s = [usage.Sample(T0 - 5 * H, week_pct=10, week_resets_at=wk1),  # before the run

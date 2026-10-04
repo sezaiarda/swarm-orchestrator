@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from swarm_orchestrator.tui import usagebox
 from swarm_orchestrator.usage import Sample
 from swarm_orchestrator.web import usagechart
 
@@ -32,6 +33,31 @@ def test_a_reset_drops_to_zero_inside_the_segment():
     segs, resets, breaks = usagechart.segments(samples, "week", 0.0, 4 * H)
     assert resets == [2 * H] and breaks == [] and len(segs) == 1
     assert [2 * H, 0.0] in segs[0]
+
+
+def test_a_limit_reset_in_place_drops_to_the_reading_that_found_it():
+    wk = 100 * H
+    samples = [_week(0, 95, wk), Sample(ts=H, week_pct=100, week_resets_at=wk, src="api"),
+               Sample(ts=2 * H, week_pct=0, week_resets_at=wk, src="api"), _week(3 * H, 2, wk)]
+    segs, resets, breaks = usagechart.segments(samples, "week", 0.0, 4 * H)
+    assert resets == [2 * H] and breaks == []
+    assert segs == [[[0, 95], [H, 100], [2 * H, 100], [2 * H, 0], [3 * H, 2]]]
+    # The TUI's chart reads the same log the same way.
+    assert usagebox.series(samples, "week", 0.0, 4 * H)[-2:] == [(2 * H, 0), (3 * H, 2)]
+
+
+def test_a_stale_snapshot_after_a_reset_in_place_is_not_the_reading():
+    wk, five = 100 * H, 4 * H
+    samples = [Sample(ts=H, five_pct=9, five_resets_at=five, week_pct=100, week_resets_at=wk,
+                      src="api"),
+               Sample(ts=2 * H, five_pct=0, week_pct=0, week_resets_at=wk, src="api"),
+               # A session that has not heard: the closed 5-hour window gives it away.
+               Sample(ts=2.5 * H, five_pct=9, five_resets_at=five, week_pct=100,
+                      week_resets_at=wk)]
+    assert usagechart._reading(samples, "week", 3 * H) == (2 * H, 0, wk)
+    segs, _, _ = usagechart.segments(samples, "week", 0.0, 3 * H)
+    assert segs[0][-1] == [2 * H, 0]
+    assert usagebox.series(samples, "week", 0.0, 3 * H)[-1] == (2 * H, 0)
 
 
 def test_an_account_switch_is_a_break_not_a_drop():

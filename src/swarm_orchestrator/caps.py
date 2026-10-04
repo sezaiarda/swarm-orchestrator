@@ -19,6 +19,12 @@ A rule is ``{window, at, action}``:
 A stale or missing reading never creates a hold and never lifts one. Workers are
 never told any of this: caps act on the swarm, not inside a session.
 
+A limit reset before its window ends (:func:`usage.restarts`) is a reset like
+any other: the reading counts from it, and a hold, an override or a ``down``
+that fired stands only if the window has reached its limit again since. A
+status line cannot show such a reset, so when every fresh reading sits well
+under the window's highest the endpoint is asked too.
+
 Everything is per account (:func:`usage.active_account`). Readings are taken
 from the samples of the account the swarm runs on now, a hold remembers the
 account it was measured on, and when the owner switches accounts a fresh
@@ -56,6 +62,15 @@ class Reading:
     pct: float
     resets_at: float | None
     ts: float
+    #: When the window was last reset in place (:func:`usage.restarts`), if it was.
+    restarted: float | None = None
+    #: The highest figure the window has read since it began or was last reset
+    #: in place, fresh or not; ``None`` = not known, ``pct`` stands for it.
+    top: float | None = None
+
+    @property
+    def peak(self) -> float:
+        return self.pct if self.top is None else self.top
 
 
 def _same_window(a: float | None, b: float | None) -> bool:
@@ -67,26 +82,41 @@ def readings(samples: list[usage.Sample], now: float, stale_s: float) -> dict[st
 
     Sessions render at different moments, so a lagging one can log a lower figure
     right after a higher one under the same reset. The highest of the newest
-    window's fresh samples is the reading.
+    window's fresh samples is the reading. A window reset in place
+    (:func:`usage.restarts`) counts from that reset only, and a stale snapshot
+    of what it read before is no reading.
     """
     out = {}
+    marks = usage.restarts(samples)
     for name, (prefix, _) in WINDOWS.items():
-        pts = [(s.ts, getattr(s, f"{prefix}_pct"), getattr(s, f"{prefix}_resets_at"))
-               for s in samples if now - s.ts <= stale_s]
-        pts = [(t, p, r) for t, p, r in pts if p is not None and (r is None or r > now)]
-        if not pts:
+        pts = [(s.ts, getattr(s, f"{prefix}_pct"), getattr(s, f"{prefix}_resets_at"), prefix in hit)
+               for s, hit in zip(samples, marks) if hit is not None]
+        pts = [x for x in pts if x[1] is not None and (x[2] is None or x[2] > now)]
+        fresh = [x for x in pts if now - x[0] <= stale_s]
+        if not fresh:
             continue
-        newest = max((r for _, _, r in pts if r is not None), default=None)
+        newest = max((x[2] for x in fresh if x[2] is not None), default=None)
         if newest is not None:
             pts = [x for x in pts if _same_window(x[2], newest)]
-        out[name] = Reading(pct=max(p for _, p, _ in pts), resets_at=newest,
-                            ts=max(t for t, _, _ in pts))
+        restarted = max((x[0] for x in pts if x[3]), default=None)
+        if restarted is not None:
+            pts = [x for x in pts if x[0] >= restarted]
+        fresh = [x for x in pts if now - x[0] <= stale_s]
+        if not fresh:
+            continue
+        out[name] = Reading(pct=max(x[1] for x in fresh), resets_at=newest,
+                            ts=max(x[0] for x in fresh), restarted=restarted,
+                            top=max(x[1] for x in pts))
     return out
 
 
 def needs_api(samples: list[usage.Sample], now: float, stale_s: float) -> bool:
-    """No fresh reading of some window: the tap has nothing current to say."""
-    return len(readings(samples, now, stale_s)) < len(WINDOWS)
+    """The tap cannot say where the account stands: some window has no fresh
+    reading, or every fresh one sits well under the window's highest, which is
+    a lagging session or a limit reset in place, and only the endpoint knows."""
+    reads = readings(samples, now, stale_s)
+    return len(reads) < len(WINDOWS) or any(
+        r.pct < r.peak - usage.INPLACE_DROP for r in reads.values())
 
 
 def _epoch(value) -> float | None:
@@ -171,6 +201,7 @@ class Outcome:
     lifted: list[str] = field(default_factory=list)  # windows released by a reset
     switched: list[str] = field(default_factory=list)  # released: another account is in use
     released: list[str] = field(default_factory=list)  # released by config or an override
+    ended: list[str] = field(default_factory=list)  # overrides a reset in place ended
     down: dict | None = None  # the ``down`` rule that crossed: {window, at, pct, resets_at}
 
 
@@ -199,6 +230,11 @@ def evaluate(rules: list[dict], reads: dict[str, Reading], hold: dict, fired: di
     ``swarm resume --override-cap`` and silences that window's pause rules until
     it resets. A hold or record without an account predates the tag, and is
     matched by its window's reset alone, as before.
+
+    A window reset in place (``Reading.restarted``) starts over: a hold, an
+    override or a fired ``down`` of it stands only while the window has been at
+    that limit again since the reset (``Reading.peak``), which a lagging
+    reading cannot undo.
     """
     hold = dict(hold)
     override = {w: t for w, t in override.items() if t is not None and t > now}
@@ -207,6 +243,20 @@ def evaluate(rules: list[dict], reads: dict[str, Reading], hold: dict, fired: di
     for window in WINDOWS:
         r = reads.get(window)
         limits = [x["at"] for x in rules if x["window"] == window and x["action"] == "pause"]
+        again = r is not None and r.restarted is not None
+        if again and limits and r.peak < min(limits):
+            mine = [k for k in {window, _mine(window, account)}
+                    if _same_window(override.get(k), r.resets_at)]
+            for key in mine:
+                del override[key]
+            if mine:
+                out.ended.append(window)
+        for x in rules if again else []:
+            if x["window"] == window and x["action"] == "down" and r.peak < x["at"]:
+                key = f"{window}:{x['at']:g}"
+                for k in {key, _mine(key, account)}:
+                    if _same_window(fired.get(k), r.resets_at):
+                        del fired[k]
         prev = hold.get(window)
         # Held on another account: nothing that account read says anything here.
         other = prev is not None and None not in (account, prev.get("account")) \
@@ -231,6 +281,10 @@ def evaluate(rules: list[dict], reads: dict[str, Reading], hold: dict, fired: di
                 out.switched.append(window)
             elif r is not None and r.resets_at is not None and prev.get("resets_at") is not None \
                     and r.resets_at - prev["resets_at"] > usage.RESET_JUMP_S:
+                del hold[window]
+                out.lifted.append(window)
+            elif again and r.peak < prev["at"] and _same_window(
+                    prev.get("resets_at"), r.resets_at):
                 del hold[window]
                 out.lifted.append(window)
             elif account and prev.get("account") is None and r is not None \

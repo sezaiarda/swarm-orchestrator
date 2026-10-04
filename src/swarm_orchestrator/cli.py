@@ -815,7 +815,7 @@ def cmd_usage(cfg: Config, as_json: bool, last: int) -> int:
     past = usage_mod.past_summaries(cfg.state_dir, last)
     if as_json:
         account = usage_mod.active_account(src.samples)
-        mine = usage_mod.of_account(src.samples, account)
+        mine = usage_mod.current(src.samples)
         return _dump({"current": cur, "runs": past, "account": account,
                       "now": {w: usage_mod.latest(mine, w, now) for w in ("five", "week")},
                       "note": usage_mod.SKEW_NOTE})

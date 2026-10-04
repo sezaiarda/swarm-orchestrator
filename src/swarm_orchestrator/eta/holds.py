@@ -145,7 +145,7 @@ def from_state(st, rules: list[dict], samples: list, burn: dict[str, float],
     lift (:func:`caps.evaluate`), so the reading in use stands in for it."""
     stopped = PAUSED if st.paused else DRAINING if st.drain else ""
     account = usage_mod.active_account(list(samples))
-    samples = usage_mod.of_account(list(samples), account)
+    samples = usage_mod.current(list(samples))
     out = []
     for window in caps_mod.WINDOWS:
         limits = [r["at"] for r in rules if r["window"] == window and r["action"] == "pause"]

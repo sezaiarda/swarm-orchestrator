@@ -2984,10 +2984,11 @@ class Supervisor:
         """Read the newest usage, apply the rules, and act on what changed.
         True when a ``down`` rule has begun stopping the swarm.
 
-        The tap's samples come first. Only when they hold no fresh reading does
-        this ask the usage endpoint, at most once per :data:`caps.API_MIN_GAP_S`
-        across restarts — or at once after an account switch, whose account has
-        nothing fresh yet; a failed call is logged and the last reading stands.
+        The tap's samples come first. Only when they cannot say where the
+        account stands (:func:`caps.needs_api`) does this ask the usage
+        endpoint, at most once per :data:`caps.API_MIN_GAP_S` across restarts —
+        or at once after an account switch, whose account has nothing fresh
+        yet; a failed call is logged and the last reading stands.
         Only the samples of the account in use count (:func:`usage.active_account`).
         """
         self._usage_last = now
@@ -3031,6 +3032,8 @@ class Supervisor:
             self._usage_ping(caps.switch_ping(window, reads.get(window), account))
         for window in out.released:
             self.log.line(f"USAGE-RELEASE {window} no rule holds it now")
+        for window in out.ended:
+            self.log.line(f"USAGE-OVERRIDE-END {window} the limit was reset inside its window")
         if out.down is not None:
             d = out.down
             self.log.line(f"USAGE-DOWN {d['window']} {d['pct']:g}% limit={d['at']:g}%")

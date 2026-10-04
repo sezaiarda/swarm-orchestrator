@@ -100,6 +100,9 @@ class Sample:
     week_resets_at: float | None = None
     #: :func:`account_key` of the login it was read under; ``None`` = unknown.
     account: str | None = None
+    #: ``"api"`` when the usage endpoint answered it (:func:`caps.fetch_api`);
+    #: ``None`` for a status line's reading.
+    src: str | None = None
 
 
 def parse_sample(row) -> Sample | None:
@@ -108,12 +111,13 @@ def parse_sample(row) -> Sample | None:
     if "pct" in row and "week_pct" not in row:  # written before runs existed
         return Sample(ts=_num(row["ts"]), week_pct=_num(row.get("pct")),
                       week_resets_at=_num(row.get("resets_at")))
-    rid, acct = row.get("run_id"), row.get("account")
+    rid, acct, src = row.get("run_id"), row.get("account"), row.get("src")
     return Sample(
         ts=_num(row["ts"]), run_id=rid if isinstance(rid, str) else None,
         five_pct=_num(row.get("five_pct")), five_resets_at=_num(row.get("five_resets_at")),
         week_pct=_num(row.get("week_pct")), week_resets_at=_num(row.get("week_resets_at")),
         account=acct if isinstance(acct, str) and acct else None,
+        src=src if isinstance(src, str) and src else None,
     )
 
 
@@ -194,8 +198,10 @@ def of_account(samples: list[Sample], account: str | None) -> list[Sample]:
 
 
 def current(samples: list[Sample]) -> list[Sample]:
-    """The samples of :func:`active_account`: what every "now" figure reads."""
-    return of_account(samples, active_account(samples))
+    """The samples of :func:`active_account`: what every "now" figure reads.
+    A stale snapshot (:func:`restarts`) is not one of them."""
+    mine = of_account(samples, active_account(samples))
+    return [s for s, hit in zip(mine, restarts(mine)) if hit is not None]
 
 
 def latest(samples: list[Sample], which: str, now: float) -> tuple[float, float | None] | None:
@@ -317,6 +323,92 @@ def switched_at(samples: list[Sample]) -> float | None:
     return times[-1] if times else None
 
 
+# -- resets in place ------------------------------------------------------------
+#: The usage endpoint reading this far under a window's highest figure, the
+#: window's reset where it was, is that window emptied early; less is rounding.
+INPLACE_DROP = 5.0
+
+
+def restarts(samples: list[Sample]) -> list[tuple[str, ...] | None]:
+    """Per sample (in ``samples``' order): the windows (``"five"``/``"week"``)
+    its reading finds *reset in place*, or ``None`` for a reading to ignore.
+
+    A limit can be reset before its window ends. The window keeps its reset
+    time and its figure falls to zero, which under an unchanged reset is also
+    what a lagging status line looks like. Every reader keeps the running
+    maximum against those, so the old figure stood until the window ended: the
+    weekly line sat at 100% for days, nothing after the reset counted as used,
+    and a hold could not lift.
+
+    Only the usage endpoint tells the two apart (``src == "api"``). It answers
+    for the account as it is now, where a status line repeats what its session
+    last heard, which may be hours old. So the endpoint reading
+    :data:`INPLACE_DROP` under the window's highest figure, its reset unchanged
+    or gone, starts the window again at that reading; and once one window has,
+    another the same answer reports as not open (no reset time, though the last
+    one known has not ended) was closed with it.
+
+    Sessions that have not spoken to the server since still render the figures
+    from before: too *high* now, which no running maximum survives. What gives
+    them away is the window that did move: a status line still naming the
+    window a reset closed is a stale snapshot, and all of it is ignored
+    (``None``), not only that window's half. A window reset in place with no
+    other closed beside it has no such tell; the next endpoint reading under
+    the stale figure restarts it again.
+    """
+    order = sorted(range(len(samples)), key=lambda i: samples[i].ts)
+    segs = accounts(samples)
+    out: list[tuple[str, ...] | None] = [()] * len(samples)
+    names = ("five", "week")
+    account = None
+    top: dict[str, float | None] = dict.fromkeys(names)
+    res: dict[str, float | None] = dict.fromkeys(names)
+    gone: dict[str, float | None] = dict.fromkeys(names)
+    for i in order:
+        s = samples[i]
+        if segs[i] is None:
+            out[i] = None
+            continue
+        if segs[i] != account:
+            account = segs[i]
+            top, res, gone = dict.fromkeys(names), dict.fromkeys(names), dict.fromkeys(names)
+        api = s.src == "api"
+        read = {w: (getattr(s, f"{w}_pct"), getattr(s, f"{w}_resets_at")) for w in names}
+        stale = False
+        for w, (_, rs) in read.items():
+            if res[w] is not None and s.ts >= res[w]:  # the window ended by itself
+                top[w] = res[w] = None
+            if gone[w] is not None and (s.ts >= gone[w] or (
+                    api and rs is not None and abs(rs - gone[w]) <= RESET_JUMP_S)):
+                gone[w] = None  # it would have ended by now, or the endpoint names it again
+            if rs is not None and not api and gone[w] is not None \
+                    and abs(rs - gone[w]) <= RESET_JUMP_S:
+                stale = True
+        if stale:
+            out[i] = None
+            continue
+        fell = [w for w, (pct, rs) in read.items()
+                if api and pct is not None and top[w] is not None and res[w] is not None
+                and pct < top[w] - INPLACE_DROP and (rs is None or abs(rs - res[w]) <= RESET_JUMP_S)]
+        hit = []
+        for w, (pct, rs) in read.items():
+            if pct is None or (None not in (rs, res[w]) and rs < res[w] - RESET_JUMP_S):
+                continue  # nothing read, or a reading from a window already over
+            closed = bool(fell) and api and rs is None and res[w] is not None
+            if w in fell or closed:
+                hit.append(w)
+                top[w] = None
+                if rs is None:
+                    gone[w], res[w] = res[w], None
+            elif res[w] is not None and rs is not None and rs > res[w] + RESET_JUMP_S:
+                top[w] = None  # a new window
+            top[w] = pct if top[w] is None else max(top[w], pct)
+            if rs is not None:
+                res[w] = rs
+        out[i] = tuple(hit)
+    return out
+
+
 # -- pace ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class Pace:
@@ -348,14 +440,17 @@ def window_pace(points, start: float, end: float) -> Pace:
 
     A point may carry a fourth item, its account (:func:`accounts`): a reading
     of another account starts from its own figure, never counting it as used,
-    and one tagged ``None`` is skipped.
+    and one tagged ``None`` is skipped. A fifth, true, says the window was
+    reset in place at this reading (:func:`restarts`): a new window whatever
+    its ``resets_at`` says, so the figure is usage since that reset.
     """
-    pts = sorted(((pt[0], pt[1], pt[2], pt[3] if len(pt) > 3 else 0) for pt in points
-                  if pt[1] is not None and start <= pt[0] <= end), key=lambda x: x[0])
+    pts = sorted(((pt[0], pt[1], pt[2], pt[3] if len(pt) > 3 else 0, len(pt) > 4 and bool(pt[4]))
+                  for pt in points if pt[1] is not None and start <= pt[0] <= end),
+                 key=lambda x: x[0])
     used, windows = 0.0, 0
     top = res = None
     account = 0
-    for _, pct, resets, seg in pts:
+    for _, pct, resets, seg, restart in pts:
         if seg is None:
             continue
         if seg != account and top is not None:
@@ -363,6 +458,11 @@ def window_pace(points, start: float, end: float) -> Pace:
             top, res, account = pct, resets, seg
             continue
         account = seg
+        if restart and top is not None:
+            windows += 1
+            used += pct
+            top, res = pct, resets
+            continue
         known = resets is not None and res is not None
         if known and (res - resets > RESET_JUMP_S or (
                 abs(resets - res) <= RESET_JUMP_S and pct < top - 0.5)):
@@ -380,14 +480,20 @@ def window_pace(points, start: float, end: float) -> Pace:
     return Pace(used=used, hours=max(0.0, end - start) / 3600, windows=windows)
 
 
+def _points(samples: list[Sample], which: str):
+    """:func:`window_pace`'s points for one window: a stale snapshot
+    (:func:`restarts`) is tagged ``None`` like any reading to skip."""
+    for s, seg, hit in zip(samples, accounts(samples), restarts(samples)):
+        yield (s.ts, getattr(s, f"{which}_pct"), getattr(s, f"{which}_resets_at"),
+               None if hit is None else seg, bool(hit) and which in hit)
+
+
 def five_pace(samples: list[Sample], start: float, end: float) -> Pace:
-    return window_pace(((s.ts, s.five_pct, s.five_resets_at, a)
-                        for s, a in zip(samples, accounts(samples))), start, end)
+    return window_pace(_points(samples, "five"), start, end)
 
 
 def week_pace(samples: list[Sample], start: float, end: float) -> Pace:
-    return window_pace(((s.ts, s.week_pct, s.week_resets_at, a)
-                        for s, a in zip(samples, accounts(samples))), start, end)
+    return window_pace(_points(samples, "week"), start, end)
 
 
 def by_account(samples: list[Sample], start: float, end: float) -> list[dict]:
@@ -730,7 +836,7 @@ def brief(samples: list[Sample], now: float, cap_lines: list[str] = ()) -> str:
     """The bot's answer to ``/usage``: both limits of the account in use, how
     old they are, and the caps."""
     account = active_account(samples)
-    samples = of_account(samples, account)
+    samples = current(samples)
     s = newest_sample(samples)
     if s is None:
         lines = ["No usage reading yet. One arrives while a swarm session runs."]
@@ -772,7 +878,7 @@ def render(cur: dict | None, past: list[dict], samples: list[Sample], now: float
         lines.append(f"{head}\n  started {_when(cur['start'])} · {cur['hours']:.1f} h elapsed{cfg}")
         span = "this period" if cur.get("legacy") else "this run"
         account = active_account(samples)
-        mine = of_account(samples, account)
+        mine = current(samples)
         on = f" · account {account}" if account else ""
         lines.append(f"  sample  {as_of(mine, now) or 'none yet'}{on}")
         for which, label in (("five", "5-hour"), ("week", "weekly")):

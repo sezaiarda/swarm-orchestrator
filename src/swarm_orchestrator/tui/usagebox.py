@@ -300,17 +300,21 @@ def series(samples, prefix: str, t0: float, now: float) -> list[tuple[float, flo
 
     Within a window only the running maximum counts: a lagging session's status
     line reports an older, lower figure, and plotting it would draw a dip that
-    never happened. A reset with no reading after it drops to zero at the reset.
-    Another account (:func:`usage.accounts`) starts from its own first reading.
+    never happened. A reset with no reading after it drops to zero at the reset;
+    a limit reset in place (:func:`usage.restarts`) drops to the reading that
+    found it. Another account (:func:`usage.accounts`) starts from its own
+    first reading.
     """
     out: list[tuple[float, float]] = []
     top = res = None
     account = None
     jump = usage_mod.RESET_JUMP_S
     samples = list(samples or ())
-    for s, seg in sorted(zip(samples, usage_mod.accounts(samples)), key=lambda x: x[0].ts):
+    marks = usage_mod.restarts(samples)
+    for s, seg, hit in sorted(zip(samples, usage_mod.accounts(samples), marks),
+                              key=lambda x: x[0].ts):
         pct, resets = getattr(s, f"{prefix}_pct"), getattr(s, f"{prefix}_resets_at")
-        if pct is None or s.ts > now or seg is None:
+        if pct is None or s.ts > now or seg is None or hit is None:
             continue
         if seg != account:
             top = res = None
@@ -318,7 +322,9 @@ def series(samples, prefix: str, t0: float, now: float) -> list[tuple[float, flo
         if res is not None and s.ts >= res:  # the window reset before this reading
             out.append((res, 0.0))
             top = res = None
-        if res is not None and resets is not None:
+        if prefix in hit:  # the limit was reset in place
+            top = None
+        elif res is not None and resets is not None:
             if resets < res - jump:
                 continue  # a reading from a window already over
             if resets > res + jump:

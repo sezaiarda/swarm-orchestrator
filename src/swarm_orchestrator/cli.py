@@ -65,6 +65,7 @@ from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
 from . import master as master_mod
+from . import models as models_mod
 from .master import build_context
 
 
@@ -1653,6 +1654,80 @@ def cmd_reshape(cfg: Config, by: str, phase: str, why: str, needs: str | None, a
     return _report_queued(cfg, key, f"reshape {phase}")
 
 
+def cmd_model(cfg: Config, by: str, model: str, rows: list[str], why: str,
+              file: str | None) -> int:
+    """Set the model the workers of open rows run on, in one ledger write.
+
+    ``model`` is a name claude takes (``sonnet``), or ``default`` to drop the
+    field so the row runs on ``[worker].worker_cmd`` as configured. ``--file``
+    takes a JSON list of ``{"row", "model", "why"}`` instead, for a sweep where
+    each row has its own model and reason.
+    """
+    try:
+        if file is not None:
+            raw = json.loads(Path(file).read_text(encoding="utf-8"))
+            picked = [(str(r["row"]), str(r["model"]), str(r.get("why") or why)) for r in raw]
+        else:
+            if not model or not rows:
+                raise ledgerw.ReportError("give a model and at least one row, or --file")
+            picked = [(r, model, why) for r in rows]
+        picked = [(r, "" if m == models_mod.DEFAULT_WORD else m, w) for r, m, w in picked]
+        key = ledgerw.file_models(cfg, by, picked)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"swarm model: {exc}", file=sys.stderr)
+        return 2
+    what = f"model of {picked[0][0]}" if len(picked) == 1 else f"model of {len(picked)} rows"
+    return _report_queued(cfg, key, what)
+
+
+def cmd_escalate(cfg: Config, phase: str, why: str) -> int:
+    """Hand a phase back from its row's own model to the swarm's.
+
+    For the worker of a row that runs on a model of its own (:mod:`models`),
+    when the phase turns out to be other work than its row says. The hand-back
+    is recorded first, so the next launch is on the swarm's model whatever else
+    happens; the row's ``model:`` and its history follow through the ledger
+    writer, and the supervisor ends this session, drops its mirror (what main
+    lacks is archived, never merged) and starts the row again.
+    """
+    st = state_mod.read(cfg)
+    refusal = _done_refusal(cfg, phase, st)
+    own = models_mod.default(cfg)
+    running = os.environ.get(models_mod.ENV, "") if os.environ.get(cfg.env_marker) \
+        else models_mod.override(cfg, phase)
+    if refusal is None and phase in st.integrating():
+        refusal = f"{phase} has finished and its work is waiting to merge"
+    if refusal is None and not any(s.busy and s.phase == phase for s in st.slots):
+        refusal = f"{phase} is waiting on the owner, not building"
+    if refusal is None and models_mod.handup(cfg, phase) is not None:
+        refusal = f"{phase} was already handed up once"
+    if refusal is None and not running:
+        refusal = (f"{phase} already runs on the swarm's own model"
+                   + (f" ({own})" if own else "") + "; there is nothing to hand it to")
+    if refusal is None and len(why.strip()) < models_mod.MIN_WHY_CHARS:
+        refusal = ("say what you found and why it needs the other model"
+                   f" (at least {models_mod.MIN_WHY_CHARS} characters); it is what the"
+                   " next worker starts from")
+    if refusal is not None:
+        print(f"swarm escalate refused: {refusal}", file=sys.stderr)
+        return 2
+    models_mod.record_handup(cfg, phase, running, own, why.strip())
+    try:
+        ledgerw.file_models(cfg, phase, [(phase, own, f"handed up by its {running} worker: "
+                                          + why.strip())])
+    except ledgerw.ReportError as exc:
+        # The record above already decides the next launch; the row just keeps
+        # its old field until someone sets it.
+        print(f"swarm escalate: the row's model: field was not changed ({exc})", file=sys.stderr)
+    poked = _poke(cfg, f"escalate {phase}")
+    print(f"{phase}: handed up from {running} to {own or 'the default model'}")
+    print("  your session ends now; nothing on this branch is merged (it is archived)")
+    print(f"  a fresh worker starts {phase} from a clean tree, with your reason in its history")
+    if not poked:
+        print("  no supervisor is reading: it acts on this when it next starts")
+    return 0
+
+
 def cmd_lesson(cfg: Config, phase: str, text: str, title: str) -> int:
     """Append a lesson to the project's lessons file, through the swarm."""
     if not text.strip():
@@ -2454,10 +2529,12 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     restarting = restart_mod.status_line(cfg, st)
     if restarting:
         lines.insert(1, restarting)
+    row_models = models_mod.overrides(cfg)
     for s in st.slots:
         mark = f"BUSY {s.phase}" if s.busy else "free"
         wt = f" branch={s.branch}" if s.branch else ""
-        lines.append(f"  slot {s.id} pane={s.pane_id} {mark}{wt}")
+        on = f" model={row_models[s.phase]}" if s.busy and s.phase in row_models else ""
+        lines.append(f"  slot {s.id} pane={s.pane_id} {mark}{wt}{on}")
     if st.waiting or st.parked:
         # A parked session the owner answered is working again, in its own window.
         working = st.working_parked()
@@ -2780,6 +2857,23 @@ def _build_parser() -> argparse.ArgumentParser:
     rsp.add_argument("--touches", default=None, help="replace its touches (comma-separated)")
     rsp.set_defaults(func=lambda cfg, a: cmd_reshape(
         cfg, a.by, a.row, " ".join(a.why), a.needs, a.add_needs, a.drop_needs, a.touches))
+
+    mdp = sub.add_parser("model", help="set the model open rows' workers run on")
+    mdp.add_argument("by", help="who sets it: your phase, or your role (owner, overseer)")
+    mdp.add_argument("model", nargs="?", default="",
+                     help="a model name claude takes (sonnet, opus), or `default` for the"
+                          " swarm's own")
+    mdp.add_argument("rows", nargs="*", help="the open rows")
+    mdp.add_argument("--why", default="", help="why; goes to each row's history")
+    mdp.add_argument("--file", default=None,
+                     help='a JSON list of {"row", "model", "why"} instead of model and rows')
+    mdp.set_defaults(func=lambda cfg, a: cmd_model(cfg, a.by, a.model, a.rows, a.why, a.file))
+
+    esp = sub.add_parser(
+        "escalate", help="(worker on a row's own model) hand the phase to the swarm's model")
+    esp.add_argument("phase")
+    esp.add_argument("why", nargs="+", help="what you found, and why it needs the other model")
+    esp.set_defaults(func=lambda cfg, a: cmd_escalate(cfg, a.phase, " ".join(a.why)))
 
     lsp = sub.add_parser("lesson", help="add a lesson to the project's lessons file")
     lsp.add_argument("phase")

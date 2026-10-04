@@ -53,6 +53,8 @@ class Row:
     dirs: list[str] = field(default_factory=list)
     #: Its ``touches:``, as written: what the row edits.
     touches: list[str] = field(default_factory=list)
+    #: Its ``model:``, as written: the model its worker runs on ("" = none named).
+    model: str = ""
     #: The headings above this row, outermost first (``#`` … ``######``).
     heads: tuple[Heading, ...] = ()
 
@@ -81,7 +83,7 @@ def _title(content: str) -> str:
     m = _BOLD_RE.search(_FIELD_SEP.join(parts))
     if m:
         return clip(plain(m.group(1)), TITLE_CHARS)
-    tail = [p for p in parts[1:] if not re.match(r"\s*\*?\s*(needs|dir|touches|TAG):", p)]
+    tail = [p for p in parts[1:] if not re.match(r"\s*\*?\s*(needs|dir|touches|model|TAG):", p)]
     return clip(plain(tail[-1] if tail else ""), TITLE_CHARS)
 
 
@@ -90,6 +92,13 @@ def _dirs(content: str) -> list[str]:
         if part.strip().startswith("dir:"):
             return [d for d in _BACKTICK_RE.findall(part) if d]
     return []
+
+
+def _model(content: str) -> str:
+    for part in content.split(_FIELD_SEP):
+        if part.strip().startswith("model:"):
+            return "".join(_BACKTICK_RE.findall(part)[:1])
+    return ""
 
 
 def _is_touches(part: str) -> bool:
@@ -154,6 +163,7 @@ def parse(text: str) -> tuple[dict[str, Row], list[Heading]]:
                 title=_title(cm.group(1)),
                 dirs=_dirs(cm.group(1)),
                 touches=_touches(cm.group(1)),
+                model=_model(cm.group(1)),
                 heads=tuple(stack),
             )
         i = j

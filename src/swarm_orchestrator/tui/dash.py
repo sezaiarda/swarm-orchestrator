@@ -58,6 +58,7 @@ from .data import (
     question_index,
     read_state,
     load_deferred,
+    load_models,
     load_graph,
     load_kept,
     load_ticked,
@@ -205,6 +206,9 @@ class Dash:
         #: Open rows that wait for a date still ahead (:func:`ledgerw.dated`), and
         #: the UTC day it was read.
         self.deferred: dict[str, str] = {}
+        #: Rows that run on a model of their own, and the swarm's own model.
+        self.row_models: dict[str, str] = {}
+        self.own_model: str = ""
         self._deferred_day = ""
         #: The forecast worker (:mod:`swarm_orchestrator.eta`); views read
         #: :attr:`forecast`, never wait on it.
@@ -362,6 +366,7 @@ class Dash:
         if ledger_moved or queue_moved or today != self._deferred_day:
             self._deferred_day = today
             self.deferred = load_deferred(self.cfg)
+            self.own_model, self.row_models = load_models(self.cfg)
             changed.add("ledger")
         # A tick or a worker-count change lands as a commit; git is asked only
         # when one of the two files moved, and answers from a cache keyed on HEAD.

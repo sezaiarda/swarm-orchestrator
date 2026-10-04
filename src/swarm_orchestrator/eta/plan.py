@@ -98,14 +98,20 @@ class Plan:
     needs: dict[str, frozenset[str]] = field(default_factory=dict)
     #: Every open row -> its campaign.
     campaigns: dict[str, str] = field(default_factory=dict)
+    #: A model of a row's own -> the usage it burns per worker-hour, as a share
+    #: of a worker on the swarm's model (:mod:`.tiers`).
+    burn_weight: dict[str, float] = field(default_factory=dict)
 
 
-def meta_for(phase: str, dirs: dict[str, list[str]]) -> Meta:
-    """A row's kind, repo and campaign. The repo is the first ``dir:``; a row
-    with none works in the repo its id is named for, as the ledger header says."""
+def meta_for(phase: str, dirs: dict[str, list[str]],
+             models: dict[str, str] | None = None) -> Meta:
+    """A row's kind, repo, campaign and model. The repo is the first ``dir:``; a
+    row with none works in the repo its id is named for, as the ledger header
+    says. ``models`` names the rows that run on a model of their own."""
     camp = campaign_of(phase)
     repo = (dirs.get(phase) or [camp])[0]
-    return Meta(kind=kind_of(phase), repo=repo, campaign=camp)
+    return Meta(kind=kind_of(phase), repo=repo, campaign=camp,
+                model=(models or {}).get(phase, ""))
 
 
 def day_start(date: str) -> float:
@@ -119,7 +125,9 @@ def build(graph: dict[str, set[str]], text: str, landed: dict[str, str], *,
           excluded: set[str] | frozenset[str] = frozenset(), workers: int = 1,
           build_slots: int = 0, park_after: float = 900.0,
           dated: dict[str, str] | None = None,
-          outside: set[str] | frozenset[str] = frozenset()) -> Plan:
+          outside: set[str] | frozenset[str] = frozenset(),
+          models: dict[str, str] | None = None,
+          burn_weight: dict[str, float] | None = None) -> Plan:
     """The plan for ``graph`` (:func:`ledger.parse`) and ledger ``text``.
 
     ``landed`` is the launcher's done view (:func:`ledger.with_ticked`); ``busy``
@@ -129,7 +137,9 @@ def build(graph: dict[str, set[str]], text: str, landed: dict[str, str], *,
     are in the merge queue; ``dated`` the rows that wait for a date
     (:func:`ledgerw.dated`), read from ``text`` when a caller has nothing else;
     ``outside`` the ``busy`` rows whose worker is in no slot (parked, answered,
-    and at work in its own window), so each runs without taking a seat.
+    and at work in its own window), so each runs without taking a seat;
+    ``models`` the rows that run on a model of their own, and ``burn_weight``
+    what each such model burns (:mod:`.tiers`).
     """
     dirs = ledger_mod.dirs(text)
     satisfied = {p for p, s in landed.items() if s in statuses.SATISFIES_DEPS}
@@ -161,7 +171,7 @@ def build(graph: dict[str, set[str]], text: str, landed: dict[str, str], *,
             if r != p:
                 behind[r].append(p)
     stuck = tuple(Stuck(r, roots[r], tuple(behind[r])) for r in open_rows if r in roots)
-    rows = {p: Row(p, meta_for(p, dirs), frozenset(d for d in graph[p] if d in live))
+    rows = {p: Row(p, meta_for(p, dirs, models), frozenset(d for d in graph[p] if d in live))
             for p in open_rows if p not in held}
     return Plan(
         now=now,
@@ -178,6 +188,7 @@ def build(graph: dict[str, set[str]], text: str, landed: dict[str, str], *,
         park_after=park_after,
         needs={p: frozenset(d for d in graph[p] if d in live) for p in open_rows},
         campaigns={p: campaign_of(p) for p in open_rows},
+        burn_weight=dict(burn_weight or {}),
     )
 
 

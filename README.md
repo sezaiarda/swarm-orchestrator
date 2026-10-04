@@ -706,6 +706,15 @@ project repo itself, and `@resource` for something that is not a file.
   `needs:` or `touches:` through the ledger gate, so nobody hand-edits the ledger.
   Under lanes a tick no longer carries a row's open needs to its dependents
   (`CARRY-SKIPPED` in the supervisor log), because touches keep rows apart.
+- **A row's model.** A row may name the model its worker runs on
+  (`` model:`sonnet` ``); one that names none runs on `worker_cmd` as configured.
+  `swarm model <by> <model> <row>… --why "…"` sets it (or `--file` for a sweep),
+  in one ledger write. A worker on a row's own model is told it is expected to
+  build the phase itself, and has one exit: `swarm escalate <phase> "<what it
+  found>"` ends its session, merges nothing (its work is archived), and starts
+  the row again on the swarm's own model with the reason in its history. A row
+  can be handed up once. The forecast times such rows, weighs what they burn
+  and counts the hand-backs, each from a prior until this machine has measured it.
 
 See [docs/config.md](docs/config.md#lanes) for every key and
 [docs/cli.md](docs/cli.md) for the commands.

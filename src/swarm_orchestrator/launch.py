@@ -30,6 +30,7 @@ from . import lanes as lanes_mod
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import meters, opqueue
+from . import models as models_mod
 from . import state as state_mod
 from . import statuses
 from . import telegram, tmux
@@ -216,9 +217,18 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
     worker gets: in-process teammates, the meters tap and the effort level. One
     builder, so the two sessions can never drift apart on those. ``name`` is the
     session's display name (:func:`session_name`); a worker's by default.
+
+    A phase worker whose row names a model of its own (:mod:`models`) runs
+    ``worker_cmd`` with that model, and is told how to hand the phase back.
     """
-    cmd = with_name(cmd or cfg.worker_cmd.format(phase=phase),
-                    name or session_name("worker", phase))
+    model = models_mod.override(cfg, phase) if cmd is None else ""
+    base = cfg.worker_cmd.format(phase=phase)
+    if model:
+        base = models_mod.swap(base, model)
+    cmd = with_name(cmd or base, name or session_name("worker", phase))
+    if model:
+        told = models_mod.brief(model, models_mod.default(cfg), phase)
+        cmd += f" --append-system-prompt {shlex.quote(told)}"
     if cfg.worker_settings:
         # Force in-process teammates: a worker's own subagents then never open
         # extra tmux panes in the workers window. Merges over the user's
@@ -238,7 +248,8 @@ def _worker_env(
     phase marker plus everything :func:`session_env` gives any session, and with
     lanes on ``SWARM_TOUCHES``, the lane it was launched with, space-separated."""
     env = {cfg.env_marker: phase,
-           **session_env(cfg, worktree, tmp=phase, session=f"worker:{phase}")}
+           **session_env(cfg, worktree, tmp=phase, session=f"worker:{phase}"),
+           models_mod.ENV: models_mod.override(cfg, phase)}
     if cfg.lanes_enabled:
         env["SWARM_TOUCHES"] = " ".join(state_mod.read(cfg).lanes.get(phase, []))
     return env
@@ -648,6 +659,9 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         # Pre-trust the fresh worktree so claude never pops the folder-trust dialog.
         pretrust_dir(worktree, log)
 
+    model = models_mod.override(cfg, phase)
+    if model:
+        log.line(f"MODEL {phase} model={model}")
     if cfg.driver == "bare":
         ok = _launch_bare(cfg, phase, worktree, log)
     else:

@@ -32,11 +32,12 @@ import heapq
 import math
 import zlib
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from statistics import NormalDist
 
 from .. import ledger as ledger_mod
 from .hazards import Hazards
+from . import tiers
 from .holds import Holds
 from .model import Durations, Meta
 from .plan import Plan
@@ -54,8 +55,8 @@ IDLE_BLOCK_H = 2
 #: No replay files more follow-up rows than this many times the rows it started with.
 MAX_GROWTH = 2.0
 
-_SEAT, _FIN, _THINK, _BUILT, _WAKE = range(5)
-_DUR, _OWNER, _WAIT, _FAIL, _LOST, _FOLLOW, _SLOW, _STOP = range(1, 9)
+_SEAT, _FIN, _THINK, _BUILT, _WAKE, _HAND = range(6)
+_DUR, _OWNER, _WAIT, _FAIL, _LOST, _FOLLOW, _SLOW, _STOP, _UP = range(1, 10)
 _MASK = (1 << 64) - 1
 _STD = NormalDist()
 
@@ -113,6 +114,8 @@ class Options:
     growth: bool = True
     caps: bool = True
     availability: bool = True
+    #: Rows on a model of their own may hand themselves back (:mod:`.tiers`).
+    handups: bool = True
 
 
 @dataclass
@@ -126,6 +129,8 @@ class Future:
     filed: dict[str, int] = field(default_factory=dict)
     #: The chain of rows that set the last finish, first to last.
     chain: tuple[str, ...] = ()
+    #: Rows that handed themselves back to the swarm's own model.
+    handups: int = 0
 
 
 def simulate(plan: Plan, model: Durations, hazards: Hazards, holds: Holds,
@@ -186,6 +191,9 @@ class _Replay:
         self.work: dict[str, list] = {}
         self.wait: dict[str, float] = {}
         self.seats = 0
+        #: Every row at work -> the usage its worker burns, in workers on the
+        #: swarm's own model (:attr:`Plan.burn_weight`; 1 for such a worker).
+        self.load: dict[str, float] = {}
         #: Rows at work that hold no seat (:attr:`Plan.outside`), until each ends.
         self.away: set[str] = set()
         builds = plan.build_slots if opts.build_share > 0 else 0
@@ -246,7 +254,17 @@ class _Replay:
     def _handle(self, kind: int, row: str) -> None:
         if kind == _SEAT:
             self.seats -= 1
+            self.load.pop(row, None)
             self.trigger = row
+        elif kind == _HAND:
+            # It hands itself back: the seat is free for an instant, its work
+            # so far is gone, and it starts again on the swarm's own model.
+            self.load.pop(row, None)
+            if row not in self.away:
+                self.seats -= 1
+            self.meta[row] = replace(self.meta[row], model="")
+            self.future.handups += 1
+            self._start(row, 0.0)
         elif kind == _FIN:
             self.done[row] = "ok"
             self.picks.land(row, "ok")
@@ -314,10 +332,10 @@ class _Replay:
         for cap in self.caps:
             self._wake(cap.next_change(self.t, self._busy()))
 
-    def _busy(self) -> int:
+    def _busy(self) -> float:
         """Workers burning usage now: the seats taken, and the rows at work in a
-        window of their own."""
-        return self.seats + len(self.away)
+        window of their own, each counted as what its model burns."""
+        return sum(self.load.values())
 
     def _wake(self, at: float) -> None:
         if self.t < at <= self.end and at not in self.woken:
@@ -356,6 +374,12 @@ class _Replay:
         self.wait[row] = wait
         if row not in self.away:
             self.seats += 1
+        self.load[row] = self.plan.burn_weight.get(meta.model, tiers.BURN_PRIOR) \
+            if meta.model else 1.0
+        if (age <= 0 and meta.model and self.opts.handups
+                and uniform(key, _UP) < self.hz.handup_p):
+            self._push(self.t + lost + tiers.HANDUP_SHARE * work, _HAND, row)
+            return
         if self.build_free is None:
             self.work[row] = []
             self._push(self.t + lost + work, _THINK, row)
@@ -375,6 +399,7 @@ class _Replay:
         wait = self.wait[row]
         if row in self.away:
             self.away.discard(row)  # its work is over, and it has no seat to give back
+            self.load.pop(row, None)
         else:
             self._push(self.t + min(wait, self.plan.park_after), _SEAT, row)
         self._push(self.t + wait, _FIN, row)

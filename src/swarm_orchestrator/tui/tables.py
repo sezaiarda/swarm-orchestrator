@@ -209,6 +209,7 @@ WORKER_COLUMNS: tuple[tuple[str, int], ...] = (
     ("slot", 4),
     ("phase", 20),
     ("live", 9),
+    ("model", 8),
     ("elapsed", 8),
     ("eta", 12),
     ("context", 15),
@@ -219,7 +220,7 @@ WORKER_COLUMNS: tuple[tuple[str, int], ...] = (
 #: What goes first when the terminal narrows: the branch name (it is the phase
 #: name again), then the git counts, the ETA and the elapsed clock. Slot, phase,
 #: liveness and context are the row.
-WORKER_PRIORITY = (0, 0, 0, 0, 2, 3, 1, 4, 4, 5)
+WORKER_PRIORITY = (0, 0, 0, 0, 1, 2, 3, 1, 4, 4, 5)
 
 #: Statuses that mean "state.json still thinks this slot is working". A pane that
 #: died leaves the run looking perfectly healthy everywhere else, which is why it
@@ -362,8 +363,19 @@ def context_cell(ctx: float | None, m=None) -> str:
     return paint(f"{ctx:3.0f}% {bar(ctx, 100, 8)}", meter_state(ctx))
 
 
-def worker_row(entry, repo=None, meter=None, history=None, gone=None) -> tuple[str, ...]:
+def model_cell(model: str | None, own: bool = True) -> str:
+    """The model a worker runs on: muted when it is the swarm's own, marked
+    when the row named another (it may hand the phase back)."""
+    if not model:
+        return paint("—", MUTED)
+    return cell(model, 8, MUTED if own else INFO)
+
+
+def worker_row(entry, repo=None, meter=None, history=None, gone=None,
+               model: tuple[str, bool] | None = None) -> tuple[str, ...]:
     """One Workers row, one cell per :data:`WORKER_COLUMNS` entry.
+
+    ``model`` is ``(name, whether it is the swarm's own)`` for the row's phase.
 
     ``gone`` gets three separate tells — the marker glyph, the phase turning red
     and the word in caps — because it is the failure mode that otherwise looks
@@ -386,6 +398,7 @@ def worker_row(entry, repo=None, meter=None, history=None, gone=None) -> tuple[s
             "—",
             cell(worker.phase, 20, BAD if gone else None),
             paint(live, state),
+            model_cell(*(model or (None,))),
             cell(fmt_duration(worker.elapsed_s), 8, elapsed_state(worker.elapsed_s)),
             cell(fmt_phase_eta(history or [], worker.elapsed_s), 12, WARN if over else MUTED),
             context_cell(ctx, meter),
@@ -413,6 +426,7 @@ def worker_row(entry, repo=None, meter=None, history=None, gone=None) -> tuple[s
         str(slot.id) if slot.id >= 0 else "—",
         cell(slot.phase or "—", 20, BAD if gone else (None if slot.busy else MUTED)),
         paint(live, state),
+        model_cell(*(model or (None,))) if slot.busy else paint("—", MUTED),
         cell(fmt_duration(slot.elapsed_s) if slot.busy else "—", 8,
              elapsed_state(slot.elapsed_s if slot.busy else None)),
         cell(left, 12, WARN if over else MUTED),
@@ -421,6 +435,18 @@ def worker_row(entry, repo=None, meter=None, history=None, gone=None) -> tuple[s
         paint(str(dirty) if dirty else "—", WARN if dirty else MUTED),
         cell(slot.branch or "—", 26, MUTED),
     )
+
+
+def worker_model(dash, phase: str | None) -> tuple[str, bool] | None:
+    """``(model, whether it is the swarm's own)`` for ``phase``'s worker, from
+    what the dashboard read of the ledger (``Dash.row_models``, ``Dash.own_model``)."""
+    if not phase:
+        return None
+    named = (getattr(dash, "row_models", None) or {}).get(phase)
+    if named:
+        return named, False
+    own = getattr(dash, "own_model", "") or ""
+    return (own, True) if own else None
 
 
 OWNER_DECISION = "owner_decision"
@@ -1076,6 +1102,7 @@ class Workers(TableTab):
                 (getattr(dash, "meters", None) or {}).get(worker_phase(r) or ""),
                 eta_runs_of(dash),
                 parked_gone(dash, r),
+                worker_model(dash, worker_phase(r)),
             ),
         )
 

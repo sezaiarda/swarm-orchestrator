@@ -41,6 +41,7 @@ import time
 from statistics import median
 
 from .. import bigpic, ledger, opqueue, statuses
+from .. import models as models_mod
 from ..drain import line as drain_line
 from .. import restart as restart_mod
 from ..overseer import starvation_map
@@ -127,12 +128,15 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         for p in b["examples"]:
             roots_of.setdefault(p, []).append(b)
 
+    own_model, named, by_model = _row_models(cfg, rows)
     cards: dict[str, dict] = {}
     for pid in graph:
         row = rows.get(pid)
         card = {"id": pid, "c": campaign_of(pid), "t": row.title if row else ""}
         if row is not None and row.dirs:
             card["r"] = row.dirs
+        if by_model:
+            card["m"] = named.get(pid) or own_model or "default"
         col, extra = _place(pid, graph, view, satisfied, excluded, waiting, parked, busy,
                             queue, snap, owed, jobs, questions, roots_of, dated, answered)
         card["col"] = col
@@ -153,6 +157,8 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
                         "cards": _order(key, mine, queue, graph)})
 
     header = _header(cfg, dash, cards, extra_cards, passes, now)
+    if by_model:
+        header["models"] = _model_counts(cfg, cards, own_model)
     return {
         "generated_at": now,
         "project": lifecycle.display_name(cfg),
@@ -165,6 +171,39 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
         "cycle": starve.get("cycle", [])[:50],
         "kept": _kept(dash, now),
     }
+
+
+def _row_models(cfg, rows: dict) -> tuple[str, dict[str, str], bool]:
+    """``(the swarm's own model, {row: model}, whether any row names a model)``:
+    the rows whose ``model:`` names another model than the swarm's own and that
+    were not handed back. A ledger that names no model shows none."""
+    if not getattr(cfg, "worker_cmd", None) or not getattr(cfg, "state_dir", None):
+        return "", {}, False
+    own = models_mod.default(cfg)
+    gone = models_mod.handed_up(cfg)
+    named = {p: r.model for p, r in rows.items()
+             if getattr(r, "model", "") and r.model != own and p not in gone}
+    return own, named, any(getattr(r, "model", "") for r in rows.values())
+
+
+def _model_counts(cfg, cards: dict, own: str) -> dict:
+    """How the rows split by the model that builds them: built, at work, to go.
+    A row handed back counts under the swarm's own model, which built (or will
+    build) it; ``handed_up`` says how many were."""
+    by: dict[str, dict[str, int]] = {}
+    for c in cards.values():
+        if c["col"] == EXCLUDED:
+            continue
+        acc = by.setdefault(c.get("m") or own or "default", {"done": 0, "running": 0, "left": 0})
+        if c["col"] in (DONE, OPERATOR):
+            acc["done"] += 1
+        elif c["col"] in (BUILDING, MERGING):
+            acc["running"] += 1
+        else:
+            acc["left"] += 1
+    order = sorted(by, key=lambda m: (m != (own or "default"), m))
+    return {"own": own or "default", "handed_up": len(models_mod.handed_up(cfg)),
+            "rows": [{"model": m, **by[m]} for m in order]}
 
 
 #: What the board says about a kept process. Not its command line, cwd or log

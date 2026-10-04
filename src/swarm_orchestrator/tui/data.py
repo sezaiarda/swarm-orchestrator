@@ -38,6 +38,7 @@ from .. import caps
 from .. import keep as keep_mod
 from .. import ledger as ledger_mod
 from .. import ledgerw
+from .. import models as models_mod
 from .. import opqueue
 from .. import pace as pace_mod
 from .. import statuses
@@ -389,6 +390,15 @@ def load_deferred(cfg) -> dict[str, str]:
         return ledgerw.dated(cfg)
     except Exception:  # noqa: BLE001 - a broken ledger must not blank the dashboard
         return {}
+
+
+def load_models(cfg) -> tuple[str, dict[str, str]]:
+    """``(the swarm's own model, {row: model})`` for the rows that run on a model
+    of their own (:func:`models.overrides`); nothing when the ledger is unreadable."""
+    try:
+        return models_mod.default(cfg), models_mod.overrides(cfg)
+    except Exception:  # noqa: BLE001 - a broken ledger must not blank the dashboard
+        return "", {}
 
 
 def phase_progress(
@@ -948,6 +958,7 @@ ENDED_WHY = {
     "freed": "its slot was freed with `swarm free`",
     "skipped": "it was skipped with `swarm skip`",
     "launch-failed": "its worker never started",
+    "escalated": "its worker handed the phase up to the swarm's own model",
     "relaunched": "the phase was started again before this run reported",
     "stale": "no slot holds it any more",
 }
@@ -1211,31 +1222,49 @@ def completions_series(events: list[Event]) -> Series:
     return Series("phases completed", points, maximum=float(total) if total else None)
 
 
-def occupancy_series(events: list[Event], max_workers: int) -> Series:
+def occupancy_series(events: list[Event], max_workers: int, weight=None) -> Series:
     """Busy-slot count over time — the series behind the utilisation number.
 
     A ``PARK`` frees a slot immediately, and the ``EVENT done`` that follows it
     carries ``freed_slot=None``, so decrementing on both would double-count. The
     ``freed_slot`` field is the authority for whether a ``done`` actually freed
-    anything.
+    anything. A hand-up (``EVENT escalate``) frees its slot too.
+
+    With ``weight`` (``phase -> float``) each busy slot counts as its phase's
+    weight instead of one: the usage a worker burns depends on its model
+    (:mod:`eta.tiers`), and the forecast's burn rate is per weighted hour.
     """
     points: list[tuple[float, float]] = []
     busy = 0
+    live: dict[str, float] = {}
     for ev in sorted(events, key=lambda e: e.ts or 0.0):
         if ev.ts is None:
             continue
         if ev.kind == "launch":
             busy += 1
-        elif ev.kind == "park":
+            if weight is not None and ev.phase:
+                live[ev.phase] = weight(ev.phase)
+        elif ev.kind in ("park", "escalate"):
+            if ev.kind == "escalate" and ev.fields.get("freed_slot", "None") == "None":
+                continue
             busy -= 1
+            live.pop(ev.phase or "", None)
         elif ev.kind == "done":
             if ev.fields.get("freed_slot", "None") == "None":
                 continue  # already freed by an earlier PARK
             busy -= 1
+            live.pop(ev.phase or "", None)
         else:
             continue
         busy = max(0, min(busy, max_workers) if max_workers > 0 else max(0, busy))
-        points.append((ev.ts, float(busy)))
+        if weight is None:
+            points.append((ev.ts, float(busy)))
+        else:
+            # A slot the log never saw freed (a reap) drops out as the count is
+            # clamped: keep the newest `busy` phases, as the count itself does.
+            while len(live) > busy:
+                live.pop(next(iter(live)))
+            points.append((ev.ts, sum(live.values()) + max(0, busy - len(live))))
     return Series("busy slots", points, maximum=float(max_workers) if max_workers else None)
 
 

@@ -231,6 +231,24 @@ def dirs(text: str) -> dict[str, list[str]]:
     return out
 
 
+def models(text: str) -> dict[str, str]:
+    """Each checklist row's ``model:`` (``model:`sonnet```), as written: the
+    model its worker runs on. A row with no such field is left out."""
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        m = _CHECKBOX_RE.match(raw)
+        ids = _BACKTICK_RE.findall(m.group(1)) if m else []
+        if not ids or not _PHASE_RE.match(ids[0]) or ids[0] in out:
+            continue
+        for part in m.group(1).split(_FIELD_SEP):
+            if part.strip().startswith("model:"):
+                got = _BACKTICK_RE.findall(part)
+                if got:
+                    out[ids[0]] = got[0]
+                break
+    return out
+
+
 def home(phase: str, row_dirs: dict[str, list[str]]) -> list[str]:
     """The repos a row works in: its ``dir:``, else the repo its id prefix names
     (``frontend-P3`` → ``frontend``), the ledger header's rule."""

@@ -682,6 +682,7 @@ function overviewView() {
   <div class="prog-top"><b>${pct}%</b><span class="mu">${n.done} of ${total} phases built</span><span class="aside">${left} to go</span></div>
   <div class="stack" role="img" aria-label="${n.done} of ${total} phases built">${stack}</div>
   <div class="legend">${legend}</div>
+  ${modelsLine(h.models)}
  </div>
 </section>`;
   const asks = b.columns.find(c => c.key === "needs_you");
@@ -704,10 +705,16 @@ function openBooks() {
   return S.board.campaigns.filter(c => c.open || runCount(c)).map((c, i) => [c, i])
     .sort((a, b) => ((a[0].eta && a[0].eta.p50) || 9e12) - ((b[0].eta && b[0].eta.p50) || 9e12) || a[1] - b[1]).map(x => x[0]);
 }
+function modelsLine(m) {
+  if (!m || !m.rows || !m.rows.length) return "";
+  const parts = m.rows.map(r => `<span title="${esc(r.model)}: ${r.done} built, ${r.running} running, ${r.left} to go"><span class="id">${esc(r.model)}</span> <b>${r.done}</b> built${r.running ? ` · ${r.running} running` : ""} · ${r.left} to go</span>`);
+  if (m.handed_up) parts.push(`<span title="Rows a worker handed up to ${esc(m.own)}">${m.handed_up} handed up to ${esc(m.own)}</span>`);
+  return `<div class="legend models" aria-label="Phases by the model that builds them"><span class="mu">By model</span>${parts.join("")}</div>`;
+}
 function runItem(c) {
   const el = c.since ? now() - c.since : null;
   const ctx = c.ctx != null ? `<span class="ctx" style="--w:${Math.min(100, c.ctx)}%;--c:${c.ctx >= 60 ? "var(--failed)" : c.ctx >= 30 ? "var(--owner)" : "var(--ready)"}">context <i></i> ${Math.round(c.ctx)}%</span>` : "";
-  return `<button class="run" data-phase="${esc(c.id)}"><span><span class="id">${esc(c.id)}</span><span class="book-tag">${esc(c.c)}</span></span>
+  return `<button class="run" data-phase="${esc(c.id)}"><span><span class="id">${esc(c.id)}</span><span class="book-tag">${esc(c.c)}</span>${c.m ? `<span class="book-tag" title="The model building it">${esc(c.m)}</span>` : ""}</span>
 <span class="el"><span data-since="${c.since || ""}">${c.col === "merging" ? "merging" : dur(el)}</span><small>${c.sub ? esc(c.sub) : c.typical ? "typical " + dur(c.typical) : ""}</small></span>
 ${c.t ? `<span class="t">${esc(c.t)}</span>` : ""}${c.doing ? `<span class="doing">${esc(c.doing)}</span>` : ""}${ctx ? `<span style="grid-column:1/-1">${ctx}</span>` : ""}</button>`;
 }

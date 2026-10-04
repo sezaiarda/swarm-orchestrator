@@ -72,6 +72,7 @@ IDLE_LINE = ("console closed. Press Enter here, or o in the dashboard, to reopen
 SESSION_MARKERS = frozenset({
     procs.SESSION_ENV, "SWARM_PHASE", "SWARM_WORKTREE", "SWARM_TOUCHES", "SWARM_MAIN",
     "SWARM_OPERATOR_JOB", "SWARM_OVERSEER_PASS", "SWARM_MASTER_KIND", "SWARM_ASK",
+    "SWARM_MODEL",
 })
 
 #: Marks the console's processes, so the resource sampler files them as the

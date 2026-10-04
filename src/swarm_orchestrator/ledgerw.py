@@ -78,10 +78,11 @@ TITLE_CHARS = 120
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ROW = re.compile(r"^(\s*[-*]\s+\[)([ xX])(\]\s+)(.+)$")
 _FIELD_SEP = ledger_mod._FIELD_SEP
-_META = re.compile(r"^\s*\**\s*(dir:|needs:|touches:)|^\s*(owner-run|owner-optional)\s*$")
+_META = re.compile(r"^\s*\**\s*(dir:|needs:|touches:|model:)|^\s*(owner-run|owner-optional)\s*$")
 _NEEDS = re.compile(r"^\s*\**\s*needs:")
 _TOUCHES = re.compile(r"^\s*\**\s*touches:")
 _DIR = re.compile(r"^\s*\**\s*dir:")
+_MODEL = re.compile(r"^\s*\**\s*model:")
 _TAG = re.compile(r"^\s*\**\s*TAG:")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _SECTION = re.compile(r"^## `([^`]+)`")
@@ -177,7 +178,8 @@ class Head:
 
     @property
     def meta(self) -> list[str]:
-        """``dir:``, the owner marker, ``needs:`` and ``touches:``: what the gates read."""
+        """``dir:``, the owner marker, ``needs:``, ``touches:`` and ``model:``: what
+        the gates and the launcher read."""
         return [f for f in self.fields if _META.match(f)]
 
     @property
@@ -744,6 +746,64 @@ def file_reshape(cfg: Config, by: str, phase: str, why: str, *, needs: list[str]
     return NOW
 
 
+def model_field(model: str) -> str:
+    """The ``model:`` field, in the ledger's own shape."""
+    return f"model:`{model}`"
+
+
+def set_model(text: str, phase: str, model: str) -> tuple[str, str]:
+    """``text`` with ``phase``'s ``model:`` set to ``model`` ("" drops the field,
+    so the row runs on the swarm's own), and what changed, in words. Refuses an
+    unknown or ticked row, a name claude would not take, and an edit that
+    changes nothing."""
+    from . import models as models_mod
+
+    lines = text.split("\n")
+    span = row_spans(lines).get(phase)
+    if span is None:
+        raise ReportError(f"no ledger row {phase}")
+    head = split_head(lines[span[0]])
+    if head.box != " ":
+        raise ReportError(f"{phase} is ticked: a done row is history")
+    if model and not models_mod.valid(model):
+        raise ReportError(f"{model!r} is not a model name")
+    k = _field_index(head, _MODEL)
+    old = "".join(ledger_mod._BACKTICK_RE.findall(head.fields[k])[:1]) if k is not None else ""
+    if model == old:
+        raise ReportError(f"{phase} already runs on {model or 'the default model'}")
+    if not model:
+        del head.fields[k]
+    elif k is None:
+        head.fields.insert(_meta_slot(head, (_DIR, _NEEDS, _TOUCHES)), model_field(model))
+    else:
+        head.fields[k] = model_field(model)
+    lines[span[0]] = head.rebuild()
+    return "\n".join(lines), f"model {old or 'default'} → {model or 'default'}"
+
+
+def file_models(cfg: Config, by: str, rows: list[tuple[str, str, str]]) -> str:
+    """Validate and queue the worker model of each ``(row, model, why)`` to
+    land at once, all in one ledger write; every row must be changeable, or
+    none is queued. Returns the queue key."""
+    if not rows:
+        raise ReportError("no row given")
+    text = _ledger_text(cfg)
+    bad = []
+    for phase, model, why in rows:
+        if not why.strip():
+            bad.append(f"{phase}: say why; the reason goes to the row's history")
+            continue
+        try:
+            text, _ = set_model(text, phase, model)
+        except ReportError as exc:
+            bad.append(str(exc))
+    if bad:
+        raise ReportError("; ".join(bad[:8]) + (f"; and {len(bad) - 8} more" if len(bad) > 8 else ""))
+    queue(cfg, NOW, {"kind": "model", "by": by,
+                     "rows": [{"phase": p, "model": m, "why": w.strip()} for p, m, w in rows]})
+    return NOW
+
+
 def _relane(cfg: Config, text: str, phase: str,
             touches: list[str] | None) -> tuple[list[str], list[str]] | None:
     """What a reshape to ``touches`` makes the lane ``phase`` holds, if it is in
@@ -910,6 +970,25 @@ def apply(cfg: Config, root: Path, key: str, data: dict, status: str | None,
                 f"{stamp} · reshape · by {who}", f"reshaped by {who}: {said}; why: {op.get('why', '')}"))
             res.touched.append(f"reshape {phase}")
             res.released = True
+        elif kind == "model":
+            who, rows = op.get("by") or "a session", op.get("rows") or []
+            said: dict[str, str] = {}
+
+            def remodel(rows=rows, said=said) -> str:
+                out = text
+                for r in rows:
+                    out, said[r["phase"]] = set_model(out, r["phase"], r.get("model", ""))
+                return out
+
+            label = (f"model of `{rows[0]['phase']}`" if len(rows) == 1
+                     else f"model of {len(rows)} rows")
+            filer = who if who in ledger_mod.parse(text) else (rows[0]["phase"] if rows else who)
+            if not rows or not gated(text, label, label.replace("`", ""), filer, remodel):
+                continue
+            for r in rows:
+                append_history(root, hist, split_kb, r["phase"], entry(
+                    f"{stamp} · model · by {who}", f"{said[r['phase']]}; why: {r.get('why', '')}"))
+            res.touched.append(label.replace("`", ""))
         elif kind == "lesson":
             append_lesson(root, cfg.lessons, op.get("phase", "?"), op.get("text", ""),
                           op.get("title", ""), day)
@@ -938,6 +1017,10 @@ def _summary(due: list[str], queued: dict[str, dict]) -> str:
                 parts.append(f"follow-up {op.get('id')}")
             elif kind == "reshape":
                 parts.append(f"reshape {op.get('phase')}")
+            elif kind == "model":
+                rows = op.get("rows") or []
+                parts.append(f"model of {rows[0]['phase']}" if len(rows) == 1
+                             else f"model of {len(rows)} rows")
             elif kind == "lesson":
                 parts.append(f"lesson from {op.get('phase')}")
     return "; ".join(parts)[:200] or "reports"

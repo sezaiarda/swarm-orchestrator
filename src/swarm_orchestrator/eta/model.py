@@ -30,6 +30,7 @@ import re
 from dataclasses import dataclass, field
 from statistics import NormalDist
 
+from . import tiers
 from .record import Sample
 
 #: A group needs this many samples before its own offset is used at all…
@@ -58,6 +59,8 @@ class Meta:
     kind: str
     repo: str
     campaign: str
+    #: The model its worker runs on when that is not the swarm's own ("" = it is).
+    model: str = ""
 
 
 def kind_of(phase: str) -> str:
@@ -79,8 +82,14 @@ class Durations:
 
     def loc(self, meta: Meta) -> float:
         """The row's median, as ``ln(seconds)``."""
-        return self.mu + sum(self.offsets.get((lvl, getattr(meta, lvl)), 0.0)
-                             for lvl in LEVELS)
+        return (self.mu + sum(self.offsets.get((lvl, getattr(meta, lvl)), 0.0)
+                              for lvl in LEVELS)
+                + (self.model_offset(meta.model) if meta.model else 0.0))
+
+    def model_offset(self, model: str) -> float:
+        """How much shorter or longer (on ``ln(seconds)``) a row on ``model``
+        works than one on the swarm's own: measured, or the prior."""
+        return self.offsets.get(("model", model), tiers.TIME_PRIOR)
 
     def median_s(self, meta: Meta) -> float:
         return math.exp(self.loc(meta))
@@ -150,6 +159,33 @@ def _censored_mean(model: Durations, meta: Meta, y_min: float) -> float:
 
 
 def _fit_once(rows, ys: list[float], shared: float) -> Durations:
+    # A model of a row's own shifts its rows' times. Its offset starts at the
+    # prior, and the rest of the fit is made on times with that shift taken out,
+    # so a mix of models never moves the swarm's own median; then the offset is
+    # measured against that fit, and the two are settled in a few rounds.
+    shift: dict[str, float] = {}
+    mine = [meta.model for _, meta in rows]
+    for _ in range(4 if any(mine) else 1):
+        plain = [y - (shift.get(m, tiers.TIME_PRIOR) if m else 0.0) for m, y in zip(mine, ys)]
+        mu, offsets, resid = _fit_levels(rows, plain)
+        sums: dict[str, list[float]] = {}
+        for m, r in zip(mine, resid):
+            if m:
+                acc = sums.setdefault(m, [0.0, 0])
+                acc[0] += r + shift.get(m, tiers.TIME_PRIOR)
+                acc[1] += 1
+        shift = {m: (total + tiers.TIME_PRIOR_N * tiers.TIME_PRIOR) / (count + tiers.TIME_PRIOR_N)
+                 for m, (total, count) in sums.items()}
+    n = len(rows)
+    resid = [y - mu - sum(offsets.get((lvl, getattr(meta, lvl)), 0.0) for lvl in LEVELS)
+             - (shift[m] if m else 0.0) for (_, meta), m, y in zip(rows, mine, ys)]
+    offsets.update({("model", m): v for m, v in shift.items()})
+    var = (sum(r * r for r in resid) + PRIOR_N * DEFAULT_SIGMA ** 2) / (n + PRIOR_N)
+    return Durations(mu=mu, sigma=math.sqrt(var), offsets=offsets, n=n, shared=shared)
+
+
+def _fit_levels(rows, ys: list[float]) -> tuple[float, dict[tuple[str, str], float], list[float]]:
+    """The pooled median, each level's offsets, and what is left of every row."""
     n = len(rows)
     mu = (sum(ys) + PRIOR_N * DEFAULT_MU) / (n + PRIOR_N)
     resid = [y - mu for y in ys]
@@ -165,5 +201,4 @@ def _fit_once(rows, ys: list[float], shared: float) -> Durations:
                 offsets[(level, key)] = total / (count + SHRINK_K)
         resid = [r - offsets.get((level, getattr(meta, level)), 0.0)
                  for (_, meta), r in zip(rows, resid)]
-    var = (sum(r * r for r in resid) + PRIOR_N * DEFAULT_SIGMA ** 2) / (n + PRIOR_N)
-    return Durations(mu=mu, sigma=math.sqrt(var), offsets=offsets, n=n, shared=shared)
+    return mu, offsets, resid

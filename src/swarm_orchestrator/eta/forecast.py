@@ -101,6 +101,11 @@ class Forecast:
     #: 1 = as simulated), and the finished campaigns that measured it (0 = the default).
     stretch: float = 1.0
     calibrated_on: int = 0
+    #: Each model of a row's own in the plan: ``(model, rows, time factor, usage
+    #: weight)`` as the replays took them (:mod:`.tiers`), and the share of such
+    #: rows they had hand themselves back.
+    models: tuple[tuple[str, int, float, float], ...] = ()
+    handup: float = 0.0
 
     @property
     def floor(self) -> bool:
@@ -123,7 +128,8 @@ class Forecast:
                       "stuck": tuple(Stuck(s["row"], s["why"], tuple(s["behind"]))
                                      for s in data["stuck"]),
                       "critical": tuple(data["critical"]),
-                      "caps": tuple(tuple(c) for c in data["caps"])})
+                      "caps": tuple(tuple(c) for c in data["caps"]),
+                      "models": tuple(tuple(m) for m in data.get("models", ()))})
 
 
 def _jsonable(value):

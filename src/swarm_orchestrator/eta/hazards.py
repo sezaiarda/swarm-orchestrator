@@ -24,6 +24,7 @@ import math
 from dataclasses import dataclass, field
 from statistics import NormalDist
 
+from . import tiers
 from .record import Record
 
 #: Research figures: the prior every rate starts from.
@@ -71,6 +72,8 @@ class Hazards:
     #: campaign -> follow-ups per finished row.
     follow: dict[str, float] = field(default_factory=dict)
     follow_all: float = FOLLOW
+    #: Share of the rows on a model of their own that hand themselves back.
+    handup_p: float = tiers.HANDUP_P
 
     def owner_wait(self, u: float) -> float:
         if self.owner_waits:
@@ -105,6 +108,8 @@ def fit(record: Record, now: float, campaign_of) -> Hazards:
         lost=lost_s if len(lost_s) >= MIN_OBSERVED else (),
         follow=follow,
         follow_all=follow_all,
+        handup_p=_pooled(sum(1 for t in record.handups if t <= now),
+                         sum(1 for t in record.model_starts if t <= now), tiers.HANDUP_P),
     )
 
 

@@ -105,6 +105,9 @@ def basis_line(fc: Forecast, now: float) -> str:
         parts.append(f"{fc.build_slots} build slot{'' if fc.build_slots == 1 else 's'}")
     if fc.working < 0.995:
         parts.append(f"working {fc.working:.0%} of the time, as lately")
+    for name, rows, time_x, burn_x in fc.models:
+        parts.append(f"{rows} row{'' if rows == 1 else 's'} on {name} ({time_x:g}× the time,"
+                     f" {burn_x:g}× the usage, {fc.handup:.0%} hand up)")
     for window, at, pct in fc.caps:
         name = "weekly" if window == "week" else "5-hour"
         parts.append(f"{name} cap pauses at {at:g}% ({pct:.0f}% now)")

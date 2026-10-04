@@ -60,6 +60,7 @@ from . import gitq
 from . import landing as landing_mod
 from . import launch as launch_mod
 from . import master as master_mod
+from . import models as models_mod
 from . import operator as operator_mod
 from . import opqueue
 from . import owner as owner_mod
@@ -480,6 +481,8 @@ class Supervisor:
             phase = parts[1] if len(parts) > 1 else "?"
             status = parts[2] if len(parts) > 2 else "ok"
             self._on_done(phase, status)
+        elif verb == "escalate":
+            self._on_escalate(parts[1] if len(parts) > 1 else "?")
         elif verb == "master-idle":
             self._on_master_idle()
         elif verb == "resolved":
@@ -959,6 +962,9 @@ class Supervisor:
         self._adopt_master(st)
         self._adopt_dead_claims()
         self._adopt_reports()
+        for phase in models_mod.unsettled(cfg):
+            # A `swarm escalate` whose poke nobody read: the record is on disk.
+            self._dispatch(f"escalate {phase}", self._on_escalate, phase)
         st = state_mod.read(cfg)
         self._flush_ledger(dict(st.done))
         self._pump_integrations()  # a queue the last supervisor left standing
@@ -1199,6 +1205,51 @@ class Supervisor:
             if not (already and not has_slot):
                 st.integ_push(phase, status)
         self._pump_integrations()
+
+    def _on_escalate(self, phase: str) -> None:
+        """A worker handed its phase back to the swarm's own model (``swarm
+        escalate``, :mod:`models`): its session ends, its mirror goes (what main
+        lacks is archived, :func:`gitq.discard`; nothing of it is merged), and
+        its slot is freed with nothing recorded, so the launcher starts the row
+        again like any ready row, now on the swarm's model.
+
+        Acted on only for a recorded hand-back of a phase building in a slot;
+        one whose worker already finished, or is gone, is just marked settled.
+        """
+        rec = models_mod.handup(self.cfg, phase) if ledger_mod.safe_id(phase) else None
+        if rec is None or rec.get("settled"):
+            self.log.line(f"ESCALATE-REFUSED {phase!r} no hand-back is owed")
+            return
+        with state_mod.transaction(self.cfg) as st:
+            building = any(s.busy and s.phase == phase for s in st.slots)
+            merging = phase in st.integrating() or phase in st.done
+        if not building or merging:
+            models_mod.settle(self.cfg, phase)
+            self.log.line(f"ESCALATE-LATE {phase} its worker is no longer building")
+            return
+        self._end_worker(phase)
+        if self.cfg.git_isolation == "worktree":
+            try:
+                gitq.discard(self.cfg, phase, self.log)
+            except gitq.GitError as exc:
+                self.log.line(f"ESCALATE-DISCARD-ERROR {phase} {exc}")
+        with state_mod.transaction(self.cfg) as st:
+            freed = st.free_slot_for(phase)
+            st.release_lane(phase)
+            st.last_event_at = time.time()
+            paused = st.on_hold
+        launch_mod.drop_session_tmp(self.cfg, phase)
+        logutil.run_ended(self.log, phase, "escalated")
+        models_mod.settle(self.cfg, phase)
+        self.log.line(f"EVENT escalate {phase} from={rec.get('from') or '?'}"
+                      f" to={rec.get('to') or 'default'}"
+                      f" freed_slot={freed.id if freed else None}")
+        # The row's `model:` and the reason, before the next worker reads them.
+        self._flush_ledger({}, hold=False)
+        if paused:
+            self.log.line("ESCALATE-PAUSED holding — no launch")
+            return
+        self._fill_slots(f"{phase} handed up (slot {freed.id if freed else '?'} free)")
 
     def _end_worker(self, phase: str) -> None:
         """End a finished worker's session and every process it started.

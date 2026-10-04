@@ -56,6 +56,9 @@ class Record:
     added: dict[str, tuple[float, int]] = field(default_factory=dict)
     #: ``(time, max_workers)`` as ``.swarm.toml`` set it, oldest first.
     workers: tuple[tuple[float, int], ...] = ()
+    #: When a row was launched on a model of its own, and when one handed itself back.
+    model_starts: tuple[float, ...] = ()
+    handups: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,8 @@ def from_sources(history, events, ledger_history: pace_mod.History) -> Record:
         ticks=dict(ledger_history.ticks),
         added=dict(ledger_history.added),
         workers=tuple(ledger_history.workers),
+        model_starts=tuple(e.ts for e in events or () if e.kind == "model" and e.ts is not None),
+        handups=tuple(e.ts for e in events or () if e.kind == "escalate" and e.ts is not None),
     )
 
 

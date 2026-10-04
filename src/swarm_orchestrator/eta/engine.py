@@ -33,12 +33,13 @@ import os
 import threading
 import time
 import weakref
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .. import ledger as ledger_mod
 from .. import ledgerw
 from .. import logutil
+from .. import models as models_mod
 from .. import pace as pace_mod
 from .. import usage as usage_mod
 from ..tui import data as data_mod
@@ -51,6 +52,7 @@ from . import model as model_mod
 from . import plan as plan_mod
 from . import record as record_mod
 from . import sim as sim_mod
+from . import tiers
 
 #: Replays per forecast. P85 from 500 is good to about 1.6 percentile points.
 RUNS = 500
@@ -73,7 +75,7 @@ IDLE_RECOMPUTE_S = 1800.0
 BURN_WINDOW_S = 7 * 86400.0
 CACHE_NAME = "eta.json"
 #: Bumped when a forecast's meaning changes, so an older cache is not read.
-VERSION = 2
+VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,10 @@ class Inputs:
     #: The rows that wait for a date (:func:`ledgerw.dated`); ``None`` when only
     #: the ledger's text was given, and its own ``after:`` dates are all there is.
     dated: dict[str, str] | None = None
+    #: The rows that run on a model of their own (:func:`models.overrides`), and
+    #: what each such model burns per worker-hour (:func:`tiers.burn_weights`).
+    models: dict[str, str] = field(default_factory=dict)
+    burn_weight: dict[str, float] = field(default_factory=dict)
 
 
 def gather(cfg, state, *, events, history, ledger_history, usage, text: str | None = None,
@@ -131,6 +137,7 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
     for ev in events:
         if ev.kind in ("launch", "claim") and ev.phase and ev.ts is not None:
             started[ev.phase] = ev.ts
+    row_models = _row_models(cfg, text)
     return Inputs(
         now=now, text=text, graph=graph,
         landed=ledger_mod.with_ticked(ledgerw.not_failed(state.done, dated or {}),
@@ -145,7 +152,53 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
                                                                       False) else (),
         forecasts=tuple(calibrate_mod.load(calibrate_mod.log_path(cfg))),
         dated=dated,
+        models=row_models,
+        burn_weight=tiers.burn_weights(_meters(cfg, graph), row_models) if row_models else {},
     )
+
+
+def _row_models(cfg, text: str) -> dict[str, str]:
+    """The rows on a model of their own; none for a caller with no real config."""
+    if not getattr(cfg, "worker_cmd", None) or not getattr(cfg, "state_dir", None):
+        return {}
+    try:
+        return models_mod.overrides(cfg, text)
+    except OSError:
+        return {}
+
+
+#: The meters are read again this often: a worker's meter moves every few
+#: seconds, and the weight it feeds moves only as rows finish.
+METERS_EVERY_S = 300.0
+_METERS: dict[str, tuple[float, dict[str, tuple[float, float]]]] = {}
+
+
+def _meters(cfg, graph) -> dict[str, tuple[float, float]]:
+    """``row -> (cost, seconds)`` as each row's session meter last read."""
+    held = _METERS.get(str(cfg.state_dir))
+    if held is not None and time.time() - held[0] < METERS_EVERY_S:
+        return held[1]
+    out = _read_meters(cfg, graph)
+    _METERS[str(cfg.state_dir)] = (time.time(), out)
+    return out
+
+
+def _read_meters(cfg, graph) -> dict[str, tuple[float, float]]:
+    out: dict[str, tuple[float, float]] = {}
+    try:
+        files = list((Path(cfg.state_dir) / usage_mod.METERS_DIR).glob("*.json"))
+    except OSError:
+        return out
+    for path in files:
+        if path.stem not in graph:
+            continue
+        try:
+            got = json.loads(path.read_text(encoding="utf-8"))
+            out[path.stem] = (float(got.get("cost_usd") or 0.0),
+                              float(got.get("duration_ms") or 0.0) / 1000.0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return out
 
 
 def from_files(cfg, st, now: float | None = None) -> Inputs:
@@ -176,7 +229,8 @@ def plan_of(inputs: Inputs) -> plan_mod.Plan:
         asking=set(st.on_owner()), merging=st.integrating(),
         excluded=set(inputs.exclude), workers=inputs.workers,
         build_slots=inputs.build_slots, park_after=inputs.park_after, dated=inputs.dated,
-        outside=set(st.working_parked()))
+        outside=set(st.working_parked()), models=inputs.models,
+        burn_weight=inputs.burn_weight)
 
 
 @dataclass(frozen=True)
@@ -209,7 +263,7 @@ def fit(inputs: Inputs) -> Fitted:
     dirs = ledger_mod.dirs(inputs.text)
     rec = record_mod.from_sources(inputs.history, inputs.events, inputs.ledger_history)
     durations = model_mod.fit(record_mod.samples(rec, inputs.now),
-                              lambda p: plan_mod.meta_for(p, dirs))
+                              lambda p: plan_mod.meta_for(p, dirs, inputs.models))
     ticks = [t for t, n in rec.ticks.values() if n <= pace_mod.BULK]
     workers = list(rec.workers) or [(0.0, inputs.workers)]
     return Fitted(
@@ -226,10 +280,15 @@ def fit(inputs: Inputs) -> Fitted:
 
 def burn(inputs: Inputs) -> dict[str, float]:
     """Each usage window's percentage points per busy worker-hour, lately."""
-    return burn_of(inputs.events, inputs.workers, inputs.usage, inputs.now)
+    weight = None
+    if inputs.models:
+        def weight(phase: str) -> float:
+            model = inputs.models.get(phase, "")
+            return inputs.burn_weight.get(model, tiers.BURN_PRIOR) if model else 1.0
+    return burn_of(inputs.events, inputs.workers, inputs.usage, inputs.now, weight)
 
 
-def burn_of(events, workers: int, usage, now: float) -> dict[str, float]:
+def burn_of(events, workers: int, usage, now: float, weight=None) -> dict[str, float]:
     """:func:`burn` from its parts: the log's events, the worker count and the
     ``limits.jsonl`` samples. The dashboard's usage box projects the caps with it,
     so it and the forecast burn at the same rate.
@@ -238,11 +297,15 @@ def burn_of(events, workers: int, usage, now: float) -> dict[str, float]:
     there was one: another account's plan burns at its own rate. Until the
     account in use has burned long enough to say, the whole stretch speaks for
     it (each account counted from its own first reading, never across the
-    switch)."""
+    switch).
+
+    With ``weight`` (``phase -> float``) the hours are weighted by what each
+    row's model burns, so the rate is that of a worker on the swarm's own model
+    whatever mix of models ran (:func:`tui.data.occupancy_series`)."""
     usage = list(usage or ())
     # The whole log, so a worker launched before the stretch counts inside it.
     events = [e for e in events if e.ts is not None and e.ts <= now]
-    busy = data_mod.occupancy_series(events, workers).points
+    busy = data_mod.occupancy_series(events, workers, weight).points
 
     def rates(start: float) -> dict[str, float]:
         seat_h = sum(v * max(0.0, min(b, now) - max(a, start))
@@ -285,6 +348,7 @@ def key(inputs: Inputs, fit_id: str) -> str:
                                              inputs.now))
                   for w in ("week", "five")],
         "fit": fit_id,
+        "models": [sorted(inputs.models.items()), sorted(inputs.burn_weight.items())],
     }
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -310,7 +374,21 @@ def compute(inputs: Inputs, fitted: Fitted | None = None, runs: int = RUNS,
     if log is not None and not holds.stopped:
         calibrate_mod.record(log, inputs.now, calibrate_mod.known(plan, futures))
     fc = forecast_mod.summarise(plan, holds, futures, inputs.now, opts)
+    basis = _model_basis(plan, fitted)
+    fc = replace(fc, models=basis, handup=fitted.hazards.handup_p if basis else 0.0)
     return calibrate_mod.apply(fc, fitted.calibration)
+
+
+def _model_basis(plan: plan_mod.Plan, fitted: Fitted) -> tuple:
+    """``(model, rows, time factor, usage weight)`` for each model of a row's
+    own in the plan: what the forecast assumed about it."""
+    count: dict[str, int] = {}
+    for row in plan.rows.values():
+        if row.meta.model:
+            count[row.meta.model] = count.get(row.meta.model, 0) + 1
+    return tuple((m, n, round(math.exp(fitted.durations.model_offset(m)), 2),
+                  round(plan.burn_weight.get(m, tiers.BURN_PRIOR), 2))
+                 for m, n in sorted(count.items()))
 
 
 def floor(inputs: Inputs, fitted: Fitted | None = None) -> forecast_mod.Forecast:

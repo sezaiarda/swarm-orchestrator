@@ -1,4 +1,4 @@
-"""The owner console: its config, its primer, its conversation id, and its window.
+"""The owner console: its config, its primer, its fresh start, and its window.
 
 The window's lifecycle runs on a fully isolated tmux server (its own
 ``TMUX_TMPDIR``, killed after, so no session can outlive the test) with a fake
@@ -106,32 +106,20 @@ def test_the_console_prompt_lints_clean():
                            known_commands=cli._known_commands()) == []
 
 
-# -- the conversation id ---------------------------------------------------------------
-def test_resume_by_id_once_a_transcript_exists_else_that_id_is_started(cfg, tmp_path):
-    assert console.session_id(cfg) is None
-    sid = console.new_session_id(cfg)
-    assert console.session_id(cfg) == sid and not console.has_transcript(sid)
-    argv = console.claude_argv(cfg, sid, resume=False)
-    assert argv[:5] == ["claude", "-n", "swarm · console", "--session-id", sid]
-    assert "--continue" not in argv and "--resume" not in argv
-    # Claude Code wrote the conversation: the next launch resumes exactly it.
-    tdir = tmp_path / "claude" / "projects" / "-some-project"
-    tdir.mkdir(parents=True)
-    (tdir / f"{sid}.jsonl").write_text("{}\n")
-    assert console.has_transcript(sid)
-    argv = console.claude_argv(cfg, sid, resume=True)
-    assert argv[:5] == ["claude", "-n", "swarm · console", "--resume", sid]
-    assert argv[-2] == "--append-system-prompt" and "owner's console" in argv[-1]
-    # --new: a fresh id, never the old one.
-    assert console.new_session_id(cfg) not in (sid, None)
+# -- a fresh conversation ----------------------------------------------------------------
+def test_the_command_names_no_conversation_so_every_start_is_fresh(cfg):
+    argv = console.claude_argv(cfg)
+    assert argv[:4] == ["claude", "-n", "swarm · console", "--append-system-prompt"]
+    assert len(argv) == 5 and "owner's console" in argv[-1]
+    assert not {"--resume", "--continue", "--session-id", "-r", "-c"} & set(argv)
 
 
 def test_model_and_command_come_from_the_config(cfg):
     cfg.console_model = "opus"
     cfg.console_cmd = "/opt/claude --verbose"
-    argv = console.claude_argv(cfg, "abc", resume=True)
+    argv = console.claude_argv(cfg)
     assert argv[:7] == ["/opt/claude", "--verbose", "--model", "opus", "-n", "swarm · console",
-                        "--resume"]
+                        "--append-system-prompt"]
 
 
 # -- not a worker ------------------------------------------------------------------------
@@ -175,17 +163,15 @@ def test_console_on_the_bare_driver_says_so(cfg, capsys):
 
 # -- the window, on an isolated tmux server ---------------------------------------------------
 FAKE_CLAUDE = r"""#!/bin/sh
-# Stands in for claude: logs how it was started, writes the transcript the real one
-# would, and runs until the test touches the quit file (the owner's /exit).
-prev=""
+# Stands in for claude: logs whether it was started fresh or pointed at an earlier
+# conversation, and runs until the test touches the quit file (the owner's /exit).
+how="fresh"
 for a in "$@"; do
-  case "$prev" in
-    --resume) echo "resume $a" >> "$SWARM_FAKE_LOG" ;;
-    --session-id) echo "new $a" >> "$SWARM_FAKE_LOG"
-      mkdir -p "$CLAUDE_CONFIG_DIR/projects/p" && : > "$CLAUDE_CONFIG_DIR/projects/p/$a.jsonl" ;;
+  case "$a" in
+    --resume|--continue|--session-id|-r|-c) how="carried $a" ;;
   esac
-  prev="$a"
 done
+echo "start $how" >> "$SWARM_FAKE_LOG"
 echo "env phase=${SWARM_PHASE-unset} session=${SWARM_SESSION_ID-unset}" >> "$SWARM_FAKE_LOG"
 echo "FAKE CLAUDE UP"
 while [ ! -e "$SWARM_FAKE_QUIT" ]; do sleep 0.05; done
@@ -235,7 +221,7 @@ def _log(cfg) -> list[str]:
 
 
 def _starts(cfg) -> list[str]:
-    return [ln for ln in _log(cfg) if ln.startswith(("new ", "resume "))]
+    return [ln for ln in _log(cfg) if ln.startswith("start ")]
 
 
 def _pane(cfg) -> str:
@@ -256,9 +242,9 @@ def test_up_puts_the_console_between_the_dashboard_and_the_overseer(live):
     names = tmux.run(["list-windows", "-t", f"={cfg.session}", "-F", "#{window_name}"])
     assert names.stdout.split() == ["dash", "console", "overseer", "operator", "workers"]
     assert windows["console"] == tmux.find_window(cfg.session, console.WINDOW)
-    # It starts at once, as a new conversation whose id the swarm chose and kept.
+    # It starts at once, as a new conversation.
     assert _wait(lambda: len(_starts(cfg)) == 1)
-    assert _starts(cfg) == [f"new {console.session_id(cfg)}"]
+    assert _starts(cfg) == ["start fresh"]
     # The fake writes its environment line after the start line, so wait for it.
     assert _wait(lambda: "env phase=unset session=unset" in _log(cfg))
     # Not a slot: untagged, in no slot record, and every slot still free.
@@ -270,21 +256,22 @@ def test_up_puts_the_console_between_the_dashboard_and_the_overseer(live):
     assert console.pane_state(pane) == console.RUNNING
 
 
-def test_exit_leaves_the_pane_and_the_key_reopens_the_same_conversation(live):
+def test_exit_leaves_the_pane_and_the_key_opens_a_fresh_conversation(live):
     cfg = live
     session_mod.setup(cfg)
     assert _wait(lambda: len(_starts(cfg)) == 1)
-    sid = console.session_id(cfg)
     _exit_claude(cfg)
     pane = _pane(cfg)
     assert tmux.window_alive(tmux.find_window(cfg.session, console.WINDOW))
     time.sleep(0.5)
     assert len(_starts(cfg)) == 1  # closed on purpose: never relaunched on its own
-    # `o` in the dashboard (and `swarm console`) is open_console: it resumes by id.
+    # `o` in the dashboard (and `swarm console`) is open_console: never the old one.
     what, _ = console.open_console(cfg)
     assert what == console.REOPENED
     assert _wait(lambda: len(_starts(cfg)) == 2)
-    assert _starts(cfg)[-1] == f"resume {sid}" and _pane(cfg) == pane
+    assert _starts(cfg) == ["start fresh"] * 2 and _pane(cfg) == pane
+    # Nothing is kept between starts: no record of a conversation to go back to.
+    assert not (cfg.state_dir / "console.json").exists()
     # Pressed again while it runs: only focused, never a second claude.
     assert _wait(lambda: console.pane_state(pane) == console.RUNNING)
     what, win = console.open_console(cfg)
@@ -295,40 +282,22 @@ def test_exit_leaves_the_pane_and_the_key_reopens_the_same_conversation(live):
     assert len(_starts(cfg)) == 2
 
 
-def test_new_starts_a_fresh_conversation_and_is_refused_while_one_runs(live):
-    cfg = live
-    session_mod.setup(cfg)
-    assert _wait(lambda: len(_starts(cfg)) == 1)
-    sid = console.session_id(cfg)
-    assert _wait(lambda: console.pane_state(_pane(cfg)) == console.RUNNING)
-    with pytest.raises(console.ConsoleError, match="/exit it there first"):
-        console.open_console(cfg, new=True)
-    assert console.session_id(cfg) == sid
-    _exit_claude(cfg)
-    what, _ = console.open_console(cfg, new=True)
-    assert what == console.REOPENED
-    assert _wait(lambda: len(_starts(cfg)) == 2)
-    fresh = console.session_id(cfg)
-    assert fresh != sid and _starts(cfg)[-1] == f"new {fresh}"
-
-
 def test_a_missing_window_or_dead_keeper_is_started_again_beside_the_dashboard(live):
     cfg = live
     session_mod.setup(cfg)
     assert _wait(lambda: len(_starts(cfg)) == 1)
-    sid = console.session_id(cfg)
     keeper = int(tmux.run(["display-message", "-p", "-t", _pane(cfg), "#{pane_pid}"])
                  .stdout.strip())
     os.killpg(keeper, signal.SIGKILL)  # the keeper dies, and its claude with it
     assert _wait(lambda: console.pane_state(_pane(cfg)) == console.DEAD)
     assert console.open_console(cfg)[0] == console.OPENED
-    assert _wait(lambda: len(_starts(cfg)) == 2) and _starts(cfg)[-1] == f"resume {sid}"
+    assert _wait(lambda: len(_starts(cfg)) == 2)
     _exit_claude(cfg)
     tmux.kill_window(tmux.find_window(cfg.session, console.WINDOW))
     assert console.open_console(cfg)[0] == console.OPENED
     names = tmux.run(["list-windows", "-t", f"={cfg.session}", "-F", "#{window_name}"])
     assert names.stdout.split() == ["dash", "console", "overseer", "operator", "workers"]
-    assert _wait(lambda: len(_starts(cfg)) == 3) and _starts(cfg)[-1] == f"resume {sid}"
+    assert _wait(lambda: len(_starts(cfg)) == 3) and _starts(cfg) == ["start fresh"] * 3
 
 
 def test_console_off_opens_no_window_and_says_so(live, monkeypatch):

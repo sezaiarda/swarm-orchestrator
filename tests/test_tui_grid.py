@@ -555,7 +555,7 @@ def test_o_reopens_the_owner_console_and_is_listed(seeded, monkeypatch, capfd):
 
     calls = []
     monkeypatch.setattr(console, "open_console",
-                        lambda cfg, new=False: calls.append(new) or (console.FOCUSED, "@9"))
+                        lambda cfg: calls.append(cfg) or (console.FOCUSED, "@9"))
 
     async def steps(app, pilot, got):
         got["text"] = screen_text(app)
@@ -565,7 +565,7 @@ def test_o_reopens_the_owner_console_and_is_listed(seeded, monkeypatch, capfd):
         await pilot.pause()
         got["calls"] = list(calls)
 
-        def refuse(cfg, new=False):
+        def refuse(cfg):
             raise console.ConsoleError("the console is off")
         monkeypatch.setattr(console, "open_console", refuse)
         await pilot.press("o")
@@ -577,7 +577,7 @@ def test_o_reopens_the_owner_console_and_is_listed(seeded, monkeypatch, capfd):
     assert "o console" in got["text"].rstrip().splitlines()[-1]
     assert "Owner console" in got["palette"]
     assert "owner console" in HelpScreen.HELP
-    assert got["calls"] == [False]  # resume, never --new, from the key
+    assert len(got["calls"]) == 1
     assert any("console: the console is off" in t for t in got["toasts"])
 
 

@@ -870,10 +870,10 @@ reshape the ledger, check on a worker. It is unrestricted, and primed with the
 swarm's commands, where the ledger, lessons and state live, and how rows are
 added (through the swarm, so it builds them); `[console] prompt_file` adds the
 project's own words. `/exit` closes it and leaves the window; Enter there, `o` in
-the dashboard or `swarm console` reopens the same conversation, and
-`swarm console --new` starts a fresh one. It is not a worker: no slot, no phase,
-no reaper while the swarm runs. `swarm down` ends it with the rest, and the next
-`swarm up` resumes it.
+the dashboard or `swarm console` opens a fresh conversation. Every start is
+fresh, `swarm up` included; `/resume` inside it brings an earlier conversation
+back. It is not a worker: no slot, no phase, no reaper while the swarm runs.
+`swarm down` ends it with the rest.
 
 ## Command reference
 
@@ -885,7 +885,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 | start, watch, stop | `swarm up`, `swarm status`, `swarm down` |
 | see what is wrong | `swarm doctor`, `swarm why <phase>` |
 | see and do what waits on you | `swarm todo`, `swarm guide` |
-| talk to the swarm in your own Claude session | `swarm console` (`--new` for a fresh one) |
+| talk to the swarm in your own Claude session | `swarm console` |
 | hold or release launching | `swarm pause`, `swarm resume` |
 | stop every session in place, then wake them | `swarm freeze`, `swarm thaw` |
 | start a phase by hand, skip one, retry a failure | `swarm launch <phase>`, `swarm skip <phase>`, `swarm retry <phase>` |
@@ -952,7 +952,7 @@ project path, so two projects with the same folder name never share state.
 | `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail`, `yield`/`unyield` for an idle holder set aside or counted again, and `passed`/`alone` under the pairing rules (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
 | `.cargo/config.toml`, `.cargo/rustc-wrap` | With `[build].cache`: the cargo config every build under the state dir reads, and the rustc wrapper it names. The wrapper makes the build paths a Rust test compiles in the cache's own, so a test built in one mirror still starts its binary after that mirror is removed (see [components.md](docs/components.md#worktree-isolation-and-mirrors)). Checked whenever a mirror is made, and removed when the cache is turned off. |
-| `console.json`, `console.lock` | The owner console's conversation id (what the next start resumes), and the lock that keeps two opens from racing. |
+| `console.lock` | The lock that keeps two opens of the owner console from racing. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
 | `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |

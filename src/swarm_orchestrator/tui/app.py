@@ -133,7 +133,7 @@ class HelpScreen(ModalScreen[None]):
 [b]anywhere[/b]
   [{COLOR[OK]}]n[/] needs-you drawer   [{COLOR[OK]}]c[/] command centre   [{COLOR[OK]}]d[/] run the doctor
   [{COLOR[OK]}]g[/] guide me: a chat in its own window that walks you through your to-dos
-  [{COLOR[OK]}]o[/] owner console: your own Claude session for this swarm (reopens it)
+  [{COLOR[OK]}]o[/] owner console: your own Claude session for this swarm (a fresh one each time)
   [{COLOR[OK]}]j k[/] / arrows move    [{COLOR[OK]}]enter[/] or click opens what is selected
   [{COLOR[OK]}]R[/] reset the run: ETA and usage count from now (asks first)
   [{COLOR[OK]}]D[/] drain: stop once the running work is done, then maybe run a command
@@ -534,7 +534,7 @@ class SwarmApp(App):
                                   severity="warning")
 
     def action_console(self) -> None:
-        """``o``: reopen the owner console (resuming its conversation), or go to it."""
+        """``o``: open the owner console (a fresh conversation), or go to the running one."""
         self._open_console()
 
     @work(thread=True, exclusive=True, group="console")

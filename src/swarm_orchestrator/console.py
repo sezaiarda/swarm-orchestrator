@@ -8,18 +8,17 @@ on purpose. Enter in the pane, ``o`` in the dashboard or ``swarm console``
 (:func:`open_console`) opens it again; while it runs they only move the owner
 there, so there is never a second ``claude``.
 
-The conversation carries over. Its id is chosen here and kept in
-``<state>/console.json``: a launch passes ``--resume <id>`` once Claude Code has
-a transcript for it and ``--session-id <id>`` before, so ``swarm up`` picks the
-same conversation up again and never another session's (``--continue`` would
-take the newest in the directory, which can be an Overseer pass).
-``swarm console --new`` stores a fresh id.
+Every start is a fresh conversation: after an ``/exit``, after ``swarm up``,
+after a dead keeper. No launch passes ``--resume``, ``--continue`` or
+``--session-id``, and no id is kept. The earlier ones stay in Claude Code's own
+history under the console's name, and ``/resume`` inside the console brings
+one back when the owner wants it.
 
 It is not a worker. It carries no phase marker and no ``SWARM_SESSION_ID``, so no
 ``Stop`` hook recap, slot, ETA, usage-per-phase or session reaper ever counts it;
 it holds no ``@swarm_slot`` pane, so no watchdog looks at it. It does carry the
 run's ``SWARM_STATE_DIR``, so its ``swarm`` commands find this run and
-``swarm down`` ends it with the rest (the transcript stays, to resume), and
+``swarm down`` ends it with the rest (the transcript stays, for ``/resume``), and
 ``SWARM_OWNER_CONSOLE``, so ``swarm resources`` shows it apart: neither a worker
 nor the swarm's own overhead. It keeps
 the owner's own settings and hooks, and its primer (``prompts/console.md``, the
@@ -31,14 +30,11 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import json
 import os
 import shlex
 import subprocess
 import sys
 import termios
-import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -51,7 +47,6 @@ from .config import Config, load
 
 WINDOW = "console"
 PROMPT = "console.md"
-RECORD = "console.json"
 
 # What :func:`open_console` did.
 OPENED = "opened"  # the window was missing (or its keeper dead) and is started
@@ -64,8 +59,8 @@ IDLE = "idle"
 DEAD = "dead"
 
 #: The line the keeper shows once claude has exited.
-IDLE_LINE = ("console closed. Press Enter here, or o in the dashboard, to reopen it"
-             " (`swarm console --new` starts a fresh conversation).")
+IDLE_LINE = ("console closed. Press Enter here, or o in the dashboard, to open a fresh"
+             " one (/resume inside it brings an earlier conversation back).")
 
 #: Variables that make a process a swarm session (or a phase's worker): the
 #: console must carry none of them, whatever the tmux server's environment holds.
@@ -91,49 +86,6 @@ NOT_YOURS = frozenset({
 
 class ConsoleError(Exception):
     """The console cannot be opened here (no swarm session, the bare driver, off)."""
-
-
-# -- the conversation id ------------------------------------------------------
-def _record_path(cfg: Config) -> Path:
-    return Path(cfg.state_dir) / RECORD
-
-
-def session_id(cfg: Config) -> str | None:
-    """The console conversation's id, or None before the first one."""
-    try:
-        data = json.loads(_record_path(cfg).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    sid = data.get("session_id") if isinstance(data, dict) else None
-    return sid if isinstance(sid, str) and sid else None
-
-
-def new_session_id(cfg: Config) -> str:
-    """Choose and store a fresh conversation id; the next launch starts it."""
-    sid = str(uuid.uuid4())
-    path = _record_path(cfg)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"session_id": sid, "since": time.time()}), encoding="utf-8")
-    os.replace(tmp, path)
-    return sid
-
-
-def _claude_dir() -> Path:
-    override = os.environ.get("CLAUDE_CONFIG_DIR")
-    return Path(override).expanduser() if override else Path.home() / ".claude"
-
-
-def has_transcript(sid: str) -> bool:
-    """Whether Claude Code has written the conversation ``sid`` (so it can resume).
-
-    Looked up in every project directory, not in one derived from the cwd: the
-    encoding of a path into a directory name is Claude Code's, and may change."""
-    projects = _claude_dir() / "projects"
-    try:
-        return any(projects.glob(f"*/{sid}.jsonl"))
-    except OSError:
-        return False
 
 
 # -- the primer ---------------------------------------------------------------
@@ -202,14 +154,15 @@ def primer(cfg: Config) -> str:
 
 
 # -- the claude command and its environment ----------------------------------
-def claude_argv(cfg: Config, sid: str, resume: bool) -> list[str]:
-    """The console's ``claude`` invocation (``[console] cmd`` replaces the base)."""
+def claude_argv(cfg: Config) -> list[str]:
+    """The console's ``claude`` invocation (``[console] cmd`` replaces the base).
+
+    It names no conversation, so Claude Code starts a new one each time."""
     argv = shlex.split(cfg.console_cmd or "claude")
     if cfg.console_model:
         argv += ["--model", cfg.console_model]
     if not launch_mod.names_itself(shlex.join(argv)):
         argv += ["-n", launch_mod.session_name(WINDOW)]
-    argv += ["--resume", sid] if resume else ["--session-id", sid]
     return argv + ["--append-system-prompt", primer(cfg)]
 
 
@@ -289,11 +242,7 @@ def run_pane(project_dir: Path, explicit: str | None = None) -> int:
     next one."""
     while True:
         cfg = load(explicit=explicit, project_dir=str(project_dir))
-        sid = session_id(cfg) or new_session_id(cfg)
-        resume = has_transcript(sid)
-        verb = "resuming" if resume else "starting"
-        print(f"swarm console: {verb} conversation {sid}", flush=True)
-        rc = _run_claude(claude_argv(cfg, sid, resume), claude_env(cfg), cfg.project_dir)
+        rc = _run_claude(claude_argv(cfg), claude_env(cfg), cfg.project_dir)
         if rc not in (0, 130):
             print(f"swarm console: claude exited with status {rc}", flush=True)
         if not _await_enter():
@@ -354,11 +303,10 @@ def _check(cfg: Config) -> None:
         raise ConsoleError(f"tmux session {cfg.session!r} is not this swarm's")
 
 
-def open_console(cfg: Config, new: bool = False) -> tuple[str, str]:
-    """``(OPENED | REOPENED | FOCUSED, window id)``: bring the console up, or move
-    the owner to the running one. ``new`` starts a fresh conversation, and is
-    refused while one is running (:class:`ConsoleError`): ending it is the
-    owner's ``/exit``, never ours."""
+def open_console(cfg: Config) -> tuple[str, str]:
+    """``(OPENED | REOPENED | FOCUSED, window id)``: bring the console up as a
+    fresh conversation, or move the owner to the running one (ending that one is
+    the owner's ``/exit``, never ours)."""
     _check(cfg)
     with _locked(cfg):
         win = tmux.find_window(cfg.session, WINDOW)
@@ -366,12 +314,7 @@ def open_console(cfg: Config, new: bool = False) -> tuple[str, str]:
         state = pane_state(pane) if pane else DEAD
         if state == RUNNING:
             focus(win)
-            if new:
-                raise ConsoleError("the console is running; /exit it there first, then"
-                                   " `swarm console --new`")
             return FOCUSED, win
-        if new:
-            new_session_id(cfg)
         if win is None or pane is None:
             win, pane = start_window(cfg, after=tmux.find_window(cfg.session, "dash"))
             what = OPENED
@@ -385,10 +328,9 @@ def open_console(cfg: Config, new: bool = False) -> tuple[str, str]:
     return what, win
 
 
-def open_words(cfg: Config, new: bool = False) -> str:
+def open_words(cfg: Config) -> str:
     """:func:`open_console`, said in words."""
-    what, _ = open_console(cfg, new)
+    what, _ = open_console(cfg)
     if what == FOCUSED:
         return f"the console is running — moved you to tmux window {WINDOW}"
-    fresh = "a new conversation" if new else "the console"
-    return f"opened {fresh} in tmux window {WINDOW}"
+    return f"opened a fresh console in tmux window {WINDOW}"

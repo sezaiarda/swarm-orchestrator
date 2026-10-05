@@ -1813,21 +1813,19 @@ settings and hooks.
 - **The window** runs a keeper (`swarm _console-pane`) that starts `claude` in
   the project directory. When you `/exit`, the keeper stays with one idle line
   and never relaunches by itself. Enter in the pane, `o` in the dashboard or
-  `swarm console` starts it again; while it runs they only move you there, so
+  `swarm console` starts a new one; while it runs they only move you there, so
   there is never a second one. A missing window is recreated after `dash`.
-- **One conversation.** The swarm picks its id and keeps it in
-  `<state>/console.json`. Each start passes `--resume <id>` once Claude Code has
-  its transcript, and `--session-id <id>` before; never `--continue`, which would
-  take the newest session in the directory (an Overseer pass, say).
-  `swarm console --new` stores a fresh id, and is refused while the console runs.
-  Claude Code records the primer once per conversation, so a primer edit reaches
-  a resumed console only after it compacts, or with `--new`.
+- **A fresh conversation every time.** No start passes `--resume`, `--continue`
+  or `--session-id`, and the swarm keeps no conversation id: after `/exit`,
+  after `swarm up`, after a dead keeper, the console opens empty. Earlier ones
+  stay in Claude Code's own history as `swarm · console`; `/resume` inside the
+  console brings one back. A primer edit reaches the next start.
 - **Not a worker.** It carries no phase marker and no `SWARM_SESSION_ID`, even if
   the tmux server's environment does, so no `Stop`-hook recap, slot, ETA,
   per-phase usage or session reaper counts it, and its pane has no `@swarm_slot`
   tag for a watchdog to look at. It carries the run's `SWARM_STATE_DIR`, so its
   `swarm` commands find the run and `swarm down` ends it; the next `swarm up`
-  resumes the conversation.
+  opens a fresh one.
 
 ## The dashboard (`swarm tui`)
 

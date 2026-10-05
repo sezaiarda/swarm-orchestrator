@@ -60,7 +60,7 @@ def test_every_launch_path_names_its_session(cfg, monkeypatch):
         "resolver": resolver_cmd(cfg, monkeypatch),
         "guide": guide.command(cfg),
         "big-picture": bigpic.command(cfg, cfg.project_dir),
-        "console": console.claude_argv(cfg, "abc", resume=False),
+        "console": console.claude_argv(cfg),
     }
     assert {kind: names(cmd) for kind, cmd in launched.items()} == {
         "worker": ["swarm · worker · P1"],
@@ -80,7 +80,7 @@ def test_a_command_that_names_itself_keeps_its_name(cfg):
     cfg.worker_cmd = "claude --model opus -n worker:{phase}"
     assert names(launch_mod._worker_shell(cfg, "P1", cfg.project_dir)) == ["worker:P1"]
     cfg.console_cmd = "claude --name=mine"
-    argv = console.claude_argv(cfg, "abc", resume=True)
+    argv = console.claude_argv(cfg)
     assert names(argv) == [] and "--name=mine" in argv
 
 

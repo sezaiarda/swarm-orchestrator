@@ -2641,10 +2641,10 @@ def cmd_todo(cfg: Config, as_json: bool) -> int:
     return 0
 
 
-def cmd_console(cfg: Config, new: bool) -> int:
-    """Open the owner console, or move to it; ``--new`` starts a fresh conversation."""
+def cmd_console(cfg: Config) -> int:
+    """Open the owner console (a fresh conversation), or move to the running one."""
     try:
-        print(console_mod.open_words(cfg, new))
+        print(console_mod.open_words(cfg))
     except console_mod.ConsoleError as exc:
         print(f"swarm console: {exc}", file=sys.stderr)
         return 2
@@ -3391,11 +3391,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "guide", help="open the owner guide: a chat that walks you through your to-dos"
     ).set_defaults(func=lambda cfg, a: cmd_guide(cfg))
 
-    cnp = sub.add_parser(
-        "console", help="open the owner console (your own Claude session), or move to it")
-    cnp.add_argument("--new", action="store_true",
-                     help="start a fresh conversation instead of resuming the last one")
-    cnp.set_defaults(func=lambda cfg, a: cmd_console(cfg, a.new))
+    sub.add_parser(
+        "console", help="open the owner console (your own Claude session), or move to it"
+    ).set_defaults(func=lambda cfg, a: cmd_console(cfg))
     sub.add_parser("_console-pane").set_defaults(  # what the console window runs
         func=lambda cfg, a: console_mod.run_pane(cfg.project_dir, a.config))
 

@@ -262,7 +262,7 @@ def measure(finished: dict[str, float], bulk: set[str] | frozenset[str],
     ``finished`` is phase -> when it finished, ``bulk`` the rows a bookkeeping
     commit ticked (done, but not throughput). ``idle`` are the spans this
     machine's log says the swarm could not work — paused, held by a usage cap,
-    its supervisor down. A span in which a phase finished anyway was not a hold
+    its supervisor down — and the stretches it stood frozen. A span in which a phase finished anyway was not a hold
     for the swarm as a whole (it was working elsewhere), so it is not taken out.
     """
     times = sorted(t for p, t in finished.items()

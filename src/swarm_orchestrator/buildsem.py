@@ -119,7 +119,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from . import buildclass, buildidle, buildlog, buildpair, procs
+from . import buildclass, buildidle, buildlog, buildpair, freezer, procs
 from .config import Config
 
 _POLL_S = 0.5  # a waiter whose turn it is not yet
@@ -290,7 +290,8 @@ def _synthetic_end(cfg: Config, rec: dict, slot: int | None, now: float) -> None
     buildlog.event(cfg, "end", id=rec.get("id", "?"), phase=rec.get("phase"),
                    pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=slot,
                    cls=rec.get("cls") or "heavy", argv=rec.get("argv", ""),
-                   cwd=rec.get("cwd", ""), run_s=now - start, exit=None,
+                   cwd=rec.get("cwd", ""), run_s=freezer.awake_elapsed(cfg, start, now),
+                   exit=None,
                    repo=rec.get("repo"), ts=now)
 
 
@@ -419,6 +420,15 @@ def _drop(t: Ticket) -> None:
         pass
 
 
+def _polling(cfg: Config, refreshed: float, now: float) -> bool:
+    """Is a ticket last refreshed at ``refreshed`` still polled? A waiter that
+    stands frozen (``swarm freeze``) cannot refresh its ticket and has not left:
+    only the time the run was awake counts toward :data:`_STALE_S`."""
+    if now - refreshed < _STALE_S:
+        return True
+    return freezer.awake_elapsed(cfg, refreshed, now) < _STALE_S
+
+
 def live_tickets(cfg: Config, mine: Ticket | None = None,
                  prune: bool = True) -> list[dict]:
     """Every waiting ticket, oldest first, with ``fresh`` (still polling).
@@ -460,7 +470,7 @@ def live_tickets(cfg: Config, mine: Ticket | None = None,
                 meta = json.loads(os.read(fd, 1 << 16) or b"{}")
             except ValueError:
                 continue
-            meta["fresh"] = now - os.fstat(fd).st_mtime < _STALE_S
+            meta["fresh"] = _polling(cfg, os.fstat(fd).st_mtime, now)
             out.append(meta)
         finally:
             os.close(fd)
@@ -823,16 +833,22 @@ def _record(meta: dict, pid: int | None, start_ts: float | None,
 def _wait_turn(cfg: Config, t: Ticket, hist: buildlog.History | None,
                announce: bool, leave_ts: float | None = None) -> Claim | None:
     """Poll until it is ``t``'s turn and a build may start; report while waiting.
-    With ``leave_ts`` the wait ends there: None, and the ticket is still ``t``'s."""
+    With ``leave_ts`` the wait ends there: None, and the ticket is still ``t``'s.
+    Time the run stood frozen is not time waited: the builds ahead stood still
+    too, so the wait goes on for as long as it was cut short."""
     overtake, short_s = cfg.build_overtake, cfg.build_short_s
     next_report = 0.0
+    began = time.time()
     while True:
         got, view = _try_turn(cfg, t, overtake, short_s)
         if got is not None:
             return got
         now = time.time()
         if leave_ts is not None and now >= leave_ts:
-            return None
+            leave_ts += freezer.frozen_in(freezer.spans(cfg, now), began, now)
+            began = now
+            if now >= leave_ts:
+                return None
         if now >= next_report:
             if announce:
                 if next_report == 0.0:
@@ -989,8 +1005,12 @@ def _clock(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
 
-def _wait_child(proc: subprocess.Popen, timeout: float | None, start: float,
+def _wait_child(cfg: Config, proc: subprocess.Popen, timeout: float | None, start: float,
                 tick=None) -> int:
+    """Wait for the build; stop it once it has run ``timeout``. Time the run
+    stood frozen (``swarm freeze``) is not time the build ran: this process and
+    its build were stopped with everything else, and a clock that counted it
+    would end the build on the first look after the thaw."""
     received: list[int] = []
 
     def forward(signum, _frame):
@@ -1010,7 +1030,8 @@ def _wait_child(proc: subprocess.Popen, timeout: float | None, start: float,
                     tick()
                 except Exception:  # noqa: BLE001 -- measuring must never end a build
                     tick = None
-            if timeout is not None and time.time() - start >= timeout:
+            if timeout is not None and time.time() - start >= timeout \
+                    and freezer.awake_elapsed(cfg, start) >= timeout:
                 _say(f"--timeout {buildlog.fmt_s(timeout)} reached (counted from the start)"
                      " — stopping the build")
                 members = _tree(proc.pid)
@@ -1122,15 +1143,16 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
     ticks = [watch.tick] if watch else []
     if held and buildpair.enabled(cfg) and not rec.get("alone"):
         ticks.append(_OwnAlone(cfg, call.id, proc.pid).tick)
-    code = _wait_child(proc, timeout, start, _ticker(ticks))
+    code = _wait_child(cfg, proc, timeout, start, _ticker(ticks))
     now = time.time()
+    ran = freezer.awake_elapsed(cfg, start, now)  # what the next run is predicted from
     if held:
         _finish(cfg, held, rec, now)
-    call.log(cfg, "end", pid=proc.pid, slot=slot, run_s=now - start, exit=code, ts=now)
+    call.log(cfg, "end", pid=proc.pid, slot=slot, run_s=ran, exit=code, ts=now)
     if held:
-        _say(f"ran {buildlog.fmt_s(now - start)}, exit {code} (queued {buildlog.fmt_s(wait_s)})")
+        _say(f"ran {buildlog.fmt_s(ran)}, exit {code} (queued {buildlog.fmt_s(wait_s)})")
         if watch:
-            watch.finish(now, now - start)
+            watch.finish(now, ran)
         held.close()  # the seat and slot free once the build's leftovers are gone too
     return code
 
@@ -1281,8 +1303,8 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
     finally:
         now = time.time()
         _finish(cfg, claim, rec, now)
-        call.log(cfg, "end", pid=os.getpid(), slot=claim.slot, run_s=now - start,
-                 exit=held.exit, ts=now)
+        call.log(cfg, "end", pid=os.getpid(), slot=claim.slot,
+                 run_s=freezer.awake_elapsed(cfg, start, now), exit=held.exit, ts=now)
         claim.close()
 
 

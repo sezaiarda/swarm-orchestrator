@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -259,6 +260,21 @@ def _tg_bot_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_scopes(monkeypatch):
+    """Nothing the suite starts gets a systemd scope of its own.
+
+    ``swarm up`` starts the supervisor, the bot, a headless board and each lane
+    check through :func:`freezer.scoped`, which asks systemd for a scope where
+    it can. The suite must not: it would leave units on the user's manager for
+    every test. The switch is the documented one, and the runtime dir the probe
+    looks for goes too. Set in the environment, so the ``swarm`` fixture's copy
+    of it carries both. ``tests/test_freeze.py`` tests the seam with the probe
+    stubbed, and asks for one real scope, around a command that ends at once."""
+    monkeypatch.setenv("SWARM_SCOPE", "0")
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_inprocess_launch(request, monkeypatch):
     """An in-process :class:`Supervisor` records its launches instead of making them.
 
@@ -328,3 +344,166 @@ def swarm(tmp_path: Path):
             except OSError:
                 pass
         _kill_orphan_fakes(state_dir)  # insurance net, scoped to THIS run
+
+
+class FakeCgroups:
+    """A cgroup tree and a ``/proc`` of the test's own, and a thread that plays
+    the kernel in them, for :class:`swarm_orchestrator.freezer.Cgroups`.
+
+    Every process that carries the test's ``SWARM_STATE_DIR`` is given a group:
+    one per ``SWARM_SESSION_ID`` (``/run/<kind>-<id>``), ``/supervisor``,
+    ``/bot`` and ``/board`` for the run's own processes, and ``/login`` for the
+    rest, the caller of a ``swarm`` command among them (``<proc>/self``).
+    :meth:`place` puts any other process where a test wants it. A write to a
+    group's ``cgroup.freeze`` shows in its ``cgroup.events`` a moment later,
+    unless the group is in :attr:`stuck`; :attr:`writes` lists every change the
+    kernel saw, in order. Nothing is really frozen."""
+
+    TICK_S = 0.02
+
+    def __init__(self, base: Path, state_dir: Path) -> None:
+        self.root = base / "cgroup"
+        self.proc = base / "proc"
+        self.stuck: set[str] = set()
+        self.writes: list[tuple[float, str, str]] = []
+        self._want = f"SWARM_STATE_DIR={state_dir}".encode()
+        self._placed: dict[int, str] = {}
+        self._where: dict[int, str] = {}
+        self._seen: dict[str, str] = {}
+        self._scans = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="fake-kernel", daemon=True)
+        (self.proc / "self").mkdir(parents=True)
+        (self.proc / "self" / "cgroup").write_text("0::/login\n")
+        self.group("/login")
+
+    @property
+    def env(self) -> dict[str, str]:
+        return {"SWARM_CGROUP_ROOT": str(self.root), "SWARM_CGROUP_PROC": str(self.proc)}
+
+    def group(self, path: str) -> Path:
+        """Make the group ``path`` (awake) if it is not there; return its directory."""
+        d = self.root / path.lstrip("/")
+        if not (d / "cgroup.freeze").is_file():
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+            (d / "cgroup.freeze").write_text("0\n")
+        return d
+
+    def place(self, pid: int, path: str) -> None:
+        """Put ``pid`` in ``path``, whatever it carries."""
+        self._placed[pid] = path
+        self._put(pid, path)
+
+    def lock(self, path: str) -> None:
+        """Make ``path`` a group the test's user may not write, the way a scope
+        root started is to everybody else."""
+        (self.group(path) / "cgroup.freeze").chmod(0o444)
+
+    def told(self, path: str) -> str:
+        """What ``path``'s ``cgroup.freeze`` reads: ``"1"`` or ``"0"``."""
+        return (self.root / path.lstrip("/") / "cgroup.freeze").read_text().strip()
+
+    def groups(self) -> list[str]:
+        return sorted("/" + str(f.parent.relative_to(self.root))
+                      for f in self.root.rglob("cgroup.freeze"))
+
+    def settle(self, timeout: float = 10.0) -> None:
+        """Wait until the kernel has looked at every process twice more, so
+        whatever started before the call is in its group."""
+        target = self._scans + 2
+        deadline = time.monotonic() + timeout
+        while self._scans < target and time.monotonic() < deadline:
+            time.sleep(self.TICK_S)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(5)
+
+    # -- the kernel ---------------------------------------------------------
+    def _put(self, pid: int, path: str) -> None:
+        if self._where.get(pid) == path:
+            return
+        self.group(path)
+        d = self.proc / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / "cgroup.tmp"
+        tmp.write_text(f"0::{path}\n")
+        os.replace(tmp, d / "cgroup")
+        self._where[pid] = path
+
+    def _group_of(self, pid: int) -> str | None:
+        try:
+            env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            if self._want not in env:
+                return None
+            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+        except OSError:
+            return None
+        for entry in env:
+            if entry.startswith(b"SWARM_SESSION_ID="):
+                return "/run/" + entry.split(b"=", 1)[1].decode().replace(":", "-")
+        if b" _supervise" in cmd:
+            return "/supervisor"
+        if b" telegram-bot" in cmd:
+            return "/bot"
+        if b" web" in cmd:
+            return "/board"
+        return "/login"
+
+    def _scan(self) -> None:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            path = self._placed.get(pid) or self._group_of(pid)
+            if path is not None:
+                self._put(pid, path)
+
+    def _mirror(self) -> None:
+        for path in self.groups():
+            try:
+                told = self.told(path)
+            except OSError:
+                continue
+            if told not in ("0", "1") or told == self._seen.get(path, "0"):
+                continue
+            self._seen[path] = told
+            self.writes.append((time.monotonic(), path, told))
+            if path not in self.stuck:
+                d = self.root / path.lstrip("/")
+                (d / "cgroup.events").write_text(f"populated 1\nfrozen {told}\n")
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan()
+                self._mirror()
+            except OSError:
+                pass  # a process or a temp dir went mid-look
+            self._scans += 1
+            self._stop.wait(self.TICK_S)
+
+
+@pytest.fixture
+def fake_cgroups(request, tmp_path: Path, monkeypatch):
+    """Point the freezer's cgroup seam at a tree of the test's own
+    (:class:`FakeCgroups`). Ask for it after ``swarm`` in an end-to-end test:
+    the harness's environment is given the seam's two variables too, and
+    anything still frozen is thawed before the harness tears the run down."""
+    fake = FakeCgroups(tmp_path / "kernel", tmp_path / "state")
+    for key, value in fake.env.items():
+        monkeypatch.setenv(key, value)
+    swarm = request.getfixturevalue("swarm") if "swarm" in request.fixturenames else None
+    if swarm is not None:
+        swarm.env.update(fake.env)
+    fake.start()
+    try:
+        yield fake
+    finally:
+        if swarm is not None:
+            swarm.cli("thaw", "--gap", "0", check=False)
+        fake.stop()

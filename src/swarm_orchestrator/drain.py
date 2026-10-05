@@ -25,14 +25,13 @@ here) or to carry the sessions across the restart (``"keep"``, see
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from . import freezer
 from . import opqueue
 from . import state as state_mod
 from .config import Config
@@ -168,9 +167,7 @@ def run_after(cfg: Config, command: str) -> Path | None:
     directory and environment, and its output is appended to the log returned."""
     log = cfg.log_dir / AFTER_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
-    argv = ["/bin/bash", "-c", command]
-    if _can_scope():
-        argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", *argv]
+    argv = freezer.scoped(["/bin/bash", "-c", command])
     try:
         with log.open("a", encoding="utf-8") as out:
             out.write(f"\n== {time.strftime('%Y-%m-%d %H:%M:%S')} $ {command}\n")
@@ -184,15 +181,3 @@ def run_after(cfg: Config, command: str) -> Path | None:
         return None
     return log
 
-
-def _can_scope() -> bool:
-    if shutil.which("systemd-run") is None or not os.environ.get("XDG_RUNTIME_DIR"):
-        return False
-    try:
-        probe = subprocess.run(
-            ["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"],
-            capture_output=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return probe.returncode == 0

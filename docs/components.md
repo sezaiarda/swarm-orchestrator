@@ -199,6 +199,176 @@ resumed session does not show the question it had open. If the swarm does not
 come back up, the kept sessions stay in the holding session and the next
 `swarm up` brings them back.
 
+## Freeze and thaw (`swarm freeze`, `swarm thaw`)
+
+`swarm pause` stops launches and `swarm down` ends the run. A freeze does
+neither: every session stops where it stands, holding its memory and its place,
+and carries on from the same instruction at the thaw. It is for giving the
+machine to something else for a while (another user, a job that needs the
+memory) without losing a minute of anybody's context. The swarm only freezes;
+what is done with the memory meanwhile is the caller's business.
+
+**The freezer is the kernel's.** A group is frozen by writing `1` to its
+`cgroup.freeze` and is frozen once its `cgroup.events` says `frozen 1`. Stop
+signals are never used: tmux continues a stopped pane by itself.
+
+**What is frozen is decided by membership, never by a name.** Every process
+that carries the run's `SWARM_STATE_DIR`, plus everything under a pane of the
+run's tmux session, is mapped to its group through `/proc/<pid>/cgroup`. Each
+group goes by the session in it (`worker P3`, `operator <job>`, `overseer
+<pass>`, `resolver`, `bigpic`, `console`, `dashboard`, else `other`), which is
+what gives the thaw its order.
+
+**What stays awake, and why.** The groups of the supervisor, the Telegram
+listener, a headless web board, the tmux server and whoever ran the command are
+never frozen: something has to be there to thaw, to answer `status`, and to
+keep the panes' terminals alive. One of those groups that also holds sessions
+is reported `shared`, and its sessions stay awake with it. So that this does
+not happen by accident, the swarm starts its own long-lived processes in a
+systemd user scope of their own where one can be made (`systemd-run --user
+--scope`): the supervisor, the listener, a headless board and each lane check.
+Freezing the terminal `swarm up` was typed in then never freezes the supervisor,
+and a lane check is frozen with the rest. Where no scope can be made (no user
+systemd, or `SWARM_SCOPE=0`) `up` and `freeze` say that the supervisor shares
+the group of whatever started it.
+
+**The sequence.**
+
+1. `freeze` writes the record (`State.frozen`, stage `freezing`) and tells the
+   supervisor, which from then on starts nothing and writes what it is still in
+   the middle of into the record (a worker starting, an Overseer or big-picture
+   session starting, a clean-up, a backup push), then the moment that is
+   nothing.
+2. The command waits for that moment, at most `--wait` seconds, then freezes
+   anyway and reports `quiesced: false`. With no supervisor running it does not
+   wait.
+3. It looks at the run again (a launch that was under way has its session by
+   now) and names every group it is about to stop in the record. No group is
+   told to freeze before it is named there, so whatever cuts a freeze short
+   (an interrupt, a kill), `swarm thaw` finds everything it has to wake.
+4. It takes the state lock and the build queue lock, writes `1` to every group
+   and keeps both locks until each group says it is frozen: a process frozen
+   with either in its hand would stop everything still awake.
+5. A group that was told to freeze and has not said so within 10 seconds takes
+   the whole freeze back: everything is woken, the record is dropped, exit 1
+   (`FREEZE-ROLLBACK` in the log). A group this user may not write is not that
+   case. It is **left** as it is and named, and the rest are frozen without it.
+
+**The supervisor stands still.** While the record is there its loop wakes once
+a second, looks whether it still is, and does nothing else: no park deadline, no
+watchdog sweep, no launch or retry, no Overseer or big-picture look, no operator
+lease, no gc, no backup, no ping. It handles `freeze`, `thaw` and `shutdown`;
+every other event (`done`, `waiting`, `resumed`, a launch that settled) waits
+and is handled, in the order it came, at the thaw. The resource sampler stops.
+A worker launch the freeze catches half way is undone, counts as no failure and
+starts again at the thaw.
+
+**One verb at a time.** `freeze` and `thaw` each hold `<state>/freeze.lock`
+from their first step to their last, and nothing else ever takes it, so no
+frozen session can be holding it. A freeze that arrives while a thaw is waking
+the sessions waits for it to finish and then freezes from scratch; a thaw that
+arrives while a freeze is being made waits and then wakes what it froze. The
+run ends as the verb that came last asked. One that has waited ten minutes for
+the other gives up, changes nothing and exits 1.
+
+**The thaw** first says in the record that it has begun (stage `thawing`), so
+nothing reads a half-woken run as frozen, then writes `0` to each group with no
+lock in hand that a session can hold: whoever froze the sessions may have
+frozen something that holds one. (If the state lock is in such a hand, saying
+it waits until the sessions are awake.) A `freeze` that finds a thaw cut short
+finishes it first. The order is your
+console, the dashboard, sessions asking you, the operator, the Overseer, a
+resolver, the workers by slot, then the rest, with `--gap` seconds after each
+Claude session. Then it stamps the end into the record, moves the clocks, adds
+the span to `<state>/history/frozen.jsonl`, drops the record and tells the
+supervisor how long it lasted.
+
+**Frozen time is not elapsed time.** Two things make that true.
+
+- *Every deadline the swarm keeps is moved along by the length of the freeze.*
+  In `state.json`: park deadlines, when each session asked and was answered,
+  the last event, the operator lease, the Overseer pass's deadline, each owed
+  push's age and last try, each landing's stage, each failed launch's back-off.
+  In the other files: operator jobs (lease, declared long work, a failed
+  start's back-off, how long a job and a question have waited), the Overseer's
+  policy (gap, cadence, hold, owner wait, starvation), the big-picture memory
+  (a running pass, the doc's age, the back-off), a gathered burst of blocked
+  pings, and the build gate's idle samples. In the supervisor's memory: the
+  watchdog sweep, ping cooldowns, crash counts, launch back-offs, the gc and
+  backup clocks and an adoption's recheck. Each file is named in the record's
+  `shifted` once it is moved, so a thaw that was cut short and is run again
+  moves nothing twice. A supervisor that was inside one long event from before
+  the freeze until after the thaw never stood still for it; it moves its
+  clocks when it reads the thaw (`THAW-MISSED`).
+- *Not moved:* a time somebody chose on the clock (a scheduled pause, a
+  scheduled restart, an operator job's `--not-before`), anything the usage
+  provider set (reset times, the hold they end, the usage check itself, which
+  runs on the first wake), the run's start, and every timestamp that is a
+  record of when something happened (log lines, sentinels, notes).
+- *Whatever measures from a moment nothing can move takes the frozen spans
+  out.* `swarm build --timeout` and the wait for a build slot, the timeout of a
+  command the swarm runs itself (post-merge, a lane check), a build's recorded
+  run time, a waiter's ticket (a frozen waiter has not left the queue),
+  doctor's start grace, activity check, stall and ages, a phase's duration and
+  a running worker's age on the dashboard, and the forecast's work times. The
+  frozen hours of a run are neither work nor idle time with a free slot.
+
+**What a caller sees.** `swarm freeze --json` prints, on success (exit 0):
+
+```json
+{
+  "frozen": [{"path": "/user.slice/…/tmux-spawn-….scope", "kind": "worker", "id": "P3"}],
+  "left":   [{"path": "/system.slice/….scope", "kind": "other", "id": ""}],
+  "awake":  [{"path": "/user.slice/…/run-….scope", "kind": "supervisor", "shared": false}],
+  "quiesced": true
+}
+```
+
+`frozen` is what this freeze stopped and what `thaw` will wake. `left` is what
+it could not write: a caller with the right to should freeze those itself
+after this returns, and wake them before it runs `swarm thaw`. `awake` is the
+run's own groups, which a caller freezing more than the swarm (a whole login,
+say) must leave alone, or nothing is there to thaw. On exit 1 nothing is
+frozen and stderr says why.
+
+**A record nothing stands behind.** After a reboot the groups are gone and the
+record is still in `state.json`. `swarm up` closes its span at that moment,
+drops it and starts (`FROZEN-STALE`). A record whose groups are still frozen
+refuses `up`: run `swarm thaw` first.
+
+**Could not tell is not thawed.** The supervisor reads the record without the
+state lock. A read that fails says nothing either way, and it goes on believing
+what it believed. `swarm thaw` exits 1 on a state it cannot read rather than
+say nothing is frozen. And the record is dropped at the end of a thaw whatever
+becomes of the bookkeeping around it: a span or a log line that cannot be
+written is not a reason to keep the supervisor standing still.
+
+**Limits.**
+
+- Only a worker launch is undone when a freeze catches it. Another session
+  being started at that instant (an operator job, an Overseer or big-picture
+  pass, a resolver) with the supervisor not yet quiet is frozen before it is
+  ready and counts as a start that failed: it is retried the way any failed
+  start is.
+- A supervisor in the middle of one long event (a merge running its post-merge
+  command) cannot answer inside `--wait`: the freeze is `quiesced: false`, that
+  command runs on, awake, in the supervisor's group, and the supervisor stands
+  still from the end of that event.
+- The span runs from when the freeze was asked for to when the last group was
+  woken, so it includes the wait and the gaps. Deadlines move by a little more
+  than the sessions stood still, never by less.
+- A timer inside a frozen process that is not the swarm's (a tool's own
+  timeout, a script's `timeout 600 …`) still sees the clock jump. So does a
+  helper's call to a model (a recap, an operator triage): it gives up at the
+  thaw and falls back the way it does on any failed call.
+- Notes held for a shared ledger commit keep the time they were written, so
+  the ones due inside the freeze are committed on the first flush after it.
+- A group reported `left` that its owner wakes after `swarm thaw` stood frozen
+  for longer than the span says: a build in it can meet its `--timeout` early.
+- A thaw killed between moving one of the other files and noting it moves that
+  one file again when it is rerun. The state's own clocks are moved and noted
+  in one write.
+
 ## Workers
 
 **What they are:** full, unrestrained Claude Code sessions, one per slot, started
@@ -1573,10 +1743,12 @@ and exits 1 if any check FAILs. It checks:
 - **supervisor:** pid alive, FIFO has a reader, no stray second supervisor;
 - **slots:** busy panes run `claude`; a busy slot with no edits or commits
   20 minutes after launch (the lost-prompt signature);
-- **run:** watchdog (which dead slots it will free, and what frees the others),
-  finished with ready work, free slots beside ready phases (a phase waiting to
-  be retried after a failed launch is named, not offered; one given up on is
-  named as that), no event for 90 minutes;
+- **run:** frozen (`run.frozen`, a WARN for as long as it lasts: since when,
+  how many groups, and that `swarm thaw` ends it), watchdog (which dead slots
+  it will free, and what frees the others), finished with ready work, free
+  slots beside ready phases (a phase waiting to be retried after a failed
+  launch is named, not offered; one given up on is named as that), no event
+  for 90 minutes. No grace, age or stall counts the time the run stood frozen;
 - **parked:** every parked session is still there (`parked.sessions`). One
   that is gone is a WARN while the running supervisor's sweep will settle it,
   and a FAIL, with what settles it by hand, under a supervisor that started
@@ -1595,7 +1767,7 @@ and exits 1 if any check FAILs. It checks:
 - not in the ledger, excluded (quoting your `.swarm.toml` comment), building,
   held, queued to merge, waiting, parked, done or failed;
 - blocked, with the root blockers found by walking its unmet dependencies;
-- ready, with what is stopping it (paused, or no free slot).
+- ready, with what is stopping it (frozen, paused, or no free slot).
 
 **`swarm gc`** reclaims disk. It is a dry run that prints a plan unless you pass
 `--yes`.

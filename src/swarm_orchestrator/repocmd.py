@@ -44,6 +44,7 @@ from pathlib import Path
 from . import buildclass
 from . import buildlog
 from . import buildsem
+from . import freezer
 from .config import Config
 
 #: The tail of a run's output worth showing the owner (:attr:`Outcome.reason`).
@@ -106,13 +107,29 @@ def _run_light(cfg: Config, cmd: str, cwd: Path, phase: str | None, fh,
     said = {"id": uuid.uuid4().hex[:12], "phase": phase, "pid": os.getpid(), "slot": None,
             "cls": buildclass.LIGHT, "argv": cmd, "cwd": str(cwd)}
     buildlog.event(cfg, "bypass", **said, wait_s=0.0, ts=start)
-    ok = _spawn(cmd, cwd, fh, timeout)
+    ok = _spawn(cmd, cwd, fh, timeout, cfg)
     now = time.time()
     buildlog.event(cfg, "end", **said, run_s=now - start, exit=0 if ok else 1, ts=now)
     return ok
 
 
-def _spawn(cmd: str, cwd: Path, fh, timeout: float) -> bool:
+def _wait(cfg: Config | None, proc: subprocess.Popen, timeout: float) -> int:
+    """Wait for ``proc`` to end, for at most ``timeout`` of the time the run was
+    awake: a command stopped by ``swarm freeze`` has not run for as long as the
+    clock says. Raises :class:`subprocess.TimeoutExpired`."""
+    start = time.time()
+    left = timeout
+    while True:
+        try:
+            return proc.wait(timeout=left)
+        except subprocess.TimeoutExpired:
+            left = timeout - freezer.awake_elapsed(cfg, start) if cfg is not None else 0.0
+            if left <= 0:
+                raise
+            left = max(left, 0.5)  # a freeze holds the clock still: look again, never spin
+
+
+def _spawn(cmd: str, cwd: Path, fh, timeout: float, cfg: Config | None = None) -> bool:
     if not cmd:
         return True
     from . import launch  # lazy: launch builds on gitq, which builds on this module
@@ -127,7 +144,7 @@ def _spawn(cmd: str, cwd: Path, fh, timeout: float) -> bool:
         fh.write(f"\n# could not start: {exc}\n")
         return False
     try:
-        return proc.wait(timeout=timeout) == 0
+        return _wait(cfg, proc, timeout) == 0
     except subprocess.TimeoutExpired:
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
@@ -182,7 +199,7 @@ def run(cfg: Config, cmd: str, cwd: Path, fh, *, timeout_s: float,
         try:
             with buildsem.slot(cfg, cmd, cwd, phase, wait_s=wait_s) as held:
                 start = time.time()
-                ok = _spawn(cmd, cwd, fh, timeout_s)
+                ok = _spawn(cmd, cwd, fh, timeout_s, cfg)
                 held.exit = 0 if ok else 1
         except buildsem.Busy as exc:
             start = time.time()

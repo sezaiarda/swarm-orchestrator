@@ -35,6 +35,7 @@ from pathlib import Path
 from statistics import median
 
 from .. import caps
+from .. import freezer
 from .. import keep as keep_mod
 from .. import ledger as ledger_mod
 from .. import ledgerw
@@ -322,6 +323,8 @@ class Snapshot:
     hold_until: float = 0.0
     #: ``State.drain``: the run is winding down to a stop (see :mod:`drain`).
     drain: dict = field(default_factory=dict)
+    #: ``State.frozen``: every session is stopped in place (see :mod:`freezer`).
+    frozen: dict = field(default_factory=dict)
     #: ``State.pause_at``: when a scheduled pause happens; 0.0 when none is.
     pause_at: float = 0.0
     finished: bool = False
@@ -614,6 +617,7 @@ def build_snapshot(
                         for h in (state.get("usage_hold") or {}).values() if isinstance(h, dict)),
                        default=0.0),
         drain=dict(state.get("drain") or {}) if isinstance(state.get("drain"), dict) else {},
+        frozen=dict(state.get("frozen") or {}) if isinstance(state.get("frozen"), dict) else {},
         pause_at=_as_float(state.get("pause_at")) or 0.0,
         finished=bool(state.get("finished")),
         master_alive=bool(state.get("master_alive")),
@@ -997,6 +1001,9 @@ class PhaseRun:
     #: Why its claim ended without a report (an :data:`ENDED_WHY` key), even when
     #: a sentinel or the ledger later said how the phase came out.
     why: str = ""
+    #: Seconds between its start and its end (or the moment the history was
+    #: built) that the run stood frozen (``swarm freeze``): not time it took.
+    frozen_s: float = 0.0
 
     @property
     def duration_s(self) -> float | None:
@@ -1005,7 +1012,7 @@ class PhaseRun:
         if self.ended_at is None and self.status is not None:
             return None  # over, and when it ended is not known
         end = self.ended_at if self.ended_at is not None else time.time()
-        return max(0.0, end - self.started_at)
+        return max(0.0, end - self.started_at - self.frozen_s)
 
     @property
     def running(self) -> bool:
@@ -1041,6 +1048,7 @@ def build_history(
     notes: dict[str, list[Note]] | None = None,
     state: dict | None = None,
     ticked: set[str] | None = None,
+    frozen: list[tuple[float, float]] | None = None,
 ) -> list[PhaseRun]:
     """Every phase run ever seen, newest first.
 
@@ -1060,9 +1068,13 @@ def build_history(
     recorded the end cannot keep a dead worker "running". A lost run that left a
     sentinel reads as that sentinel; one the ledger has ticked since (``ticked``)
     and this swarm holds no report of reads as "done elsewhere".
+
+    ``frozen`` are the stretches the run stood frozen (:func:`freezer.spans`):
+    what of them falls inside a run is not time that run took.
     """
     sentinels = sentinels or {}
     recaps = recaps or {}
+    built = time.time()
     ordered = sorted(events, key=lambda e: (e.ts is None, e.ts or 0.0))
     open_runs: dict[str, dict] = {}
     runs: list[dict] = []
@@ -1170,6 +1182,9 @@ def build_history(
                 notes=len((notes or {}).get(phase, ())) if is_last else 0,
                 hold=run.get("hold", ""),
                 why=run.get("why", ""),
+                frozen_s=freezer.frozen_in(frozen, run["started_at"],
+                                           built if ended is None else ended)
+                if frozen and run.get("started_at") is not None else 0.0,
             )
         )
     out.sort(key=lambda r: (r.ended_at or r.started_at or 0.0), reverse=True)
@@ -1183,6 +1198,14 @@ def launch_times(events: list[Event]) -> dict[str, float]:
         if ev.kind in ("launch", "claim") and ev.phase and ev.ts is not None:
             out[ev.phase] = ev.ts
     return out
+
+
+def awake_starts(started: dict[str, float], frozen: list[tuple[float, float]],
+                 now: float | None = None) -> dict[str, float]:
+    """Each start moved along by the time the run has stood frozen since it
+    (:func:`freezer.spans`), so that an age counted from it is time awake."""
+    now = time.time() if now is None else now
+    return {p: ts + freezer.frozen_in(frozen, ts, now) for p, ts in started.items()}
 
 
 def run_started_at(events: list[Event]) -> float | None:
@@ -1373,13 +1396,16 @@ def finish_times(landed: dict[str, str], ticked: set[str], history: pace_mod.His
     return out, bulk
 
 
-def idle_spans(events: list[Event], now: float | None = None) -> list[tuple[float, float]]:
+def idle_spans(events: list[Event], now: float | None = None,
+               frozen: list[tuple[float, float]] | None = None) -> list[tuple[float, float]]:
     """When this machine's log says the swarm could not work.
 
     Its supervisor was down, the owner paused it (every ``WATCHDOG`` line says
     ``paused=``), or a usage cap held it (``USAGE-HOLD``/``USAGE-RELEASE``, and
     the ``held=`` of every ``USAGE-CHECK``, which is all a restart logs about a
-    hold it inherited). A two-day hold is not a slow swarm.
+    hold it inherited). A two-day hold is not a slow swarm. Nor is one that
+    stood ``frozen`` (:func:`freezer.spans`): those stretches are hours it
+    neither worked nor sat idle with a free slot.
     """
     spans: list[tuple[float, float]] = []
     down = paused = held = False
@@ -1404,7 +1430,7 @@ def idle_spans(events: list[Event], now: float | None = None) -> list[tuple[floa
             since = None
     if since is not None:
         spans.append((since, time.time() if now is None else now))
-    return spans
+    return freezer.merged([*spans, *frozen]) if frozen else spans
 
 
 def phase_eta(runs: list[PhaseRun], elapsed_s: float | None) -> tuple[float | None, bool]:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -78,6 +79,14 @@ def wait_window(key: str) -> str:
     if kind == OVERSEER:
         return f"wait:overseer-{ident}"
     return f"wait:{ident}"
+
+
+def moved(stamp: float, delta: float, now: float) -> float:
+    """A moment already behind, moved ``delta`` along for a thaw: never past
+    ``now`` (one that fell inside the freeze is not older than the freeze let
+    it get), and 0, which is "never", stays 0."""
+    stamp = float(stamp or 0.0)
+    return min(stamp + delta, max(stamp, now)) if stamp else 0.0
 
 
 @dataclass
@@ -219,6 +228,20 @@ class State:
     # Same compatibility rule as ``lanes``: top-level, written only when non-empty.
     launching: list[str] = field(default_factory=list)
     launch_fails: dict[str, list[float]] = field(default_factory=dict)
+    # ``swarm freeze`` (see :mod:`freezer`): ``{since, stage, quiet_at, waiting,
+    # quiesced, cgroups, awake, left}`` from the moment a freeze is asked for
+    # until ``swarm thaw`` drops it, empty otherwise. ``stage`` is ``freezing``,
+    # ``frozen`` or ``thawing``; ``waiting`` is the supervisor's word on what it
+    # is still in the middle of and ``quiet_at`` the moment that list emptied;
+    # ``cgroups`` is what was frozen (``[{path, kind, id}]``), ``awake`` the
+    # run's own groups that were not and ``left`` the sessions' groups this user
+    # may not write. A thaw adds ``until`` (when it woke them) and ``shifted``
+    # (the clocks it has moved along). A hold of its own, like ``drain``: while it
+    # is there nothing launches, and the supervisor does nothing but wait for the
+    # thaw. Same compatibility rule as ``lanes``: top-level, written only when
+    # non-empty. An older supervisor would drop it on its next write, which is
+    # why ``swarm freeze`` refuses one (``"freeze"`` in :data:`restart.CAPS`).
+    frozen: dict = field(default_factory=dict)
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -229,9 +252,9 @@ class State:
 
     @property
     def on_hold(self) -> bool:
-        """Nothing new may launch: paused by a person, held by a usage cap, or
-        draining to a stop."""
-        return self.paused or bool(self.usage_hold) or bool(self.drain)
+        """Nothing new may launch: paused by a person, held by a usage cap,
+        draining to a stop, or frozen."""
+        return self.paused or bool(self.usage_hold) or bool(self.drain) or bool(self.frozen)
 
     def any_busy(self) -> bool:
         return any(s.busy for s in self.slots)
@@ -527,6 +550,41 @@ class State:
         self.release_lane(phase)
         return True
 
+    # -- a freeze is not time that passed ----------------------------------
+    def shift(self, delta: float, now: float | None = None) -> None:
+        """Move every clock the swarm keeps for itself ``delta`` seconds along:
+        a thaw's, for a freeze that lasted that long (:func:`freezer.rebase`).
+
+        Nothing ran while the sessions stood frozen, so nothing waited, held a
+        lease, backed off or sat idle either: the park deadlines, the moments
+        sessions asked and were answered, the last event, the operator lease,
+        the Overseer pass's deadline, each owed push's age and last try, each
+        landing's stage and each failed launch's back-off all move. A moment
+        that is already behind (:func:`moved`) never moves past ``now``.
+
+        Left alone: ``pause_at`` (a time the owner chose on the clock), the
+        usage maps and ``usage_api_at`` (the provider's clock is the wall's),
+        ``run_epoch`` and the frozen record itself."""
+        now = time.time() if now is None else now
+        self.waiting = {k: float(v) + delta for k, v in self.waiting.items()}
+        self.asked = {k: moved(v, delta, now) for k, v in self.asked.items()}
+        self.answered = {k: moved(v, delta, now) for k, v in self.answered.items()}
+        self.last_event_at = moved(self.last_event_at, delta, now)
+        if self.operator_lease_until:
+            self.operator_lease_until += delta
+        if self.overseer_deadline:
+            self.overseer_deadline += delta
+        for rec in self.push_owed.values():
+            for key in ("since", "tried"):
+                if rec.get(key):
+                    rec[key] = moved(rec[key], delta, now)
+        for repos in self.landing.values():
+            for entry in repos.values():
+                if entry.get("at"):
+                    entry["at"] = moved(entry["at"], delta, now)
+        self.launch_fails = {p: [v[0], moved(v[1], delta, now)]
+                             for p, v in self.launch_fails.items()}
+
     # -- serialisation ---------------------------------------------------
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -534,7 +592,7 @@ class State:
             del d["lanes"]  # a run with lanes off writes no new key
         if not d["landing"]:
             del d["landing"]
-        for mark in ("asked", "answered", "launching", "launch_fails"):
+        for mark in ("asked", "answered", "launching", "launch_fails", "frozen"):
             if not d[mark]:
                 del d[mark]  # nothing to say: no new key
         return d
@@ -582,6 +640,7 @@ class State:
             landing={k: dict(v) for k, v in (data.get("landing") or {}).items()},
             launching=list(data.get("launching") or []),
             launch_fails={k: list(v) for k, v in (data.get("launch_fails") or {}).items()},
+            frozen=dict(data.get("frozen") or {}),
         )
 
     @classmethod
@@ -628,6 +687,48 @@ def transaction(cfg: Config) -> Iterator[State]:
             _save(cfg, state)
         finally:
             fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
+@contextmanager
+def held(cfg: Config, wait_s: float) -> Iterator[bool]:
+    """Hold the state lock for the block, reading and writing nothing.
+
+    For ``swarm freeze``: a process frozen while it holds this lock would stop
+    every reader and writer that is still awake, so the freeze is made with the
+    lock in hand. Tried without blocking for up to ``wait_s``; yields whether
+    it was taken. Nothing inside the block may open a :func:`transaction`."""
+    cfg.ensure_dirs()
+    deadline = time.monotonic() + wait_s
+    with cfg.lock_path.open("w") as lockf:
+        got = True
+        while True:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    got = False
+                    break
+                time.sleep(0.02)
+        try:
+            yield got
+        finally:
+            if got:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
+@contextmanager
+def transaction_within(cfg: Config, wait_s: float) -> Iterator[State | None]:
+    """:func:`transaction`, given up after ``wait_s``: yields None, and nothing
+    is read or written, when the lock stayed taken. For ``swarm thaw``, which
+    may find the lock in the hand of a session that is frozen."""
+    with held(cfg, wait_s) as got:
+        if not got:
+            yield None
+            return
+        state = _load(cfg)
+        yield state
+        _save(cfg, state)
 
 
 def init_state(cfg: Config, windows: dict[str, str] | None = None, log=None,

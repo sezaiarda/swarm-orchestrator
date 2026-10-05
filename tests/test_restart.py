@@ -764,9 +764,9 @@ def test_the_dashboard_and_the_board_show_a_planned_restart(cfg):
     plan = restart_mod.new_plan(cfg, restart_mod.SUPERVISOR, time.time() + 7200, "the worker on P1")
     state = {"slots": [{"busy": True, "phase": "P0"}, {"busy": True, "phase": "P1"}],
              "waiting": {"P1": 1.0}, "parked": ["P2"]}
-    snap = SimpleNamespace(ok=True, drain={}, paused=False, usage_hold="", supervisor_alive=True,
-                           finished=False, integ_blocked=None, slots=[], last_event_at=None,
-                           pause_at=0.0)
+    snap = SimpleNamespace(ok=True, frozen={}, drain={}, paused=False, usage_hold="",
+                           supervisor_alive=True, finished=False, integ_blocked=None, slots=[],
+                           last_event_at=None, pause_at=0.0)
     dash = SimpleNamespace(snapshot=snap, notifications=[], restart=plan, _state=state)
     lines = [text for text, _ in alerts.problems(dash)]
     assert any("restart planned at" in t and "1 worker and 2 questions carry on" in t

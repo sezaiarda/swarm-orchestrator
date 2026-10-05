@@ -58,6 +58,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import recap as recap_mod
+from . import state as state_mod
 from . import telegram
 from .config import Config
 
@@ -205,6 +206,10 @@ class Item:
     resume_note: str = ""
     #: When it was put back. 0 = never.
     put_back_at: float = 0.0
+    #: Seconds the run stood frozen since this was queued (:func:`shift`): not
+    #: time it waited. ``queued_at`` itself stays put, because it is also the
+    #: order of the queue and is compared with moments that do not move.
+    frozen_s: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -221,7 +226,8 @@ class Item:
         return self.state in TERMINAL
 
     def age_s(self, now: float | None = None) -> float:
-        return max(0.0, (time.time() if now is None else now) - self.queued_at)
+        waited = (time.time() if now is None else now) - self.queued_at
+        return max(0.0, waited - self.frozen_s)
 
     def ready(self, now: float | None = None) -> bool:
         """Is this leasable right now?"""
@@ -419,6 +425,33 @@ def load_all(cfg: Config) -> list[Item]:
             out.append(item)
     out.sort(key=lambda i: i.queued_at)
     return out
+
+
+def shift(cfg: Config, delta: float, now: float | None = None) -> None:
+    """Move the queue's clocks ``delta`` seconds along for a thaw: nothing ran
+    while the sessions stood frozen, so no lease, declared wait or back-off ran
+    down and no job or question aged (:func:`freezer.rebase`).
+
+    A lease and the long work declared under it move together, as they were
+    set. ``run_after`` moves only when it is a failed start's back-off, which
+    is never more than :data:`RETRY_BACKOFF_S` ahead of when the freeze began:
+    a ``--not-before`` further out is a time somebody chose on the clock, and
+    the clock kept running."""
+    now = time.time() if now is None else now
+    began = now - delta
+    with _locked(cfg):
+        for item in load_all(cfg):
+            if item.terminal:
+                continue
+            item.frozen_s += max(0.0, min(delta, now - item.queued_at))
+            if item.lease_until:
+                item.lease_until += delta
+            if item.hold_until:
+                item.hold_until += delta
+            if item.state == QUEUED and began < item.run_after <= began + RETRY_BACKOFF_S:
+                item.run_after += delta
+            item.asked_at = state_mod.moved(item.asked_at, delta, now)
+            _write(cfg, item)
 
 
 def pending(cfg: Config) -> list[Item]:

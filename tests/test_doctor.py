@@ -1158,7 +1158,7 @@ def test_run_checks_reads_in_a_fixed_order_and_never_raises(cfg, monkeypatch):
     (cfg.project_dir / cfg.ledger).unlink()  # no ledger at all
     names = [c.name for c in doctor.run_checks(cfg)]
     assert names == [
-        "supervisor.pid", "supervisor.fifo", "supervisor.stray", "slots.panes",
+        "supervisor.pid", "supervisor.fifo", "supervisor.stray", "run.frozen", "slots.panes",
         "run.watchdog", "parked.sessions", "slots.activity", "integration.blocked",
         "integration.push",
         "backup", "run.finished",

@@ -74,6 +74,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import buildclass
+from . import state as state_mod
 from .config import Config
 from .resources import ptree
 
@@ -250,6 +251,27 @@ def _save(cfg: Config, st: dict) -> None:
         os.replace(tmp, path)
     except OSError:
         pass
+
+
+def shift(cfg: Config, delta: float, now: float) -> None:
+    """Move the samples ``delta`` seconds along for a thaw, under
+    ``queue.lock``: a holder that stood frozen was not quiet for that long, and
+    the stretch is not one nobody watched (:func:`freezer.rebase`). A sample a
+    woken waiter has taken since is newer than the freeze and stays where it is."""
+    from . import buildsem
+
+    if not _path(cfg).is_file():
+        return
+    with buildsem._qlock(cfg, wait_s=5.0) as got:
+        if not got:
+            return  # a stopped process holds it: the stretch reads as one nobody watched
+        st = load(cfg)
+        st["ts"] = state_mod.moved(st["ts"], delta, now)
+        for entry in st["h"].values():
+            for key in ("t", "quiet", "yielded"):
+                if entry.get(key):
+                    entry[key] = state_mod.moved(entry[key], delta, now)
+        _save(cfg, st)
 
 
 @dataclass

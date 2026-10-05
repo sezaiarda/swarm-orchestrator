@@ -159,7 +159,8 @@ def pane(monkeypatch):
 
 
 def _await(log: _Log | None = None) -> bool:
-    cfg = SimpleNamespace(ready_marker=READY)
+    # No state file: the wait also looks for a freeze, and there is none.
+    cfg = SimpleNamespace(ready_marker=READY, state_path=Path("/nonexistent/state.json"))
     return launch_mod.await_ready(cfg, PANE, log or _Log())
 
 

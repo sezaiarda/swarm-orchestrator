@@ -17,12 +17,15 @@ Two sources, each read by a parser that already exists:
 A pause does not stop a running worker (``swarm pause`` only stops launches),
 so it is not taken out of a phase's work time; the time a worker sat waiting
 on the owner is, because that is a separate, rarer delay (:mod:`.hazards`).
+So is the time the run stood frozen (``swarm freeze``): that does stop a
+running worker, and no hour of it is work.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .. import freezer
 from .. import pace as pace_mod
 from .. import statuses
 
@@ -41,7 +44,7 @@ class Attempt:
     #: Finished with a report. ``False`` is a lost attempt: the worker died, the
     #: swarm restarted under it, or it was relaunched before it reported.
     done: bool
-    #: Seconds inside it spent waiting on the owner.
+    #: Seconds inside it spent waiting on the owner or standing frozen.
     waited_s: float = 0.0
 
 
@@ -86,9 +89,11 @@ def owner_waits(events) -> dict[str, list[tuple[float, float]]]:
     return spans
 
 
-def attempts(history, events) -> tuple[Attempt, ...]:
+def attempts(history, events, frozen=()) -> tuple[Attempt, ...]:
     """Every attempt in ``history`` (:class:`tui.data.PhaseRun`, newest first)
-    that has a launch time, oldest first, with its owner waits."""
+    that has a launch time, oldest first, with its owner waits and the
+    stretches the run stood ``frozen`` (:func:`freezer.spans`), each second of
+    either counted once."""
     waits = owner_waits(events)
     out = []
     for run in history or ():
@@ -99,16 +104,16 @@ def attempts(history, events) -> tuple[Attempt, ...]:
         if end is None and not run.running:
             continue  # over, and when is not known: nothing to measure
         inside = sum(max(0.0, min(b, end if end is not None else b) - max(a, run.started_at))
-                     for a, b in waits.get(run.phase, ()))
+                     for a, b in freezer.merged([*waits.get(run.phase, ()), *frozen]))
         out.append(Attempt(run.phase, run.started_at, end, done and end is not None, inside))
     out.sort(key=lambda a: a.start)
     return tuple(out)
 
 
-def from_sources(history, events, ledger_history: pace_mod.History) -> Record:
+def from_sources(history, events, ledger_history: pace_mod.History, frozen=()) -> Record:
     """The record from what the dashboard already holds."""
     return Record(
-        attempts=attempts(history, events),
+        attempts=attempts(history, events, frozen),
         ticks=dict(ledger_history.ticks),
         added=dict(ledger_history.added),
         workers=tuple(ledger_history.workers),

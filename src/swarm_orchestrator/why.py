@@ -29,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import caps
+from . import freezer
 from . import master as master_mod
 from . import ledger as ledger_mod
 from . import ledgerw
@@ -203,7 +204,8 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]],
             WAITING,
             "waiting on YOU — its worker asked you a question in its pane and"
             " keeps its worker slot until you answer (in"
-            f" {max(0, int(st.waiting[phase] - time.time()))}s it moves to its own window)",
+            f" {max(0, int(st.waiting[phase] - freezer.state_now(st.frozen)))}s it moves to its"
+            " own window)",
         )
 
     if phase in st.done:
@@ -233,6 +235,10 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]],
             " starts it on that day, not before",
         )
 
+    if st.frozen:
+        return Explanation(
+            phase, READY, "ready — but the swarm is FROZEN: nothing runs (`swarm thaw`)"
+        )
     if st.paused:
         return Explanation(
             phase, READY, "ready — but the swarm is PAUSED (`swarm resume`)"

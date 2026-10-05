@@ -175,6 +175,24 @@ def session_pane_pids(session: str) -> list[int]:
     return [int(ln) for ln in out.stdout.split() if ln.isdigit()]
 
 
+def session_pane_windows(session: str) -> list[tuple[int, str]]:
+    """``(pane pid, window name)`` for every pane in ``session``."""
+    out = run(["list-panes", "-s", "-t", f"={session}", "-F", "#{pane_pid}\t#{window_name}"])
+    pairs: list[tuple[int, str]] = []
+    for ln in out.stdout.splitlines():
+        pid, _, name = ln.partition("\t")
+        if pid.isdigit():
+            pairs.append((int(pid), name))
+    return pairs
+
+
+def server_pid() -> int | None:
+    """The pid of the tmux server; None when there is none to ask."""
+    out = run(["display-message", "-p", "#{pid}"])
+    pid = out.stdout.strip()
+    return int(pid) if out.returncode == 0 and pid.isdigit() else None
+
+
 def new_session(session: str) -> str:
     """Create a detached session; return the id of its initial window."""
     out = run(

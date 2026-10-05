@@ -43,6 +43,7 @@ from statistics import median
 from .. import bigpic, ledger, opqueue, statuses
 from .. import models as models_mod
 from ..drain import line as drain_line
+from ..freezer import line as frozen_line
 from .. import restart as restart_mod
 from ..overseer import starvation_map
 from ..tui import books as books_mod
@@ -561,6 +562,7 @@ def _header(cfg, dash, cards: dict, extra: list, passes: list, now: float) -> di
         "paused": bool(snap.paused),
         "usage_hold": snap.usage_hold,
         "drain": drain_line(snap.drain),
+        "frozen": frozen_line(snap.frozen, now),
         **_restart(dash, now),
         "finished": bool(snap.finished),
         "running": bool(snap.ok and snap.supervisor_alive),

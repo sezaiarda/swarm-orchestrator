@@ -34,6 +34,7 @@ from . import ovrecord
 from . import tui as tui_mod
 from . import doctor as doctor_mod
 from . import drain as drain_mod
+from . import freezer
 from . import gc as gc_mod
 from . import guide as guide_mod
 from . import promptlint
@@ -290,6 +291,34 @@ def _report_web_board(cfg: Config, hosted: bool = False) -> None:
     )
 
 
+#: Said by ``swarm up`` and ``swarm freeze`` where no scope can be made.
+_SHARED_GROUP = ("note: no systemd user scope can be made here, so the supervisor shares the"
+                 " cgroup of whatever started it; a freeze of that group from outside"
+                 " stops the supervisor too")
+
+
+def _drop_stale_freeze(cfg: Config) -> bool:
+    """Before ``swarm up`` touches the state: a frozen record with nothing
+    frozen behind it (the machine was restarted) is closed and dropped; one
+    whose groups are still frozen refuses the ``up`` (False)."""
+    record = freezer.peek(cfg)
+    if not record:
+        return True
+    live = freezer.still_frozen(record)
+    if live:
+        print(f"swarm up: {_frozen_words(record)} ({len(live)} group(s) still are frozen)",
+              file=sys.stderr)
+        return False
+    since = float(record.get("since") or 0.0)
+    _log_line(cfg, f"FROZEN-STALE since={pauseat.stamp(since)} groups="
+                   f"{len(record.get('cgroups') or [])}: nothing is frozen any more")
+    if since:
+        _close_span(cfg, since, time.time())
+    with state_mod.transaction(cfg) as st:
+        st.frozen = {}
+    return True
+
+
 def cmd_up(cfg: Config, attach: bool = True) -> int:
     cfg.ensure_dirs()
     if _supervisor_running(cfg):
@@ -311,6 +340,8 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
             f"`tmux attach -t {cfg.session}` to look at it, or `swarm down` first",
             file=sys.stderr,
         )
+        return 1
+    if not _drop_stale_freeze(cfg):
         return 1
     # A restart planned before this `up` is moot: the code on disk loads now.
     planned = restart_mod.load(cfg)
@@ -343,8 +374,11 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         log.close()
     if carried:
         print(f"kept across the restart, still waiting on you: {', '.join(carried)}")
+    # In a scope of its own where one can be made, so that freezing the
+    # terminal or the session `up` was typed in never freezes the supervisor.
+    argv = freezer.scoped([sys.executable, "-m", "swarm_orchestrator", "_supervise"])
     proc = subprocess.Popen(
-        [sys.executable, "-m", "swarm_orchestrator", "_supervise"],
+        argv,
         cwd=str(cfg.project_dir),
         # `swarm up` typed in the owner console: the supervisor is the swarm's own.
         env={k: v for k, v in os.environ.items() if k != console_mod.CONSOLE_ENV},
@@ -360,6 +394,8 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         return 1
     _poke(cfg, "bootstrap")
     print(f"swarm up: supervisor pid={pid} driver={cfg.driver}")
+    if not freezer.in_scope(argv):
+        print(_SHARED_GROUP, file=sys.stderr)
     if cfg.driver == "tmux" and cfg.console_enabled:
         print(f"console: tmux window {console_mod.WINDOW} — your own Claude session"
               " (o in the dashboard, or `swarm console`)")
@@ -2153,6 +2189,273 @@ def cmd_skip(cfg: Config, phase: str) -> int:
     return 0
 
 
+# -- freeze / thaw ------------------------------------------------------------
+def _log_line(cfg: Config, message: str) -> None:
+    """One line in the supervisor log, if it can be written: nothing a freeze
+    or a thaw has to do may wait on its own bookkeeping."""
+    try:
+        log = Log(cfg.supervisor_log)
+    except OSError:
+        return
+    try:
+        log.line(message)
+    finally:
+        log.close()
+
+
+def _close_span(cfg: Config, since: float, until: float) -> None:
+    """Write a freeze that ended into the history. One that cannot be written
+    is said in the log and costs the readers of the spans that stretch; the
+    record it belonged to is dropped all the same."""
+    try:
+        freezer.close_span(cfg, since, until)
+    except OSError as exc:
+        _log_line(cfg, f"THAW-SPAN-FAILED {exc}: this freeze is not in the history")
+
+
+def _frozen_words(record: dict) -> str:
+    """Why a verb is refused, by how far the freeze has got."""
+    if record.get("stage") == freezer.THAWING:
+        return ("the swarm is being thawed; wait for `swarm thaw` to finish, or run it"
+                " again if it was cut short")
+    return "the swarm is frozen; run `swarm thaw` first"
+
+
+def _freeze_report(record: dict) -> dict:
+    return {"frozen": list(record.get("cgroups") or []),
+            "awake": list(record.get("awake") or []),
+            "left": list(record.get("left") or []),
+            "quiesced": bool(record.get("quiesced"))}
+
+
+def _await_quiet(cfg: Config, wait_s: float) -> bool:
+    """Wait for the supervisor to say it is in the middle of nothing."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        if freezer.peek(cfg).get("quiet_at"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def _no_turn(verb: str) -> int:
+    print(f"swarm {verb}: another `swarm freeze` or `swarm thaw` was still running after"
+          f" {freezer.TURN_S:g}s; nothing was changed", file=sys.stderr)
+    return 1
+
+
+def cmd_freeze(cfg: Config, as_json: bool = False, wait_s: float = 120.0) -> int:
+    """Freeze every session of the run in place (see :mod:`freezer`).
+
+    The record goes in first and the supervisor is told, so it stops starting
+    things and says when it is in the middle of nothing; after ``wait_s`` the
+    freeze is made anyway and reported ``quiesced: false``. A freeze of a run
+    that is already frozen freezes again what its record names, and whatever
+    has turned up since. A group this user may not write is reported ``left``
+    and the rest are frozen without it: whoever may write it freezes it, and
+    wakes it before ``swarm thaw``.
+
+    One of the two verbs runs at a time (:func:`freezer.turn`): a freeze that
+    arrives while a thaw is waking the sessions waits for it to finish and then
+    freezes from scratch, so the run ends as the verb that came last asked."""
+    with freezer.turn(cfg) as mine:
+        return _freeze(cfg, as_json, wait_s) if mine else _no_turn("freeze")
+
+
+def _freeze(cfg: Config, as_json: bool, wait_s: float) -> int:
+    """:func:`cmd_freeze`, with the turn in hand."""
+    cg = freezer.Cgroups.from_env()
+    st = state_mod.read(cfg)
+    if st.frozen.get("stage") == freezer.THAWING:
+        # A thaw that was cut short. It is finished first (every group awake,
+        # the clocks moved, its span closed) and the freeze starts from nothing.
+        _thaw(cfg, dict(st.frozen), 0.0)
+        st = state_mod.read(cfg)
+    prior = dict(st.frozen)
+    running = _supervisor_running(cfg)
+    if running and not restart_mod.capable(cfg, st.supervisor_pid, "freeze"):
+        print("swarm freeze: the running supervisor is older than this command and"
+              " would not stand still for it; run `swarm restart` first", file=sys.stderr)
+        return 1
+    again = prior.get("stage") == freezer.FROZEN
+    plan = freezer.plan(cfg, st, cg)
+    with state_mod.transaction(cfg) as st:
+        st.frozen = {
+            "since": float(prior.get("since") or time.time()),
+            "stage": freezer.FREEZING,
+            "quiet_at": float(prior.get("quiet_at") or 0.0) if again else 0.0,
+            "waiting": [],
+            "quiesced": bool(prior.get("quiesced")) if again else False,
+            # What a freeze cut short before now left frozen stays named.
+            "cgroups": plan.frozen + [g for g in prior.get("cgroups") or []
+                                      if g["path"] not in {p["path"] for p in plan.frozen}],
+            "awake": plan.awake,
+        }
+    _log_line(cfg, f"FREEZE-START groups={len(plan.frozen)}" + (" again" if again else ""))
+    _poke(cfg, "freeze")
+    quiesced = bool(prior.get("quiesced")) if again else (
+        _await_quiet(cfg, max(0.0, wait_s)) if running else True)
+    # Looked at again: a launch that was under way has its session by now.
+    plan = freezer.plan(cfg, state_mod.read(cfg), cg)
+    known = {g["path"] for g in plan.frozen}
+    groups = plan.frozen + [g for g in prior.get("cgroups") or []
+                            if g["path"] not in known and cg.exists(g["path"])]
+    # Named in the record before any of them is told to freeze: whatever cuts
+    # this short from here on, `swarm thaw` finds every group it has to wake.
+    with state_mod.transaction(cfg) as st:
+        dropped = not st.frozen  # an `up` took the record meanwhile
+        if not dropped:
+            st.frozen["cgroups"] = groups
+    frozen: list[dict] = []
+    left: list[dict] = []
+    why = "the frozen record was dropped while the freeze was made" if dropped else ""
+    if not dropped:
+        try:
+            frozen, stuck, left = freezer.freeze(cfg, groups, cg)
+            why = f"would not freeze: {', '.join(stuck)}" if stuck else ""
+        except freezer.Busy as exc:
+            why = f"{exc} stayed taken"
+    record: dict = {}
+    with state_mod.transaction(cfg) as st:
+        if not st.frozen:
+            why = why or "the frozen record was dropped while the freeze was made"
+        elif not why:
+            st.frozen.update(stage=freezer.FROZEN, quiesced=quiesced, cgroups=frozen,
+                             awake=plan.awake, left=left)
+            record = dict(st.frozen)
+        elif not again:
+            st.frozen = {}  # nothing stood still for long: there is no span to close
+    if why:
+        # Whatever did freeze is awake again; a run that was frozen before
+        # this ends its freeze here, the way a thaw does.
+        freezer.thaw(groups, cg)
+        frozen_s, since = _end_freeze(cfg) or (0.0, 0.0)
+        _log_line(cfg, f"FREEZE-ROLLBACK {why}")
+        _poke(cfg, f"thaw {frozen_s:.3f} {since:.3f}")
+        print(f"swarm freeze: nothing is frozen: {why}", file=sys.stderr)
+        return 1
+    _log_line(cfg, f"FROZEN groups={len(frozen)} left={len(left)} quiesced={quiesced}")
+    if running and not freezer.can_scope():
+        print(_SHARED_GROUP, file=sys.stderr)
+    if as_json:
+        print(json.dumps(_freeze_report(record), indent=2, sort_keys=True))
+        return 0
+    print(f"swarm frozen: {len(frozen)} group(s) stopped in place; `swarm thaw` wakes them")
+    if not quiesced:
+        print(f"  the supervisor was still busy after {wait_s:g}s"
+              f" ({', '.join(freezer.peek(cfg).get('waiting') or ['it did not say'])});"
+              " that is tried again at the thaw")
+    for group in record["awake"]:
+        if group.get("shared"):
+            print(f"  left awake, sessions and all: {group['path']} (the {group['kind']}'s group)")
+    for group in left:
+        print(f"  left alone, not this user's to freeze: {group['path']}"
+              f" ({' '.join(filter(None, (group['kind'], group['id'])))})")
+    return 0
+
+
+def _end_freeze(cfg: Config) -> tuple[float, float] | None:
+    """Close the frozen record once its sessions are awake: mark it thawing,
+    move the clocks along, write its span into the history and drop it.
+    Returns how long the freeze lasted and when it began; None when there is
+    no record.
+
+    The end is stamped into the record first, so a thaw cut short and run
+    again closes the same span and moves the clocks by the same amount. The
+    record is dropped whatever becomes of the clocks, the span and the log: a
+    record that stays keeps the supervisor standing still and every verb
+    refused, for the sake of bookkeeping."""
+    with state_mod.transaction(cfg) as st:
+        if not st.frozen:
+            return None
+        st.frozen["stage"] = freezer.THAWING
+        st.frozen.setdefault("until", time.time())
+        since, until = float(st.frozen.get("since") or 0.0), float(st.frozen["until"])
+    frozen_s = max(0.0, until - since) if since else 0.0
+    failed = freezer.rebase(cfg, frozen_s)
+    if failed:
+        _log_line(cfg, f"THAW-CLOCKS-FAILED {' '.join(failed)}: not moved along")
+    if since:
+        _close_span(cfg, since, until)
+    with state_mod.transaction(cfg) as st:
+        st.frozen = {}
+    return frozen_s, since
+
+
+def _thaw(cfg: Config, record: dict, gap_s: float) -> tuple[int, float] | None:
+    """The thaw itself, with the turn in hand: say in the record that it has
+    begun, wake its groups, close it. Returns how many groups were woken and
+    how long the freeze lasted; None when the record went meanwhile.
+
+    Saying it first means nothing reads a half-woken run as frozen. That takes
+    the state lock, which a frozen session may be holding (whoever froze them
+    may have frozen more than this did), so it is tried for a moment only: the
+    groups are woken with or without it, and with no lock in hand."""
+    with state_mod.transaction_within(cfg, freezer.MARK_S) as st:
+        marked = st is not None
+        if marked and st.frozen:
+            st.frozen["stage"] = freezer.THAWING
+    if not marked:
+        _log_line(cfg, f"THAW-UNMARKED the state lock stayed taken for {freezer.MARK_S:g}s:"
+                       " waking the sessions first")
+    cg = freezer.Cgroups.from_env()
+    st = state_mod.State.from_dict(freezer.peek_state(cfg))
+    woken = freezer.thaw(freezer.thaw_order(record, st), cg, max(0.0, gap_s))
+    ended = _end_freeze(cfg)
+    if ended is None:
+        return None
+    frozen_s, since = ended
+    _log_line(cfg, f"THAW groups={len(woken)} frozen={frozen_s:.0f}s")
+    _poke(cfg, f"thaw {frozen_s:.3f} {since:.3f}")
+    return len(woken), frozen_s
+
+
+def cmd_thaw(cfg: Config, gap_s: float = 5.0) -> int:
+    """Wake what ``swarm freeze`` stopped, a few seconds apart, and let the
+    supervisor carry on.
+
+    The groups are woken with no lock in hand that a session can hold: whoever
+    froze them may have frozen something that holds one. Run again after it
+    was cut short, it finishes what is left. A thaw that arrives while a freeze
+    is being made waits for it to finish, then wakes what it froze."""
+    with freezer.turn(cfg) as mine:
+        if not mine:
+            return _no_turn("thaw")
+        record = freezer.look(cfg)
+        if record is None:
+            print(f"swarm thaw: {cfg.state_path} could not be read, so whether anything is"
+                  " frozen is not known and nothing was changed; run it again",
+                  file=sys.stderr)
+            return 1
+        done = _thaw(cfg, record, gap_s) if record else None
+    if done is None:
+        print("swarm thaw: nothing is frozen")
+        return 0
+    print(f"swarm thawed: {done[0]} group(s) woken after {done[1]:.0f}s")
+    return 0
+
+
+#: Verbs that start, stop or reshape the run. Refused while it is frozen: each
+#: would act on sessions that cannot answer, or start one the freeze never saw.
+FROZEN_REFUSED = frozenset({
+    "up", "down", "restart", "_restart-run", "reset", "launch", "retry", "free", "skip",
+    "integrate", "finish", "gc", "reload", "layout", "console", "operator",
+})
+
+
+def _refused_frozen(cfg: Config, command: str) -> bool:
+    """Whether ``command`` is refused because the run is frozen (and say so).
+    ``up`` is let through to a record nothing stands behind: it drops it."""
+    if command not in FROZEN_REFUSED:
+        return False
+    record = freezer.peek(cfg)
+    if not record or (command == "up" and not freezer.still_frozen(record)):
+        return False
+    print(f"swarm {command}: {_frozen_words(record)}", file=sys.stderr)
+    return True
+
+
 def _warn_if_no_supervisor(cfg: Config, what: str) -> None:
     """Warn when a control command lands on a state no supervisor is reading.
 
@@ -2503,6 +2806,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         data["kept"] = [r.to_json() for r in keep_mod.load_all(cfg)]
         data["resources"] = resources_view.status_lines(cfg)
         data["drain_line"] = drain_mod.line(st.drain)
+        data["frozen_line"] = freezer.line(st.frozen)
         data["pause_line"] = pauseat.line(st.pause_at)
         data["restart"] = restart_mod.load(cfg)
         data["restart_line"] = restart_mod.status_line(cfg, st)
@@ -2524,6 +2828,8 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     ]
     if st.drain:
         lines.insert(1, drain_mod.line(st.drain))
+    if st.frozen:
+        lines.insert(1, freezer.line(st.frozen))
     if st.pause_at:
         lines.insert(1, pauseat.line(st.pause_at))
     restarting = restart_mod.status_line(cfg, st)
@@ -2729,6 +3035,19 @@ def _build_parser() -> argparse.ArgumentParser:
     when.add_argument("--at", metavar="HH:MM", help="pause at the next HH:MM, local time")
     when.add_argument("--cancel", action="store_true", help="drop a scheduled pause")
     pap.set_defaults(func=lambda cfg, a: cmd_pause(cfg, a.delay, a.at, a.cancel))
+    frp = sub.add_parser(
+        "freeze", help="stop every session in place (kernel freezer); `swarm thaw` wakes them")
+    frp.add_argument("--json", action="store_true",
+                     help="print what was frozen and which of the run's groups stay awake")
+    frp.add_argument("--wait", type=float, default=120.0, metavar="S",
+                     help="seconds to wait for the supervisor to finish what it is in the"
+                          " middle of before freezing anyway (default 120)")
+    frp.set_defaults(func=lambda cfg, a: cmd_freeze(cfg, a.json, a.wait))
+    thp = sub.add_parser("thaw", help="wake what `swarm freeze` stopped, a few seconds apart")
+    thp.add_argument("--gap", type=float, default=5.0, metavar="S",
+                     help="seconds between one Claude session's wake-up and the next"
+                          " (default 5)")
+    thp.set_defaults(func=lambda cfg, a: cmd_thaw(cfg, a.gap))
     rsm = sub.add_parser("resume", help="resume launching workers into free slots")
     rsm.add_argument("--override-cap", action="store_true",
                      help="also run through a usage cap's hold until its window resets")
@@ -3152,6 +3471,8 @@ def main(argv: list[str] | None = None) -> int:
         # reach for precisely when the config is what you just broke.
         print(f"swarm: config error: {exc}", file=sys.stderr)
         return 2
+    if _refused_frozen(cfg, args.command):
+        return 1
     return args.func(cfg, args)
 
 

@@ -31,6 +31,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .. import freezer
+
 PIDFILE = "web.pid"
 LOG = "web.log"
 #: Must match :data:`swarm_orchestrator.web.server.APP_ID` — the string
@@ -318,7 +320,9 @@ def start_detached(cfg) -> int | None:
     """Start the board as its own process (the ``bare`` driver). Returns its pid.
 
     A board already answering on the port is left alone: two would fight over
-    the socket, and the second would just fail to bind.
+    the socket, and the second would just fail to bind. In a scope of its own
+    where one can be made (:func:`freezer.scoped`), so it stays readable while
+    the sessions are frozen.
     """
     if not cfg.web_enabled or listening(cfg):
         return None
@@ -327,7 +331,7 @@ def start_detached(cfg) -> int | None:
     env = {**os.environ, "SWARM_STATE_DIR": str(cfg.state_dir)}
     with (log_dir / LOG).open("ab") as log:
         proc = subprocess.Popen(
-            shlex.split(command(cfg)), cwd=str(cfg.project_dir), env=env,
+            freezer.scoped(shlex.split(command(cfg)), env), cwd=str(cfg.project_dir), env=env,
             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
         )
     return proc.pid
@@ -344,6 +348,15 @@ def _ours(pid: int) -> bool:
             return False
         return True  # no /proc to check against; the pid file is all we have
     return b"swarm_orchestrator" in cmd and b" web" in cmd
+
+
+def running(cfg) -> int | None:
+    """The pid of the board ``up`` started as its own process, if it is still alive."""
+    try:
+        pid = int(pidfile(cfg).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 and _ours(pid) else None
 
 
 def stop(cfg, timeout: float = 5.0) -> bool:

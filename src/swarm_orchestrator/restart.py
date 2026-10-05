@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
+from . import freezer
 from . import opqueue
 from . import ovrecord
 from . import pauseat
@@ -94,7 +95,10 @@ FORCE = "force"
 #: waits for a parked session that is at work on the owner's answer, so a full
 #: restart need not refuse for one. ``reap-parked``: its sweep settles a parked
 #: session that is gone, so ``swarm doctor`` may say such a session will be.
-CAPS = ("handover", "restart-at", "keep-later", "reap-stopped", "drain-parked", "reap-parked")
+#: ``freeze``: it keeps ``State.frozen`` and stands still while it is there, so
+#: ``swarm freeze`` may freeze the sessions under it.
+CAPS = ("handover", "restart-at", "keep-later", "reap-stopped", "drain-parked", "reap-parked",
+        "freeze")
 
 #: How long a restart waits for a safe moment, then for the old supervisor to
 #: be gone. Past it the restart fails and says what it was still waiting for;
@@ -628,10 +632,15 @@ def start_supervisor(cfg: Config, env: dict[str, str], log: Log) -> int | None:
     """Start a supervisor that adopts the run as it stands; its pid once it has
     the FIFO open, ``None`` if two attempts both failed."""
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
+    # In a scope of its own where one can be made, as `swarm up` starts it:
+    # asked of the environment it is started in, which is the last
+    # supervisor's and not this helper's.
+    argv = freezer.scoped([sys.executable, "-m", "swarm_orchestrator", "_supervise", "--adopt"],
+                          env)
     for attempt in (1, 2):
         with (cfg.log_dir / START_ERR).open("ab") as err:
             proc = subprocess.Popen(
-                [sys.executable, "-m", "swarm_orchestrator", "_supervise", "--adopt"],
+                argv,
                 cwd=str(cfg.project_dir), env=env, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=err, start_new_session=True,
             )

@@ -55,6 +55,7 @@ from . import bigpic as bigpic_mod
 from . import blockedping
 from . import doctor as doctor_mod
 from . import drain as drain_mod
+from . import freezer
 from . import gc as gc_mod
 from . import gitq
 from . import landing as landing_mod
@@ -104,6 +105,11 @@ HANDOVER_POLL_S = 0.5
 #: again this much later — soon enough to catch the gap between two builds,
 #: rarely enough that probing the gate costs nothing.
 GC_RETRY_S = 600.0
+#: While frozen the loop wakes this often and only looks whether it still is:
+#: no deadline counts, so none may set the pace.
+FROZEN_POLL_S = 1.0
+#: The only events handled while frozen; every other line waits for the thaw.
+FREEZE_VERBS = ("freeze", "thaw", "shutdown")
 
 
 class Supervisor:
@@ -211,6 +217,13 @@ class Supervisor:
         # The resource sampler (see resources/sampler.py): its own thread, started
         # with the loop and stopped with it. It only reads /proc and writes meters/.
         self._resources: resources_mod.Sampler | None = None
+        # ``swarm freeze`` (see `_freeze_tick`): when the freeze this process is
+        # standing still for began (None = not frozen), the events that arrived
+        # meanwhile, and the last thing it said it was still in the middle of.
+        self._frozen_since: float | None = None
+        self._thawed_since = 0.0  # when the last freeze it carried on from began
+        self._deferred: list[str] = []
+        self._freeze_said: list[str] | None = None
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -289,28 +302,11 @@ class Supervisor:
                     )
                 except InterruptedError:
                     continue
-                # Fire on EVERY wake — a FIFO event, a park-deadline timeout or a
-                # watchdog tick (the latter two leave `ready` empty and fall
-                # through the guard below). A due scheduled pause goes first, so
-                # nothing this wake does can launch past it.
-                self._dispatch("scheduled-pause", self._pause_at_tick)
-                self._dispatch("restart", self._restart_tick)
-                self._dispatch("park-deadlines", self._check_park_deadlines)
-                self._dispatch("operator-queue", self._check_operator_queue)
-                self._dispatch("watchdog", self._watchdog_tick)
-                self._dispatch("launch-retry", self._retry_backed_off)
-                self._dispatch("overseer", self._overseer_tick)
-                if self._handover is None:
-                    # Nothing new starts while handing over: each of these can
-                    # open a session or a thread the exit would cut off.
-                    self._dispatch("big-picture", self.bigpic.tick)
-                    self._dispatch("gc", self._gc_tick)
-                    self._dispatch("backup", self._backup_tick)
-                self._dispatch("blocked-pings", blockedping.flush, self.cfg, self.log)
-                self._dispatch("usage", self._usage_tick)
-                self._dispatch("adopt-recheck", self._adopt_recheck_tick)
-                self._dispatch("drain", self._drain_tick)
-                self._dispatch("handover", self._handover_tick)
+                # A freeze goes before everything: while the sessions are
+                # frozen no tick below runs, and no event but its own.
+                self._dispatch("freeze", self._freeze_tick)
+                if self._frozen_since is None:
+                    self._wake_ticks()
                 if self._stop or self._fifo_fd not in ready:
                     continue
                 try:
@@ -321,15 +317,11 @@ class Supervisor:
                 while b"\n" in buf:
                     raw, buf = buf.split(b"\n", 1)
                     line = raw.decode("utf-8", "replace").strip()
-                    self._dispatch(line, self._handle, line)
-                    if self._stop:
-                        break
-                    # After every event too: the event may be the trigger (a
-                    # `fail`, a hold), and waiting for the next wake to notice
-                    # it could be waiting for nothing.
-                    self._dispatch("overseer", self._overseer_tick)
-                    self._dispatch("drain", self._drain_tick)
-                    self._dispatch("handover", self._handover_tick)
+                    if self._frozen_since is not None and line.split(" ", 1)[0] not in FREEZE_VERBS:
+                        if line:
+                            self._deferred.append(line)  # handled, in order, at the thaw
+                        continue
+                    self._event(line)
                     if self._stop:
                         break
             if self._handed_over and buf:
@@ -364,6 +356,40 @@ class Supervisor:
                 os.close(self._fifo_fd)
             self.log.line("SUPERVISOR-STOP" + (" handover" if self._handed_over else ""))
             self.log.close()
+
+    def _wake_ticks(self) -> None:
+        """What every wake looks at — a FIFO event, a park-deadline timeout or a
+        watchdog tick alike. A due scheduled pause goes first, so nothing this
+        wake does can launch past it."""
+        self._dispatch("scheduled-pause", self._pause_at_tick)
+        self._dispatch("restart", self._restart_tick)
+        self._dispatch("park-deadlines", self._check_park_deadlines)
+        self._dispatch("operator-queue", self._check_operator_queue)
+        self._dispatch("watchdog", self._watchdog_tick)
+        self._dispatch("launch-retry", self._retry_backed_off)
+        self._dispatch("overseer", self._overseer_tick)
+        if self._handover is None:
+            # Nothing new starts while handing over: each of these can
+            # open a session or a thread the exit would cut off.
+            self._dispatch("big-picture", self.bigpic.tick)
+            self._dispatch("gc", self._gc_tick)
+            self._dispatch("backup", self._backup_tick)
+        self._dispatch("blocked-pings", blockedping.flush, self.cfg, self.log)
+        self._dispatch("usage", self._usage_tick)
+        self._dispatch("adopt-recheck", self._adopt_recheck_tick)
+        self._dispatch("drain", self._drain_tick)
+        self._dispatch("handover", self._handover_tick)
+
+    def _event(self, line: str) -> None:
+        """Handle one FIFO line, then look at what it may have set off: the
+        event may be the trigger (a ``fail``, a hold), and waiting for the next
+        wake to notice it could be waiting for nothing."""
+        self._dispatch(line, self._handle, line)
+        if self._stop or self._frozen_since is not None:
+            return
+        self._dispatch("overseer", self._overseer_tick)
+        self._dispatch("drain", self._drain_tick)
+        self._dispatch("handover", self._handover_tick)
 
     def _drop_stale_orders(self) -> None:
         """Take out of the pipe what was addressed to the previous supervisor.
@@ -473,8 +499,10 @@ class Supervisor:
     def _handle(self, line: str) -> None:
         if not line:
             return
-        with state_mod.transaction(self.cfg) as st:
-            st.last_event_at = time.time()
+        if self._frozen_since is None:
+            # Not while frozen: the state lock may be in a frozen hand.
+            with state_mod.transaction(self.cfg) as st:
+                st.last_event_at = time.time()
         parts = line.split()
         verb = parts[0]
         if verb == "done":
@@ -508,6 +536,11 @@ class Supervisor:
             self._on_resume()
         elif verb == "drain":
             self._on_drain()
+        elif verb == "freeze":
+            self.log.line("EVENT freeze")
+            self._freeze_tick()
+        elif verb == "thaw":
+            self._on_thaw(*parts[1:3])
         elif verb == "handover":
             self._on_handover(parts[1] if len(parts) > 1 else "?")
         elif verb == "handover-cancel":
@@ -825,6 +858,139 @@ class Supervisor:
         for key in keys:
             self._dispatch(f"park {key}", self._park, key)
 
+    # -- freeze: stand still while the sessions are frozen ------------------
+    def _freeze_tick(self) -> None:
+        """Notice a freeze and its end; while one is being made, say what this
+        process is still in the middle of until that is nothing.
+
+        Runs first on every wake. The record is read without the state lock (a
+        frozen process may hold it), and while it is there the loop does
+        nothing else: no tick, and no event but :data:`FREEZE_VERBS`. The
+        resource sampler stops too: frozen sessions use nothing worth a sample.
+        A state that could not be read says nothing: this process goes on
+        believing what it believed, frozen or not, until a read that tells."""
+        record = freezer.look(self.cfg)
+        if record is None:
+            return
+        if not record:
+            if self._frozen_since is not None and not self._fifo_readable():
+                self._thaw()  # dropped, and no `thaw` came with it
+            return
+        if self._frozen_since is None:
+            self._frozen_since = float(record.get("since") or time.time())
+            self._freeze_said = None
+            self.log.line(f"FREEZE groups={len(record.get('cgroups') or [])}")
+            if self._resources is not None:
+                self._resources.stop()
+                self._resources = None
+        if record.get("stage") == freezer.FREEZING and not record.get("quiet_at"):
+            self._freeze_quiet()
+
+    def _fifo_readable(self) -> bool:
+        """Is an event waiting to be read? (A ``thaw`` says how long the freeze
+        lasted, so the wake that brings one leaves the carrying-on to it.)"""
+        if self._fifo_fd < 0:
+            return False
+        return bool(select.select([self._fifo_fd], [], [], 0)[0])
+
+    def _freeze_quiet(self) -> None:
+        """Write what a freeze still waits for into its record, and the moment
+        that is nothing: ``swarm freeze`` waits for it before it freezes."""
+        waits = self._handover_waits(leaving=False)
+        if waits and waits == self._freeze_said:
+            return
+        with state_mod.transaction(self.cfg) as st:
+            if st.frozen.get("stage") != freezer.FREEZING:
+                return  # frozen, or called off, since the look above
+            st.frozen["waiting"] = waits
+            if not waits:
+                st.frozen["quiet_at"] = time.time()
+        self._freeze_said = waits
+        self.log.line(f"FREEZE-WAITING {', '.join(waits)}" if waits else "FREEZE-QUIET")
+
+    def _on_thaw(self, frozen_s: str = "", since: str = "") -> None:
+        """``swarm thaw`` woke the sessions and dropped the record: it says how
+        long the freeze lasted and when it began.
+
+        A freeze this process did not carry on from still stopped everything
+        it times, so its clocks are moved along all the same, once: one it
+        never stood still for (it was inside one long event from before the
+        freeze until after the thaw), and one that was followed by the next
+        freeze before this was read, which it goes on standing still for."""
+        self.log.line(f"EVENT thaw {frozen_s} {since}".rstrip())
+        record = freezer.look(self.cfg)
+        if record is None:
+            return  # could not tell: the next look at the record carries on
+        try:
+            seconds, began = float(frozen_s), float(since or 0.0)
+        except ValueError:
+            seconds, began = None, 0.0
+        if self._frozen_since is not None and not record:
+            self._thaw(seconds)
+        elif seconds and began and abs(began - self._thawed_since) > 0.01:
+            self._thawed_since = began
+            if record and self._frozen_since is not None:
+                self._frozen_since = float(record.get("since") or time.time())
+                self.log.line(f"THAW-REFROZEN frozen={seconds:.0f}s: frozen again since")
+            else:
+                self.log.line(f"THAW-MISSED frozen={seconds:.0f}s: never stood still for it")
+            self._shift_clocks(seconds)
+
+    def _thaw(self, frozen_s: float | None = None) -> None:
+        """Carry on after a freeze that lasted ``frozen_s``: the sampler starts
+        again, the events that arrived meanwhile are handled in the order they
+        came, and the free slots are filled."""
+        since, self._frozen_since = self._frozen_since, None
+        self._thawed_since = since or 0.0
+        if frozen_s is None:
+            frozen_s = max(0.0, time.time() - (since or time.time()))
+        self._freeze_said = None
+        lines, self._deferred = self._deferred, []
+        self.log.line(f"THAWED frozen={frozen_s:.0f}s deferred={len(lines)}")
+        self._shift_clocks(frozen_s)
+        self._start_resources()
+        for line in lines:
+            self._event(line)
+            if self._stop:
+                return
+        self._fill_slots("thawed")
+        self._finish_if_settled()
+
+    def _shift_clocks(self, delta: float) -> None:
+        """Move what this process times in its own memory ``delta`` seconds
+        along: the sessions stood frozen that long, and none of it is time a
+        sweep was due in, a launch backed off, a ping cooled down, a worker's
+        deaths aged or a gc, a backup or a commit of held notes came nearer.
+        The files were moved by the thaw itself (:func:`freezer.rebase`); the
+        Overseer's policy and the big-picture memory are held here and written
+        from here, so theirs move here too. The usage check keeps the wall
+        clock: the provider's windows ran on, and the first wake reads them."""
+        if delta <= 0:
+            return
+        now = time.time()
+
+        def moved(stamp: float) -> float:
+            return state_mod.moved(stamp, delta, now)
+
+        self._last_sweep = moved(self._last_sweep)
+        self._doctor_probed = moved(self._doctor_probed)
+        self._pinged = {k: moved(v) for k, v in self._pinged.items()}
+        self._crashes = {p: [moved(t) for t in ts] for p, ts in self._crashes.items()}
+        with self._launch_lock:
+            self._launch_fails = {p: (n, moved(last))
+                                  for p, (n, last) in self._launch_fails.items()}
+        self._adopt_recheck = {p: at + delta for p, at in self._adopt_recheck.items()}
+        if self._ledger_held_until:
+            self._ledger_held_until += delta
+        self._gc_last = moved(self._gc_last)
+        if self._gc_retry_at:
+            self._gc_retry_at += delta
+        if self._gc_idle_since is not None:
+            self._gc_idle_since = moved(self._gc_idle_since)
+        self._backup_last = moved(self._backup_last)
+        self.overseer.shift(delta, now)
+        self.bigpic.shift(delta, now)
+
     # -- restart: fire a scheduled one, hand over, adopt --------------------
     def _restart_tick(self) -> None:
         """Start a scheduled restart once it is due, and notice one that died.
@@ -875,13 +1041,14 @@ class Supervisor:
         self._fill_slots("restart cancelled")
         self._finish_if_settled()
 
-    def _handover_waits(self) -> list[str]:
+    def _handover_waits(self, leaving: bool = True) -> list[str]:
         """What this process is in the middle of that its exit would cut off.
 
         A merge is never on the list: it runs inside one event, and this is
         only ever asked between events. Sessions are not on it either — they
         are adopted — except on the bare driver, whose master is this process's
-        child and cannot be."""
+        child and cannot be. A freeze asks the same of a process that stays
+        (``leaving`` false): a session it is not about to leave is no wait."""
         out: list[str] = []
         with self._launch_lock:
             launching = len(self._launching)
@@ -891,7 +1058,7 @@ class Supervisor:
             out.append("a worker starting")  # settled, and still reporting it
         if self._overseer_live is not None and self._overseer_spawning:
             out.append("an Overseer pass starting")
-        elif self.cfg.driver == "bare" and self.master.is_alive():
+        elif leaving and self.cfg.driver == "bare" and self.master.is_alive():
             out.append("an Overseer pass" if self._overseer_live else "the start-up pass")
         if self.bigpic.mem.live and not self.bigpic._spawned:
             out.append("the big-picture pass starting")
@@ -1795,6 +1962,8 @@ class Supervisor:
         the owner un-notified (a silent outage of unbounded length). With
         ``watchdog_s = 0`` this returns ``_next_timeout`` unchanged, so the purely
         event-driven loop is preserved byte-for-byte."""
+        if self._frozen_since is not None:
+            return FROZEN_POLL_S  # no deadline counts while frozen
         deadline = self._next_timeout()
         if self._handover is not None or self._restart_proc is not None:
             # A clean-up or a backup ending is not an event: look again shortly.
@@ -2467,7 +2636,7 @@ class Supervisor:
             outcome = launch_mod.launch_outcome(cfg, phase, self.log, quiet=True)
         except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
             self.log.line(f"LAUNCH-ERROR {phase} {exc!r}")
-            outcome = launch_mod.FAILED
+            outcome = launch_mod.FROZEN if freezer.peek(cfg) else launch_mod.FAILED
             with state_mod.transaction(cfg) as st:
                 held = st.free_slot_for(phase) is not None  # don't strand the claim
             if held:
@@ -2485,6 +2654,8 @@ class Supervisor:
         """A launch thread settled. Tell the owner once if the phase has now
         failed often enough to be given up on, then re-check the finish — a
         launch that failed may have been the last thing the run was waiting on.
+        One a freeze caught is no failure: it counts for nothing, and the thaw
+        that hands this event over fills the slot again.
         A failure deliberately does NOT refill the slot at once: it would hand
         the same broken cause the next phase. The back-off, the next event or
         the watchdog does."""
@@ -2697,8 +2868,7 @@ class Supervisor:
         if self._ledger_held_until:
             # The pass reads the histories as committed, its own last notes included.
             self._flush_ledger({}, hold=False)
-        mem = self.overseer.mem
-        since = mem.last_pass_at or mem.anchor or now
+        since = self.overseer.since(now)
         prior = ovrecord.load_passes(self.cfg, limit=1)
         last = prior[0].to_dict() if prior else None
         reasons = self.overseer.begin(now)

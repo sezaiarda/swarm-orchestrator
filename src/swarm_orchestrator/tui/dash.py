@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import bigpic, doctor, ledgerw, opqueue, ovrecord
+from .. import bigpic, doctor, freezer, ledgerw, opqueue, ovrecord
 from .. import pace as pace_mod
 from .. import restart as restart_mod
 from .. import runs as runs_mod
@@ -25,6 +25,7 @@ from ..meters import LIMITS_LOG, METERS_DIR
 from ..resources import store as resources_store
 from . import probes
 from .data import (
+    awake_starts,
     Blocker,
     Limits,
     LogTail,
@@ -398,7 +399,8 @@ class Dash:
             self.usage = self._run_usage(now)
             try:
                 self.burn = eta_mod.burn_of(self.tail.events, int(self.cfg.max_workers or 1),
-                                            self._samples.samples, now)
+                                            self._samples.samples, now,
+                                            frozen=freezer.spans(self.cfg, now))
             except Exception:  # noqa: BLE001 - a projection must never take the dash down
                 self.burn = {}
             changed.add("usage")
@@ -534,7 +536,10 @@ class Dash:
                   if kind == state_mod.OVERSEER}
         live = {st["overseer_pass"]} if st.get("overseer_pass") else set()
         self._live_pass = tuple(sorted(parked | live))
-        launched = launch_times(events)
+        # Frozen time is not elapsed time: no worker's age and no run's
+        # duration counts the stretches the run stood frozen.
+        frozen = freezer.spans(self.cfg, record=st.get("frozen") or {})
+        launched = awake_starts(launch_times(events), frozen)
         self.snapshot = build_snapshot(
             self.cfg,
             state,
@@ -549,6 +554,7 @@ class Dash:
         self.history = build_history(
             events, self.sentinels, self.recaps, self.cfg.done_dir, self.notes,
             state=state if isinstance(state, dict) else None, ticked=self.ticked,
+            frozen=frozen,
         )
         wt_dir = self.cfg.wt_dir if self.cfg.git_isolation == "worktree" else None
         self.parked_workers = parked_workers(state, self.history, launched, wt_dir)

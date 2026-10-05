@@ -57,6 +57,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from . import ledgerw, statuses
+from . import state as state_mod
 from .config import Config
 from .logutil import Log
 
@@ -117,6 +118,11 @@ class Memory:
 
     #: Start of the last pass (the min-gap and every-s clocks run from here).
     last_pass_at: float = 0.0
+    #: How far thaws have moved the clocks' start (``last_pass_at``, else
+    #: ``anchor``) along since it was set (:meth:`shift`). The clocks count from
+    #: the moved moment; what finished since is read from the real one
+    #: (:meth:`Policy.since`).
+    frozen_s: float = 0.0
     last_pass_end: float = 0.0
     #: When the every-s clock started if no pass has run yet (supervisor start).
     anchor: float = 0.0
@@ -145,6 +151,29 @@ class Memory:
     def from_dict(cls, data: dict) -> "Memory":
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+    def shift(self, delta: float, now: float) -> None:
+        """Move every clock ``delta`` seconds along for a thaw: no pass could
+        run and nobody could answer while the sessions stood frozen, so no gap,
+        cadence, hold, wait on the owner or starvation got any older."""
+        was = self.last_pass_at or self.anchor
+        self.last_pass_at = state_mod.moved(self.last_pass_at, delta, now)
+        self.anchor = state_mod.moved(self.anchor, delta, now)
+        self.frozen_s += (self.last_pass_at or self.anchor) - was
+        self.hold_since = state_mod.moved(self.hold_since, delta, now)
+        self.starving_since = state_mod.moved(self.starving_since, delta, now)
+        self.owner_since = {k: state_mod.moved(v, delta, now)
+                            for k, v in self.owner_since.items()}
+        self.push_since = {k: state_mod.moved(v, delta, now)
+                           for k, v in self.push_since.items()}
+
+
+def shift(cfg: Config, delta: float, now: float | None = None) -> None:
+    """A thaw's move of the policy file (:func:`freezer.rebase`). A running
+    supervisor holds the same memory and moves its own (:meth:`Policy.shift`)."""
+    policy = Policy(cfg)
+    if policy.path.is_file():
+        policy.shift(delta, now)
 
 
 class Policy:
@@ -210,12 +239,23 @@ class Policy:
         now = time.time() if now is None else now
         return now - self.mem.last_pass_at >= self.cfg.overseer_min_gap_s
 
+    def shift(self, delta: float, now: float | None = None) -> None:
+        self.mem.shift(delta, time.time() if now is None else now)
+        self.save()
+
+    def since(self, now: float) -> float:
+        """The moment the next pass reads on from, by the wall clock: when the
+        last one began (or the policy first looked)."""
+        start = self.mem.last_pass_at or self.mem.anchor
+        return start - self.mem.frozen_s if start else now
+
     def begin(self, now: float | None = None) -> list[Reason]:
         """Take every pending reason for a pass that starts now."""
         now = time.time() if now is None else now
         taken = self.pending
         self.mem.pending = []
         self.mem.last_pass_at = now
+        self.mem.frozen_s = 0.0
         self.mem.finished_since = 0
         self.save()
         return taken

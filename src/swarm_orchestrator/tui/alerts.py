@@ -22,6 +22,7 @@ from rich.markup import escape
 
 from .. import telegram
 from ..drain import line as drain_line
+from ..freezer import line as frozen_line, state_now
 from ..pauseat import line as pause_line
 from .. import restart as restart_mod
 from .data import fmt_clock, fmt_duration, fmt_stamp, held_merge, open_drops
@@ -61,13 +62,16 @@ def problems(dash, now: float | None = None) -> list[tuple[str, str]]:
 
     Staleness only escalates while a slot is busy — a finished or idle swarm is
     *supposed* to be quiet. A scheduled pause is not a problem but a hold the
-    owner set for later, so it is said until it happens.
+    owner set for later, so it is said until it happens. A frozen run is said
+    before any other hold, and its frozen time is not quiet time.
     """
     now = time.time() if now is None else now
     snap = dash.snapshot
     parts: list[tuple[str, str]] = []
     if not snap.ok:
         parts.append(("no run yet", MUTED))
+    elif snap.frozen:
+        parts.append((escape(frozen_line(snap.frozen, now)), WARN))
     elif snap.drain and snap.supervisor_alive:
         parts.append((escape(drain_line(snap.drain)), WARN))
     elif snap.paused:
@@ -83,7 +87,8 @@ def problems(dash, now: float | None = None) -> list[tuple[str, str]]:
     if dropped:
         parts.append((f"{len(dropped)} ping(s) never reached your phone (x clears)", BAD))
     busy = any(s.busy for s in snap.slots)
-    age = None if snap.last_event_at is None else max(0.0, now - snap.last_event_at)
+    age = None if snap.last_event_at is None else max(
+        0.0, state_now(snap.frozen, now) - snap.last_event_at)
     if busy and age is not None and age > STALE_BAD_S:
         parts.append((f"nothing has happened for {fmt_duration(age)}", BAD))
     elif busy and age is not None and age > STALE_WARN_S:

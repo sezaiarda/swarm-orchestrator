@@ -3,9 +3,9 @@
 Four kinds of stop, all of which leave running workers to finish (that is what
 ``swarm pause`` and a usage hold do):
 
-* **the owner's, known.** A paused or draining swarm launches nothing until the
-  owner says so, and a scheduled pause (``swarm pause --at``) stops launches
-  from its moment on. No clock can say when the owner resumes, so rows that
+* **the owner's, known.** A paused, draining or frozen swarm launches nothing
+  until the owner says so, and a scheduled pause (``swarm pause --at``) stops
+  launches from its moment on. No clock can say when the owner resumes, so rows that
   would start after a scheduled pause have no finish time in that future, and a
   paused swarm is forecast as if resumed now;
 * **the owner's, as usual.** A swarm is not up all the time: it
@@ -44,6 +44,7 @@ LIMIT = 100.0
 
 PAUSED = "paused"
 DRAINING = "draining to a stop"
+FROZEN = "frozen"
 
 _STD = NormalDist()
 
@@ -122,7 +123,8 @@ def availability(ticks, workers, now: float, mean_work_s: float) -> Availability
 class Holds:
     """The launch calendar."""
 
-    #: Launching stopped until the owner acts (:data:`PAUSED`, :data:`DRAINING`).
+    #: Launching stopped until the owner acts (:data:`FROZEN`, :data:`PAUSED`,
+    #: :data:`DRAINING`).
     stopped: str = ""
     #: A scheduled pause: no launch from this moment on (0 = none).
     pause_at: float = 0.0
@@ -137,13 +139,14 @@ class Holds:
 
 def from_state(st, rules: list[dict], samples: list, burn: dict[str, float],
                now: float, avail: Availability = Availability()) -> Holds:
-    """The calendar from the state (``paused``, ``drain``, ``pause_at``,
-    ``usage_hold``), the ``pause`` rules, the usage samples (the newest still
+    """The calendar from the state (``frozen``, ``paused``, ``drain``,
+    ``pause_at``, ``usage_hold``), the ``pause`` rules, the usage samples (the newest still
     in its window counts, :func:`usage.latest`), each window's burn per busy
     worker-hour and the availability. A paused swarm is forecast as if resumed
     now. A hold measured on another account than the one in use is about to
     lift (:func:`caps.evaluate`), so the reading in use stands in for it."""
-    stopped = PAUSED if st.paused else DRAINING if st.drain else ""
+    stopped = (FROZEN if getattr(st, "frozen", None) else PAUSED if st.paused
+               else DRAINING if st.drain else "")
     account = usage_mod.active_account(list(samples))
     samples = usage_mod.current(list(samples))
     out = []

@@ -494,8 +494,9 @@ flowchart TD
 
 ### Dashboard (`swarm tui`)
 
-A Textual app in window 0. It has a status bar (live, paused or down; slots;
-campaign progress; time since the last event) and a needs-you drawer (`n`). Its
+A Textual app in window 0. It has a status bar (live, frozen, paused or down;
+slots; campaign progress; time since the last event) and a needs-you drawer
+(`n`). Its
 ten tabs, switched with `1`–`9` and `0`, are:
 
 - **home:** ETA, usage outlook, every campaign's finish (the phase books),
@@ -658,6 +659,13 @@ stateDiagram-v2
   that, and `swarm status` shows it until it happens. A
   usage cap holds them the same way, on its own record (see
   [Meters, usage and runs](#meters-usage-and-runs)).
+- **Freeze:** `swarm freeze` stops every session where it stands (the kernel
+  freezer, nothing is ended) and `swarm thaw` wakes them a few seconds apart.
+  In between the supervisor launches, reaps, pings and times out nothing, and
+  at the thaw every deadline is moved along by how long the freeze lasted, so
+  the frozen hours count as nothing. `status`, `doctor`, the dashboard and the
+  board say `frozen` (see
+  [docs/components.md](docs/components.md#freeze-and-thaw-swarm-freeze-swarm-thaw)).
 - **Done-ness** comes from the swarm's own records (`state.json`, seeded from
   `done/` sentinels on every `swarm up`), plus the ledger's checkboxes: a row
   ticked `[x]` that the swarm has no record of counts as done. It is neither
@@ -807,6 +815,14 @@ installed code), and to pick a swarm up again after its supervisor died.
 a session waits on you unless you pass `--wait-questions`, `--keep-questions` or
 `--force`. A restart that does not come back telegrams you.
 
+**Freezing:** `swarm freeze` stops every session in place, to hand the machine
+to something else for a while without ending anything: workers, the operator, a
+running pass, your console and the dashboard stop where they stand, and the
+supervisor stays awake and stands still. `swarm thaw` wakes them in order and
+the run carries on from where it was. `--json` says what was frozen, what was
+left alone because this user may not freeze it, and which of the run's own
+processes stay awake.
+
 ## Answering the swarm
 
 A worker, an operator job or the Overseer pass stops only when a call is
@@ -871,6 +887,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 | see and do what waits on you | `swarm todo`, `swarm guide` |
 | talk to the swarm in your own Claude session | `swarm console` (`--new` for a fresh one) |
 | hold or release launching | `swarm pause`, `swarm resume` |
+| stop every session in place, then wake them | `swarm freeze`, `swarm thaw` |
 | start a phase by hand, skip one, retry a failure | `swarm launch <phase>`, `swarm skip <phase>`, `swarm retry <phase>` |
 | release a held merge queue | `swarm resolved <phase>` |
 | apply a config edit | `swarm reload` |
@@ -922,7 +939,7 @@ project path, so two projects with the same folder name never share state.
 | `turns/<phase>.jsonl` | Final turn texts from the Stop hook. |
 | `recaps/<phase>.json` | Generated recaps. |
 | `meters/` | Per-phase meters, `limits.jsonl` (5-hour and weekly samples), `sessions.jsonl`. `limits.jsonl` is not rotated: a row is written only when a usage figure moves (a few hundred small rows a day at most), the open run's usage is computed from every sample since its start, and each closed run keeps its own slice in `history/runs/<id>/`. |
-| `history/` | `current.json` and `runs/<id>/` (runs and their summaries). |
+| `history/` | `current.json` and `runs/<id>/` (runs and their summaries); `frozen.jsonl`, one `{since, until}` a line for every stretch the run stood frozen, which every timeout, grace and count of working hours leaves out. |
 | `meters/resources.jsonl`, `meters/resources-1m.jsonl`, `meters/builds.jsonl`, `resources-now.json` | The resource sampler's samples (a day at full resolution, then a month of minute rows), one summary per finished heavy build, and the latest snapshot. Each file is bounded by age and bytes. |
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/restart.log`, `logs/supervisor-start.err` | What each restart's detached helper printed, and what a supervisor that would not start said. |

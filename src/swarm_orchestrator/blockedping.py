@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from . import state as state_mod
 from . import telegram
 from .config import Config
 from .logutil import Log
@@ -96,6 +97,24 @@ def deadline(cfg: Config) -> float | None:
     if not rows:
         return None
     return min(float(r.get("ts") or 0.0) for r in rows) + GATHER_S
+
+
+def shift(cfg: Config, delta: float, now: float | None = None) -> None:
+    """Move the gathered burst ``delta`` seconds along for a thaw: a burst
+    gathers while workers run, and none ran (:func:`freezer.rebase`)."""
+    now = time.time() if now is None else now
+    try:
+        with _locked(cfg):
+            rows = _read(cfg)
+            if not rows:
+                return
+            for row in rows:
+                row["ts"] = state_mod.moved(row.get("ts") or 0.0, delta, now)
+            tmp = _path(cfg).with_suffix(".tmp")
+            tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            os.replace(tmp, _path(cfg))
+    except OSError:
+        pass
 
 
 def message(rows: list[dict]) -> str:

@@ -420,6 +420,8 @@ and `swarm resources` in [cli.md](cli.md)). It reads `/proc` and never signals a
 | `SWARM_TG_API` | The Bot API base URL the command listener polls (default `https://api.telegram.org`). The tests point it at a fake. |
 | `SWARM_SUBMIT_SETTLE` | Seconds typed text gets to render before Enter is sent (default 1.5). Raise it on a slow host. |
 | `SWARM_LOG_ECHO` | Also echo supervisor log lines to stderr. |
+| `SWARM_SCOPE` | `0`: never start the supervisor, the command listener, a headless board or a lane check in a systemd user scope of its own (see [`swarm freeze`](components.md#freeze-and-thaw-swarm-freeze-swarm-thaw)). The tests set it. |
+| `SWARM_CGROUP_ROOT`, `SWARM_CGROUP_PROC` | Where `swarm freeze` and `swarm thaw` find the cgroup tree and `/proc` (defaults `/sys/fs/cgroup` and `/proc`). Test seams. |
 | `SWARM_BIN` | The `swarm` command that detached helpers (`recap`, `operator-triage`, the grace poke) run. A test seam. |
 | `SWARM_RECAP_CMD`, `SWARM_TRIAGE_CMD` | Replace the model call for recaps and triage with a command that reads the prompt on stdin. Test seams. |
 | `SWARM_CLAUDE_CONFIG` | The `~/.claude.json` that the folder-trust pre-seeding writes to. A test seam. |

@@ -68,6 +68,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable
 
+from . import freezer
 from . import gitq
 from . import launch as launch_mod
 from . import ledgerw
@@ -339,10 +340,13 @@ def _catch_up(
 def _spawn_check(cfg: Config, phase: str, repo: Path) -> int | None:
     bin_ = os.environ.get("SWARM_BIN", "swarm")  # the test seam, as for `_poke-done`
     argv = f"exec {bin_} _lane-check {shlex.quote(phase)} {shlex.quote(lane_name(cfg, repo))}"
+    env = launch_mod.detached_env(cfg)
     try:
+        # In a scope of its own where one can be made: it carries the run's
+        # state dir, so a freeze stops it with the sessions, not the supervisor.
         proc = subprocess.Popen(
-            ["/bin/sh", "-c", argv], cwd=str(cfg.project_dir),
-            env=launch_mod.detached_env(cfg), stdin=subprocess.DEVNULL,
+            freezer.scoped(["/bin/sh", "-c", argv], env), cwd=str(cfg.project_dir),
+            env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
     except (OSError, ValueError):

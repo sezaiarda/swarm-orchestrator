@@ -17,6 +17,7 @@ from __future__ import annotations
 from textual.containers import Horizontal
 from textual.widgets import Static
 
+from ..freezer import state_now
 from . import campaign as camp
 from .data import fmt_ago, fmt_duration
 from .theme import ACCENT, BAD, COLOR, MUTED, OK, WARN, paint
@@ -57,6 +58,8 @@ class StatusBar(Static):
             parts.append(f"[{COLOR[BAD]}]● SUPERVISOR DOWN[/]")
         elif snap.finished:
             parts.append(f"[{COLOR[MUTED]}]● finished[/]")
+        elif snap.frozen:
+            parts.append(f"[{COLOR[WARN]}]● frozen[/]")
         elif snap.paused:
             parts.append(f"[{COLOR[WARN]}]● paused[/]")
         elif snap.usage_hold:
@@ -88,9 +91,7 @@ class StatusBar(Static):
             parts.append(f"[{COLOR[MUTED]}]up[/] {fmt_duration(snap.uptime_s)}")
         state = ""
         if snap.last_event_at:
-            import time
-
-            idle = time.time() - snap.last_event_at
+            idle = state_now(snap.frozen) - snap.last_event_at  # frozen time is not idle time
             colour = MUTED
             if busy and idle > STALE_BAD_S:
                 colour, state = BAD, "-bad"

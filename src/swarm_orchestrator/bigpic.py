@@ -120,6 +120,12 @@ class Memory:
     #: The running pass, and when it started.
     live: str = ""
     live_at: float = 0.0
+    #: How far thaws have moved ``live_at`` and ``last_at`` along since each was
+    #: set (:meth:`shift`). The timeout and the age clock count from the moved
+    #: moments; what landed since the last pass is read from the real one
+    #: (:meth:`last_began`).
+    live_frozen: float = 0.0
+    last_frozen: float = 0.0
     #: The umbrella's main at the current pass's start; ``last_head`` once it lands.
     live_head: str = ""
     #: The counted phases the current pass took; given back if it produces nothing.
@@ -145,6 +151,32 @@ class Memory:
     def from_dict(cls, data: dict) -> "Memory":
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+    def last_began(self) -> float:
+        """When the last pass that produced a doc started, by the wall clock."""
+        return self.last_at - self.last_frozen if self.last_at else 0.0
+
+    def shift(self, delta: float, now: float) -> None:
+        """Move every clock ``delta`` seconds along for a thaw: a pass that
+        stood frozen did not run that long, and neither the doc's age nor a
+        back-off counts time in which nothing could land."""
+        live, last = self.live_at, self.last_at
+        self.live_at = state_mod.moved(live, delta, now)
+        self.last_at = state_mod.moved(last, delta, now)
+        self.live_frozen += self.live_at - live
+        self.last_frozen += self.last_at - last
+        self.anchor = state_mod.moved(self.anchor, delta, now)
+        if self.retry_at:
+            self.retry_at += delta
+
+
+def shift(cfg: Config, delta: float, now: float | None = None) -> None:
+    """A thaw's move of the memory file (:func:`freezer.rebase`). A running
+    supervisor holds the same memory and moves its own (:meth:`Runner.shift`)."""
+    if memory_path(cfg).is_file():
+        mem = load(cfg)
+        mem.shift(delta, time.time() if now is None else now)
+        save(cfg, mem)
 
 
 def load(cfg: Config) -> Memory:
@@ -281,7 +313,8 @@ def brief_text(cfg: Config, pid: str, mem: Memory, st: state_mod.State) -> str:
     swarm = f"swarm --project-dir {shlex.quote(str(cfg.project_dir))}"
     doc = cfg.project_dir / cfg.big_picture_doc
     if mem.last_at:
-        since = (f"The last pass ran {time.strftime('%Y-%m-%d %H:%M', time.localtime(mem.last_at))}"
+        began = time.strftime("%Y-%m-%d %H:%M", time.localtime(mem.last_began()))
+        since = (f"The last pass ran {began}"
                  + (f"; the umbrella's {cfg.git_main_branch} was at {mem.last_head} then"
                     f" (`git log {mem.last_head}..{cfg.git_main_branch}` shows what landed since)."
                     if mem.last_head else "."))
@@ -304,7 +337,7 @@ def brief_text(cfg: Config, pid: str, mem: Memory, st: state_mod.State) -> str:
         "## Finished since the last pass",
         "",
     ]
-    finished = ovdigest.finished_since(cfg, st, mem.last_at)
+    finished = ovdigest.finished_since(cfg, st, mem.last_began())
     if not finished:
         lines.append("(none recorded)")
     for row in finished:
@@ -405,6 +438,10 @@ class Runner:
     def save(self) -> None:
         save(self.cfg, self.mem)
 
+    def shift(self, delta: float, now: float | None = None) -> None:
+        self.mem.shift(delta, time.time() if now is None else now)
+        self.save()
+
     def recover(self) -> None:
         """At supervisor start: no session outlives the supervisor that started it."""
         if self.mem.live:
@@ -487,6 +524,7 @@ class Runner:
         pid = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
         mem = self.mem
         mem.live, mem.live_at, mem.live_head = pid, now, _head(self.cfg)
+        mem.live_frozen = 0.0
         mem.requested = False
         mem.live_taken, mem.since = mem.since, 0
         self._spawned = False
@@ -605,6 +643,7 @@ class Runner:
         mem = self.mem
         if produced:
             mem.last_at = mem.live_at or now
+            mem.last_frozen = mem.live_frozen if mem.live_at else 0.0
             mem.last_head = mem.live_head
         else:
             mem.since += mem.live_taken

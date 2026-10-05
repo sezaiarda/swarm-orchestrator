@@ -36,6 +36,7 @@ import weakref
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+from .. import freezer
 from .. import ledger as ledger_mod
 from .. import ledgerw
 from .. import logutil
@@ -118,6 +119,9 @@ class Inputs:
     #: (``MODEL <row>``). Only their history speaks for the model: a row given a
     #: model after an earlier attempt ran that attempt on the swarm's own.
     ran_models: dict[str, str] = field(default_factory=dict)
+    #: The stretches the run stood frozen (:func:`freezer.spans`): no work time
+    #: and no running row's age counts them.
+    frozen: tuple = ()
 
 
 def gather(cfg, state, *, events, history, ledger_history, usage, text: str | None = None,
@@ -162,7 +166,15 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
         burn_weight={m: tiers.BURN_PRIOR for m in row_models.values()}
         | (tiers.burn_weights(_meters(cfg, graph), ran_models) if ran_models else {}),
         ran_models=ran_models,
+        frozen=tuple(_frozen(cfg, state, now)),
     )
+
+
+def _frozen(cfg, state, now: float) -> list[tuple[float, float]]:
+    """The stretches the run stood frozen; none for a caller with no real config."""
+    if not getattr(cfg, "state_dir", None):
+        return []
+    return freezer.spans(cfg, now, record=dict(getattr(state, "frozen", None) or {}))
 
 
 def _row_models(cfg, text: str) -> dict[str, str]:
@@ -215,7 +227,7 @@ def from_files(cfg, st, now: float | None = None) -> Inputs:
     events = data_mod.parse_events(logutil.read_all(cfg.supervisor_log))
     history = data_mod.build_history(
         events, data_mod.load_sentinels(cfg.done_dir), state=asdict(st),
-        ticked=data_mod.load_ticked(cfg))
+        ticked=data_mod.load_ticked(cfg), frozen=_frozen(cfg, st, time.time()))
     usage = usage_mod.load_samples(Path(cfg.state_dir) / usage_mod.METERS_DIR
                                    / usage_mod.LIMITS_LOG)
     return gather(cfg, st, events=events, history=history,
@@ -231,7 +243,10 @@ def at_work(st) -> list[str]:
 
 def plan_of(inputs: Inputs) -> plan_mod.Plan:
     st = inputs.state
-    busy = {p: inputs.started.get(p, inputs.now) for p in at_work(st)}
+    # A running row's age is the time it has been awake for (frozen time is
+    # not elapsed time): its start is moved along by what stood frozen since.
+    started = data_mod.awake_starts(inputs.started, list(inputs.frozen), inputs.now)
+    busy = {p: started.get(p, inputs.now) for p in at_work(st)}
     return plan_mod.build(
         inputs.graph, inputs.text, inputs.landed, now=inputs.now, busy=busy,
         asking=set(st.on_owner()), merging=st.integrating(),
@@ -259,7 +274,7 @@ def fit_key(inputs: Inputs) -> str:
 
     Not the calibration's log: a forecast it has just logged has no outcome yet,
     and its outcomes arrive as ticks, which refit it here."""
-    ended = [a.end for a in record_mod.attempts(inputs.history, inputs.events)
+    ended = [a.end for a in record_mod.attempts(inputs.history, inputs.events, inputs.frozen)
              if a.end is not None]
     ticks = inputs.ledger_history.ticks
     last = max((t for t, _ in ticks.values()), default=0.0)
@@ -269,7 +284,8 @@ def fit_key(inputs: Inputs) -> str:
 def fit(inputs: Inputs) -> Fitted:
     """Refit everything the forecast learns from history."""
     dirs = ledger_mod.dirs(inputs.text)
-    rec = record_mod.from_sources(inputs.history, inputs.events, inputs.ledger_history)
+    rec = record_mod.from_sources(inputs.history, inputs.events, inputs.ledger_history,
+                                  inputs.frozen)
     durations = model_mod.fit(record_mod.samples(rec, inputs.now),
                               lambda p: plan_mod.meta_for(p, dirs, inputs.ran_models))
     ticks = [t for t, n in rec.ticks.values() if n <= pace_mod.BULK]
@@ -293,10 +309,12 @@ def burn(inputs: Inputs) -> dict[str, float]:
         def weight(phase: str) -> float:
             model = inputs.ran_models.get(phase, "")
             return inputs.burn_weight.get(model, tiers.BURN_PRIOR) if model else 1.0
-    return burn_of(inputs.events, inputs.workers, inputs.usage, inputs.now, weight)
+    return burn_of(inputs.events, inputs.workers, inputs.usage, inputs.now, weight,
+                   inputs.frozen)
 
 
-def burn_of(events, workers: int, usage, now: float, weight=None) -> dict[str, float]:
+def burn_of(events, workers: int, usage, now: float, weight=None,
+            frozen=()) -> dict[str, float]:
     """:func:`burn` from its parts: the log's events, the worker count and the
     ``limits.jsonl`` samples. The dashboard's usage box projects the caps with it,
     so it and the forecast burn at the same rate.
@@ -309,14 +327,16 @@ def burn_of(events, workers: int, usage, now: float, weight=None) -> dict[str, f
 
     With ``weight`` (``phase -> float``) the hours are weighted by what each
     row's model burns, so the rate is that of a worker on the swarm's own model
-    whatever mix of models ran (:func:`tui.data.occupancy_series`)."""
+    whatever mix of models ran (:func:`tui.data.occupancy_series`). The hours a
+    busy worker stood ``frozen`` (:func:`freezer.spans`) are not hours it burned in."""
     usage = list(usage or ())
     # The whole log, so a worker launched before the stretch counts inside it.
     events = [e for e in events if e.ts is not None and e.ts <= now]
     busy = data_mod.occupancy_series(events, workers, weight).points
 
     def rates(start: float) -> dict[str, float]:
-        seat_h = sum(v * max(0.0, min(b, now) - max(a, start))
+        seat_h = sum(v * max(0.0, min(b, now) - max(a, start)
+                             - freezer.frozen_in(frozen, max(a, start), min(b, now)))
                      for (a, v), (b, _) in zip(busy, busy[1:] + [(now, 0.0)])) / 3600.0
         out = {}
         for window, pace in (("week", usage_mod.week_pace(usage, start, now)),
@@ -349,7 +369,7 @@ def key(inputs: Inputs, fit_id: str) -> str:
         "asking": sorted(st.on_owner()),
         "merging": sorted(st.integrating()),
         "holds": [st.paused, bool(st.drain), st.pause_at, sorted(st.usage_hold),
-                  sorted(st.usage_override)],
+                  sorted(st.usage_override), bool(getattr(st, "frozen", None))],
         "config": [sorted(inputs.exclude), inputs.workers, inputs.build_slots,
                    inputs.park_after, json.dumps(inputs.rules, sort_keys=True)],
         "usage": [usage_key(usage_mod.latest(usage_mod.current(list(inputs.usage)), w,

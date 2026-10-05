@@ -38,6 +38,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from . import freezer
 from . import telegram
 from . import usage as usage_mod
 
@@ -456,6 +457,8 @@ def start_detached(cfg) -> tuple[int | None, str]:
     Detached under either driver — no tmux window: it has nothing to show, and
     its log is ``<state>/logs/telegram-bot.log``. It carries the run's
     ``SWARM_STATE_DIR``, so ``swarm down``'s reaping finds it like any session.
+    In a scope of its own where one can be made (:func:`freezer.scoped`): it
+    answers the owner while the sessions are frozen.
     """
     if not cfg.telegram_commands:
         return None, "off ([telegram] commands = false)"
@@ -470,7 +473,8 @@ def start_detached(cfg) -> tuple[int | None, str]:
     try:
         with (log_dir / LOG).open("ab") as log:
             proc = subprocess.Popen(
-                command(cfg), cwd=str(cfg.project_dir), env=env, stdin=subprocess.DEVNULL,
+                freezer.scoped(command(cfg), env), cwd=str(cfg.project_dir), env=env,
+                stdin=subprocess.DEVNULL,
                 stdout=log, stderr=log, start_new_session=True,
             )
     except OSError as exc:

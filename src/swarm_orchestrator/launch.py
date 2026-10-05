@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import blockedping
+from . import freezer
 from . import gitq
 from . import lanes as lanes_mod
 from . import ledger as ledger_mod
@@ -53,6 +54,9 @@ POLL_INTERVAL_S = 0.25
 LAUNCHED = "launched"
 DENIED = "denied"
 FAILED = "failed"
+#: A ``swarm freeze`` caught the launch part-way. It is undone like a failed
+#: one and counts as none: the supervisor starts it again at the thaw.
+FROZEN = "frozen"
 
 # `swarm done` statuses that SATISFY a dependent phase's `needs:`. A `fail` is a
 # *recorded outcome*, not a completed dependency — its work was rolled back, so
@@ -572,7 +576,7 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
 def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) -> str:
     """Claim a slot and start a worker for ``phase``; return what happened.
 
-    One of :data:`LAUNCHED`, :data:`DENIED` or :data:`FAILED`. ``quiet``
+    One of :data:`LAUNCHED`, :data:`DENIED`, :data:`FAILED` or :data:`FROZEN`. ``quiet``
     suppresses the stdout line a denial prints for a terminal caller: the
     supervisor launches from its own loop, where stdout is nobody's, and the
     reason is in the log either way.
@@ -593,6 +597,9 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
             return DENIED
         if st.drain:
             log.line(f"LAUNCH-DENIED {phase} draining")
+            return DENIED
+        if st.frozen:
+            log.line(f"LAUNCH-DENIED {phase} frozen")
             return DENIED
         if phase in st.integrating():
             log.line(f"LAUNCH-DENIED {phase} its finished work is waiting to merge")
@@ -662,12 +669,17 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
     model = models_mod.override(cfg, phase)
     if model:
         log.line(f"MODEL {phase} model={model}")
-    if cfg.driver == "bare":
+    if freezer.peek(cfg):
+        # A freeze landed while the workspace was made: a worker started now
+        # would be born awake, in a group the freeze never saw.
+        ok = False
+    elif cfg.driver == "bare":
         ok = _launch_bare(cfg, phase, worktree, log)
     else:
         ok = _launch_tmux(cfg, phase, pane, worktree, log)
 
     if not ok:
+        caught = bool(freezer.peek(cfg))
         # Kill the half-started claude BEFORE dropping its worktree, so we never
         # yank the cwd out from under a live process (which would strand an
         # orphaned claude in a deleted directory).
@@ -683,6 +695,9 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         if worktree is not None:
             # An empty mirror goes; one an earlier attempt left work in stays.
             gitq.set_aside(cfg, phase, log)
+        if caught:
+            log.line(f"LAUNCH-FROZEN {phase} slot={sid}")
+            return FROZEN
         telegram.notify(
             cfg.telegram_notify,
             f"swarm: the worker for {phase} failed to start. The swarm tries again"
@@ -742,7 +757,7 @@ def _launch_tmux(
             return False
         if _await_ready(cfg, pane, log):
             break
-        if attempt == 2:
+        if attempt == 2 or freezer.peek(cfg):
             return False
         log.line(f"READY-RETRY {phase} pane={pane}")
     command = cfg.command_template.format(phase=phase)
@@ -862,6 +877,11 @@ def await_ready(cfg: Config, pane: str, log: Log) -> bool:
     dialog = None
     deadline = time.monotonic() + READY_TIMEOUT_S
     while time.monotonic() < deadline:
+        if freezer.peek(cfg):
+            # The session is frozen, or about to be: it will not boot in time,
+            # and whoever started it tries again at the thaw.
+            log.line(f"READY-FROZEN pane={pane}")
+            return False
         text = tmux.capture_joined(pane)
         dialog = read_trust_dialog(text)
         if dialog is not None:

@@ -46,6 +46,7 @@ from typing import NamedTuple
 
 from . import backup as backup_mod
 from . import caps
+from . import freezer
 from . import gc as gc_mod
 from . import gitq
 from . import keep as keep_mod
@@ -687,7 +688,7 @@ def _slot_worker(
     if phase and _reported(cfg, st, phase):
         return _LANDING
     claimed = _unlaunched(cfg, phase) if phase else None
-    if claimed is not None and now - claimed < _START_GRACE_S:
+    if claimed is not None and freezer.awake_elapsed(cfg, claimed, now) < _START_GRACE_S:
         return _STARTING
     cmd = (sweep_cmd or _pane_cmd)(slot.pane_id or "")
     if cmd == "?":
@@ -696,7 +697,8 @@ def _slot_worker(
         return _WORKING
     what = f"slot {slot.id} ({slot.phase}) pane {slot.pane_id} runs {cmd!r}"
     if claimed is not None:
-        what += f", claimed {_human_age(now - claimed)} ago and never launched"
+        ago = _human_age(freezer.awake_elapsed(cfg, claimed, now))
+        what += f", claimed {ago} ago and never launched"
     kept = _sweep_keeps(cfg, st, phase, cmd, sweeper=sweep_cmd is not None)
     return Stopped(phase, what, claimed is not None, kept)
 
@@ -1064,7 +1066,7 @@ def _check_activity(cfg: Config, st: State) -> Check:
                 started = Path(slot.worktree or "").stat().st_mtime
             except OSError:
                 continue
-        age = now - started
+        age = freezer.awake_elapsed(cfg, started, now)
         if age < _IDLE_GRACE_S:
             continue
         work = _worktree_activity(cfg, slot.phase or "", slot.worktree or "")
@@ -1096,7 +1098,7 @@ def _check_integration(cfg: Config, st: State) -> Check:
     if not st.integ_blocked:
         return Check("integration.blocked", OK, f"queue={st.integ_queue or '[]'}, not blocked")
     since = _log_ts(cfg, f"INTEGRATE-BLOCKED {st.integ_blocked} ")
-    age = time.time() - since if since else None
+    age = freezer.awake_elapsed(cfg, since) if since else None
     repo = Path(st.integ_blocked_repo).name if st.integ_blocked_repo else "?"
     detail = (
         f"integration held on {st.integ_blocked} ({st.integ_blocked_kind} in {repo})"
@@ -1121,7 +1123,8 @@ def _check_push_owed(st: State) -> Check:
     return Check(
         "integration.push",
         WARN,
-        "push owed — " + "; ".join(pushowed.describe(st.push_owed)),
+        "push owed — " + "; ".join(
+            pushowed.describe(st.push_owed, freezer.state_now(st.frozen))),
         "fix the repo's pre-push check (or the remote), or `git -C <repo> push` by"
         " hand; the swarm retries after each integration and clears it itself",
     )
@@ -1296,6 +1299,7 @@ def _check_nudge(
     if st.finished or st.on_hold or st.integ_blocked or st.bootstrapping:
         why = (
             "finished" if st.finished
+            else "frozen" if st.frozen
             else "paused" if st.paused
             else "held by a usage cap" if st.usage_hold
             else "draining to a stop" if st.drain
@@ -1343,6 +1347,15 @@ def _check_nudge(
     return Check("run.nudge", OK, f"free={free} ready={ready}")
 
 
+def _check_frozen(st: State) -> Check:
+    """``swarm freeze``: since when, how many groups, and what ends it. A hold,
+    so a WARN while it lasts: nothing runs, and nothing else here is a fault
+    of a run that stands still on purpose."""
+    if not st.frozen:
+        return Check("run.frozen", OK, "not frozen")
+    return Check("run.frozen", WARN, freezer.line(st.frozen), "swarm thaw")
+
+
 def _check_stall(cfg: Config, st: State) -> Check:
     """No supervisor event at all for a long time, with work still in flight."""
     last = float(getattr(st, "last_event_at", 0.0) or 0.0)
@@ -1350,7 +1363,7 @@ def _check_stall(cfg: Config, st: State) -> Check:
         return Check("run.stall", OK, "nothing in flight")
     if not last:
         return Check("run.stall", OK, "no event timestamp recorded yet")
-    age = time.time() - last
+    age = freezer.state_now(st.frozen) - last  # frozen time is not a stall
     if age >= _STALL_WARN_S:
         return Check(
             "run.stall",
@@ -1392,7 +1405,7 @@ def _check_owner(cfg: Config, st: State) -> Check:
     unanswered and what it asked. A parked session the owner has answered is
     working in its own window: it is named as that, and never as a blocker.
     """
-    now = time.time()
+    now = freezer.state_now(st.frozen)  # nobody waits while the sessions stand frozen
     working = [
         f"{key} in {state_mod.wait_window(key)}, answered {_human_age(now - st.answered[key])} ago"
         for key in sorted(st.working_parked())
@@ -1415,7 +1428,7 @@ def _check_owner(cfg: Config, st: State) -> Check:
             age, words = now - asked, f"{key} parked, asked {_human_age(now - asked)} ago"
         else:
             since = _log_ts(cfg, f"PARK {key} ")
-            age = now - since if since else None
+            age = freezer.awake_elapsed(cfg, since) if since else None
             words = f"{key} parked {_human_age(age)}"
         if age:
             oldest = max(oldest, age)
@@ -1598,7 +1611,7 @@ def _auto_gc(cfg: Config, now: float | None = None) -> tuple[bool, str]:
     when = _human_age(now - ts)
     if rec.get("outcome") == gc_mod.AUTO_FAILED:
         return False, f"automatic gc FAILED {when} ago: {rec.get('detail') or '?'}"
-    if cfg.gc_every_s and now - ts > 2 * cfg.gc_every_s:
+    if cfg.gc_every_s and freezer.awake_elapsed(cfg, ts, now) > 2 * cfg.gc_every_s:
         return False, f"automatic gc has not completed for {when}"
     return True, f"automatic gc last ran {when} ago, freed {_human_bytes(int(rec.get('freed') or 0))}"
 
@@ -1875,7 +1888,7 @@ def _check_operator(cfg: Config) -> Check:
     out spelled out.
     """
     items = opqueue.load_all(cfg)
-    now = time.time()
+    now = freezer.state_now(freezer.peek(cfg))
     slow = [
         i for i in items
         if i.state == opqueue.WAITING
@@ -2032,6 +2045,7 @@ def run_checks(cfg: Config) -> list[Check]:
     probe = _dead_panes(cfg, st)
     checks: list[Check] = []
     checks.extend(_check_supervisor(cfg, st))
+    checks.append(_check_frozen(st))
     checks.append(_check_panes(cfg, st, probe))
     checks.append(_check_watchdog(cfg, probe))
     checks.append(_check_parked(cfg, st))

@@ -16,15 +16,18 @@ Everything else is *held back*: written to the log and never sent. :func:`fold`
 is for what the next summary should account for (the Overseer's digest lists
 it), :func:`log` for what only the record needs.
 
-One more thing leaves through here and is not a message the swarm starts:
-:func:`reply` answers a command the owner typed to the bot (``/usage``).
+One more thing leaves through here and is no swarm's message: :func:`reply`
+answers a command the owner typed to the bot (``/status``, ``/usage``). It
+names no swarm, because the answer is about all of them.
 
-Sends go through the swarm's own ``notify.sh`` (``[telegram].notify``). When
-``SWARM_TG_SINK`` is set (hermetic tests), they are appended to that file
-instead of hitting the network.
+The bot is the machine's: one for every swarm on it (:func:`bot`). Sends go
+through its script (``[telegram] notify`` in ``machine.toml``, by default the
+bundled ``scripts/notify.sh``), which reads the token and chat id from the
+bot's env file (``[telegram] env``). When ``SWARM_TG_SINK`` is set (hermetic
+tests), they are appended to that file instead of hitting the network.
 
-Every message — sent, dropped or held back — appends one JSON line to
-``<state_dir>/notifications.jsonl``. Before that log existed a dropped ping was
+Every message of a swarm — sent, dropped or held back — appends one JSON line
+to ``<state_dir>/notifications.jsonl``. Before that log existed a dropped ping was
 indistinguishable from a healthy one even forensically: ``notify.sh``'s exit code
 was the only signal, its stderr was captured and thrown away, and every caller
 discards the returned bool. The log is what lets the dashboard (and a
@@ -39,6 +42,12 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import config as config_mod
+from . import machine
+
+#: The sender this package brings: the machine's when ``machine.toml`` names none.
+BUNDLED = Path(__file__).resolve().parent.parent.parent / "scripts" / "notify.sh"
 
 LEDGER_NAME = "notifications.jsonl"
 
@@ -63,7 +72,6 @@ _CUT = "…"
 # The ``class`` column: how a row left, or why it did not.
 ASK = "ask"
 SUMMARY = "summary"
-REPLY = "reply"
 FOLDED = "folded"
 LOGGED = "logged"
 
@@ -89,7 +97,6 @@ KINDS = (
     "session-ask",  # cli.notify: a session asking the owner for something it cannot do
     "overseer",  # supervisor: an Overseer pass hung past its timeout / would not start
     "summary",  # the Overseer's summary on the clock, or the swarm's in its place
-    "bot-reply",  # tgbot: an answer to the owner's /usage or /help
     "worktree-fail",  # launch: the phase mirror could not be created
     "spawn-fail",  # launch: the worker process/pane would not start
     "web-board",  # cli.cmd_up: the LAN board's window/process did not come up
@@ -212,12 +219,14 @@ def summary(cfg, text: str, *, kind: str = "summary", source: str = "") -> Notif
     return _send(cfg, body, SUMMARY, kind, None, source)
 
 
-def reply(cfg, text: str, *, source: str = "") -> NotifyResult:
-    """Answer a command the owner typed to the bot. Never raises."""
-    body = prefix(cfg) + text
-    if len(body) > MAX_REPLY_CHARS:
-        body = body[: MAX_REPLY_CHARS - len(_CUT)] + _CUT
-    return _send(cfg, body, REPLY, "bot-reply", None, source)
+def reply(text: str) -> NotifyResult:
+    """Answer a command the owner typed to the bot. Never raises.
+
+    The machine's answer, so it carries no swarm's name and goes into no
+    swarm's log; the listener's own log says whether it left."""
+    if len(text) > MAX_REPLY_CHARS:
+        text = text[: MAX_REPLY_CHARS - len(_CUT)] + _CUT
+    return _deliver(text)
 
 
 def fold(cfg, text: str, *, kind: str = "other", phase: str | None = None,
@@ -243,10 +252,19 @@ def _hold(cfg, text: str, cls: str, why: str, kind: str, phase: str | None,
 
 def _send(cfg, body: str, cls: str, kind: str, phase: str | None, source: str,
           extra: dict | None = None) -> NotifyResult:
-    sink = os.environ.get("SWARM_TG_SINK")
-    result = _write_sink(sink, body) if sink else _run_script(cfg.telegram_notify, body)
+    result = _deliver(body)
     _record(cfg, cls, kind, phase, source, result, extra)
     return result
+
+
+def _deliver(body: str) -> NotifyResult:
+    sink = os.environ.get("SWARM_TG_SINK")
+    if sink:
+        return _write_sink(sink, body)
+    try:
+        return _run_script(bot(), body)
+    except machine.SettingsError as exc:  # no sender can be named: a drop, said
+        return NotifyResult(False, body, str(exc))
 
 
 def _write_sink(sink: str, text: str) -> NotifyResult:
@@ -258,13 +276,17 @@ def _write_sink(sink: str, text: str) -> NotifyResult:
     return NotifyResult(True, text, None)
 
 
-def _run_script(script: str, text: str) -> NotifyResult:
+def _run_script(sender: Bot, text: str) -> NotifyResult:
     """``notify.sh`` prints a token-redacted API error on stderr; it is kept, so
-    a ``400 can't parse entities`` drop never looks like a healthy send."""
-    path = Path(script).expanduser()
+    a ``400 can't parse entities`` drop never looks like a healthy send.
+
+    The script is told which env file to read (``SWARM_TG_ENV``, the one
+    variable it has), so it sends from the machine's bot whatever the shell
+    that started this process had set."""
     try:
         proc = subprocess.run(
-            [str(path), text], capture_output=True, text=True, timeout=30
+            [str(sender.script), text], capture_output=True, text=True, timeout=30,
+            env={**os.environ, "SWARM_TG_ENV": str(sender.env)},
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return NotifyResult(False, text, str(exc))
@@ -391,34 +413,51 @@ def open_drops(rows: list[dict], acked: float) -> list[dict]:
     return out
 
 
-# -- the sender's own health ---------------------------------------------------
-def _sender_env_file(script: Path) -> Path:
-    """The env file ``notify.sh`` will actually read.
+# -- the machine's bot ----------------------------------------------------------
+@dataclass(frozen=True)
+class Bot:
+    """The machine's bot, as the sender and the listener both find it: the
+    script that sends, and the env file its token and chat id are in."""
 
-    ``$SWARM_TG_ENV`` else ``.env`` in the repo root above the script — the same
-    resolution the script does with ``dirname "$BASH_SOURCE"/..``.
-    """
-    override = os.environ.get("SWARM_TG_ENV")
-    if override:
-        return Path(override).expanduser()
-    return script.resolve().parent.parent / ".env"
+    script: Path
+    env: Path
 
 
-def check(script: str) -> tuple[bool, str]:
+def bot() -> Bot:
+    """The one bot of this machine, as ``machine.toml`` names it now.
+
+    ``[telegram] notify`` is the script, by default the bundled one
+    (:data:`BUNDLED`); ``[telegram] env`` is its env file, by default ``.env``
+    in the folder above the script's, where the bundled script looks
+    (``dirname "$BASH_SOURCE"/..``). Raises :class:`machine.SettingsError` for
+    a machine file that does not read, unless this process read it while it
+    was sound."""
+    conf = config_mod.machine_settings()
+    script = Path(conf.telegram_notify).expanduser() if conf.telegram_notify else BUNDLED
+    env = (Path(conf.telegram_env).expanduser() if conf.telegram_env
+           else script.resolve().parent.parent / ".env")
+    return Bot(script, env)
+
+
+def check() -> tuple[bool, str]:
     """Verify telegram is usable (env file + executable notify.sh).
 
     Returns ``(ok, detail)``. Used before the swarm relies on being able to notify
     — you cannot telegram that telegram is missing.
 
-    It validates the env file *the sender reads* (see :func:`_sender_env_file`),
-    so it reports on the swarm's own bot and no other.
+    It validates the env file *the sender reads* (:func:`bot`), so it reports
+    on the machine's own bot and no other, the same for every swarm that asks.
     """
     if os.environ.get("SWARM_TG_SINK"):
         return True, "sink"
-    path = Path(script).expanduser()
+    try:
+        sender = bot()
+    except machine.SettingsError as exc:
+        return False, str(exc)
+    path = sender.script
     if not path.is_file() or not os.access(path, os.X_OK):
         return False, f"notify.sh missing or not executable: {path}"
-    env = _sender_env_file(path)
+    env = sender.env
     if not env.is_file():
         return False, f"telegram env missing: {env}"
     body = env.read_text(encoding="utf-8")

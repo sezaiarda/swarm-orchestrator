@@ -10,8 +10,8 @@ otherwise.
 Do all of this in this pane, then stop:
 
 ## 1. Telegram preflight
-Run `swarm doctor` and read its `telegram.config` line: it checks the configured
-`[telegram] notify` script and that script's **own** credentials. Do not look anywhere else for them. If you ever need to message the owner,
+Run `swarm doctor` and read its `telegram.config` line: it checks the machine's
+bot (`[telegram]` in `machine.toml`) and that bot's **own** credentials. Do not look anywhere else for them. If you ever need to message the owner,
 the one door is `swarm notify "<ask>"`; never a `notify.sh` or any other
 sender. It sends an ask to their phone (`[<swarm>] Asks you: <your words>`), read
 in a notification: one or two short plain sentences, first what the owner must

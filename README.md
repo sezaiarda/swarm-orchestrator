@@ -497,7 +497,7 @@ flowchart TD
   supervisor asks Claude Code's usage endpoint, at most every 30 minutes. Workers
   are never told.
 - **On your phone (Telegram):** usage only when you ask: `/usage` to the swarm bot answers
-  with both limits, how old the reading is, and the caps' state. A cap that
+  with both limits, how old the reading is, the caps, and each swarm a cap holds. A cap that
   stops the swarm asks you to start it again; a pause that lifts by itself is
   only in the Overseer's summary.
 
@@ -505,7 +505,7 @@ flowchart TD
 
 - **`swarm doctor`:** about 25 read-only checks covering the supervisor, slots,
   the run, integration, questions waiting on you, the ledger, Telegram, disk,
-  records, the operator, prompts, the web board and the bot's command listener.
+  records, the operator, prompts, the web board and the machine's bot listener.
   Exit 1 on any FAIL.
 - **`swarm why <phase>`:** the one reason a phase is not running, walking unmet
   dependencies to the root blockers.
@@ -591,9 +591,11 @@ terminal.
 
 ### Telegram, and asking the owner
 
-- **The sender:** the swarm has its own bot, `scripts/notify.sh`. It reads
-  `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's gitignored `.env`.
-  Every send is logged to `<state>/notifications.jsonl`. `swarm notify` is the
+- **The sender:** the machine has one bot, and every swarm on it sends through
+  it: by default `scripts/notify.sh`, reading `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_CHAT_ID` from this repo's gitignored `.env`. Another script or
+  another env file is `[telegram]` in `machine.toml`, never a project's
+  `.swarm.toml`. Every send is logged to `<state>/notifications.jsonl`. `swarm notify` is the
   only way a session should message you, even when a brief or a ledger row
   names another script (a `notify.sh`, say); the prompts say so.
   Once you have seen the pings that never arrived, `swarm notify --ack` (or `x`
@@ -622,11 +624,14 @@ terminal.
 - **Short by construction:** a session's ask (`swarm waiting`, `swarm notify`,
   `swarm operator-done --ask`) and the Overseer's summary are refused when too
   long, with the limit, and the session rewrites them. Nothing is cut to fit.
-- **Commands:** the bot also listens. Send it `/usage` for usage and the caps or
-  `/help` for the list. `swarm up` starts the listener (`[telegram].commands`, on
-  by default), `swarm down` stops it, and `swarm telegram-bot` runs it in the
-  foreground. It answers only the chat in `TELEGRAM_CHAT_ID` and ignores everyone
-  else. Only one program may poll a bot token: while it runs,
+- **Commands:** the bot also listens, with one listener for the machine that
+  answers for every swarm on it. `/status` is a line per swarm (how it stands,
+  how many phases are done, what waits on you, those waiting on you first),
+  `/usage` the account's limits once and then each swarm a cap holds, `/help`
+  the list. Any `swarm up` starts the listener when it is not running, and the
+  `swarm down` of the last swarm that is up stops it; `swarm telegram-bot` does
+  the same by hand. It answers only the chat in `TELEGRAM_CHAT_ID` and ignores
+  everyone else. Only one program may poll a bot token: while it runs,
   `scripts/resolve-chat-id.sh` gets a 409, so run that before `swarm up`.
 - **Asking:** a worker, an operator job or the Overseer all run
   `swarm waiting <who> "<ask>"` then `swarm resumed <who> "<answer>"`.
@@ -773,7 +778,8 @@ git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
 
 2. **Set up Telegram** (optional; the swarm runs without it): create a bot, put
    `TELEGRAM_BOT_TOKEN=…` in this repo's `.env`, send the bot any message, then run
-   `scripts/resolve-chat-id.sh`.
+   `scripts/resolve-chat-id.sh`. It is the machine's bot, once for every swarm;
+   `[telegram]` in `machine.toml` points elsewhere if you keep it elsewhere.
 
 3. **Have a phase ledger** in the project, at `docs/PHASE-LEDGER.md` by default.
    Either format works:
@@ -940,7 +946,8 @@ The full list, one line per subcommand and grouped by purpose, is in
 - `[swarm]`: the display name, slots, models, the watchdog;
 - `[worker]`: the worker command, settings, effort, parking;
 - `[tasks]`: the ledger, exclusions;
-- `[telegram]`;
+- `[telegram]`: whether the machine's bot answers for this swarm (which bot
+  is the machine's to say, in `machine.toml`);
 - `[tmux]`: the session name, the layout, worker panes per window;
 - `[tui]`;
 - `[git]`: isolation, main branch, repos, `auto_resolve`;
@@ -970,9 +977,10 @@ Several projects can each run a swarm on one machine. Their state dirs sit
 side by side in `~/.local/state/swarm-orchestrator/`, and `swarm ls` lists
 them from any folder: which are running, how far along each is, and how much
 waits on you in each. The web board shows the same on one page. Beside them,
-`machine/` is for what all of them share (the build gate, below, and the web
-board's `web.pid` and `web.log`), and settings that describe the machine
-rather than a project, the gate's limits and the board's port among them, go in
+`machine/` is for what all of them share (the build gate, below, the web
+board's `web.pid` and `web.log`, and the Telegram listener's files), and
+settings that describe the machine rather than a project, the gate's limits,
+the board's port and the bot among them, go in
 `~/.config/swarm-orchestrator/machine.toml`
 ([docs/config.md](docs/config.md#the-machine-file-machinetoml)). A command
 acts on one swarm only, and a session of one swarm cannot run a command on
@@ -995,7 +1003,7 @@ another ([docs/cli.md](docs/cli.md)).
 | `meters/resources.jsonl`, `meters/resources-1m.jsonl`, `meters/builds.jsonl`, `resources-now.json` | The resource sampler's samples (a day at full resolution, then a month of minute rows), one summary per finished heavy build, and the latest snapshot. Each file is bounded by age and bytes. |
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/restart.log`, `logs/supervisor-start.err` | What each restart's detached helper printed, and what a supervisor that would not start said. |
-| `logs/supervisor.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
+| `logs/supervisor.log` | The supervisor's log. It rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock` | Per-repo integration locks. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
@@ -1004,7 +1012,6 @@ another ([docs/cli.md](docs/cli.md)).
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
 | `gc-auto.json`, `.doctor-disk.json` | The last automatic gc, doctor's disk-growth baseline. |
-| `telegram-bot.pid`, `.offset.json`, `.status.json` | The command listener's pid, the next Telegram update id it will ask for, and what it is doing (polling, backing off a 409, …). |
 
 The build gate is not in a swarm's state dir. It is one for the machine, so its
 files are in the machine directory, `~/.local/state/swarm-orchestrator/machine/`,
@@ -1018,6 +1025,8 @@ which every swarm on the machine reads and writes:
 | `buildsem/pair.json` | Under `pair = "distinct-repo"` (`machine.toml`): the running builds found to hold a command that runs alone (a script that turned out to build an image). |
 | `buildsem/gc` | The record of a gc that holds the gate, locked for as long as it does. |
 | `buildsem/events.jsonl` | Every `swarm build` call of every swarm, each line naming its swarm: `queued`, `start`, `end`, `bypass`, `preflight_fail`, `yield`/`unyield` for an idle holder set aside or counted again, and `passed`/`alone` under the pairing rules (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
+| `telegram-bot.pid`, `.log`, `.offset.json`, `.status.json`, `.lock` | The machine's Telegram listener: its pid, its log (not rotated), the next update id it will ask for, what it is doing (polling, backing off a 409, …), and the lock its starters and stoppers take. |
+| `web.pid`, `web.log`, `web.lock` | The machine's web board: its pid, its log and the lock its starters and stoppers take. |
 
 ## Tests
 
@@ -1042,7 +1051,7 @@ fake scripts need bash (`read -t`).
   `test_overseer_*.py`);
 - the dashboard, which is booted headless at three terminal sizes (`test_tui_*.py`);
 - the web board (`test_web_*.py`);
-- the bot's `/usage` answer and its command listener (`test_tgbot.py`), and the
+- the machine's bot: `/status`, `/usage` and its one listener (`test_tgbot.py`), and the
   usage caps (`test_caps.py`);
 - units for every other module.
 

@@ -205,14 +205,14 @@ def test_the_run_starts_its_own_processes_through_the_scope_seam(cfg, monkeypatc
                         lambda *_a, **_k: web_lifecycle.Found(web_lifecycle.CLOSED))
     monkeypatch.setattr(restart_mod, "START_TIMEOUT_S", 0.0)
     monkeypatch.setattr(cfg, "telegram_commands", True)
-    monkeypatch.setattr(tgbot, "credentials", lambda _c: ("token", "chat"))
+    monkeypatch.setattr(tgbot, "credentials", lambda: ("token", "chat"))
     from swarm_orchestrator.logutil import Log
 
     log = Log(cfg.supervisor_log)
     try:
         landing_mod._spawn_check(cfg, "P0", cfg.project_dir)
         service_mod.start(web_lifecycle.the_service(at), at.mdir)  # the machine's board
-        tgbot.start_detached(cfg)
+        tgbot.ensure(cfg.state_dir)  # the machine's bot listener
         theirs = {**os.environ, "FZ_WHOSE": "the last supervisor's"}
         restart_mod.start_supervisor(cfg, theirs, log)
         drain_mod.run_after(cfg, "true")

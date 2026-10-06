@@ -833,8 +833,9 @@ def _window(samples: list[Sample], which: str, label: str, now: float) -> str:
 
 
 def brief(samples: list[Sample], now: float, cap_lines: list[str] = ()) -> str:
-    """The bot's answer to ``/usage``: both limits of the account in use, how
-    old they are, and the caps."""
+    """The head of the bot's answer to ``/usage``: both limits of the account in
+    use and how old they are, then ``cap_lines``. Account-wide, so it is said
+    once for every swarm (``tgbot.usage_text``)."""
     account = active_account(samples)
     samples = current(samples)
     s = newest_sample(samples)
@@ -846,23 +847,6 @@ def brief(samples: list[Sample], now: float, cap_lines: list[str] = ()) -> str:
                  _window(samples, "five", "5-hour", now),
                  f"Read at {_clock(s.ts, now)}, {_ago(max(0.0, now - s.ts))}{on}."]
     return "\n".join([*lines, *cap_lines])
-
-
-def brief_for(cfg, now: float | None = None) -> str:
-    """:func:`brief` for a project, read from disk. Never raises: the bot must answer."""
-    from . import caps, state as state_mod  # caps imports this module
-
-    now = time.time() if now is None else now
-    try:
-        samples = load_samples(Path(cfg.state_dir) / METERS_DIR / LIMITS_LOG)
-        if not cfg.usage_enabled:
-            cap = ["Usage caps are off."]
-        else:
-            cap = (caps.describe_hold(state_mod.read(cfg).usage_hold, now)
-                   or [caps.limits_line(cfg.usage_rules)])
-        return brief(samples, now, cap)
-    except Exception as exc:  # noqa: BLE001 - diagnostics only, never fatal
-        return f"Usage is unavailable right now ({type(exc).__name__}: {exc})"[:300]
 
 
 def render(cur: dict | None, past: list[dict], samples: list[Sample], now: float) -> str:

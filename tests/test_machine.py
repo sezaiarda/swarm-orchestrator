@@ -383,8 +383,9 @@ def test_ls_lists_every_swarm_from_any_folder(two_swarms, tmp_path):
     _up(b)
     r = _ls(a, tmp_path)
     assert r.returncode == 0 and r.stderr == ""
-    head, *rows, board = r.stdout.splitlines()
+    head, *rows, board, bot = r.stdout.splitlines()
     assert board.startswith("web board: ")  # the one address, after the swarms
+    assert bot.startswith("telegram bot: ")  # and the one listener
     assert head.split() == ["SWARM", "STATUS", "DONE", "RUNNING", "OPEN", "NEEDS", "YOU",
                             "SESSION", "PROJECT"]
     assert [ln.split() for ln in rows] == [
@@ -401,6 +402,7 @@ def test_ls_json_is_the_registry(two_swarms, tmp_path):
     assert data["machine_dir"] == str(machine.directory())
     assert data["settings"] == str(machine.settings_path())
     assert data["web"].startswith("web board: ")
+    assert data["telegram"].startswith("telegram bot: ")
     (one,) = data["swarms"]
     assert one == machine.look(a.state_dir).to_dict()
     assert (one["name"], one["status"], one["running"], one["stale"], one["needs_owner"]) \
@@ -417,7 +419,7 @@ def test_ls_from_a_session_of_one_swarm_shows_the_others_too(two_swarms, monkeyp
     _up(b)
     env = {**a.env, "SWARM_STATE_DIR": str(a.state_dir), "SWARM_PROJECT": str(a.project)}
     r = _ls(a, b.project, env=env)
-    assert [ln.split()[0] for ln in r.stdout.splitlines()[1:-1]] == ["alpha", "beta"]
+    assert [ln.split()[0] for ln in r.stdout.splitlines()[1:-2]] == ["alpha", "beta"]
     monkeypatch.setenv("SWARM_STATE_DIR", str(a.state_dir))
     cfg = machine.swarm_config(b.state_dir)
     assert cfg.state_dir == b.state_dir and cfg.project_dir == b.project

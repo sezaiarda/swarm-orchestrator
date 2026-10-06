@@ -56,9 +56,10 @@ park_after      = 900  # seconds a worker may wait on the owner. 0 = disable par
 # Phases the swarm must never launch:
 #   jade-W14  -- needs the full stack; run by the operator afterwards.
 exclude = ["jade-W14", "billing-P4", "teal-W19"]
+lessons = "tasks/lessons.md#main"  # not a comment
 
 [telegram]
-notify = "scripts/notify.sh#main"  # not a comment
+commands = true
 
 [tmux]
 # session name defaults to the project
@@ -182,18 +183,18 @@ def test_a_value_that_outgrows_its_column_takes_its_comment_block_with_it():
 
 
 def test_a_hash_inside_a_string_is_not_mistaken_for_a_comment():
-    """The old value ends in ``.sh#main`` and the new one in ``#dev``.
+    """The old value ends in ``.md#main`` and the new one in ``#dev``.
 
     A scanner that stopped at the first ``#`` would treat half the old value as
     a comment, rewrite from there, and leave a mangled line that no longer
     parses — with the real comment appended to whatever was left.
     """
-    out = cf.toml_set_many(CORPUS, {("telegram", "notify"): "/tmp/n.sh#dev"})
-    line = next(x for x in out.split("\n") if x.startswith("notify"))
-    original = next(x for x in CORPUS.split("\n") if x.startswith("notify"))
+    out = cf.toml_set_many(CORPUS, {("tasks", "lessons"): "/tmp/l.md#dev"})
+    line = next(x for x in out.split("\n") if x.startswith("lessons"))
+    original = next(x for x in CORPUS.split("\n") if x.startswith("lessons"))
     assert line.rstrip().endswith("# not a comment")
     assert line.rindex("#") == original.rindex("#")
-    assert tomllib.loads(out)["telegram"]["notify"] == "/tmp/n.sh#dev"
+    assert tomllib.loads(out)["tasks"]["lessons"] == "/tmp/l.md#dev"
 
 
 def test_a_literal_string_stays_a_literal_string():

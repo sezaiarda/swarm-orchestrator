@@ -12,11 +12,12 @@ command is typed in upward, and refuses every command where there is none (see
 
 A key the loader does not read is ignored, so a file that still sets a retired
 key (`[worker].done_hook`, `[tasks].roadmap`) loads unchanged. The one exception
-is a limit of the build gate that has moved to [the machine file](#the-machine-file-machinetoml)
-(`[build]` `max_concurrent`, `short_s`, `overtake`, `idle_yield_s`,
-`idle_yield_max`, `pair`, `alone`): a `.swarm.toml` that still sets one does not
-load, and the error names the key and `machine.toml`. Ignoring it would leave
-the owner believing in a limit that is not in force.
+is a key that has moved to [the machine file](#the-machine-file-machinetoml)
+(the build gate's `[build]` `max_concurrent`, `short_s`, `overtake`,
+`idle_yield_s`, `idle_yield_max`, `pair`, `alone`; the board's `[web]` `host`
+and `port`; the bot's `[telegram]` `notify` and `env`): a `.swarm.toml` that
+still sets one does not load, and the error names the key and `machine.toml`.
+Ignoring it would leave the owner believing in a setting that is not in force.
 
 **Precedence:** an environment variable, when set, beats the file, which beats the
 default. An integer that does not parse falls back to the next source instead of
@@ -40,8 +41,8 @@ A launched session (a worker, an operator job, the Overseer) runs its own
 checkout. They read this file, the project's, not a copy in the folder they
 are run from: `SWARM_PROJECT` names the project. So what a worker's
 `swarm done` or an operator's `swarm operator-done` reads
-(`[operator].enabled`, `triage_model`, `notify`, `done_grace_s`, the
-`[telegram]` keys) is "hot": the next such command uses the saved value. If the
+(`[operator].enabled`, `triage_model`, `notify`, `done_grace_s`) is "hot":
+the next such command uses the saved value. If the
 file does not load, the command says so and runs on the settings the supervisor
 last recorded (`<state>/config.json`), never on another folder's file.
 
@@ -68,7 +69,8 @@ One name, shown in several places. An edit reaches them at different times:
 | Telegram messages that name the swarm ("… has stopped", "… did not restart") | **hot**: the next message after `swarm reload` |
 | `swarm status` (`name=`, and `config.name` in `--json`) | **hot**: the next command |
 | the web board: the swarm's card, its button and its page's title | **hot**: after `swarm reload`. The board shows each swarm on the settings its supervisor recorded, so for a swarm that is down the new name shows at its next `swarm up` |
-| the dashboard's status bar, the command listener's log line and its entry in the bot lock | **next**: when the dashboard and the listener next start; a plain `swarm restart` restarts both |
+| the dashboard's status bar | **next**: when the dashboard next starts; a plain `swarm restart` restarts it |
+| the bot's `/status` and `/usage` answers | **hot**: after `swarm reload`. The listener reads each swarm on the settings its supervisor recorded, as the board does |
 | the tmux session (`tmux ls`, `tmux attach -t …`), unless `[tmux].session` sets it | **restart**: `swarm down` then `swarm up`, or `swarm restart --full` |
 
 The tmux session cannot be renamed under a run: every pane and window the run
@@ -78,12 +80,9 @@ addressing that one, and `swarm reload` lists `[tmux].session: <old> -> <new>`
 under *REFUSED*, each time, until the restart that renames it. `swarm down`
 ends the old session and the `swarm up` after it creates the new one.
 
-A command listener started under the old name is still this swarm's: it is
-known by its pid file in the state dir and the per-bot lock, which the name
-does not touch. So `swarm status` and the dashboard find the old one and
-`swarm down` or `swarm restart` replaces it; a second one is never started
-beside it. The web board is the machine's and lists a swarm by its state dir,
-which a rename does not move either: the swarm's page keeps its address.
+The web board and the Telegram listener are the machine's, and know a swarm
+by its state dir, which a rename does not move: the swarm's page keeps its
+address, and the listener answers for it under the new name.
 
 ## `[worker]`
 
@@ -122,8 +121,12 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
-| `notify` | `<this repo>/scripts/notify.sh` | | hot | The sender. It is called with the message as `$1`. The bundled script reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's `.env`, or from the file named by `SWARM_TG_ENV`. |
-| `commands` | `true` | `SWARM_TG_COMMANDS` | restart | Start the bot's command listener at `swarm up`, so `/usage` and `/help` sent to the bot are answered. It reads the token and chat id from the file the sender reads, answers only that chat, and is not started when the file lacks them. |
+| `commands` | `true` | `SWARM_TG_COMMANDS` | restart | The machine's bot answers for this swarm: its `swarm up` starts the machine's listener when it is not running, and `/status` and `/usage` list it. `false` leaves it out of both, and its `swarm up` starts none. |
+
+The bot is the machine's, one for every swarm, so which script sends and where
+its token is are not a project's to say: they are [`[telegram]` in
+`machine.toml`](#telegram-1). A `.swarm.toml` that still sets `[telegram].notify`
+is refused by every command, with the key and the machine file named.
 
 ## `[tmux]`
 
@@ -501,6 +504,26 @@ would send that shell's commands looking for the board where it is not.
 | `host` | `"0.0.0.0"` | — | The bind address. The default is every interface, so the board answers on the Tailscale IP that `swarm status` and `swarm ls` print (or the LAN address when Tailscale is absent). |
 | `port` | `8765` | — | The TCP port, one for every swarm on the machine. At least 1. When another program holds it, `swarm up` and `swarm status` say which, and this is the key to change. |
 
+### `[telegram]`
+
+The machine's one Telegram bot: every swarm on the machine sends through it,
+each message named for its swarm, and one listener answers `/status`, `/usage`
+and `/help` for all of them ([components.md](components.md#telegram-and-asking-the-owner)).
+With neither key set, the bot is the bundled `scripts/notify.sh` of the
+installed swarm-orchestrator, with its token and chat id in that checkout's
+`.env`: what a single swarm used before the bot was the machine's. A sender
+reads the file each time it sends; the listener reads the credentials when it
+starts (`swarm telegram-bot stop`, then `swarm telegram-bot`, after an edit).
+Neither key has an environment variable: a file one shell named for itself
+would have that shell's swarm send from a bot the machine's listener does not
+poll. `SWARM_TG_ENV` is no longer read by the swarm; it is what the swarm hands
+the script.
+
+| key | default | env | meaning |
+|---|---|---|---|
+| `notify` | `""` | — | The script that sends, called with the message as `$1` and with `SWARM_TG_ENV` set to the env file below. `""` is the bundled `scripts/notify.sh`. |
+| `env` | `""` | — | The file holding `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, in shell `KEY=value` form; the listener reads the same file. `""` is `.env` in the folder above the script's, where the bundled script looks. |
+
 ## Environment-only variables
 
 | variable | effect |
@@ -509,11 +532,10 @@ would send that shell's commands looking for the board where it is not.
 | `XDG_STATE_HOME` | The state root is `$XDG_STATE_HOME/swarm-orchestrator`. Default `~/.local/state`. Every swarm on the machine keeps its state dir there, beside the machine directory `machine/`; `swarm ls` lists them. |
 | `XDG_CONFIG_HOME` | The machine file is `$XDG_CONFIG_HOME/swarm-orchestrator/machine.toml`. Default `~/.config`. |
 | `SWARM_TG_SINK` | Append telegrams to this file instead of sending them. The tests use it; it also skips recap generation. |
-| `SWARM_TG_ENV` | The credentials file the bundled `notify.sh` reads, and the command listener too. |
-| `SWARM_TG_API` | The Bot API base URL the command listener polls (default `https://api.telegram.org`). The tests point it at a fake. |
+| `SWARM_TG_API` | The Bot API base URL the machine's listener polls (default `https://api.telegram.org`). The tests point it at a fake. It and `SWARM_TG_SINK` are the two `SWARM_*` variables the listener is started with. |
 | `SWARM_SUBMIT_SETTLE` | Seconds typed text gets to render before Enter is sent (default 1.5). Raise it on a slow host. |
 | `SWARM_LOG_ECHO` | Also echo supervisor log lines to stderr. |
-| `SWARM_SCOPE` | `0`: never start the supervisor, the command listener, the web board or a lane check in a systemd user scope of its own (see [`swarm freeze`](components.md#freeze-and-thaw-swarm-freeze-swarm-thaw)). The tests set it. |
+| `SWARM_SCOPE` | `0`: never start the supervisor, the bot's listener, the web board or a lane check in a systemd user scope of its own (see [`swarm freeze`](components.md#freeze-and-thaw-swarm-freeze-swarm-thaw)). The tests set it. |
 | `SWARM_CGROUP_ROOT`, `SWARM_CGROUP_PROC` | Where `swarm freeze` and `swarm thaw` find the cgroup tree and `/proc` (defaults `/sys/fs/cgroup` and `/proc`). Test seams. |
 | `SWARM_BIN` | The `swarm` command that detached helpers (`recap`, `operator-triage`, the grace poke) run. A test seam. |
 | `SWARM_RECAP_CMD`, `SWARM_TRIAGE_CMD` | Replace the model call for recaps and triage with a command that reads the prompt on stdin. Test seams. |

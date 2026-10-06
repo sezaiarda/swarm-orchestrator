@@ -111,7 +111,7 @@ it, and every step is a `RESTART-*` line in the supervisor log.
 
 **In place (the default).** Only the supervisor process is replaced, then the
 dashboard, the web board (the machine's one, so the other swarms' pages blink)
-and the Telegram listener are started again. The tmux
+and the machine's Telegram listener are started again. The tmux
 session, the worker panes, parked sessions, the operator, the master pane and
 the owner console are not touched, and nothing is drained.
 
@@ -1869,17 +1869,20 @@ spans a switch lists each account's points used. Rows from before the tag load
 as account unknown and are left out once the account is known.
 
 Usage reaches your phone only when you ask: `/usage` to the bot (see
-[Telegram](#telegram-and-asking-the-owner)) answers with (`usage.brief`):
+[Telegram](#telegram-and-asking-the-owner)) answers with (`usage.brief`, then
+`tgbot.usage_text`):
 
 ```
 Weekly 41%, resets Wed 11:00.
 5-hour 23%, resets 16:00.
 Read at 14:05, 3 min ago.
-The swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.
+Every running swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.
 ```
 
-The last line is the usage caps' state: the hold, when one holds. A sample arrives
-only when some session renders its status line, so the answer says how old it is.
+The figures are the account's, so they are read from every swarm's samples
+together and said once. The lines after them are the caps, and each swarm a cap
+holds. A sample arrives only when some session renders its status line, so the
+answer says how old it is.
 `swarm usage` prints the same age on its `sample` line.
 
 ### Usage caps
@@ -2291,10 +2294,14 @@ Both need an elevated PowerShell.
 
 ## Telegram and asking the owner
 
-The swarm has its own sender: `scripts/notify.sh`, with a bot of its own. It reads
-`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's
-`.env`, which is gitignored; `scripts/resolve-chat-id.sh` fills in the chat id.
-Point `[telegram].notify` at any script that takes the message as `$1`.
+The machine has one bot, and every swarm on it sends through it. The sender is
+`scripts/notify.sh` by default; it reads `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID` from this repo's `.env`, which is gitignored;
+`scripts/resolve-chat-id.sh` fills in the chat id. `[telegram]` in
+[`machine.toml`](config.md#telegram-1) points `notify` at any other script that
+takes the message as `$1`, and `env` at another credentials file; the swarm
+hands the script that file as `SWARM_TG_ENV`. A project's `.swarm.toml` never
+names the bot: one that still sets `[telegram].notify` does not load.
 
 **One sender, two kinds of message.** Everything the swarm sends goes through
 `telegram.py`, which names the swarm at the front of every message, once, so
@@ -2416,10 +2423,10 @@ progress is stopped, or will stop, on something only you can do.
 | an Overseer pass ran past its limit (not yet three in a row) | `overseer` | log only |
 | a drain finished and the swarm is restarting (an ask follows only if it does not come back) | `drain` | log only |
 | `swarm overseer-summary` on a pass with no summary due | `summary` | log only |
-| the bot's answer to a command you typed (`/usage`, `/help`) | `bot-reply` | reply |
 
-A reply is not a message the swarm starts: it answers a command you sent, it
-carries the swarm's name like every message, and it is as long as its answer.
+The bot's answer to a command you typed (`/status`, `/usage`, `/help`) is not
+in the table: no swarm starts it. It answers for every swarm, so it names none
+and goes into no swarm's log, and it is as long as its answer.
 `ok` finishes say nothing at all.
 
 **Why some things are not asks.** A usage pause that resumes by itself needs
@@ -2431,31 +2438,69 @@ on, anything folded that turns out to need you reaches you as its ask; with it
 off, the swarm's own summary still tells you every `every_s` how many phases
 failed and what waits on you.
 
-**Commands (`tgbot.py`).** The bot also listens, so you can ask it:
+**Commands (`tgbot.py`).** The bot also listens, so you can ask it. One
+listener answers for every swarm on the machine, and a reply names no swarm,
+because it is about all of them:
 
-- `/usage`: both limits and the usage caps' state, read when you ask;
-- `/help` (and `/start`): the list.
+- `/status`: one line per swarm, those waiting on you first, then the ones that
+  are up, then the ones that finished, then the ones that are down. Each line
+  says how the swarm stands in a word (running, paused, paused by a usage cap,
+  frozen, finished, down), how many phases are done of how many, and how many
+  things wait on you there (questions and to-dos). A line for the machine's
+  build gate follows when a build runs or waits. A state dir whose project is
+  gone, one no supervisor ran in, and a swarm with `[telegram].commands = false`
+  are not listed.
+
+      beta: paused, 5 of 8 done, 2 wait on you
+      alpha: running, 3 of 12 done
+      gamma: finished
+      delta: down, 2 of 9 done
+      Builds: 1 running, 2 waiting.
+
+- `/usage`: the account's limits once (they are the account's, so every swarm's
+  readings are read together and the newest counts), then the caps, once when
+  every running swarm has the same ones, then each swarm a cap holds: paused
+  until a window resets, or stopped until you run `swarm up`.
+
+      Weekly 61%, resets Sat 11:00.
+      5-hour 12%, resets 16:00.
+      Read at 14:03, 2 min ago.
+      Every running swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.
+      beta: paused at weekly 61% (cap 60%) until Sat 11:00.
+      gamma: stopped at the weekly cap; down until you run swarm up (the window resets Sat 11:00).
+
+- `/help` (and `/start`): the list. Any other command gets a one-line pointer
+  to `/help`.
 
 The listener long-polls `getUpdates` with the same token and answers through the
 same sender. It answers only messages from the chat in `TELEGRAM_CHAT_ID`, and
 ignores every other chat without a reply. It also ignores plain text, edits, and
 commands older than 15 minutes (sent while nothing listened). The next update id
-is saved in `<state>/telegram-bot.offset.json` before an update is answered, so
-none is ever answered twice.
+is saved in the machine directory's `telegram-bot.offset.json` before an update
+is answered, so none is ever answered twice. Its replies go into no swarm's
+`notifications.jsonl`; a reply that did not leave is in its log.
 
-- **Lifecycle:** `swarm up` starts it as a detached process under either driver
-  (no tmux window), with its log in `<state>/logs/telegram-bot.log`. `swarm down`
-  stops it, and its reaping would find it anyway, since it carries the run's
-  `SWARM_STATE_DIR`. `swarm telegram-bot` runs it in the foreground. `swarm status`
-  and `swarm doctor` (`telegram.bot`) say whether it runs and what it is doing.
-  `[telegram].commands = false` turns it off.
+- **Lifecycle:** a machine service, like the [web board](#the-web-board-swarm-web):
+  any `swarm up` of a swarm with `[telegram].commands` on starts it when it is
+  not running, every later `up` leaves it alone, and the `swarm down` of the
+  last swarm that is up stops it. It is detached under either driver (no tmux
+  window), started with no swarm's environment, and its pid, log, offset and
+  status are `telegram-bot.*` in the machine directory. `swarm restart` starts
+  it again on the code on disk; a freeze leaves it awake. `swarm telegram-bot`
+  starts, stops (`stop`), reports (`status`) or runs it in the foreground
+  (`serve`) by hand. `swarm status`, `swarm ls` and `swarm doctor`
+  (`telegram.bot`) say whether it runs and what it is doing. A machine with no
+  token in the bot's env file starts none, and `swarm up` says so.
 - **One poller per token:** Telegram answers `409 Conflict` when two programs poll
-  one bot (or a webhook is set). Two projects on one box share the bot through
-  this repo's `.env`, so a lock per token (in `$XDG_RUNTIME_DIR`) keeps the second
-  listener waiting to take over, retrying every minute; `/usage` then answers from
-  the project that holds it. A 409 from anything else is logged, shown by
-  doctor, and backed off from 60 s up to 10 minutes. `scripts/resolve-chat-id.sh`
-  polls the same token, so run it while the listener is stopped.
+  one bot (or a webhook is set). The service makes one listener per state root,
+  but two can still meet on one token: a `swarm telegram-bot serve` typed by
+  hand, a second state root (`SWARM_STATE_DIR` pointed elsewhere), or a
+  per-swarm listener left running from before the bot was the machine's. So a
+  lock per token (in `$XDG_RUNTIME_DIR`) keeps the second listener waiting to
+  take over, retrying every minute. A 409 from anything else is logged, shown
+  by doctor, and backed off from 60 s up to 10 minutes.
+  `scripts/resolve-chat-id.sh` polls the same token, so run it while the
+  listener is stopped.
 - **Failures:** network errors back off from 5 s up to 5 minutes, a rejected token
   waits 10 minutes, a 429 waits as told. None of it touches the supervisor.
 

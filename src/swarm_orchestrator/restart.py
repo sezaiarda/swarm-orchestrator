@@ -615,9 +615,9 @@ def restart_helpers(cfg: Config, st: state_mod.State, log: Log) -> list[str]:
                 done.append("web board")
         except (ValueError, OSError) as exc:
             log.line(f"RESTART-WEB-BOARD-FAILED {exc}")
-    if cfg.telegram_commands and tgbot.stop(cfg):
-        if tgbot.start_detached(cfg)[0]:
-            done.append("telegram listener")
+    if cfg.telegram_commands and tgbot.restart(cfg.state_dir):
+        # The machine's too, and stateless: its offset is on disk.
+        done.append("telegram listener")
     return done
 
 

@@ -502,7 +502,8 @@ def _roles(cfg: Config, st: state_mod.State, server: int | None) -> dict[str, in
         board = None
     return {
         "supervisor": restart_mod.live_supervisor(cfg, st),
-        "bot": tgbot.running(cfg),
+        # The machine's, like the board: it answers for the other swarms too.
+        "bot": tgbot.running(cfg.state_dir),
         # The machine's, not this run's: it shows the other swarms too.
         "board": board,
         "tmux": server,

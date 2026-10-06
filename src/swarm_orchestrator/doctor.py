@@ -1498,12 +1498,13 @@ def _check_telegram(cfg: Config) -> list[Check]:
     sends logged across hundreds of log lines while messages were delivered — from
     the tool's own records the two are indistinguishable.
     """
-    ok, detail = telegram.check(cfg.telegram_notify)
+    ok, detail = telegram.check()
     config = Check(
         "telegram.config",
         OK if ok else FAIL,
         detail,
-        None if ok else "scripts/resolve-chat-id.sh, or fix the .env it names",
+        None if ok else ("scripts/resolve-chat-id.sh, or fix the .env it names; the bot is"
+                         f" [telegram] in {machine_mod.settings_path()}"),
     )
     everything = _notifications(cfg)
     # A message the swarm chose not to send (`suppressed`) is neither a send nor
@@ -2014,27 +2015,30 @@ def _check_usage(cfg: Config, st: State) -> Check:
 
 
 def _check_tgbot(cfg: Config, st: State) -> Check:
-    """Is the bot's command listener (``/usage``) running, and is it being answered?
+    """Is the machine's bot listener (``/status``, ``/usage``) running, and is it
+    being answered?
 
     A 409 means some other program polls the same bot token; the listener backs
     off and says so in its status file, which is where this reads it from.
     """
     name = "telegram.bot"
     if not cfg.telegram_commands:
-        return Check(name, OK, "off ([telegram] commands = false)")
-    pid = tgbot.running(cfg)
+        return Check(name, OK, "off for this swarm ([telegram] commands = false)")
+    pid = tgbot.running(cfg.state_dir)
+    log = tgbot.log_path(cfg.state_dir)
     if pid is not None:
-        info = tgbot.read_status(cfg, pid)
+        info = tgbot.read_status(machine_mod.directory(cfg.state_dir), pid)
         state, detail = info.get("state") or "starting", info.get("detail") or ""
         if state in (tgbot.CONFLICT, tgbot.REJECTED, tgbot.WAITING_LOCK, tgbot.NETWORK):
             return Check(name, WARN, f"running (pid {pid}) but {state}: {detail}",
-                         f"see {cfg.log_dir / tgbot.LOG}")
-        return Check(name, OK, f"running (pid {pid}): /usage and /help answered")
+                         f"see {log}")
+        return Check(name, OK, f"running (pid {pid}): /status, /usage and /help answered"
+                               " for every swarm on this machine")
     if st.supervisor_pid and _pid_alive(st.supervisor_pid):
-        why = ("" if tgbot.credentials(cfg) is not None
-               else f" (no bot token/chat id in {tgbot.env_file(cfg)})")
-        return Check(name, WARN, f"the run is up but the command listener is not running{why}",
-                     f"swarm telegram-bot   # or check {cfg.log_dir / tgbot.LOG}")
+        why = ("" if tgbot.credentials() is not None
+               else f" (no bot token/chat id in {tgbot.env_named()})")
+        return Check(name, WARN, f"the run is up but the machine's bot listener is not"
+                                 f" running{why}", f"swarm telegram-bot   # or check {log}")
     return Check(name, OK, "not running — `swarm up` starts it")
 
 

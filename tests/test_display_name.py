@@ -6,7 +6,7 @@ state dir, the worktrees), so the name is a setting of its own: by default the
 folder's, and when set, what the tmux session, the web board, the Telegram
 texts and ``swarm status`` show. These tests pin both halves: nothing changes
 for a project that does not set it, and setting it moves no state and strands
-no board, bot or tmux session started under the old name.
+no board or tmux session started under the old name.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from swarm_orchestrator import reload as reload_mod
 from swarm_orchestrator import restart as restart_mod
 from swarm_orchestrator import session as session_mod
 from swarm_orchestrator import state as state_mod
-from swarm_orchestrator import tgbot, tmux
+from swarm_orchestrator import tmux
 from swarm_orchestrator.config import HOT, RESTART, SETTINGS, load
 from swarm_orchestrator.logutil import Log
 from swarm_orchestrator.web import board as board_mod
@@ -191,26 +191,6 @@ def test_a_config_without_a_name_still_titles_the_board():
     assert lifecycle.display_name(Bare()) == "a-folder"
     assert lifecycle.display_name(object()) is None
     assert board_mod.lifecycle is lifecycle
-
-
-# -- a bot started under the old name is still ours --------------------------
-def test_the_bot_is_found_by_its_pid_file_and_lock_not_by_name(project, tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    old = _load(project)
-    new = _load(project, '[swarm]\nname = "New Name"\n')
-    assert tgbot.pidfile(old) == tgbot.pidfile(new)  # `down`/`restart` stop the old one
-    held = tgbot.take_lock("123:SECRET", old.name)
-    assert held is not None
-    try:
-        # One poller per bot: a listener under the new name waits for the old
-        # one to go; it never polls beside it.
-        assert tgbot.take_lock("123:SECRET", new.name) is None
-        assert f"project {FOLDER}" in tgbot.lock_holder("123:SECRET")
-    finally:
-        held.close()
-    again = tgbot.take_lock("123:SECRET", new.name)
-    assert again is not None and "project New Name" in tgbot.lock_holder("123:SECRET")
-    again.close()
 
 
 # -- a run keeps the tmux session it was started in ---------------------------

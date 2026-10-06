@@ -396,8 +396,9 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
     if cfg.web_enabled:
         _report_web_board(cfg)
     if cfg.telegram_commands:
-        # A side helper, never part of the run: whatever happens to it, `up` goes on.
-        _, what = tgbot.start_detached(cfg)
+        # The machine's, and a side helper, never part of the run: whatever
+        # happens to it, `up` goes on.
+        _, what = tgbot.ensure(cfg.state_dir)
         print(f"telegram bot: {what}")
     if attach:
         _attach(cfg)  # interactive: hand the terminal to the swarm window
@@ -448,9 +449,24 @@ def cmd_web(action: str, host: str | None = None, port: int | None = None,
     return 0 if found.state == web_lifecycle.OURS or action == "status" else 1
 
 
-def cmd_telegram_bot(cfg: Config, pidfile: str | None) -> int:
-    """Answer ``/usage`` and ``/help`` from the owner's chat, in the foreground."""
-    return tgbot.serve(cfg, pidfile)
+def cmd_telegram_bot(action: str, state_root: str | None = None) -> int:
+    """``swarm telegram-bot``: the machine's one listener, by hand. A machine
+    command: it names no project, and what it starts answers for every swarm."""
+    if action == "serve":
+        root = Path(state_root).expanduser().resolve() if state_root else None
+        return tgbot.serve(root or machine_mod.state_root().resolve())
+    if action == "stop":
+        print("telegram bot: stopped" if tgbot.stop() else "telegram bot: was not running")
+        return 0
+    if action == "start":
+        pid, what = tgbot.ensure()
+        print(f"telegram bot: {what}")
+        if pid is None:
+            print(f"  its log is {tgbot.log_path()}", file=sys.stderr)
+            return 1
+        return 0
+    print(tgbot.machine_line())
+    return 0
 
 
 def cmd_supervise(cfg: Config, adopt: bool = False) -> int:
@@ -511,7 +527,7 @@ def cmd_down(cfg: Config) -> int:
         web_lifecycle.stop_with_last(web_lifecycle.place(cfg.state_dir), cfg.state_dir)
     except machine_mod.SettingsError as exc:
         print(f"swarm down: the web board was left as it is ({exc})", file=sys.stderr)
-    tgbot.stop(cfg)
+    tgbot.stop_with_last(cfg.state_dir)
     ended, left = session_mod.end_processes(cfg, sessions)
     # After the sessions end, so their work is final. Printed only once the run
     # is closed: a dashboard that ran this is gone by now, and a write to its
@@ -1404,7 +1420,7 @@ def cmd_check(cfg: Config, strict: bool) -> int:
     warning: printed, and fatal only under ``strict``."""
     bad = False
     warned = False
-    ok, detail = telegram.check(cfg.telegram_notify)
+    ok, detail = telegram.check()
     print(f"telegram: {'ok' if ok else 'FAIL'} — {detail}")
     bad = bad or not ok
     try:
@@ -2891,12 +2907,13 @@ def cmd_ls(as_json: bool = False) -> int:
     found = machine_mod.swarms()
     board = web_lifecycle.machine_line()
     if as_json:
-        print(json.dumps({**machine_mod.listing(found), "web": board}, indent=2,
-                         sort_keys=True))
+        print(json.dumps({**machine_mod.listing(found), "web": board,
+                          "telegram": tgbot.machine_line()}, indent=2, sort_keys=True))
     else:
         print(machine_mod.render(found))
         if found:
             print(board)
+            print(tgbot.machine_line())
     return 0
 
 
@@ -3288,10 +3305,18 @@ def _build_parser() -> argparse.ArgumentParser:
     wbp.add_argument("--state-root", help=argparse.SUPPRESS)  # serve: whose swarms to show
     wbp.set_defaults(func=lambda a: cmd_web(a.action, a.host, a.port, a.state_root),
                      machine=True)
-    tgp = sub.add_parser("telegram-bot",
-                         help="answer /usage and /help from the owner's Telegram chat (foreground)")
-    tgp.add_argument("--pidfile", help=argparse.SUPPRESS)
-    tgp.set_defaults(func=lambda cfg, a: cmd_telegram_bot(cfg, a.pidfile))
+    tgp = sub.add_parser(
+        "telegram-bot", help="the machine's Telegram listener: /status, /usage and /help",
+        description="One listener for the machine's one bot, answering for every swarm."
+                    " `swarm up` starts it when it is not running and the `swarm down` of"
+                    " the last swarm that is up stops it; this command does the same by hand."
+                    " The bot is [telegram] in machine.toml.")
+    tgp.add_argument(
+        "action", nargs="?", default="start", choices=("start", "stop", "status", "serve"),
+        help="start: start it in the background unless it is running (the default). stop:"
+             " stop it. status: say whether it runs. serve: run it in the foreground")
+    tgp.add_argument("--state-root", help=argparse.SUPPRESS)  # serve: whose swarms to answer for
+    tgp.set_defaults(func=lambda a: cmd_telegram_bot(a.action, a.state_root), machine=True)
 
     dcp = sub.add_parser("doctor", help="diagnose a stuck or unhealthy swarm")
     dcp.add_argument("--json", action="store_true")

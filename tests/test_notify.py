@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import machine_toml
+
 from swarm_orchestrator import launch, owner, statuses, telegram
 from swarm_orchestrator.config import load
 
@@ -99,13 +101,11 @@ def test_the_prefix_is_the_swarms_own_name(cfg, sink, monkeypatch):
     monkeypatch.setattr(cfg, "name", "glasheim")
     telegram.ask(cfg, "Run `swarm up`.")
     telegram.summary(cfg, "Two phases landed. Nothing waits on you.")
-    telegram.reply(cfg, "usage: 40%")
     assert sent(sink) == [
         "[glasheim] Asks you: Run `swarm up`.",
         "[glasheim] Overseer: Two phases landed. Nothing waits on you.",
-        "[glasheim] usage: 40%",
     ]
-    assert [r["class"] for r in ledger(cfg.state_dir)] == ["ask", "summary", "reply"]
+    assert [r["class"] for r in ledger(cfg.state_dir)] == ["ask", "summary"]
 
 
 def test_a_summary_leads_with_overseer_and_is_filed_as_one(cfg, sink):
@@ -238,9 +238,12 @@ def test_an_unwritable_sink_fails_loudly_in_the_log(cfg, tmp_path, monkeypatch):
 def test_script_success(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
     out = tmp_path / "got.txt"
-    monkeypatch.setattr(cfg, "telegram_notify", str(script(tmp_path, f'printf "%s" "$1" > {out}\n')))
+    machine_toml(telegram={"notify": str(script(
+        tmp_path, f'printf "%s|%s" "$1" "$SWARM_TG_ENV" > {out}\n'))})
+    monkeypatch.setenv("SWARM_TG_ENV", "/a/shells/own.env")  # not the machine's bot
     assert telegram.ask(cfg, "ping").delivered is True
-    assert out.read_text() == "[project] Asks you: ping"
+    # The script is told the machine's env file: beside it, by default.
+    assert out.read_text() == f"[project] Asks you: ping|{tmp_path / '.env'}"
     assert ledger(cfg.state_dir)[0]["delivered"] is True
 
 
@@ -248,7 +251,7 @@ def test_script_failure_keeps_the_api_error(cfg, tmp_path, monkeypatch):
     """The redacted API error used to be captured and discarded."""
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
     sh = script(tmp_path, 'echo "400 can\'t parse entities" >&2\nexit 1\n')
-    monkeypatch.setattr(cfg, "telegram_notify", str(sh))
+    machine_toml(telegram={"notify": str(sh)})
     result = telegram.ask(cfg, "ping")
     assert result.delivered is False
     assert result.error == "400 can't parse entities"
@@ -262,13 +265,13 @@ def test_script_failure_keeps_the_api_error(cfg, tmp_path, monkeypatch):
 def test_script_failure_with_no_stderr_still_says_something(cfg, tmp_path, monkeypatch,
                                                             body, error):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    monkeypatch.setattr(cfg, "telegram_notify", str(script(tmp_path, body)))
+    machine_toml(telegram={"notify": str(script(tmp_path, body))})
     assert telegram.ask(cfg, "ping").error == error
 
 
 def test_a_missing_script_never_raises(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    monkeypatch.setattr(cfg, "telegram_notify", str(tmp_path / "nope.sh"))
+    machine_toml(telegram={"notify": str(tmp_path / "nope.sh")})
     result = telegram.summary(cfg, "ping")
     assert result.delivered is False and result.error
     assert ledger(cfg.state_dir)[0]["delivered"] is False
@@ -276,8 +279,7 @@ def test_a_missing_script_never_raises(cfg, tmp_path, monkeypatch):
 
 def test_a_long_script_error_is_capped(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    monkeypatch.setattr(cfg, "telegram_notify",
-                        str(script(tmp_path, 'printf "%0600d" 0 >&2\nexit 1\n')))
+    machine_toml(telegram={"notify": str(script(tmp_path, 'printf "%0600d" 0 >&2\nexit 1\n'))})
     assert len(telegram.ask(cfg, "ping").error) == 400
 
 
@@ -297,51 +299,77 @@ def test_every_message_is_one_whole_line_of_the_log(cfg, sink):
 
 
 def test_a_reply_keeps_its_lines_and_is_as_long_as_its_answer(cfg, sink):
-    """An answer to a command the owner typed is not a message the swarm starts."""
+    """An answer to a command the owner typed is not a message a swarm starts:
+    it is about every swarm, so it names none and goes into no swarm's log."""
     answer = "weekly 48%\n5-hour 11%\n" + "detail " * 100
-    assert telegram.reply(cfg, answer, source="tgbot").delivered
-    assert sink.read_text(encoding="utf-8") == "[project] " + answer + "\n"
-    [row] = ledger(cfg.state_dir)
-    assert (row["class"], row["kind"]) == ("reply", "bot-reply")
-    telegram.reply(cfg, "z" * 10_000)
-    assert len(ledger(cfg.state_dir)[-1]["text"]) == telegram.MAX_REPLY_CHARS
+    assert telegram.reply(answer).delivered
+    assert sink.read_text(encoding="utf-8") == answer + "\n"
+    assert ledger(cfg.state_dir) == []
+    assert len(telegram.reply("z" * 10_000).text) == telegram.MAX_REPLY_CHARS
 
 
 # -- check ------------------------------------------------------------------
 def test_check_passes_under_the_sink(sink):
-    assert telegram.check("/does/not/exist") == (True, "sink")
+    machine_toml(telegram={"notify": "/does/not/exist"})
+    assert telegram.check() == (True, "sink")
+
+
+def test_with_no_machine_file_the_bot_is_the_bundled_script_and_the_env_beside_it():
+    got = telegram.bot()
+    assert got.script == telegram.BUNDLED and got.script.name == "notify.sh"
+    assert got.env == telegram.BUNDLED.resolve().parent.parent / ".env"
 
 
 def test_check_reads_the_env_file_the_sender_reads(tmp_path, monkeypatch):
-    """Beside the repo root (``bin/..``), not the owner's own Claude bot."""
+    """Beside the repo root (``bin/..``), not the owner's own Claude bot, and
+    not a file a shell named for itself."""
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    monkeypatch.delenv("SWARM_TG_ENV", raising=False)
+    elsewhere = tmp_path / "elsewhere.env"
+    elsewhere.write_text("TELEGRAM_BOT_TOKEN=a\nTELEGRAM_CHAT_ID=1\n")
+    monkeypatch.setenv("SWARM_TG_ENV", str(elsewhere))
     sh = script(tmp_path, "exit 0\n")
-    ok, detail = telegram.check(str(sh))
+    machine_toml(telegram={"notify": str(sh)})
+    ok, detail = telegram.check()
     assert not ok and "telegram env missing" in detail and str(tmp_path / ".env") in detail
 
-    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=abc\n")
-    ok, detail = telegram.check(str(sh))
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=abc\n")
+    ok, detail = telegram.check()
     assert not ok and "TELEGRAM_CHAT_ID" in detail
 
-    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=abc\nTELEGRAM_CHAT_ID=42\n")
-    assert telegram.check(str(sh)) == (True, "ok")
+    env.write_text("TELEGRAM_BOT_TOKEN=abc\nTELEGRAM_CHAT_ID=42\n")
+    assert telegram.check() == (True, "ok")
 
 
-def test_check_honours_the_env_override(tmp_path, monkeypatch):
+def test_the_machine_file_names_the_env_file(tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    env = tmp_path / "elsewhere.env"
+    env = tmp_path / "bot.env"
     env.write_text("TELEGRAM_BOT_TOKEN=a\nTELEGRAM_CHAT_ID=1\n")
-    monkeypatch.setenv("SWARM_TG_ENV", str(env))
-    assert telegram.check(str(script(tmp_path, "exit 0\n"))) == (True, "ok")
+    machine_toml(telegram={"notify": str(script(tmp_path, "exit 0\n")), "env": str(env)})
+    assert telegram.bot().env == env
+    assert telegram.check() == (True, "ok")
 
 
 def test_check_rejects_a_script_it_cannot_run(tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
     sh = script(tmp_path, "exit 0\n")
     sh.chmod(0o644)
-    ok, detail = telegram.check(str(sh))
+    machine_toml(telegram={"notify": str(sh)})
+    ok, detail = telegram.check()
     assert not ok and "not executable" in detail
+
+
+def test_a_project_file_that_still_names_the_sender_is_refused(tmp_path):
+    """The bot is the machine's. Read from a project, the swarm would send from
+    one bot while the machine's listener polls another."""
+    (tmp_path / ".swarm.toml").write_text('[telegram]\ncommands = true\nnotify = "/x.sh"\n')
+    with pytest.raises(ValueError) as exc:
+        load(project_dir=str(tmp_path))
+    said = str(exc.value)
+    assert "[telegram].notify" in said and str(tmp_path / ".swarm.toml") in said
+    assert "machine setting" in said and "one Telegram bot" in said
+    (tmp_path / ".swarm.toml").write_text("[telegram]\ncommands = false\n")
+    assert load(project_dir=str(tmp_path)).telegram_commands is False
 
 
 # -- a finishing worker -------------------------------------------------------

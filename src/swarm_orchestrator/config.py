@@ -45,9 +45,6 @@ def _slugify(name: str) -> str:
     return slug or "project"
 
 
-_REPO_NOTIFY = Path(__file__).resolve().parent.parent.parent / "scripts" / "notify.sh"
-
-
 def _default_slug(pdir: Path) -> str:
     """A slug that is unique to the *full* project path, not just its basename.
 
@@ -368,18 +365,15 @@ class Config:
         why="the supervisor reads it each time a phase lands")
 
     # -- [telegram] -------------------------------------------------------
-    # The swarm's OWN sender, resolved from this package: falling back to some
-    # other bot would put two audiences on one channel.
-    telegram_notify: str = _k(
-        "telegram", "notify", str(_REPO_NOTIFY), HOT,
-        doc="script that sends the swarm's Telegram messages",
-        why="the supervisor resolves the sender per message, and so does a"
-            " session's own `swarm done`, from the project's file")
+    # The bot is the machine's (one sender and one listener for every swarm),
+    # so its script and its credentials are in ``machine.toml``
+    # (:class:`machine.Settings`). What is a project's own is whether the bot
+    # answers for this swarm.
     telegram_commands: bool = _k(
         "telegram", "commands", True, RESTART, env="SWARM_TG_COMMANDS",
-        doc="answer /usage and /help sent to the swarm bot",
-        why="the command listener is started once, by `swarm up`, and stopped by"
-            " `swarm down`; there is no later moment a reload could start or stop it")
+        doc="the machine's bot answers for this swarm",
+        why="`swarm up` decides whether to start the listener, and the listener"
+            " reads what the supervisor recorded at its start")
 
     # -- [tmux] -----------------------------------------------------------
     # The swarm's own name, not a generic `swarm`: it is what `tmux ls` shows,
@@ -883,9 +877,9 @@ SETTINGS: dict[str, Setting] = {
 
 
 #: The keys that are the machine's, as ``(table, key)``: every one
-#: ``machine.toml`` declares. Each was a project's once (the build gate's
-#: limits, where the web board listens) and is now one thing for every swarm on
-#: the machine.
+#: ``machine.toml`` declares. Most were a project's once (the build gate's
+#: limits, where the web board listens, the Telegram sender) and each is now one
+#: thing for every swarm on the machine.
 MACHINE_KEYS = tuple((k.table, k.key) for k in machine.keys())
 
 # The last reading of machine.toml: what the file was (path, mtime, size), and
@@ -936,7 +930,7 @@ def _refuse_machine_keys(cfg_file: Path, data: dict) -> None:
     raise ValueError(
         f"{cfg_file}: {', '.join(found)} {'is' if one else 'are'} not a project's to set."
         f" {'It is' if one else 'They are'} the same for every swarm on this machine (one"
-        f" build gate, one web board), so {'it is a machine setting' if one else 'they are machine settings'}:"
+        f" build gate, one web board, one Telegram bot), so {'it is a machine setting' if one else 'they are machine settings'}:"
         f" move {'it' if one else 'them'} to the same table of {machine.settings_path()}"
         f" and delete {'it' if one else 'them'} here")
 

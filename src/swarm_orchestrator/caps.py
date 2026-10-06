@@ -374,15 +374,16 @@ def reading_line(reads: dict[str, Reading], now: float, account: str | None = No
             f"(as of {usage._clock(newest, now)}{on}).")
 
 
-def limits_line(rules: list[dict]) -> str:
-    """``The swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.``"""
+def limits_line(rules: list[dict], who: str = "The swarm") -> str:
+    """``The swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.``
+    ``who`` is the subject: the swarm, or every swarm on the machine."""
     def join(action):
         items = [f"{label(r['window'])} {r['at']:g}%" for r in rules if r["action"] == action]
         return " and ".join(items)
 
     parts = [f"pauses at {p}" if (p := join("pause")) else "", f"stops at {d}" if (d := join("down")) else ""]
     parts = [p for p in parts if p]
-    return f"The swarm {', and '.join(parts)}." if parts else "No usage caps are set."
+    return f"{who} {', and '.join(parts)}." if parts else "No usage caps are set."
 
 
 def summary(cfg, hold: dict, samples: list[usage.Sample], now: float) -> list[str]:

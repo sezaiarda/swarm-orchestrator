@@ -136,5 +136,5 @@ def test_the_reference_doc_agrees_on_env_reload_class_and_default():
         where = f"[{s.table}].{s.key}"
         assert (re.findall(r"`(SWARM_\w+)`", env) or [None])[0] == s.env, where
         assert klass.split(",")[0] == s.klass, where
-        if not callable(s.default) and s.name not in ("telegram_notify", "usage_rules"):
+        if not callable(s.default) and s.name != "usage_rules":
             assert default == f"`{toml_literal(s.default)}`", where

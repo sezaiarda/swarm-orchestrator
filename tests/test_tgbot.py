@@ -1,24 +1,27 @@
-"""The bot's ``/usage`` answer and its command listener.
+"""The machine's bot: its answers, its listener and its lifecycle.
 
-The answer (``usage.brief``) is plain and short: both limits, how old the
-reading is, and the usage caps. The listener is
-driven without a network: its API call, reply and clock are injected, and the
-end-to-end ``up``/``down`` test points it at a fake Bot API on loopback.
+The answers are plain and short: ``/status`` a line per swarm, ``/usage`` the
+account's figures once and then what differs per swarm. The listener is driven
+without a network: its API call, reply and clock are injected, and the
+end-to-end ``up``/``down`` tests point it at a fake Bot API on loopback. One
+listener serves every swarm on the machine, survives one swarm's ``down`` and
+stops with the last.
 """
 
 from __future__ import annotations
 
 import http.server
 import json
-import os
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import session as session_mod
-from swarm_orchestrator import telegram, tgbot
+from conftest import machine_toml
+
+from swarm_orchestrator import machine, procs, telegram, tgbot
+from swarm_orchestrator import state as state_mod
 from swarm_orchestrator import usage as usage_mod
 from swarm_orchestrator.cli import main as cli_main
 from swarm_orchestrator.config import load
@@ -70,24 +73,6 @@ def test_brief_without_any_sample_is_one_line():
         "No usage reading yet. One arrives while a swarm session runs.")
 
 
-def test_brief_for_includes_the_cap_state_and_never_raises(tmp_path, monkeypatch):
-    monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("SWARM_USAGE", "1")
-    cfg = load(project_dir=str(tmp_path))
-    out = usage_mod.brief_for(cfg).splitlines()
-    assert out[0].startswith("No usage reading yet")
-    assert out[1] == ("The swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.")
-    monkeypatch.setenv("SWARM_USAGE", "0")
-    assert usage_mod.brief_for(load(project_dir=str(tmp_path))).endswith("Usage caps are off.")
-
-    def boom(_path):
-        raise RuntimeError("disk on fire")
-
-    monkeypatch.setattr(usage_mod, "load_samples", boom)
-    assert usage_mod.brief_for(cfg) == (
-        "Usage is unavailable right now (RuntimeError: disk on fire)")
-
-
 def test_swarm_usage_says_how_old_its_sample_is():
     cur = {"run_id": "r", "start": NOW - 3600, "hours": 1.0, "max_workers": 1,
            "isolation": "none", "five_windows": 1, "five_used": 2.0, "week_used": 1.0,
@@ -137,6 +122,127 @@ def test_an_ask_from_anyone_else_has_no_footer(cfg, tmp_path, monkeypatch):
     assert _ledger(cfg)[-1]["kind"] == "session-ask"
 
 
+# -- the answers: one line per swarm, the account once ----------------------------
+def _swarm(root: Path, name: str, **flags) -> machine.Swarm:
+    project = root / f"p-{name}"
+    project.mkdir(parents=True, exist_ok=True)
+    return machine.Swarm(slug=f"{name}-1", state_dir=root / f"{name}-1", name=name,
+                         project_dir=project, session=name, **flags)
+
+
+def _phases(done: int, total: int) -> dict:
+    return {"done": done, "running": 0, "open": total - done, "total": total}
+
+
+def test_status_is_a_line_per_swarm_with_those_that_wait_on_you_first(tmp_path, monkeypatch):
+    found = [
+        _swarm(tmp_path, "alpha", running=True, phases=_phases(3, 12)),
+        _swarm(tmp_path, "beta", running=True, paused=True, phases=_phases(5, 8), asking=1,
+               todos=1),
+        _swarm(tmp_path, "delta", phases=_phases(2, 9)),
+        _swarm(tmp_path, "gamma", finished=True, phases=_phases(8, 8)),
+        _swarm(tmp_path, "held", running=True, held=True, phases=None),
+        _swarm(tmp_path, "omega", phases=_phases(0, 4), todos=1),
+        machine.Swarm(slug="gone-1", state_dir=tmp_path / "gone-1", name="gone",
+                      project_dir=tmp_path / "no-such-folder", session="", running=True),
+        machine.Swarm(slug="empty-1", state_dir=tmp_path / "empty-1", name="empty",
+                      project_dir=None, session=""),
+    ]
+    monkeypatch.setattr(machine, "swarms", lambda root=None: found)
+    assert tgbot.status_text(tmp_path).splitlines() == [
+        "beta: paused, 5 of 8 done, 2 wait on you",
+        "omega: down, 0 of 4 done, 1 waits on you",
+        "alpha: running, 3 of 12 done",
+        "held: paused by a usage cap, progress unknown",
+        "gamma: finished",
+        "delta: down, 2 of 9 done",
+    ]  # the stale and the empty state dirs are not listed
+    monkeypatch.setattr(machine, "swarms", lambda root=None: [])
+    assert tgbot.status_text(tmp_path) == "No swarms on this machine."
+
+
+def _recorded(root: Path, name: str, monkeypatch, toml: str = "", **state) -> Path:
+    """A swarm called ``name`` under the state root ``root``, as its supervisor
+    left it: ``config.json`` and ``state.json``."""
+    project = root.parent / name
+    project.mkdir(parents=True)
+    (project / ".swarm.toml").write_text(f'[swarm]\nname = "{name}"\n{toml}')
+    state_dir = root / f"{name}-1"
+    monkeypatch.setenv("SWARM_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("SWARM_TG_COMMANDS", raising=False)  # the file says, as for a real one
+    try:
+        cfg = load(project_dir=str(project))
+        cfg.ensure_dirs()
+        snap = {k: str(v) if isinstance(v, Path) else v for k, v in vars(cfg).items()
+                if k in {f for f in type(cfg).__dataclass_fields__}}
+        (state_dir / "config.json").write_text(json.dumps(snap, default=str))
+        with state_mod.transaction(cfg) as st:
+            for key, value in state.items():
+                setattr(st, key, value)
+    finally:
+        monkeypatch.delenv("SWARM_STATE_DIR")
+    return state_dir
+
+
+def _meter(state_dir: Path, ts: float, week: float, five: float) -> None:
+    meters = state_dir / usage_mod.METERS_DIR
+    meters.mkdir(parents=True, exist_ok=True)
+    row = usage_mod.sample_row(ts, None, {"pct": five, "resets_at": AT_16},
+                               {"pct": week, "resets_at": SAT_11})
+    with (meters / usage_mod.LIMITS_LOG).open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def test_usage_says_the_account_once_and_then_only_what_differs(tmp_path, monkeypatch):
+    root = tmp_path / "state-root"
+    monkeypatch.delenv("SWARM_USAGE")  # caps on, as in a real project
+    alpha = _recorded(root, "alpha", monkeypatch)
+    beta = _recorded(root, "beta", monkeypatch, usage_hold={
+        "week": {"at": 60, "pct": 61.0, "resets_at": SAT_11, "since": NOW - 60}})
+    _recorded(root, "gamma", monkeypatch, usage_fired={"week:70": SAT_11})
+    # The account's readings, as two swarms' sessions saw them: the newest wins.
+    _meter(alpha, NOW - 3600, week=58.0, five=40.0)
+    _meter(beta, NOW - 120, week=61.0, five=12.0)
+    up = {alpha.name, beta.name}
+    monkeypatch.setattr(procs, "fifo_has_reader", lambda path: Path(path).parent.name in up)
+
+    assert tgbot.usage_text(root, NOW).splitlines() == [
+        "Weekly 61%, resets Sat 11:00.",
+        "5-hour 12%, resets 16:00.",
+        "Read at 14:03, 2 min ago.",
+        "Every running swarm pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%.",
+        "beta: paused at weekly 61% (cap 60%) until Sat 11:00.",
+        "gamma: stopped at the weekly cap; down until you run swarm up (the window resets"
+        " Sat 11:00).",
+    ]
+    # A running swarm with other caps is named with them.
+    _recorded(root, "delta", monkeypatch, '[usage]\nenabled = false\n')
+    up.add("delta-1")
+    lines = tgbot.usage_text(root, NOW).splitlines()
+    assert "delta: usage caps are off." in lines
+    assert ("alpha, beta pauses at weekly 60% and 5-hour 90%, and stops at weekly 70%."
+            in lines)
+
+
+def test_a_swarm_with_commands_off_is_not_answered_for(tmp_path, monkeypatch):
+    root = tmp_path / "state-root"
+    _recorded(root, "alpha", monkeypatch)
+    _recorded(root, "quiet", monkeypatch, "[telegram]\ncommands = false\n")
+    assert [s.name for s in tgbot.answered(root)] == ["alpha"]
+    assert tgbot.status_text(root).startswith("alpha: down, ")
+
+
+def test_an_answer_never_raises(tmp_path, monkeypatch):
+    def boom(_root, *_a):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(tgbot, "status_text", boom)
+    assert tgbot.answer_text(tmp_path, "status") == (
+        "/status is unavailable right now (RuntimeError: disk on fire)")
+    assert tgbot.answer_text(tmp_path, "help") == tgbot.HELP
+    assert tgbot.answer_text(tmp_path, "nope") == "Unknown command /nope. Send /help for the list."
+
+
 # -- the listener ----------------------------------------------------------------
 class FakeApi:
     """Scripted ``getUpdates`` answers: a list, or an exception to raise."""
@@ -161,70 +267,77 @@ def _msg(uid: int, text: str, chat=OWNER, date=None) -> dict:
                                           "text": text}}
 
 
-def _listener(cfg, api, clock=lambda: NOW):
+@pytest.fixture
+def root(tmp_path) -> Path:
+    return tmp_path / "state-root"
+
+
+def _listener(root, api, clock=lambda: NOW):
     replies: list[str] = []
-    lst = tgbot.Listener(cfg, "123:SECRET", OWNER, call=api, reply=replies.append,
-                         answer_usage=lambda: "USAGE-BLOCK", log=lambda _l: None, clock=clock)
+    lst = tgbot.Listener(root, "123:SECRET", OWNER, call=api, reply=replies.append,
+                         answer=lambda cmd: f"ANSWER {cmd}", log=lambda _l: None, clock=clock)
     return lst, replies
 
 
-def test_only_the_owners_chat_is_answered(cfg):
-    api = FakeApi([_msg(1, "/usage", chat="999"), _msg(2, "/usage"), _msg(3, "/help"),
+def test_only_the_owners_chat_is_answered(root):
+    api = FakeApi([_msg(1, "/usage", chat="999"), _msg(2, "/status"), _msg(3, "/help"),
                    _msg(4, "/usage@your_swarm_bot now"), _msg(5, "thanks"), _msg(6, "/nope"),
                    _msg(7, "/usage", date=NOW - 3600), {"update_id": 8, "edited_message": {}}])
-    lst, replies = _listener(cfg, api)
+    lst, replies = _listener(root, api)
     lst.poll_once()
-    assert replies[0] == "USAGE-BLOCK" and replies[1] == tgbot.HELP
-    assert replies[2] == "USAGE-BLOCK" and replies[3].startswith("unknown command /nope")
-    assert len(replies) == 4  # stranger, plain text, an old command, an edit: silence
+    assert replies == ["ANSWER status", "ANSWER help", "ANSWER usage", "ANSWER nope"]
+    # stranger, plain text, a command older than 15 minutes, an edit: silence
     assert lst.offset == 9
 
 
-def test_no_update_is_handled_twice(cfg):
+def test_no_update_is_handled_twice(root):
     api = FakeApi([_msg(10, "/usage")], [_msg(10, "/usage"), _msg(11, "/usage")])
-    lst, replies = _listener(cfg, api)
+    lst, replies = _listener(root, api)
     lst.poll_once()
     lst.poll_once()
     assert len(replies) == 2 and lst.offset == 12
     assert [c[1]["offset"] for c in api.calls] == [0, 11]
-    # The offset outlives the process, and belongs to this bot only.
-    again, _ = _listener(cfg, FakeApi())
+    # The offset outlives the process, in the machine directory, and belongs to
+    # this bot only.
+    assert (root / "machine" / tgbot.OFFSET_FILE).is_file()
+    again, _ = _listener(root, FakeApi())
     assert again.offset == 12
-    other = tgbot.Listener(cfg, "999:OTHER", OWNER, call=FakeApi(), log=lambda _l: None)
+    other = tgbot.Listener(root, "999:OTHER", OWNER, call=FakeApi(), log=lambda _l: None)
     assert other.offset == 0
 
 
-def test_the_offset_moves_before_the_answer(cfg):
+def test_the_offset_moves_before_the_answer(root):
     """A reply that blows up is not retried on the next poll."""
     api = FakeApi([_msg(20, "/usage")], [])
-    lst = tgbot.Listener(cfg, "123:SECRET", OWNER, call=api, log=lambda _l: None,
-                         reply=lambda _t: 1 / 0, answer_usage=lambda: "x", clock=lambda: NOW)
+    lst = tgbot.Listener(root, "123:SECRET", OWNER, call=api, log=lambda _l: None,
+                         reply=lambda _t: 1 / 0, answer=lambda _c: "x", clock=lambda: NOW)
     lst.poll_once()
     assert lst.offset == 21 and api.calls[-1][1]["offset"] == 0
     lst.poll_once()
     assert api.calls[-1][1]["offset"] == 21
 
 
-def test_409_backs_off_logs_and_recovers(cfg):
+def test_409_backs_off_logs_and_recovers(root):
     conflict = tgbot.ApiError(409, "Conflict: terminated by other getUpdates request")
     api = FakeApi(*([conflict] * 6), [])
     logged: list[str] = []
-    lst = tgbot.Listener(cfg, "123:SECRET", OWNER, call=api, reply=lambda _t: None,
+    lst = tgbot.Listener(root, "123:SECRET", OWNER, call=api, reply=lambda _t: None,
                          log=logged.append, clock=lambda: NOW)
     waits = [lst.poll_once() for _ in range(6)]
     assert waits == [60, 120, 240, 480, 600, 600]
-    assert tgbot.read_status(cfg)["state"] == tgbot.CONFLICT
-    assert "another program is calling getUpdates" in tgbot.read_status(cfg)["detail"]
+    mdir = root / "machine"
+    assert tgbot.read_status(mdir)["state"] == tgbot.CONFLICT
+    assert "another program is calling getUpdates" in tgbot.read_status(mdir)["detail"]
     assert sum("409 Conflict" in line for line in logged) == 1  # logged on the change
     lst.poll_once()
-    assert tgbot.read_status(cfg)["state"] == tgbot.POLLING and lst.conflicts == 0
+    assert tgbot.read_status(mdir)["state"] == tgbot.POLLING and lst.conflicts == 0
 
 
-def test_errors_never_busy_loop(cfg):
+def test_errors_never_busy_loop(root):
     api = FakeApi(tgbot.NetError("URLError: no route"), tgbot.NetError("again"),
                   tgbot.ApiError(429, "slow down", retry_after=7),
                   tgbot.ApiError(401, "Unauthorized"), tgbot.ApiError(502, "Bad Gateway"), [])
-    lst, _ = _listener(cfg, api)
+    lst, _ = _listener(root, api)
     assert [lst.poll_once() for _ in range(5)] == [5, 10, 7, tgbot.REJECTED_S, 20]
     # A server that answers an empty long-poll at once still gets a pause.
     assert lst.poll_once() == 1.0
@@ -257,42 +370,43 @@ def test_api_call_redacts_the_token_and_reads_409(tmp_path, monkeypatch):
     assert "SECRET" not in str(err.value)
 
 
-def test_one_listener_per_bot_token(tmp_path, monkeypatch):
+def test_one_poller_per_bot_token_across_state_roots(tmp_path, monkeypatch):
+    """The service makes one listener per state root; a second root, or one
+    typed by hand, still waits instead of stealing the first one's updates."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    first = tgbot.take_lock("123:SECRET", "alpha")
+    first = tgbot.take_lock("123:SECRET", tmp_path / "one")
     assert first is not None
-    assert tgbot.take_lock("123:SECRET", "beta") is None
-    assert "project alpha" in tgbot.lock_holder("123:SECRET")
-    assert tgbot.take_lock("456:OTHER", "beta") is not None  # another bot is free
+    assert tgbot.take_lock("123:SECRET", tmp_path / "two") is None
+    assert f"state root {tmp_path / 'one'}" in tgbot.lock_holder("123:SECRET")
+    assert tgbot.take_lock("456:OTHER", tmp_path / "two") is not None  # another bot is free
     first.close()
-    assert tgbot.take_lock("123:SECRET", "beta") is not None
+    assert tgbot.take_lock("123:SECRET", tmp_path / "two") is not None
 
 
-def test_credentials_are_read_as_notify_sh_reads_them(tmp_path, monkeypatch, cfg):
+def test_credentials_are_read_from_the_machines_bot(tmp_path, monkeypatch):
     env = tmp_path / "bot.env"
     env.write_text("# the swarm bot\nexport TELEGRAM_BOT_TOKEN='123:SECRET'\nTELEGRAM_CHAT_ID=4242\n")
-    monkeypatch.setenv("SWARM_TG_ENV", str(env))
-    assert tgbot.credentials(cfg) == ("123:SECRET", "4242")
+    monkeypatch.setenv("SWARM_TG_ENV", str(tmp_path / "a-shells-own.env"))  # never read
+    machine_toml(telegram={"env": str(env)})
+    assert tgbot.credentials() == ("123:SECRET", "4242")
     env.write_text("TELEGRAM_BOT_TOKEN=123:SECRET\n")
-    assert tgbot.credentials(cfg) is None
+    assert tgbot.credentials() is None
 
 
-# -- lifecycle: `swarm up` starts it, `swarm down` stops it -----------------------
+# -- lifecycle: one listener for the machine ----------------------------------------
 class FakeBotApi(http.server.BaseHTTPRequestHandler):
-    """One pending ``/usage`` from the owner and one from a stranger, then quiet."""
+    """Hands out what a test queues in :attr:`pending`, then holds a quiet poll."""
 
-    served = False
+    pending: list[dict] = []
+    lock = threading.Lock()
 
     def do_POST(self):
         result: object = True
         if self.path.endswith("/getUpdates"):
-            if not FakeBotApi.served:
-                FakeBotApi.served = True
-                result = [_msg(1, "/usage", chat="999", date=time.time()),
-                          _msg(2, "/usage", date=time.time())]
-            else:
-                time.sleep(0.5)
-                result = []
+            with FakeBotApi.lock:
+                result, FakeBotApi.pending[:] = list(FakeBotApi.pending), []
+            if not result:
+                time.sleep(0.3)
         body = json.dumps({"ok": True, "result": result}).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -301,6 +415,11 @@ class FakeBotApi(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+
+def _ask(uid: int, text: str, chat=OWNER) -> None:
+    with FakeBotApi.lock:
+        FakeBotApi.pending.append(_msg(uid, text, chat=chat, date=time.time()))
 
 
 def _wait(pred, timeout: float = 20.0) -> bool:
@@ -312,59 +431,94 @@ def _wait(pred, timeout: float = 20.0) -> bool:
     return False
 
 
-def test_up_starts_the_listener_and_down_stops_it(swarm, tmp_path):
-    FakeBotApi.served = False
+@pytest.fixture
+def bot_api(tmp_path):
+    """The fake Bot API, and the machine's bot pointed at it."""
+    FakeBotApi.pending = []
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeBotApi)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     env_file = tmp_path / "bot.env"
     env_file.write_text(f"TELEGRAM_BOT_TOKEN=123:SECRET\nTELEGRAM_CHAT_ID={OWNER}\n")
-    swarm.env.update({"SWARM_TG_COMMANDS": "1", "SWARM_TG_ENV": str(env_file),
-                      "SWARM_TG_API": f"http://127.0.0.1:{srv.server_address[1]}",
-                      "XDG_RUNTIME_DIR": str(tmp_path)})
-    pidfile = swarm.state_dir / tgbot.PIDFILE
+    machine_toml(telegram={"env": str(env_file)})
     try:
-        out = swarm.up()
-        assert "telegram bot: listening for /usage" in out.stdout
+        yield {"SWARM_TG_COMMANDS": "1", "SWARM_TG_API": f"http://127.0.0.1:{srv.server_address[1]}",
+               "XDG_RUNTIME_DIR": str(tmp_path)}
+    finally:
+        srv.shutdown()
+
+
+def _gone(pid: int) -> bool:
+    try:
+        return b"telegram-bot" not in Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return True
+
+
+def _replies(inst, start: str) -> list[str]:
+    """The listener's replies in ``inst``'s sink: the lines of each reply that
+    begins with ``start``, and the lines after it."""
+    lines = inst.tg_lines()
+    at = next((i for i, line in enumerate(lines) if line.startswith(start)), None)
+    return [] if at is None else lines[at:]
+
+
+def test_two_swarms_one_listener_that_outlives_one_down_and_stops_with_the_last(
+        two_swarms, bot_api):
+    a, b = two_swarms
+    for inst in (a, b):
+        inst.env.update(bot_api, FAKE_WORKER_PARK="1")
+    mdir = machine.state_root().resolve() / "machine"
+    pidfile = mdir / "telegram-bot.pid"
+    try:
+        out = a.up()
+        assert "telegram bot: listening for /status and /usage" in out.stdout, out.stdout
         assert _wait(pidfile.exists), "the listener never wrote its pid file"
         pid = int(pidfile.read_text())
-        # Answered once, to the owner only; the stranger got nothing.
-        answer = f"[{swarm.project.name}] No usage reading yet"  # a reply names its swarm too
-        assert _wait(lambda: any(line.startswith(answer) for line in swarm.tg_lines()))
-        time.sleep(1.0)
-        assert sum(line.startswith(answer) for line in swarm.tg_lines()) == 1
-        doctor = json.loads(swarm.cli("doctor", "--json", check=False).stdout)
+        assert f"already running (pid {pid})" in b.up().stdout  # one for the machine
+        assert a.wait(lambda: a.busy_phases() == ["P0"]) and b.wait(
+            lambda: b.busy_phases() == ["P0"])
+        b.cli("pause")
+        assert b.wait(lambda: b.state()["paused"], timeout=10)
+
+        # /status answers for both, from the one listener, to the owner only.
+        _ask(1, "/status", chat="999")
+        _ask(2, "/status")
+        assert _wait(lambda: len(_replies(a, "alpha: ")) >= 2), a.tg_lines()
+        assert _replies(a, "alpha: ")[:2] == ["alpha: running, 0 of 5 done",
+                                              "beta: paused, 0 of 5 done"]
+        assert not b.tg_lines()  # replies leave through the sender that started it
+        _ask(3, "/usage")
+        assert _wait(lambda: _replies(a, "No usage reading yet"))
+        assert sum(line.startswith("alpha: ") for line in a.tg_lines()) == 1  # answered once
+
+        status = a.cli("status").stdout
+        assert f"telegram bot: polling (pid {pid}), for every swarm on this machine" in status
+        doctor = json.loads(a.cli("doctor", "--json", check=False).stdout)
         bot = next(c for c in doctor if c["name"] == "telegram.bot")
         assert bot["status"] == "ok" and f"pid {pid}" in bot["detail"]
-        assert f"telegram bot: polling (pid {pid})" in swarm.cli("status").stdout
-        # `down`'s reaping would find it too: it carries the run's state dir.
-        cfg = _cfg_for(swarm)
-        assert pid in session_mod.session_processes(cfg)
+
+        # One swarm goes down: the listener stays for the other.
+        a.down()
+        time.sleep(0.5)
+        assert not _gone(pid) and int(pidfile.read_text()) == pid
+        _ask(4, "/status")
+        assert _wait(lambda: any(line.startswith("alpha: down, ") for line in a.tg_lines()))
     finally:
-        swarm.down()
-        srv.shutdown()
-    assert _wait(lambda: not Path(f"/proc/{pid}").exists()
-                 or b"telegram-bot" not in Path(f"/proc/{pid}/cmdline").read_bytes())
+        b.down()
+    # The last one goes down, and the listener with it.
+    assert _wait(lambda: _gone(pid))
     assert not pidfile.exists()
 
 
-def _cfg_for(swarm):
-    old = os.environ.get("SWARM_STATE_DIR")
-    os.environ["SWARM_STATE_DIR"] = str(swarm.state_dir)
-    try:
-        return load(project_dir=str(swarm.project))
-    finally:
-        if old is None:
-            os.environ.pop("SWARM_STATE_DIR", None)
-        else:
-            os.environ["SWARM_STATE_DIR"] = old
-
-
-def test_up_does_not_start_it_when_off_or_without_a_token(swarm, tmp_path):
-    swarm.env.update({"SWARM_TG_COMMANDS": "1", "SWARM_TG_ENV": str(tmp_path / "missing.env")})
+def test_up_starts_none_when_off_or_without_a_token(swarm, tmp_path):
+    machine_toml(swarm.env, telegram={"env": str(tmp_path / "missing.env")})
+    swarm.env.update({"SWARM_TG_COMMANDS": "1"})
+    mdir = swarm.state_dir.parent / "machine"
     out = swarm.up()
     try:
         assert "telegram bot: not started: no bot token/chat id" in out.stdout
-        assert not (swarm.state_dir / tgbot.PIDFILE).exists()
+        assert "missing.env" in out.stdout
+        assert not (mdir / "telegram-bot.pid").exists()
         doctor = json.loads(swarm.cli("doctor", "--json", check=False).stdout)
         bot = next(c for c in doctor if c["name"] == "telegram.bot")
         assert bot["status"] == "warn" and "missing.env" in bot["detail"]
@@ -374,6 +528,17 @@ def test_up_does_not_start_it_when_off_or_without_a_token(swarm, tmp_path):
     out = swarm.up()
     try:
         assert "telegram bot" not in out.stdout
-        assert "telegram bot: off" in swarm.cli("status").stdout
+        assert "telegram bot: off for this swarm" in swarm.cli("status").stdout
     finally:
         swarm.down()
+
+
+def test_the_listener_carries_no_swarms_environment_but_its_own_seams(root):
+    svc = tgbot.the_service(root)
+    assert svc.argv()[3:] == ["telegram-bot", "serve", "--state-root", str(root)]
+    from swarm_orchestrator import service as service_mod
+
+    env = service_mod.clean_env({"SWARM_STATE_DIR": "/x", "SWARM_SLUG": "s",
+                                 "SWARM_TG_API": "http://fake", "SWARM_TG_SINK": "/t",
+                                 "PATH": "/bin"}, keep=svc.keep)
+    assert env == {"SWARM_TG_API": "http://fake", "SWARM_TG_SINK": "/t", "PATH": "/bin"}

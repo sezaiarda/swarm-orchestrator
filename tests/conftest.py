@@ -307,9 +307,9 @@ def _web_off(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _tg_bot_off(monkeypatch):
-    """The bot's command listener is on by default in a real project; in the
-    suite it is off, so no ``swarm up`` long-polls Telegram. ``tests/test_tgbot.py``
-    turns it back on against a fake API on loopback."""
+    """The machine's bot listener answers for a real project by default; in the
+    suite no swarm starts it, so no ``swarm up`` long-polls Telegram.
+    ``tests/test_tgbot.py`` turns it back on against a fake API on loopback."""
     monkeypatch.setenv("SWARM_TG_COMMANDS", "0")
 
 
@@ -432,8 +432,8 @@ class FakeCgroups:
     the kernel in them, for :class:`swarm_orchestrator.freezer.Cgroups`.
 
     Every process that carries the test's ``SWARM_STATE_DIR`` is given a group:
-    one per ``SWARM_SESSION_ID`` (``/run/<kind>-<id>``), ``/supervisor`` and
-    ``/bot`` for the run's own processes, and ``/login`` for the
+    one per ``SWARM_SESSION_ID`` (``/run/<kind>-<id>``), ``/supervisor`` for
+    the run's own process, and ``/login`` for the
     rest, the caller of a ``swarm`` command among them (``<proc>/self``).
     :meth:`place` puts any other process where a test wants it. A write to a
     group's ``cgroup.freeze`` shows in its ``cgroup.events`` a moment later,
@@ -529,8 +529,6 @@ class FakeCgroups:
                 return "/run/" + entry.split(b"=", 1)[1].decode().replace(":", "-")
         if b" _supervise" in cmd:
             return "/supervisor"
-        if b" telegram-bot" in cmd:
-            return "/bot"
         return "/login"
 
     def _scan(self) -> None:

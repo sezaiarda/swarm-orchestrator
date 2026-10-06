@@ -189,6 +189,19 @@ class Settings:
     web_port: int = setting(
         "web", "port", 8765, "the port the machine's one board listens on", minimum=1)
 
+    # -- [telegram]: the one bot that speaks for every swarm on the machine --
+    # One bot, so one sender and one credentials file, and neither has a
+    # variable: a file one shell named for itself would have that shell's
+    # swarm send from another bot than the one the machine's listener polls.
+    telegram_notify: str = setting(
+        "telegram", "notify", "",
+        "the script that sends every swarm's messages, called with the message as"
+        " $1; \"\" = the bundled scripts/notify.sh")
+    telegram_env: str = setting(
+        "telegram", "env", "",
+        "the file the bot's token and chat id are in; \"\" = .env in the folder"
+        " above the script's")
+
 
 def keys(schema: type = Settings) -> list[Key]:
     """Every key ``schema`` declares, in order."""

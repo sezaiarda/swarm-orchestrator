@@ -19,7 +19,9 @@ writes the pid file, under a lock that :func:`stop_with_last` takes too, so two
 The process is started with no swarm's environment: every ``SWARM_*`` variable
 is left behind, because one typed for a single project (``SWARM_STATE_DIR``,
 ``SWARM_SLUG``) would otherwise decide what the helper does for all of them.
-What it needs to know goes on its command line.
+What it needs to know goes on its command line. The exception is a variable
+the service names as its own (``Service.keep``): one that is about the helper
+and not about a swarm.
 """
 
 from __future__ import annotations
@@ -51,13 +53,15 @@ class Service:
     is (``("web", "serve")``): a pid whose command line does not carry them is
     not this service, whatever the pid file says. ``answers``, when given, says
     whether one is already serving that the pid file does not know of (started
-    by hand, in the foreground).
+    by hand, in the foreground). ``keep`` names the ``SWARM_*`` variables that
+    go with the process all the same, because they are about the helper itself.
     """
 
     name: str
     args: tuple[str, ...]
     mark: tuple[str, ...]
     answers: Callable[[], bool] | None = None
+    keep: tuple[str, ...] = ()
 
     def argv(self) -> list[str]:
         """The command line. This interpreter, not whatever ``swarm`` is first
@@ -107,10 +111,11 @@ def _turn(svc: Service, mdir: Path) -> Iterator[None]:
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
-    """``env`` without any swarm's own settings: what a machine service runs in."""
+def clean_env(env: dict[str, str] | None = None, keep: tuple[str, ...] = ()) -> dict[str, str]:
+    """``env`` without any swarm's own settings: what a machine service runs in.
+    The variables in ``keep`` stay."""
     env = dict(os.environ if env is None else env)
-    return {k: v for k, v in env.items() if not k.startswith("SWARM_")}
+    return {k: v for k, v in env.items() if not k.startswith("SWARM_") or k in keep}
 
 
 def start(svc: Service, mdir: Path) -> tuple[int | None, bool]:
@@ -129,7 +134,7 @@ def start(svc: Service, mdir: Path) -> tuple[int | None, bool]:
             return None, False
         with logfile(svc, mdir).open("ab") as log:
             proc = subprocess.Popen(
-                freezer.scoped(svc.argv()), cwd=str(mdir), env=clean_env(),
+                freezer.scoped(svc.argv()), cwd=str(mdir), env=clean_env(keep=svc.keep),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
             )
         pidfile(svc, mdir).write_text(f"{proc.pid}\n", encoding="utf-8")

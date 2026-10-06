@@ -22,9 +22,11 @@ exclude = ["intake-P1","intake-P2","intake-P3","intake-P4","intake-P5",
            "I1","I2","I3","I4","I5","I6"]      # externally blocked
 
 [telegram]
-# Default: this repo's scripts/notify.sh (the swarm's own bot). Any script that
-# takes the message as $1 works.
-notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
+# The bot is the machine's: one for every swarm on it, so which script sends and
+# where its token is are `[telegram]` in ~/.config/swarm-orchestrator/machine.toml
+# (default: this repo's scripts/notify.sh and .env). What is this project's is
+# whether the bot answers /status and /usage for it.
+commands = true
 
 [tmux]
 session = "swarm"

@@ -17,8 +17,5 @@ env_marker = "SWARM_PHASE"
 ledger = "ledger.txt"
 exclude = []
 
-[telegram]
-notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
-
 [tmux]
 session = "swarm-demo"

@@ -30,6 +30,7 @@ import pytest
 from swarm_orchestrator import operator as operator_mod
 from swarm_orchestrator import opqueue
 from swarm_orchestrator import state as state_mod
+from swarm_orchestrator.cli import main as cli_main
 from swarm_orchestrator.config import load
 from swarm_orchestrator.logutil import Log
 
@@ -293,14 +294,25 @@ def test_operator_hold_refuses_what_it_cannot_grant(cfg, log, monkeypatch):
     assert cli(cfg, "operator-hold", JOB, "90m", WHY).returncode == 1  # no live job
 
 
-def test_status_shows_a_declared_wait_and_until_when(cfg, log, monkeypatch):
+@pytest.mark.parametrize("clock, until", [
+    ((2026, 10, 6, 12, 0), "13:30"),  # it ends today: the time alone
+    ((2026, 10, 6, 23, 15), "2026-10-07 00:45"),  # past midnight: the day is said too
+])
+def test_status_shows_a_declared_wait_and_until_when(cfg, log, monkeypatch, capsys, clock, until):
+    """The clock is pinned: 90 minutes from now is another day late in the
+    evening, and the line then carries the date (``opqueue.hhmm``)."""
+    at = time.mktime((*clock, 0, 0, 0, -1))
+    monkeypatch.setattr(time, "time", lambda: at)
+    project = ["--project-dir", str(cfg.project_dir)]
     running(cfg, log)
     monkeypatch.setenv(operator_mod.JOB_ENV, JOB)
-    assert cli(cfg, "operator-hold", JOB, "90m", WHY).returncode == 0
-    until = time.strftime("%H:%M", time.localtime(opqueue.load(cfg, JOB).hold_until))
+    assert cli_main([*project, "operator-hold", JOB, "90m", WHY]) == 0
+    assert opqueue.load(cfg, JOB).hold_until == pytest.approx(at + minutes(90))
+    capsys.readouterr()
 
-    out = cli(cfg, "status").stdout
+    assert cli_main([*project, "status"]) == 0
 
+    out = capsys.readouterr().out
     assert f"current: {JOB} [running, at long work until {until}: {WHY}]" in out
 
 

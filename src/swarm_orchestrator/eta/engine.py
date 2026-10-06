@@ -534,7 +534,7 @@ _SHARED_LOCK = threading.Lock()
 def shared_engine(cfg, runs: int = LIVE_RUNS) -> "Engine":
     """The one :class:`Engine` of this process for ``cfg``'s state dir.
 
-    The dashboard and the web board it serves each hold a :class:`~tui.dash.Dash`;
+    Two readers of one run in one process each hold a :class:`~tui.dash.Dash`;
     with an engine each, both remade the same forecast, and while one had read a
     state the other had not yet, each found the other's cached forecast stale."""
     key = str(cfg.state_dir)

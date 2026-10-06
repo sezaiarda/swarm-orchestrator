@@ -11,7 +11,7 @@ launches nothing, reaps nothing, pings nothing and times nothing out
 (:func:`plan`): every process that carries this run's ``SWARM_STATE_DIR``, plus
 the trees under the tmux session's panes, each mapped to its group through
 ``/proc/<pid>/cgroup``. Never frozen: the groups of the supervisor, the Telegram
-listener, a headless web board, the caller and the tmux server. One of those
+listener, the web board, the caller and the tmux server. One of those
 that also holds sessions is reported ``shared``: they stay awake with it. So
 that this does not happen by accident, the swarm starts its own long-lived
 processes in a scope of their own where it can (:func:`scoped`).
@@ -496,10 +496,15 @@ def _roles(cfg: Config, st: state_mod.State, server: int | None) -> dict[str, in
     from . import tgbot
     from .web import lifecycle as web_lifecycle
 
+    try:
+        board = web_lifecycle.running(web_lifecycle.place(cfg.state_dir))
+    except ValueError:  # a machine.toml that does not read: no board to find
+        board = None
     return {
         "supervisor": restart_mod.live_supervisor(cfg, st),
         "bot": tgbot.running(cfg),
-        "board": web_lifecycle.running(cfg),
+        # The machine's, not this run's: it shows the other swarms too.
+        "board": board,
         "tmux": server,
         "caller": "self",
     }

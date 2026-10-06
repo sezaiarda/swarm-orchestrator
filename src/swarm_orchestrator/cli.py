@@ -54,6 +54,7 @@ from . import landing as landing_mod
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import launch as launch_mod
+from . import service as service_mod
 from . import session as session_mod
 from . import state as state_mod
 from . import statuses
@@ -252,42 +253,33 @@ def _attach(cfg: Config) -> None:
         print(f"could not attach to tmux session {cfg.session!r}: {exc}", file=sys.stderr)
 
 
-#: How long ``up`` waits for the dashboard to boot and bind the board it serves.
-WEB_HOSTED_WAIT_S = 20.0
-
-
-def web_hosted(cfg: Config) -> bool:
-    """Whether the dashboard serves the web board (``up`` then starts none): only
-    under tmux, where ``up`` opens the dashboard in window 0."""
-    return cfg.driver == "tmux" and bool(cfg.tui_autostart)
-
-
-def _report_web_board(cfg: Config, hosted: bool = False) -> None:
-    """After ``up`` starts the board (in the dashboard, or a detached process),
-    say whether it actually came up — port-taken and crash both used to go
-    silent: the pane died, ``swarm up`` printed the URLs anyway, and nothing but
-    a since-corrected ``status``/``doctor`` connect check ever disagreed."""
-    state, detail = web_lifecycle.wait_probe(cfg, WEB_HOSTED_WAIT_S if hosted else 5.0)
-    if state == web_lifecycle.OURS:
-        # ``detail``: the dashboard holds the port and has not answered yet.
-        print(f"web board: {' '.join(web_lifecycle.urls(cfg))}"
-              + (f" ({detail})" if detail else ""))
+def _report_web_board(cfg: Config) -> None:
+    """``up``'s part in the machine's one board: start it unless it is already
+    answering (another swarm's ``up`` started it, or ``swarm web`` did), and say
+    where it is, or why it is not there. A port something else holds and a
+    board that never came up both used to go silent."""
+    try:
+        at = web_lifecycle.place(cfg.state_dir)
+        found = web_lifecycle.ensure(at)
+    except (machine_mod.SettingsError, OSError) as exc:
+        print(f"web board: not started ({exc})", file=sys.stderr)
         return
-    if state == web_lifecycle.TAKEN:
-        who = f" ({detail})" if detail else ""
-        reason = f"port :{cfg.web_port} is held by another program{who}"
+    if found.state == web_lifecycle.OURS:
+        base = web_lifecycle.url(at)
+        print(f"web board: {base}")
+        print(f"  this swarm: {web_lifecycle.link(base, web_lifecycle.slug_of(cfg))}")
+        return
+    if found.state == web_lifecycle.TAKEN:
+        reason, hint = web_lifecycle.taken_line(at, found), found.fix
     else:
-        where = ("the dashboard's status bar says why" if hosted
-                 else "check <state>/logs/web.log")
-        reason = f"nothing answered on :{cfg.web_port} — {where}"
-    hint = "set [web].port in .swarm.toml to a free port and restart"
+        log = service_mod.logfile(web_lifecycle.the_service(at), at.mdir)
+        reason, hint = f"nothing answered on :{at.port}", f"its log is {log}"
     print(f"web board: FAILED to start — {reason}", file=sys.stderr)
     print(f"  fix: {hint}", file=sys.stderr)
     telegram.log(
         cfg,
         f"the swarm is running, but the web board did not start ({reason}). The TUI"
-        " still works. To fix it, give the board a free port in .swarm.toml and"
-        " restart the swarm.",
+        f" still works. To fix it: {hint}.",
         why="printed by `swarm up`; the board is not the run",
         kind="web-board",
         source="cli._report_web_board",
@@ -402,12 +394,7 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         print(f"console: tmux window {console_mod.WINDOW} — your own Claude session"
               " (o in the dashboard, or `swarm console`)")
     if cfg.web_enabled:
-        # The dashboard serves the board (tui.webboard); with no dashboard — the
-        # headless driver, or `[tui] autostart` off — it gets its own process.
-        hosted = web_hosted(cfg)
-        if not hosted:
-            web_lifecycle.start_detached(cfg)
-        _report_web_board(cfg, hosted)
+        _report_web_board(cfg)
     if cfg.telegram_commands:
         # A side helper, never part of the run: whatever happens to it, `up` goes on.
         _, what = tgbot.start_detached(cfg)
@@ -417,18 +404,48 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
     return 0
 
 
-def cmd_web(cfg: Config, host: str | None, port: int | None, pidfile: str | None,
-            explicit: str | None = None) -> int:
-    """Serve the board. Deferred import: `swarm done` must not pay for http.server."""
-    from .web import server as web_server
+def cmd_web(action: str, host: str | None = None, port: int | None = None,
+            state_root: str | None = None) -> int:
+    """``swarm web``: the machine's one board, by hand. A machine command: it
+    names no project, and what it starts shows every swarm."""
+    try:
+        at = web_lifecycle.place()
+    except machine_mod.SettingsError as exc:
+        print(f"swarm web: {exc}", file=sys.stderr)
+        return 2
+    if action == "serve":
+        # Deferred import: `swarm done` must not pay for http.server.
+        from .web import server as web_server
 
-    return web_server.serve(
-        cfg,
-        cfg.web_host if host is None else host,
-        cfg.web_port if port is None else port,
-        pidfile=pidfile,
-        explicit_config=explicit,
-    )
+        return web_server.serve(
+            Path(state_root).expanduser().resolve() if state_root else at.root,
+            at.host if host is None else host, at.port if port is None else port)
+    if action == "stop":
+        print("web board: stopped" if web_lifecycle.stop(at) else "web board: was not running")
+        return 0
+    if action == "start":
+        try:
+            found = web_lifecycle.ensure(at)
+        except OSError as exc:
+            print(f"swarm web: cannot start the board: {exc}", file=sys.stderr)
+            return 1
+        if found.state == web_lifecycle.CLOSED:
+            log = service_mod.logfile(web_lifecycle.the_service(at), at.mdir)
+            print(f"swarm web: the board did not come up on :{at.port}; its log is {log}",
+                  file=sys.stderr)
+            return 1
+    else:
+        found = web_lifecycle.probe(at)
+    print(web_lifecycle.machine_line(at))
+    if found.state == web_lifecycle.OURS:
+        base = web_lifecycle.url(at)
+        from .web import hub as hub_mod
+
+        shown = hub_mod.registry(at.root)
+        width = max((len(sw.name) for sw in shown), default=0)
+        for sw in shown:
+            print(f"  {sw.name.ljust(width)}  {web_lifecycle.link(base, sw.slug)}")
+    return 0 if found.state == web_lifecycle.OURS or action == "status" else 1
 
 
 def cmd_telegram_bot(cfg: Config, pidfile: str | None) -> int:
@@ -488,9 +505,12 @@ def cmd_down(cfg: Config) -> int:
     sessions = session_mod.session_processes(cfg, roots)
     if owned:
         session_mod.teardown(cfg)
-    # After the teardown: under tmux the board died with its window, and this
-    # only clears the pid file; under the headless driver it is what stops it.
-    web_lifecycle.stop(cfg)
+    # The board is the machine's: it stops with the last swarm that is up, and
+    # this swarm's supervisor is gone by now.
+    try:
+        web_lifecycle.stop_with_last(web_lifecycle.place(cfg.state_dir), cfg.state_dir)
+    except machine_mod.SettingsError as exc:
+        print(f"swarm down: the web board was left as it is ({exc})", file=sys.stderr)
     tgbot.stop(cfg)
     ended, left = session_mod.end_processes(cfg, sessions)
     # After the sessions end, so their work is final. Printed only once the run
@@ -2869,10 +2889,14 @@ def cmd_resources(cfg: Config, as_json: bool = False, hours: float = 24.0,
 def cmd_ls(as_json: bool = False) -> int:
     """Every swarm on this machine (:mod:`machine`), whatever folder this is."""
     found = machine_mod.swarms()
+    board = web_lifecycle.machine_line()
     if as_json:
-        print(json.dumps(machine_mod.listing(found), indent=2, sort_keys=True))
+        print(json.dumps({**machine_mod.listing(found), "web": board}, indent=2,
+                         sort_keys=True))
     else:
         print(machine_mod.render(found))
+        if found:
+            print(board)
     return 0
 
 
@@ -3247,11 +3271,23 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("tui", help="the always-on dashboard (window 0)").set_defaults(
         func=lambda cfg, a: cmd_tui(cfg))
 
-    wbp = sub.add_parser("web", help="the read-only Kanban board, reached over Tailscale")
-    wbp.add_argument("--host", help="address to bind (default [web] host, 0.0.0.0)")
-    wbp.add_argument("--port", type=int, help="port (default [web] port, 8765; 0 = any)")
-    wbp.add_argument("--pidfile", help=argparse.SUPPRESS)  # written only when `up` starts it
-    wbp.set_defaults(func=lambda cfg, a: cmd_web(cfg, a.host, a.port, a.pidfile, a.config))
+    # About the machine, not a project: one board shows every swarm.
+    wbp = sub.add_parser(
+        "web", help="the machine's read-only web board of every swarm, reached over Tailscale",
+        description="One board for the machine: an overview of every swarm, and a page per"
+                    " swarm. `swarm up` starts it when it is not running and the `swarm down`"
+                    " of the last swarm that is up stops it; this command does the same by"
+                    " hand. Where it listens is [web] host and port in machine.toml.")
+    wbp.add_argument(
+        "action", nargs="?", default="start", choices=("start", "stop", "status", "serve"),
+        help="start: start it in the background unless it is running, and print its address"
+             " (the default). stop: stop it. status: say where it is and whether it answers."
+             " serve: run it in the foreground (what start runs)")
+    wbp.add_argument("--host", help="serve: the address to bind (default [web] host)")
+    wbp.add_argument("--port", type=int, help="serve: the port (default [web] port)")
+    wbp.add_argument("--state-root", help=argparse.SUPPRESS)  # serve: whose swarms to show
+    wbp.set_defaults(func=lambda a: cmd_web(a.action, a.host, a.port, a.state_root),
+                     machine=True)
     tgp = sub.add_parser("telegram-bot",
                          help="answer /usage and /help from the owner's Telegram chat (foreground)")
     tgp.add_argument("--pidfile", help=argparse.SUPPRESS)

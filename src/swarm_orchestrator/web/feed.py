@@ -14,9 +14,10 @@ What is watched, and how often:
   log, ``done/``, ``notes/``, ``recaps/``, the operator queue, the run record,
   ``meters/`` and ``limits.jsonl``, the ledger, the Overseer's pass records,
   ``keep/`` (what ``swarm keep`` left running).
-* Here: ``history/``, ``.swarm.toml`` (the exclude
-  list lives there — it is re-loaded like ``swarm reload`` would) and the last
-  captured turn of each busy worker.
+* Here: ``history/``, ``config.json`` (the settings the swarm's supervisor
+  runs on, the exclude list among them: the board shows what the swarm does,
+  so an edit of ``.swarm.toml`` shows once the swarm has taken it) and the
+  last captured turn of each busy worker.
 
 Meters and turns move every few seconds while a worker runs; they only refresh
 context % and "last activity", so they rebuild at most every
@@ -34,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-from .. import config as config_mod
+from .. import machine
 from .. import recap as recap_mod
 from ..tui.dash import Dash
 from ..tui.data import read_state
@@ -42,12 +43,9 @@ from . import board as board_mod
 from . import campaigns, detail, graph as graph_mod, resview, rows as rows_mod, usagechart
 from .redact import deep
 
-#: Seconds between polls of the run's files when the board owns its dash
-#: (``swarm web``). Hosted by the TUI it polls nothing: the TUI's dash does.
+#: Seconds between polls of the run's files.
 POLL_S = 2.5
-#: Hosted, a pass reads only what the TUI's dash banked, so it can be quick.
-SHARED_POLL_S = 1.0
-#: A standalone board stops polling this long after a client last asked for anything.
+#: A feed stops polling this long after a client last asked for anything.
 IDLE_S = 60.0
 #: Floor between rebuilds driven only by meters/turns (context %, last activity).
 SLOW_S = 15.0
@@ -63,12 +61,9 @@ _FAST = {"state", "log", "notifications", "done", "recaps", "notes", "operator",
 class Feed:
     """The current board, its version, and a condition clients wait on."""
 
-    def __init__(self, cfg, explicit_config: str | None = None, dash: Dash | None = None) -> None:
+    def __init__(self, cfg) -> None:
         self.cfg = cfg
-        self._explicit = explicit_config
-        #: Hosted by the TUI: ``dash`` is the TUI's own, polled by it, only read here.
-        self.shared = dash is not None
-        self.dash = dash if dash is not None else Dash(cfg)
+        self.dash = Dash(cfg)
         self._wake = threading.Event()
         self._touched = time.monotonic()
         self.version = 0
@@ -109,21 +104,17 @@ class Feed:
         return True
 
     def _reload_config(self) -> None:
-        """Adopt an edited ``.swarm.toml`` (the exclude list, the ledger path).
-
-        The state dir never moves under a running board — it is what the board
-        was started against — so a load that would change it is ignored, as is
-        one that fails: the last good config keeps serving.
+        """Adopt the settings the swarm's supervisor last recorded (the name, the
+        exclude list, the ledger path), bound to this feed's state dir whatever
+        the environment says (:func:`machine.swarm_config`). A record that does
+        not read, or whose project is gone, changes nothing: the last good
+        config keeps serving.
         """
-        try:
-            new = config_mod.load(explicit=self._explicit, project_dir=str(self.cfg.project_dir))
-        except (ValueError, OSError):
-            return
-        if new.state_dir != self.cfg.state_dir:
+        new = machine.swarm_config(self.cfg.state_dir)
+        if new is None:
             return
         self.cfg = new
-        if not self.shared:
-            self.dash.cfg = new
+        self.dash.cfg = new
 
     def _load_ledger(self) -> None:
         path = Path(self.cfg.project_dir) / self.cfg.ledger
@@ -155,10 +146,10 @@ class Feed:
         """One poll. Returns whether the board's version moved."""
         now = time.time() if now is None else now
         fast = False
-        if self._moved("config", Path(self.cfg.project_dir) / ".swarm.toml") and self._built_at:
+        if self._moved("config", Path(self.cfg.state_dir) / "config.json") and self._built_at:
             self._reload_config()
             fast = True
-        changed = self.dash.take_changes() if self.shared else self.dash.poll()
+        changed = self.dash.poll()
         fast |= bool(changed & _FAST)
         if "state" in changed or self._state is None:
             self._state = read_state(self.cfg)
@@ -264,6 +255,10 @@ class Feed:
         return self._view(("usage",), stamp,
                           lambda: usagechart.payload(self.cfg, self.dash, board, now))
 
+    def rows(self) -> dict:
+        """The ledger's rows by id, as last read."""
+        return self._rows
+
     def search(self, query: str, limit: int = 500) -> list[str]:
         """Ids of rows whose id or full ledger text holds every word of ``query``.
 
@@ -295,17 +290,12 @@ class Feed:
         self._wake.set()
 
     def idle(self) -> bool:
-        """Whether a standalone feed has gone quiet: nobody asked for :data:`IDLE_S`."""
-        return not self.shared and time.monotonic() - self._touched > IDLE_S
+        """Whether the feed has gone quiet: nobody asked for :data:`IDLE_S`."""
+        return time.monotonic() - self._touched > IDLE_S
 
-    def run(self, poll_s: float | None = None) -> None:
+    def run(self, poll_s: float = POLL_S) -> None:
         """The watcher loop: poll until :attr:`stopping` is set. Never raises.
-
-        Standalone, it sleeps once idle and wakes on the next :meth:`touch`;
-        hosted, each pass only reads what the TUI's dash banked.
-        """
-        if poll_s is None:
-            poll_s = SHARED_POLL_S if self.shared else POLL_S
+        It sleeps once idle and wakes on the next :meth:`touch`."""
         while not self.stopping.is_set():
             if self.idle():
                 self._wake.wait()

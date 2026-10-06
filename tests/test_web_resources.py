@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import json
 import os
-import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,7 +17,7 @@ from swarm_orchestrator.resources import capacity, store, view
 from swarm_orchestrator.web import reshist, resview
 from swarm_orchestrator.web import server as web_server
 
-from test_web_board import make_run
+from test_web_board import make_run, serve
 
 #: A minute boundary, so buckets and test offsets line up.
 NOW = 1_800_000_000.0 - 1_800_000_000.0 % 7200 + 7200
@@ -303,12 +302,34 @@ def test_the_gate_view_turns_waits_into_times(cfg, monkeypatch):
                    "starts_in_s": 110.0, "new_field": 1}],
         "recent": []})
     got = resview.gate(cfg)
-    assert got["slots"] == [{"slot": 0, "busy": True, "unknown": False, "id": "b9",
-                             "phase": "al-W2", "cmd": "cargo test", "since": NOW - 90,
+    own = {"swarm": None, "swarm_name": None, "mine": True, "frozen": False}
+    assert got["slots"] == [{"slot": 0, "busy": True, "unknown": False, "gc": False, "id": "b9",
+                             "phase": "al-W2", **own, "cmd": "cargo test", "since": NOW - 90,
                              "usual_s": 200.0}]
-    assert got["queue"] == [{"id": "q1", "phase": "al-W3", "cmd": "bash ~/gate.sh",
+    assert got["queue"] == [{"id": "q1", "phase": "al-W3", **own, "cmd": "bash ~/gate.sh",
                              "queued_at": NOW - 120, "usual_s": None, "starts_at": NOW + 110,
                              "passed": 2, "stale": False}]
+
+
+def test_the_gate_view_says_whose_each_build_is(cfg, monkeypatch):
+    """One gate for the machine: its holders and waiters are every swarm's, and
+    each says whose it is and whether its swarm stands frozen."""
+    machine_toml(build={"max_concurrent": 2})
+    monkeypatch.setattr(resview.buildstatus, "snapshot", lambda cfg, n_recent=10: {
+        "max_concurrent": 2, "overtake": 2, "short_s": 60,
+        "slots": [{"slot": 0, "busy": True, "id": "b1", "phase": "al-W2", "argv": "cargo test",
+                   "swarm": "alpha-1", "swarm_name": "alpha", "mine": True, "running_s": 5.0},
+                  {"slot": 1, "busy": True, "id": "b2", "phase": "W3", "argv": "make",
+                   "swarm": "glasheim-9", "swarm_name": "glasheim", "mine": False,
+                   "frozen": True, "running_s": 9.0}],
+        "queue": [{"id": "q1", "phase": "W4", "argv": "make", "swarm": "glasheim-9",
+                   "swarm_name": "glasheim", "mine": False, "waiting_s": 3.0}],
+        "recent": []})
+    got = resview.gate(cfg)
+    assert [(h["swarm"], h["swarm_name"], h["mine"], h["frozen"]) for h in got["slots"]] == [
+        ("alpha-1", "alpha", True, False), ("glasheim-9", "glasheim", False, True)]
+    assert [(t["swarm"], t["swarm_name"], t["mine"]) for t in got["queue"]] == [
+        ("glasheim-9", "glasheim", False)]
 
 
 def test_a_gate_that_cannot_be_read_is_said_not_raised(cfg, monkeypatch):
@@ -374,6 +395,20 @@ def test_a_build_row_keeps_what_it_knows_and_tolerates_the_rest(cfg):
     assert bare["yielded_s"] is None and bare["phase"] is None and bare["ended"] is None
     assert bare["cmd"] == "" and bare["psi_memf"] is None
     assert resview.table(rows, now=NOW)["rows"][-1]["id"] == "bare"
+    # A record from before builds said whose they are is the reader's own.
+    assert (bare["swarm"], bare["swarm_name"], bare["mine"]) == (None, None, True)
+
+
+def test_a_neighbours_build_is_named_with_its_swarm(cfg):
+    """``builds.jsonl`` and the snapshot hold every swarm's builds. The table
+    row says whose each is, and the history names a neighbour's with its swarm
+    in front, as ``swarm build --status`` does."""
+    theirs = {"swarm": "glasheim-9", "swarm_name": "glasheim", "mine": False}
+    rows = rows_of(cfg, [build(1, NOW - 100), build(2, NOW - 50, **theirs)])
+    assert [(r["swarm_name"], r["mine"]) for r in rows] == [(None, True), ("glasheim", False)]
+    win = json.loads(resview.Resources(cfg.state_dir).window(cfg, "1h", NOW)[0])
+    named = [p for s in win["spans"] for p in s["phases"]]
+    assert len(named) == 2 and sum(p.startswith("[glasheim] ") for p in named) == 1
 
 
 def test_the_builds_are_read_once_then_only_as_they_grow(cfg):
@@ -482,8 +517,7 @@ def srv(tmp_path, monkeypatch):
     cfg = make_run(tmp_path, monkeypatch)
     import time
     seed(cfg, time.time())
-    s = web_server.make_server(cfg, "127.0.0.1", 0, poll_s=0.05)
-    threading.Thread(target=s.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    s = serve(cfg)
     try:
         yield s
     finally:
@@ -491,7 +525,8 @@ def srv(tmp_path, monkeypatch):
 
 
 def _get(srv, path: str, headers: dict | None = None):
-    req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}",
+    # Every path is this swarm's: its page and its data are under /s/<slug>.
+    req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{srv.at}{path}",
                                  headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -546,5 +581,5 @@ def test_nothing_a_resources_endpoint_serves_names_a_path_or_a_credential(srv):
 
 def test_the_page_has_a_resources_tab(srv):
     html = _get(srv, "/")[2].decode()
-    assert '["resources", "Resources"' in html and "/api/resources/history" in html
+    assert '["resources", "Resources"' in html and '"api/resources/history' in html
     assert 'data-tab="resources"' in html      # the overview's host line links to it

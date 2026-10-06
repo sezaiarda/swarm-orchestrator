@@ -159,6 +159,48 @@ def test_the_machine_file_holds_the_build_gates_limits_and_none_has_a_variable(t
         machine.settings(_file(tmp_path, "[build]\njobs = 4\n"))  # that one is a project's
 
 
+def test_the_machine_file_says_which_tables_it_has(tmp_path):
+    assert {k.table for k in machine.keys()} >= {"web"}
+    with pytest.raises(SettingsError, match=r"\[nope\] is not a table of machine.toml"
+                                            r" \(it has: .*\[web\]"):
+        machine.settings(_file(tmp_path, "[nope]\nx = 1\n"))
+
+
+def test_the_board_listens_where_the_machine_file_says_and_no_variable_moves_it(
+        tmp_path, monkeypatch):
+    """One board for the machine, so one address: a variable would let one shell
+    look for it where it is not."""
+    web = {k.key: k for k in machine.keys() if k.table == "web"}
+    assert set(web) == {"host", "port"} and all(k.env is None for k in web.values())
+    monkeypatch.setenv("SWARM_WEB_PORT", "9000")
+    monkeypatch.setenv("SWARM_WEB_HOST", "10.0.0.9")
+    conf = machine.settings(tmp_path / "none.toml")
+    assert (conf.web_host, conf.web_port) == ("0.0.0.0", 8765)
+    conf = machine.settings(_file(tmp_path, '[web]\nhost = "127.0.0.1"\nport = 8780\n'))
+    assert (conf.web_host, conf.web_port) == ("127.0.0.1", 8780)
+    with pytest.raises(SettingsError, match=r"\[web\].port must be at least 1"):
+        machine.settings(_file(tmp_path, "[web]\nport = 0\n"))
+
+
+@pytest.mark.parametrize("key, value", [("port", "8780"), ("host", '"127.0.0.1"')])
+def test_a_project_file_that_still_says_where_the_board_listens_is_refused(
+        tmp_path, key, value, capsys):
+    """The key moved to the machine file. Dropped in silence, the owner would
+    believe a port is in force that no board listens on."""
+    (tmp_path / ".swarm.toml").write_text(f"[web]\nenabled = true\n{key} = {value}\n")
+    with pytest.raises(ValueError) as exc:
+        load(project_dir=str(tmp_path))
+    said = str(exc.value)
+    assert f"[web].{key}" in said and str(tmp_path / ".swarm.toml") in said
+    assert str(machine.settings_path()) in said and "machine setting" in said
+    # Every command of that project says so and does nothing.
+    assert cli_main(["--project-dir", str(tmp_path), "status"]) == 2
+    assert f"[web].{key}" in capsys.readouterr().err
+    # What stays a project's is whether it is on the board at all.
+    (tmp_path / ".swarm.toml").write_text("[web]\nenabled = false\n")
+    assert load(project_dir=str(tmp_path)).web_enabled is False
+
+
 def _doc_rows() -> dict[tuple[str, str], list[str]]:
     """``{(table, key): cells}`` from the machine section of ``docs/config.md``:
     its ``### `[table]` `` headings and the key rows under each."""
@@ -341,7 +383,8 @@ def test_ls_lists_every_swarm_from_any_folder(two_swarms, tmp_path):
     _up(b)
     r = _ls(a, tmp_path)
     assert r.returncode == 0 and r.stderr == ""
-    head, *rows = r.stdout.splitlines()
+    head, *rows, board = r.stdout.splitlines()
+    assert board.startswith("web board: ")  # the one address, after the swarms
     assert head.split() == ["SWARM", "STATUS", "DONE", "RUNNING", "OPEN", "NEEDS", "YOU",
                             "SESSION", "PROJECT"]
     assert [ln.split() for ln in rows] == [
@@ -357,6 +400,7 @@ def test_ls_json_is_the_registry(two_swarms, tmp_path):
     assert data["state_root"] == str(machine.state_root())
     assert data["machine_dir"] == str(machine.directory())
     assert data["settings"] == str(machine.settings_path())
+    assert data["web"].startswith("web board: ")
     (one,) = data["swarms"]
     assert one == machine.look(a.state_dir).to_dict()
     assert (one["name"], one["status"], one["running"], one["stale"], one["needs_owner"]) \
@@ -373,7 +417,7 @@ def test_ls_from_a_session_of_one_swarm_shows_the_others_too(two_swarms, monkeyp
     _up(b)
     env = {**a.env, "SWARM_STATE_DIR": str(a.state_dir), "SWARM_PROJECT": str(a.project)}
     r = _ls(a, b.project, env=env)
-    assert [ln.split()[0] for ln in r.stdout.splitlines()[1:]] == ["alpha", "beta"]
+    assert [ln.split()[0] for ln in r.stdout.splitlines()[1:-1]] == ["alpha", "beta"]
     monkeypatch.setenv("SWARM_STATE_DIR", str(a.state_dir))
     cfg = machine.swarm_config(b.state_dir)
     assert cfg.state_dir == b.state_dir and cfg.project_dir == b.project

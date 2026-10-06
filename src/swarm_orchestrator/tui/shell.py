@@ -108,7 +108,7 @@ class StatusBar(Static):
             state = state or "-attention"
 
         # 6. Where the web board is — last, so it is the first thing a narrow
-        # terminal loses. It is served from this process (tui.webboard).
+        # terminal loses.
         board = self._board()
         if board:
             parts.append(board)
@@ -117,11 +117,8 @@ class StatusBar(Static):
         self.update("  ".join(parts))
 
     def _board(self) -> str:
-        """Where the web board is, painted; "" when the dashboard serves none."""
-        board = getattr(self.app, "web_board", None)
-        if board is None:
-            return ""
-        text, tone = board.line()
+        """Where the web board is, painted; "" when this swarm is not on it."""
+        text, tone = getattr(self.app, "board_line", ("", ""))
         return f"[{COLOR[tone]}]{text}[/]" if text else ""
 
 

@@ -178,6 +178,17 @@ class Settings:
          "buildah", "nerdctl", "buildctl"],
         "commands no build runs beside, under pair = \"distinct-repo\"")
 
+    # -- [web]: the one board that shows every swarm on the machine ----------
+    # One address and one port, whichever swarm asks, so neither has a
+    # variable: a port one shell could set for itself would send that shell's
+    # commands looking for the board where it is not. Open to the network by
+    # the owner's choice: it serves computed JSON only and redacts anything
+    # secret-shaped.
+    web_host: str = setting(
+        "web", "host", "0.0.0.0", "the address the board binds; 0.0.0.0 is every interface")
+    web_port: int = setting(
+        "web", "port", 8765, "the port the machine's one board listens on", minimum=1)
+
 
 def keys(schema: type = Settings) -> list[Key]:
     """Every key ``schema`` declares, in order."""

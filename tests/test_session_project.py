@@ -214,6 +214,30 @@ def test_a_project_config_that_does_not_load_runs_on_the_recorded_one_and_says_s
     assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
 
 
+def test_a_key_that_moved_to_the_machine_file_does_not_stop_a_running_swarms_sessions(
+        ws, monkeypatch, capsys):
+    """A swarm started before `[web] port` moved still has it in its file, and
+    in what its supervisor recorded. The owner's commands refuse the file until
+    it is edited; a worker's `swarm` commands go on, on the recorded settings."""
+    cfg, mirror = ws
+    _supervised(cfg)
+    record = cfg.state_dir / "config.json"
+    record.write_text(json.dumps({**json.loads(record.read_text()),
+                                  "web_host": "0.0.0.0", "web_port": 8780}))
+    toml = cfg.project_dir / ".swarm.toml"
+    toml.write_text(toml.read_text() + "\n[web]\nport = 8780\n")
+    monkeypatch.chdir(mirror)
+    assert cli_main(["widen", "hold-W1", "alpha/src/new.py"]) == 0
+    err = capsys.readouterr().err
+    assert "does not load" in err and "[web].port" in err and "machine.toml" in err
+    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
+    # Outside a session there is nothing to fall back on, and no reason to.
+    monkeypatch.delenv("SWARM_PROJECT")
+    monkeypatch.delenv("SWARM_STATE_DIR")
+    assert cli_main(["--project-dir", str(cfg.project_dir), "status"]) == 2
+    assert "[web].port" in capsys.readouterr().err
+
+
 def test_a_project_config_that_does_not_load_with_nothing_recorded_is_an_error(
         ws, monkeypatch, capsys):
     cfg, mirror = ws

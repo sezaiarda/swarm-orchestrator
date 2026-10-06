@@ -105,6 +105,28 @@ except Exception as exc:  # noqa: BLE001
     _DRAWER_ERR = exc
 
 
+def board_standing(cfg) -> tuple[tuple[str, str], str]:
+    """``((text, state token), link)``: the status bar's last words on the
+    machine's web board, and this swarm's page on it ("" unless it answers).
+
+    Blocking (a probe, the Tailscale lookup): call it from a worker thread.
+    """
+    from ..web import lifecycle
+    from .theme import WARN
+
+    try:
+        at = lifecycle.place(cfg.state_dir)
+    except ValueError as exc:  # a machine.toml that does not read
+        return (f"board: {exc}", WARN), ""
+    found = lifecycle.probe(at)
+    if found.state == lifecycle.OURS:
+        link = lifecycle.link(lifecycle.url(at), lifecycle.slug_of(cfg))
+        return (f"board {link}", MUTED), link
+    if found.state == lifecycle.TAKEN:
+        return (f"board: {lifecycle.taken_line(at, found)}", WARN), ""
+    return ("board: not running (`swarm web` starts it)", MUTED), ""
+
+
 class HelpScreen(ModalScreen[None]):
     """Every key, on one screen. Keyboard-first only works if the keys are findable.
 
@@ -247,13 +269,13 @@ class SwarmApp(App):
         self.dash = Dash(cfg)
         self._busy_last = False
         self._guide_n: int | None = None
-        #: The web board, served from this process (:mod:`.webboard`); ``None``
-        #: when ``[web] enabled`` is off, or ``board=False``.
-        self.web_board = None
-        if (getattr(cfg, "web_enabled", False) if board is None else board):
-            from .webboard import WebBoard
-
-            self.web_board = WebBoard(cfg, dash=self.dash)
+        #: Whether the status bar says where the machine's web board is: when
+        #: ``[web] enabled`` is on for this swarm, unless ``board`` says otherwise.
+        self.shows_board = bool(getattr(cfg, "web_enabled", False) if board is None else board)
+        #: ``(text, state token)`` for the status bar, found by :meth:`_board_tick`.
+        self.board_line: tuple[str, str] = ("", "")
+        #: This swarm's page on the board, once the probe thread has found it.
+        self.board_link = ""
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="statusbar")
@@ -291,7 +313,7 @@ class SwarmApp(App):
         self.set_interval(TICK_S, self._tick)
         self.set_interval(PROBE_S, self._probe)
         self._probe()
-        if self.web_board is not None:
+        if self.shows_board:
             self.set_interval(PROBE_S, self._board_tick)
             self._board_tick()
 
@@ -319,23 +341,16 @@ class SwarmApp(App):
 
     @work(thread=True, exclusive=True, group="board")
     def _board_tick(self) -> None:
-        """Serve the web board if nothing else does (a probe, maybe a bind: a thread)."""
-        board = self.web_board
-        if board is None:
-            return
-        before = (board.state, board.url, board.detail)
+        """Find where the machine's web board is and whether it answers (a probe
+        and the Tailscale lookup: a thread). The dashboard does not serve it."""
         try:
-            board.ensure()
+            line, link = board_standing(self.cfg)
         except Exception as exc:  # noqa: BLE001 - the board must never take the cockpit down
             self.log(f"web board: {exc}")
             return
-        if (board.state, board.url, board.detail) != before:
+        if (line, link) != (self.board_line, self.board_link):
+            self.board_line, self.board_link = line, link
             self.call_from_thread(self.refresh_all)
-
-    def stop_board(self) -> None:
-        """Stop serving the web board; it goes with the dashboard."""
-        if self.web_board is not None:
-            self.web_board.stop()
 
     def refresh_all(self) -> None:
         """Repaint the status bar and the one tab that is actually on screen.
@@ -560,18 +575,18 @@ class SwarmApp(App):
                             self.action_copy_url)
 
     def board_url(self) -> str:
-        """The web board's address: the one this dashboard serves or found running,
-        else the first the board would be reached at."""
-        board = getattr(self, "web_board", None)
-        if board is not None and board.url:
-            return board.url
+        """This swarm's page on the machine's web board: the one the probe found,
+        else where the board would be reached; "" when the machine file that
+        says where does not read."""
+        if self.board_link:
+            return self.board_link
         from ..web import lifecycle
 
         try:
-            got = lifecycle.urls(self.cfg)
-        except Exception:  # noqa: BLE001 - an address is a nicety
-            got = []
-        return got[0] if got else f"http://localhost:{self.cfg.web_port}/"
+            at = lifecycle.place(self.cfg.state_dir)
+        except ValueError:
+            return ""
+        return lifecycle.link(lifecycle.url(at), lifecycle.slug_of(self.cfg))
 
     def action_copy_url(self) -> None:
         """``u``: copy the board's URL and show it whole.
@@ -581,6 +596,10 @@ class SwarmApp(App):
         still shows the toast: the URL in full, to read or long-press.
         """
         url = self.board_url()
+        if not url:
+            self.notify(self.board_line[0] or "the board has no address", severity="warning",
+                        timeout=20)
+            return
         self.copy_to_clipboard(url)
         self.notify(url, title="board URL copied", timeout=20)
 
@@ -647,17 +666,12 @@ def reset_run(cfg) -> dict:
 
 
 def main(cfg) -> int:
-    """Run the dashboard, and the web board with it. Returns a process exit code."""
-    app = None
+    """Run the dashboard. Returns a process exit code."""
     try:
-        app = SwarmApp(cfg)
-        app.run()
+        SwarmApp(cfg).run()
     except Exception as exc:  # noqa: BLE001
         import sys
 
         print(f"swarm tui: {exc}", file=sys.stderr)
         return 2
-    finally:
-        if app is not None:
-            app.stop_board()
     return 0

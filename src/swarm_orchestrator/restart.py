@@ -606,9 +606,15 @@ def restart_helpers(cfg: Config, st: state_mod.State, log: Log) -> list[str]:
             done.append("dashboard")
         except (subprocess.CalledProcessError, OSError) as exc:
             log.line(f"RESTART-DASHBOARD-FAILED {exc}")
-    if cfg.web_enabled and not hosted and web_lifecycle.stop(cfg):
-        if web_lifecycle.start_detached(cfg):
-            done.append("web board")
+    if cfg.web_enabled:
+        # The machine's one board: stateless, and its pages find it again by
+        # themselves, so the other swarms it shows lose nothing but a moment.
+        # Started even when it was not running: a swarm on the board has one.
+        try:
+            if web_lifecycle.restart(web_lifecycle.place(cfg.state_dir)):
+                done.append("web board")
+        except (ValueError, OSError) as exc:
+            log.line(f"RESTART-WEB-BOARD-FAILED {exc}")
     if cfg.telegram_commands and tgbot.stop(cfg):
         if tgbot.start_detached(cfg)[0]:
             done.append("telegram listener")

@@ -14,7 +14,7 @@ repository layout: it drives one repo or an umbrella of many, configured by one
 `.swarm.toml`.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="swarm-orchestrator at runtime: a detached supervisor reads control.fifo and owns state.json; it launches Claude Code sessions into a tmux session with a dashboard (which serves the web board), an overseer window, an operator window and worker slots; it merges finished phases into the project's repos and pings the owner on Telegram" width="900">
+  <img src="docs/architecture.svg" alt="swarm-orchestrator at runtime: a detached supervisor reads control.fifo and owns state.json; it launches Claude Code sessions into a tmux session with a dashboard, an overseer window, an operator window and worker slots; it merges finished phases into the project's repos and pings the owner on Telegram" width="900">
 </p>
 
 ## Contents
@@ -544,11 +544,19 @@ terminal.
 
 ### Web board (`swarm web`)
 
-- **Is:** a read-only board for a phone or a laptop, in the last tmux window.
-  `swarm status` prints its address: the machine's Tailscale IP (the LAN
-  address only when Tailscale is absent). `u` in the dashboard copies it to
-  your clipboard.
-- **Tabs:** Overview (when every phase is done, P50 and P85, what runs now, the
+- **Is:** a read-only board for a phone or a laptop, one for the machine. One
+  address shows every swarm: the overview at `/` says first what waits for
+  you across all of them, then the totals, then a card per swarm with a button
+  into its own board (`/s/<slug>/`), and every swarm's page has the others as
+  buttons. `swarm up`, `swarm status`, `swarm doctor` and `swarm ls` print the
+  address: the machine's Tailscale IP (the LAN address only when Tailscale is
+  absent). `u` in the dashboard copies this swarm's page to your clipboard.
+- **Runs:** as a process of its own. Any `swarm up` starts it unless it is
+  already answering, and the `swarm down` of the last swarm that is up stops
+  it; `swarm web` starts it by hand (over swarms that are down too) and
+  `swarm web stop` stops it. Its port is `[web].port` in
+  `~/.config/swarm-orchestrator/machine.toml`, never a project's.
+- **A swarm's tabs:** Overview (when every phase is done, P50 and P85, what runs now, the
   next usage cap), Phase books (every campaign with its finish range, and a
   status board), Graph (the `needs:` graph laid out left to right: what blocks
   what, the critical path, pan and zoom), Usage (both windows over time with
@@ -820,8 +828,8 @@ git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
    swarm up              # session + supervisor + init pass, then attaches you
    ```
 
-**Moving around:** `Ctrl-b 0` is the dashboard (which also serves the web board),
-`1` the overseer window, `2` the operator, and `3` the first workers window (`4`,
+**Moving around:** `Ctrl-b 0` is the dashboard (its status bar ends with this
+swarm's page on the web board), `1` the overseer window, `2` the operator, and `3` the first workers window (`4`,
 … page through the rest).
 `Ctrl-b d` detaches while the supervisor keeps
 running. Inside tmux already, `swarm up` switches your client instead of
@@ -912,7 +920,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 | you want to | run |
 |---|---|
 | start, watch, stop | `swarm up`, `swarm status`, `swarm down` |
-| see every swarm on this machine | `swarm ls` |
+| see every swarm on this machine | `swarm ls`, or the web board (`swarm web` prints its address) |
 | see what is wrong | `swarm doctor`, `swarm why <phase>` |
 | see and do what waits on you | `swarm todo`, `swarm guide` |
 | talk to the swarm in your own Claude session | `swarm console` |
@@ -944,7 +952,8 @@ The full list, one line per subcommand and grouped by purpose, is in
 - `[usage]`: the subscription usage caps;
 - `[backup]`: pushing unmerged phase work to `origin`;
 - `[gc]`;
-- `[web]`.
+- `[web]`: whether this swarm is on the machine's web board (where the board
+  listens is the machine's to say, in `machine.toml`).
 
 Every key, with its default, its environment override and its reload class, is
 in **[docs/config.md](docs/config.md)**.
@@ -960,9 +969,10 @@ or the first command that changes something, never by one that only reads.
 Several projects can each run a swarm on one machine. Their state dirs sit
 side by side in `~/.local/state/swarm-orchestrator/`, and `swarm ls` lists
 them from any folder: which are running, how far along each is, and how much
-waits on you in each. Beside them, `machine/` is for what all of them share
-(the build gate, below), and settings that describe the machine rather than a
-project, the gate's limits among them, go in
+waits on you in each. The web board shows the same on one page. Beside them,
+`machine/` is for what all of them share (the build gate, below, and the web
+board's `web.pid` and `web.log`), and settings that describe the machine
+rather than a project, the gate's limits and the board's port among them, go in
 `~/.config/swarm-orchestrator/machine.toml`
 ([docs/config.md](docs/config.md#the-machine-file-machinetoml)). A command
 acts on one swarm only, and a session of one swarm cannot run a command on
@@ -985,7 +995,7 @@ another ([docs/cli.md](docs/cli.md)).
 | `meters/resources.jsonl`, `meters/resources-1m.jsonl`, `meters/builds.jsonl`, `resources-now.json` | The resource sampler's samples (a day at full resolution, then a month of minute rows), one summary per finished heavy build, and the latest snapshot. Each file is bounded by age and bytes. |
 | `notifications.jsonl` | Every Telegram send and whether it landed, plus every message held back on purpose (`suppressed`). |
 | `logs/restart.log`, `logs/supervisor-start.err` | What each restart's detached helper printed, and what a supervisor that would not start said. |
-| `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
+| `logs/supervisor.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
 | `git/<repo>.lock` | Per-repo integration locks. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
@@ -993,7 +1003,7 @@ another ([docs/cli.md](docs/cli.md)).
 | `console.lock` | The lock that keeps two opens of the owner console from racing. |
 | `keep/<name>.json`, `keep/<name>.log` | What `swarm keep` left running: pid, start time, argv, cwd, who started it, why; and its output. |
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
-| `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |
+| `gc-auto.json`, `.doctor-disk.json` | The last automatic gc, doctor's disk-growth baseline. |
 | `telegram-bot.pid`, `.offset.json`, `.status.json` | The command listener's pid, the next Telegram update id it will ask for, and what it is doing (polling, backing off a 409, …). |
 
 The build gate is not in a swarm's state dir. It is one for the machine, so its

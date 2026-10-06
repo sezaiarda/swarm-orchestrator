@@ -127,9 +127,20 @@ def sample(snap: dict, cfg) -> dict:
     }
 
 
+def whose(rec: dict) -> dict:
+    """Whose a build is, as its record says: ``swarm`` (the slug), ``swarm_name``
+    and ``mine`` (whether that is the swarm reading). The gate is the machine's,
+    so every view of it holds every swarm's builds; a record that names no
+    swarm is the reader's own."""
+    return {"swarm": rec.get("swarm") or None, "swarm_name": rec.get("swarm_name") or None,
+            "mine": rec.get("mine") is not False}
+
+
 def gate(cfg) -> dict:
     """The build gate now: each slot's holder and the queue in the order it would
     start, from :func:`buildstatus.snapshot` (what ``swarm build --status`` prints).
+    It is the machine's one gate, so the holders and waiters are every swarm's,
+    each saying whose it is (:func:`whose`) and whether its swarm stands frozen.
     Every "for how long" is turned into a time, so the page counts it itself."""
     if cfg.build_max_concurrent < 1:
         return {"on": False}
@@ -148,7 +159,8 @@ def gate(cfg) -> dict:
         run = _n(h.get("running_s"))
         slots.append({
             "slot": h.get("slot"), "busy": bool(h.get("busy")), "unknown": bool(h.get("unknown")),
-            "id": h.get("id"), "phase": h.get("phase"),
+            "gc": bool(h.get("gc")), "id": h.get("id"), "phase": h.get("phase"),
+            **whose(h), "frozen": bool(h.get("frozen")),
             "cmd": tidy(h.get("argv"), cfg, CMD_MAX) if h.get("argv") else "",
             "since": round(at - run, 1) if run is not None else None,
             "usual_s": _n(h.get("pred_s")),
@@ -158,6 +170,7 @@ def gate(cfg) -> dict:
         wait = _n(t.get("waiting_s"))
         queue.append({
             "id": t.get("id"), "phase": t.get("phase"),
+            **whose(t), "frozen": bool(t.get("frozen")),
             "cmd": tidy(t.get("argv"), cfg, CMD_MAX),
             "queued_at": round(at - wait, 1) if wait is not None else None,
             "usual_s": _n(t.get("pred_s")), "starts_at": at_plus(t.get("starts_in_s")),
@@ -186,6 +199,7 @@ def build_row(row: dict, cfg) -> dict:
     """One line of ``builds.jsonl`` as the table shows it. Fields this does not
     know are left out; a missing one is ``None``."""
     out: dict = {"id": str(row.get("id") or ""), "phase": row.get("phase") or None,
+                 **whose(row),
                  "cmd": tidy(row.get("argv"), cfg, CMD_MAX),
                  "where": tidy(buildlog.where(cfg, str(row.get("cwd") or "")), cfg, 60)
                  if row.get("cwd") else "",
@@ -353,8 +367,9 @@ class Resources:
         self.builds.update(cfg)
         data = self.history.window(name, now)
         t0, step, n = data["t0"], data["step"], data["n"]
-        marks = [{"a": r["started"], "b": r["ended"], "phase": r["phase"], "cmd": r["cmd"],
-                  "exit": r["exit"]}
+        # A neighbour's build is named with its swarm in front, as the gate names it.
+        marks = [{"a": r["started"], "b": r["ended"], "phase": buildlog.who(r, "").strip() or None,
+                  "cmd": r["cmd"], "exit": r["exit"]}
                  for r in self.builds.rows if r["started"] is not None and r["ended"] is not None]
         waits = [(r["started"] - r["wait_s"], r["started"]) for r in self.builds.rows
                  if r["started"] is not None and r["wait_s"]]
@@ -363,7 +378,8 @@ class Resources:
             at = _n(snap.get("ts")) or now
             for b in snap.get("builds") or []:
                 if isinstance(b, dict) and _n(b.get("age_s")) is not None:
-                    marks.append({"a": at - b["age_s"], "b": now, "phase": b.get("phase"),
+                    marks.append({"a": at - b["age_s"], "b": now,
+                                  "phase": buildlog.who(b, "").strip() or None,
                                   "cmd": tidy(b.get("argv"), cfg, CMD_MAX), "exit": None,
                                   "live": True})
             for t in self._gate_view(cfg)[1].get("queue") or []:

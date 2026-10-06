@@ -31,6 +31,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import machine_toml
+
 from swarm_orchestrator import doctor, owner
 from swarm_orchestrator import state as state_mod
 from swarm_orchestrator import telegram
@@ -1127,13 +1129,20 @@ def test_the_prompts_ship_with_this_checkout():
     assert doctor._check_prompts().status == OK
 
 
-def test_check_web_warns_when_the_port_is_taken_by_something_else(cfg):
-    """A connect-only check reads a squatter's open port as a live board — see
-    ``web.lifecycle.probe``. The doctor must say WHO holds it, not "listening"."""
+def _board_on_a_free_port(cfg, monkeypatch) -> int:
+    """This swarm on the board, and the machine's board on a free loopback port."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    cfg.web_enabled, cfg.web_host, cfg.web_port = True, "127.0.0.1", port
+    cfg.web_enabled = True
+    machine_toml(web={"host": "127.0.0.1", "port": port})
+    return port
+
+
+def test_check_web_warns_when_the_port_is_taken_by_something_else(cfg, monkeypatch):
+    """A connect-only check reads a squatter's open port as a live board — see
+    ``web.lifecycle.probe``. The doctor must say WHO holds it, not "listening"."""
+    port = _board_on_a_free_port(cfg, monkeypatch)
     squatter = subprocess.Popen(
         [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1145,27 +1154,25 @@ def test_check_web_warns_when_the_port_is_taken_by_something_else(cfg):
             time.sleep(0.1)
             check = doctor._check_web(cfg, set_state(cfg))
         assert check.status == WARN
-        assert "held by another program" in check.detail
-        assert f":{port}" in check.detail
-        assert check.fix_hint and "web].port" in check.fix_hint
+        assert f"port :{port} is held by" in check.detail
+        assert "not this machine's board" in check.detail
+        assert check.fix_hint and "web].port" in check.fix_hint and "machine.toml" in check.fix_hint
     finally:
         squatter.terminate()
         squatter.wait(timeout=5)
 
 
-def test_check_web_is_ok_when_our_own_board_answers(cfg):
+def test_check_web_is_ok_when_our_own_board_answers(cfg, monkeypatch):
     from swarm_orchestrator.web import server as web_server
 
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    cfg.web_enabled, cfg.web_host, cfg.web_port = True, "127.0.0.1", port
-    srv = web_server.make_server(cfg, "127.0.0.1", port)
+    port = _board_on_a_free_port(cfg, monkeypatch)
+    srv = web_server.make_server(cfg.state_dir.parent, "127.0.0.1", port)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
         check = doctor._check_web(cfg, set_state(cfg))
         assert check.status == OK and "listening" in check.detail
+        assert f"this swarm: http://127.0.0.1:{port}/s/{cfg.state_dir.name}/" in check.detail
     finally:
         # ``close`` calls ``shutdown()``, which blocks forever unless
         # ``serve_forever`` is actually running to notice the request.

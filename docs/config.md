@@ -67,7 +67,7 @@ One name, shown in several places. An edit reaches them at different times:
 |---|---|
 | Telegram messages that name the swarm ("… has stopped", "… did not restart") | **hot**: the next message after `swarm reload` |
 | `swarm status` (`name=`, and `config.name` in `--json`) | **hot**: the next command |
-| the web board's title and its `project` field | **hot**: the board re-reads the file when it changes |
+| the web board: the swarm's card, its button and its page's title | **hot**: after `swarm reload`. The board shows each swarm on the settings its supervisor recorded, so for a swarm that is down the new name shows at its next `swarm up` |
 | the dashboard's status bar, the command listener's log line and its entry in the bot lock | **next**: when the dashboard and the listener next start; a plain `swarm restart` restarts both |
 | the tmux session (`tmux ls`, `tmux attach -t …`), unless `[tmux].session` sets it | **restart**: `swarm down` then `swarm up`, or `swarm restart --full` |
 
@@ -78,13 +78,12 @@ addressing that one, and `swarm reload` lists `[tmux].session: <old> -> <new>`
 under *REFUSED*, each time, until the restart that renames it. `swarm down`
 ends the old session and the `swarm up` after it creates the new one.
 
-A web board or a command listener started under the old name is still this
-swarm's: the board is recognised by the project's slug (one started before
-boards reported a slug, by the folder name it answers with), and the listener
-by its pid file in the state dir and the per-bot lock, none of which the name
-touches. So `swarm status` and the dashboard find the old one and
+A command listener started under the old name is still this swarm's: it is
+known by its pid file in the state dir and the per-bot lock, which the name
+does not touch. So `swarm status` and the dashboard find the old one and
 `swarm down` or `swarm restart` replaces it; a second one is never started
-beside it.
+beside it. The web board is the machine's and lists a swarm by its state dir,
+which a rename does not move either: the swarm's page keeps its address.
 
 ## `[worker]`
 
@@ -387,9 +386,14 @@ and `swarm resources` in [cli.md](cli.md)). It reads `/proc` and never signals a
 
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
-| `enabled` | `true` | `SWARM_WEB` | restart | Serve the board. Under tmux the dashboard serves it; with no dashboard (the `bare` driver, or `[tui] autostart = false`) `swarm up` starts it as a detached process. |
-| `host` | `"0.0.0.0"` | `SWARM_WEB_HOST` | restart | The bind address. The default is every interface, so the board answers on the Tailscale IP that `swarm status` prints (or the LAN address when Tailscale is absent). |
-| `port` | `8765` | `SWARM_WEB_PORT` | restart | The TCP port. |
+| `enabled` | `true` | `SWARM_WEB` | restart | Show this swarm on the machine's web board. `swarm up` starts the board when it is not running; `false` keeps this swarm off it, and its `swarm up` starts none. |
+
+The board is the machine's, one for every swarm, so where it listens is not a
+project's to say: `host` and `port` are in [`machine.toml`](#web-1). A
+`.swarm.toml` that still sets `[web].host` or `[web].port` is refused by every
+command, with the key and the machine file named, because the value would
+otherwise be dropped in silence. A session of a running swarm keeps working
+through that: its commands fall back to the settings the supervisor recorded.
 
 ## The machine file: `machine.toml`
 
@@ -483,6 +487,20 @@ never yields (`--hold`, a daemon's client), a frozen build keeps its slot until
 its swarm is thawed or stopped, and `swarm build --status` names it. Its
 waiters keep their places in the queue and are passed over until they wake.
 
+### `[web]`
+
+Where the machine's one [web board](components.md#the-web-board-swarm-web)
+listens. It is read when the board starts: after an edit, `swarm web stop` and
+`swarm web` (or the next `swarm up` once every swarm is down) put it in force.
+Neither key has an environment variable: a port one shell could set for itself
+would send that shell's commands looking for the board where it is not.
+`SWARM_WEB_HOST` and `SWARM_WEB_PORT` are no longer read.
+
+| key | default | env | meaning |
+|---|---|---|---|
+| `host` | `"0.0.0.0"` | — | The bind address. The default is every interface, so the board answers on the Tailscale IP that `swarm status` and `swarm ls` print (or the LAN address when Tailscale is absent). |
+| `port` | `8765` | — | The TCP port, one for every swarm on the machine. At least 1. When another program holds it, `swarm up` and `swarm status` say which, and this is the key to change. |
+
 ## Environment-only variables
 
 | variable | effect |
@@ -495,7 +513,7 @@ waiters keep their places in the queue and are passed over until they wake.
 | `SWARM_TG_API` | The Bot API base URL the command listener polls (default `https://api.telegram.org`). The tests point it at a fake. |
 | `SWARM_SUBMIT_SETTLE` | Seconds typed text gets to render before Enter is sent (default 1.5). Raise it on a slow host. |
 | `SWARM_LOG_ECHO` | Also echo supervisor log lines to stderr. |
-| `SWARM_SCOPE` | `0`: never start the supervisor, the command listener, a headless board or a lane check in a systemd user scope of its own (see [`swarm freeze`](components.md#freeze-and-thaw-swarm-freeze-swarm-thaw)). The tests set it. |
+| `SWARM_SCOPE` | `0`: never start the supervisor, the command listener, the web board or a lane check in a systemd user scope of its own (see [`swarm freeze`](components.md#freeze-and-thaw-swarm-freeze-swarm-thaw)). The tests set it. |
 | `SWARM_CGROUP_ROOT`, `SWARM_CGROUP_PROC` | Where `swarm freeze` and `swarm thaw` find the cgroup tree and `/proc` (defaults `/sys/fs/cgroup` and `/proc`). Test seams. |
 | `SWARM_BIN` | The `swarm` command that detached helpers (`recap`, `operator-triage`, the grace poke) run. A test seam. |
 | `SWARM_RECAP_CMD`, `SWARM_TRIAGE_CMD` | Replace the model call for recaps and triage with a command that reads the prompt on stdin. Test seams. |

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -68,8 +69,16 @@ def _item(phase: str, state: str, **kw) -> dict:
                         queued_at=time.time() - 60, state=state, **kw).to_dict()
 
 
+def record(cfg) -> None:
+    """Record ``cfg`` in its state dir as its supervisor does (``config.json``):
+    what makes a state dir a swarm, and the settings the board shows it on."""
+    snap = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()}
+    (cfg.state_dir / "config.json").write_text(json.dumps(snap, default=str), encoding="utf-8")
+
+
 def make_run(tmp_path: Path, monkeypatch) -> config_mod.Config:
-    """A project + state dir holding one phase in every column."""
+    """A project + state dir holding one phase in every column, recorded as a
+    swarm of the state root ``tmp_path`` (its slug there is ``state``)."""
     project = tmp_path / "project"
     (project / "docs").mkdir(parents=True)
     (project / "docs" / "LEDGER.md").write_text(LEDGER, encoding="utf-8")
@@ -77,8 +86,10 @@ def make_run(tmp_path: Path, monkeypatch) -> config_mod.Config:
         '[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "be-W8", "be-W9"]\n', encoding="utf-8")
     state_dir = tmp_path / "state"
     monkeypatch.setenv("SWARM_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("SWARM_WEB", "1")  # on the board; the suite's default keeps swarms off it
     cfg = config_mod.load(project_dir=str(project))
     cfg.ensure_dirs()
+    record(cfg)
     state = {
         "slots": [{"id": 0, "pane_id": "%1", "busy": True, "phase": "al-W2",
                    "branch": "swarm/al-W2", "worktree": "/wt/al-W2"},
@@ -118,6 +129,26 @@ def make_run(tmp_path: Path, monkeypatch) -> config_mod.Config:
     (state_dir / "recaps" / "al-W0.json").write_text(json.dumps(
         {"phase": "al-W0", "status": "ok", "summary": "It landed the root.", "ts": 3.0}))
     return cfg
+
+
+#: What ``make_run``'s swarm is called on the board: its state dir's name.
+SLUG = "state"
+
+
+def serve(cfg, poll_s: float = 0.05):
+    """The machine's board over the state root ``cfg``'s swarm is in, bound to a
+    free port and serving on a thread. ``srv.feed`` is that swarm's feed and
+    ``srv.at`` where its routes are; close it with ``web.server.close``."""
+    import threading
+
+    from swarm_orchestrator.web import server as web_server
+
+    srv = web_server.make_server(cfg.state_dir.parent, "127.0.0.1", 0, poll_s=poll_s)
+    srv.feed = srv.hub.feed(cfg.state_dir.name)
+    srv.at = f"/s/{cfg.state_dir.name}"
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05},
+                     daemon=True).start()
+    return srv
 
 
 @pytest.fixture
@@ -240,11 +271,17 @@ def test_the_header_says_a_drain_in_words(feed):
     assert feed.board["header"]["drain"] == "Draining: waiting for 2 workers, then stop"
 
 
-def test_an_edited_exclude_list_moves_the_card(feed):
+def test_an_exclude_list_the_swarm_has_taken_moves_the_card(feed):
+    """The board shows what the swarm runs on: the settings its supervisor
+    recorded. An edit of ``.swarm.toml`` shows once the swarm has taken it."""
     toml = feed.cfg.project_dir / ".swarm.toml"
     toml.write_text('[tasks]\nledger = "docs/LEDGER.md"\nexclude = ["be-W1", "be-W8", "be-W9", "al-W1"]\n')
+    feed.refresh(force=True)
+    assert _cards(feed.board)["al-W1"]["col"] == "ready"  # the supervisor still launches it
+    record(config_mod.load(project_dir=str(feed.cfg.project_dir)))  # `swarm reload`
     feed.refresh()
     assert _cards(feed.board)["al-W1"]["col"] == "excluded"
+    assert feed.cfg.state_dir == feed.dash.cfg.state_dir
 
 
 # -- campaigns --------------------------------------------------------------

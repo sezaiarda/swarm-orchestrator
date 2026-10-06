@@ -3,66 +3,41 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#121722">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#121722" media="(prefers-color-scheme:dark)">
+<meta name="theme-color" content="#f3f4f8" media="(prefers-color-scheme:light)">
 <title>swarm</title>
 <style>
-/* Tokens. Night ink, not black; gold marks the finish line
-   and the critical path, and nothing else. Status hues are the graph's legend. */
-:root{
-  --bg:#121722;--bg2:#0f141d;--sf:#182030;--sf2:#1e283a;--sf3:#253047;--ln:#263049;--ln2:#33405c;
-  --tx:#e8ecf4;--tx2:#c3cad8;--mu:#8e99b0;--mu2:#667189;
-  --gold:#e6c07b;--gold2:rgba(230,192,123,.16);
-  --run:#5aa9ff;--ready:#3dd6b0;--blocked:#7c879e;--wait:#b592ff;--owner:#f2a541;--done:#4fae78;--failed:#f2667a;
-  --up:#ff9468;--down:#3dd6b0;
-  --r1:6px;--r2:10px;--r3:14px;
-  --sans:system-ui,-apple-system,"Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",sans-serif;
-  --disp:ui-rounded,"SF Pro Rounded","Segoe UI Variable Display",system-ui,-apple-system,"Segoe UI",sans-serif;
-  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
-  --hdr:56px;
-}
-*{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 var(--sans);-webkit-text-size-adjust:100%;font-variant-numeric:tabular-nums}
-body{min-height:100vh;min-height:100dvh}
-button,select,input{font:inherit;color:inherit}
-button{background:none;border:0;padding:0;cursor:pointer;text-align:left}
-:focus-visible{outline:2px solid var(--run);outline-offset:2px;border-radius:6px}
-h1,h2,h3,h4,p{margin:0}
-.id{font-family:var(--mono);font-size:.92em;font-weight:600;letter-spacing:-.01em}
-.mu{color:var(--mu)}.mu2{color:var(--mu2)}
-.nowrap{white-space:nowrap}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;background:var(--mu2)}
-.s-running{--c:var(--run)}.s-ready{--c:var(--ready)}.s-blocked{--c:var(--blocked)}.s-waiting{--c:var(--wait)}
-.s-owner{--c:var(--owner)}.s-done{--c:var(--done)}.s-failed{--c:var(--failed)}
-.dot[class*=" s-"],.dot[class^="s-"]{background:var(--c)}
+/*{{shared.css}}*/
+
+/* The machine bar: every swarm here as a button, and the way back to all of
+   them. It scrolls away with the page; the swarm's own header stays. ---------- */
+:root{--mbar:51px}
+.mbar{display:flex;align-items:center;gap:8px;height:calc(var(--mbar) + env(safe-area-inset-top));padding:calc(8px + env(safe-area-inset-top)) 20px 8px;background:var(--bg2);border-bottom:1px solid var(--ln);overflow-x:auto;scrollbar-width:none}
+.mbar::-webkit-scrollbar{display:none}
+.mbar-list{display:flex;gap:8px;align-items:center}
+.notice{margin:0;padding:10px 20px;background:color-mix(in srgb,var(--mu2) 14%,var(--bg));border-bottom:1px solid var(--ln);color:var(--tx2);font-size:13.5px}
+.notice[hidden]{display:none}
+.notice b{color:var(--tx);font-weight:600}
+.nb{display:inline-flex;align-items:baseline;gap:6px;padding:0 7px;border-radius:999px;border:1px solid var(--ln2);color:var(--tx2);font-size:12.5px;white-space:nowrap}
+.nb:hover{color:var(--tx);border-color:var(--mu)}
 
 /* Header ------------------------------------------------------------------ */
-.top{position:sticky;top:0;z-index:30;height:calc(var(--hdr) + env(safe-area-inset-top));padding:env(safe-area-inset-top) 20px 0;display:flex;align-items:center;gap:18px;background:rgba(18,23,34,.92);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--ln)}
+.top{position:sticky;top:0;z-index:30;height:calc(var(--hdr) + env(safe-area-inset-top));padding:env(safe-area-inset-top) 20px 0;display:flex;align-items:center;gap:18px;background:var(--glass);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--ln)}
 .brand{display:flex;align-items:baseline;gap:8px;min-width:0}
 .brand b{font:650 17px/1 var(--disp);letter-spacing:-.01em}
-.brand span{color:var(--mu);font-size:13px}
+.brand b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tabs{display:flex;gap:2px;height:100%;align-items:stretch;margin-left:10px}
 .tab{display:flex;align-items:center;gap:8px;padding:0 14px;color:var(--mu);font-weight:550;border-bottom:2px solid transparent;margin-bottom:-1px}
 .tab svg{width:17px;height:17px;flex:none}
 .tab:hover{color:var(--tx2)}
 .tab[aria-selected=true]{color:var(--tx);border-bottom-color:var(--gold)}
 .status{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:13px;color:var(--mu);white-space:nowrap}
-.state{display:inline-flex;align-items:center;gap:7px;padding:4px 11px 4px 9px;border-radius:999px;background:var(--sf);border:1px solid var(--ln);color:var(--tx2)}
-.state .dot{background:var(--c,var(--mu2))}
-.state.live .dot{box-shadow:0 0 0 0 var(--c);animation:beat 2.4s ease-out infinite}
-@keyframes beat{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--c) 60%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
 .stale{color:var(--owner)}
 
 /* Page frame -------------------------------------------------------------- */
 main{padding:28px 28px 64px;max-width:1360px;margin:0 auto}
 main.full{max-width:none;padding:0}
-.sec-h{display:flex;align-items:baseline;gap:12px;margin:0 0 14px}
-.sec-h h2{font:650 17px/1.3 var(--disp);letter-spacing:-.01em}
-.sec-h .aside{margin-left:auto;color:var(--mu);font-size:13px}
-.linkish{color:var(--run);font-weight:550;font-size:13px}
-.linkish:hover{text-decoration:underline}
-.panel{background:var(--sf);border:1px solid var(--ln);border-radius:var(--r3);padding:20px 22px}
-.empty{color:var(--mu);padding:14px 0}
 
 /* Overview ----------------------------------------------------------------- */
 .ov{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:20px}
@@ -82,11 +57,6 @@ main.full{max-width:none;padding:0}
 .prog-top{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
 .prog-top b{font:650 20px/1 var(--disp)}
 .prog-top .aside{margin-left:auto;color:var(--mu);font-size:13px}
-.stack{display:flex;height:10px;border-radius:999px;overflow:hidden;background:var(--sf3);gap:2px}
-.stack i{display:block;height:100%;background:var(--c)}
-.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;font-size:13px;color:var(--mu)}
-.legend span{display:inline-flex;align-items:center;gap:7px}
-.legend b{color:var(--tx2);font-weight:600}
 .ask{grid-column:1/-1;border-color:color-mix(in srgb,var(--owner) 45%,var(--ln));background:color-mix(in srgb,var(--owner) 7%,var(--sf))}
 .ask-item{display:block;width:100%;padding:10px 0;border-top:1px solid var(--ln)}
 .ask-item:first-of-type{border-top:0}
@@ -111,10 +81,6 @@ main.full{max-width:none;padding:0}
 .meter-h b{font:650 22px/1 var(--disp)}
 .meter-h .lab{color:var(--tx2);font-weight:550}
 .meter-h .aside{margin-left:auto;color:var(--mu);font-size:13px}
-.gauge{position:relative;height:8px;border-radius:999px;background:var(--sf3)}
-.gauge>i{position:absolute;left:0;top:0;bottom:0;border-radius:999px;background:var(--c,var(--run))}
-.gauge>u{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--owner);border-radius:1px}
-.gauge>u.stop{background:var(--failed)}
 .blist{display:flex;flex-direction:column}
 .brow{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(90px,1fr) 70px minmax(120px,.9fr);gap:16px;align-items:center;padding:11px 0;border-top:1px solid var(--ln);width:100%}
 .brow:first-child{border-top:0}
@@ -183,15 +149,15 @@ select.pick{background:var(--bg2);border:1px solid var(--ln);border-radius:9px;p
 .grp-h .mu{font-weight:400}
 
 /* Graph --------------------------------------------------------------------- */
-.gwrap{position:relative;height:calc(100dvh - var(--hdr) - env(safe-area-inset-top));display:flex;flex-direction:column}
+.gwrap{position:relative;height:calc(100dvh - var(--mbar) - var(--hdr) - 2 * env(safe-area-inset-top));display:flex;flex-direction:column}
 .gbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--ln);background:var(--bg)}
 .gbar .search{max-width:260px}
 .gbar .aside{color:var(--mu2);font-size:12px;white-space:nowrap}
 .gbody{position:relative;flex:1;min-height:0;display:flex}
-.gcanvas{position:relative;flex:1;min-width:0;overflow:hidden;touch-action:none;background:radial-gradient(circle at 1px 1px,#1c2435 1px,transparent 1.2px) 0 0/22px 22px,var(--bg2);cursor:grab}
+.gcanvas{position:relative;flex:1;min-width:0;overflow:hidden;touch-action:none;background:radial-gradient(circle at 1px 1px,var(--speck) 1px,transparent 1.2px) 0 0/22px 22px,var(--bg2);cursor:grab}
 .gcanvas.drag{cursor:grabbing}
 #gsvg{position:absolute;inset:0;width:100%;height:100%;display:block;user-select:none;-webkit-user-select:none}
-#gsvg .e{fill:none;stroke:#3a4661;stroke-width:1.3}
+#gsvg .e{fill:none;stroke:var(--edge);stroke-width:1.3}
 #gsvg .e.cp{stroke:var(--gold);stroke-width:2.6}
 #gsvg .n rect.b{fill:var(--sf);stroke:var(--ln2);stroke-width:1}
 #gsvg .n rect.k{fill:var(--c)}
@@ -213,12 +179,12 @@ select.pick{background:var(--bg2);border:1px solid var(--ln);border-radius:9px;p
 #gsvg.find .n{opacity:.18}#gsvg.find .e{opacity:.1}
 #gsvg.find .n.hit{opacity:1}
 #gsvg.find .n.hit rect.b{stroke:var(--gold);stroke-width:2.4}
-.zoom{position:absolute;right:16px;bottom:16px;display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--ln);border-radius:10px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+.zoom{position:absolute;right:16px;bottom:16px;display:flex;flex-direction:column;background:var(--sf);border:1px solid var(--ln);border-radius:10px;overflow:hidden;box-shadow:0 6px 20px var(--shade)}
 .zoom button{width:38px;height:36px;display:grid;place-items:center;color:var(--tx2);font-size:18px;border-top:1px solid var(--ln)}
 .zoom button:first-child{border-top:0}
 .zoom button:hover{background:var(--sf2)}
 .zoom svg{width:17px;height:17px}
-.mm{position:absolute;left:16px;bottom:16px;background:rgba(15,20,29,.92);border:1px solid var(--ln);border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.35);cursor:pointer}
+.mm{position:absolute;left:16px;bottom:16px;background:var(--glass);border:1px solid var(--ln);border-radius:10px;box-shadow:0 6px 20px var(--shade);cursor:pointer}
 .mm canvas{display:block;border-radius:10px}
 .glegend{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:12.5px;color:var(--mu);margin-left:auto}
 .glegend span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
@@ -239,8 +205,6 @@ select.pick{background:var(--bg2);border:1px solid var(--ln);border-radius:9px;p
 .refs button:hover{background:var(--sf2)}
 .refs .id{flex:none;white-space:nowrap}
 .refs .tt{color:var(--mu);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:8px 14px;border-radius:9px;border:1px solid var(--ln2);background:var(--sf2);color:var(--tx);font-weight:550;font-size:13px}
-.btn:hover{background:var(--sf3)}
 .x{width:32px;height:32px;border-radius:8px;display:inline-grid;place-items:center;color:var(--mu);border:1px solid var(--ln)}
 .x:hover{color:var(--tx);background:var(--sf2)}
 
@@ -256,9 +220,9 @@ select.pick{background:var(--bg2);border:1px solid var(--ln);border-radius:9px;p
 .fact.hit b{color:var(--owner)}.fact.safe b{color:var(--done)}
 .chart{width:100%;display:block;overflow:visible}
 .chart text{font:11.5px var(--sans);fill:var(--mu)}
-.chart .grid{stroke:#232c40;stroke-width:1}
+.chart .grid{stroke:var(--grid);stroke-width:1}
 .chart .ln{fill:none;stroke:var(--run);stroke-width:2;stroke-linejoin:round}
-.chart .area{fill:rgba(90,169,255,.1)}
+.chart .area{fill:color-mix(in srgb,var(--run) 11%,transparent)}
 .chart .proj{fill:none;stroke:var(--gold);stroke-width:2;stroke-dasharray:6 5}
 .chart .capl{stroke:var(--owner);stroke-width:1.3;stroke-dasharray:5 4}
 .chart .capl.stop{stroke:var(--failed);stroke-dasharray:none}
@@ -271,7 +235,7 @@ select.pick{background:var(--bg2);border:1px solid var(--ln);border-radius:9px;p
 .chart .lab-brk{fill:var(--wait)}
 .chart .hitdot{fill:var(--gold);stroke:var(--bg);stroke-width:2}
 .chart .hover-l{stroke:var(--tx2);stroke-width:1}
-.tip{position:absolute;pointer-events:none;background:var(--sf3);border:1px solid var(--ln2);border-radius:8px;padding:5px 9px;font-size:12.5px;white-space:nowrap;transform:translate(-50%,-120%);box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.tip{position:absolute;pointer-events:none;background:var(--sf3);border:1px solid var(--ln2);border-radius:8px;padding:5px 9px;font-size:12.5px;white-space:nowrap;transform:translate(-50%,-120%);box-shadow:0 6px 18px var(--shade)}
 .ukey{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--mu);margin-top:10px}
 .ukey span{display:inline-flex;align-items:center;gap:7px}
 .ukey i{display:inline-block;width:18px;height:0;border-top:2px solid var(--c)}
@@ -312,11 +276,11 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
 .rc-h .ukey{margin:0}
 .rc-h .aside{margin-left:auto;color:var(--mu);font-size:12.5px;white-space:nowrap}
 .rc-h .aside b{color:var(--tx2);font-weight:600}
-.chart .band{fill:rgba(90,169,255,.17)}
-.chart .mx{fill:none;stroke:rgba(90,169,255,.6);stroke-width:1;stroke-linejoin:round}
+.chart .band{fill:color-mix(in srgb,var(--run) 18%,transparent)}
+.chart .mx{fill:none;stroke:color-mix(in srgb,var(--run) 60%,transparent);stroke-width:1;stroke-linejoin:round}
 .chart .l2{fill:none;stroke:var(--owner);stroke-width:2;stroke-linejoin:round}
-.chart .sp{fill:rgba(195,202,216,.055)}
-.chart .sp.alt{fill:rgba(195,202,216,.11)}
+.chart .sp{fill:color-mix(in srgb,var(--tx2) 6%,transparent)}
+.chart .sp.alt{fill:color-mix(in srgb,var(--tx2) 12%,transparent)}
 .chart .lane{fill:var(--mu2)}
 .chart .lane.bad{fill:var(--failed)}
 .chart .lane.live{fill:var(--run)}
@@ -361,8 +325,8 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
 .pre{white-space:pre-wrap;word-break:break-word;font-size:13px;color:var(--tx2)}
 
 /* Sheet ------------------------------------------------------------------------ */
-.scrim{position:fixed;inset:0;background:rgba(6,9,14,.6);z-index:40}
-.sheet{position:fixed;z-index:41;top:0;right:0;bottom:0;width:min(600px,100vw);background:var(--sf);border-left:1px solid var(--ln);display:flex;flex-direction:column;box-shadow:-18px 0 40px rgba(0,0,0,.35);animation:slide .18s ease-out}
+.scrim{position:fixed;inset:0;background:var(--scrim);z-index:40}
+.sheet{position:fixed;z-index:41;top:0;right:0;bottom:0;width:min(600px,100vw);background:var(--sf);border-left:1px solid var(--ln);display:flex;flex-direction:column;box-shadow:-18px 0 40px var(--shade);animation:slide .18s ease-out}
 @keyframes slide{from{transform:translateX(24px);opacity:.4}to{transform:none;opacity:1}}
 .sheet-h{display:flex;align-items:flex-start;gap:12px;padding:18px 22px 14px;border-bottom:1px solid var(--ln);padding-top:calc(18px + env(safe-area-inset-top))}
 .sheet-h h2{font:650 18px/1.3 var(--disp)}
@@ -386,15 +350,15 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
   .btr .c3{grid-column:1/-1;grid-row:2}
 }
 @media (max-width:760px){
-  :root{--hdr:52px}
   .top{padding:env(safe-area-inset-top) 16px 0;gap:10px}
+  .mbar{padding-left:14px;padding-right:14px}
+  .notice{padding:10px 16px}
   .tabs{display:none}
   .status .slots,.status .upd{display:none}
   main{padding:18px 14px calc(88px + env(safe-area-inset-bottom))}
-  .panel{padding:16px}
   .hero{padding:20px 18px}
   .when{font-size:38px}
-  .btabs{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:30;background:rgba(18,23,34,.96);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid var(--ln);padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+  .btabs{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--glass2);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid var(--ln);padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
   .btabs .tab{flex:1;flex-direction:column;gap:3px;padding:4px 0;font-size:11px;border:0;margin:0;align-items:center;justify-content:center}
   .btabs .tab svg{width:21px;height:21px}
   .btabs .tab[aria-selected=true]{color:var(--gold)}
@@ -406,13 +370,13 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
   .btr{grid-template-columns:minmax(0,1fr);gap:8px;padding:14px 16px}
   .btr .c3{grid-row:auto}
   .btr .eta{text-align:left}.btr .eta small{display:inline;margin-left:6px}
-  .gwrap{height:calc(100dvh - var(--hdr) - env(safe-area-inset-top) - 64px - env(safe-area-inset-bottom))}
+  .gwrap{height:calc(100dvh - var(--mbar) - var(--hdr) - 2 * env(safe-area-inset-top) - 64px - env(safe-area-inset-bottom))}
   .gbar{padding:8px 10px;gap:8px}
   .gbar .search{flex:1 1 80px;max-width:none;padding:6px 10px}
   .gbar .seg button{padding:5px 10px}
   .gbar select.pick{max-width:112px;padding:6px 8px}
   .gbar .aside{display:none}
-  .gside{position:absolute;left:0;right:0;bottom:0;width:auto;max-height:52%;border-left:0;border-top:1px solid var(--ln);border-radius:16px 16px 0 0;box-shadow:0 -12px 30px rgba(0,0,0,.45);z-index:5}
+  .gside{position:absolute;left:0;right:0;bottom:0;width:auto;max-height:52%;border-left:0;border-top:1px solid var(--ln);border-radius:16px 16px 0 0;box-shadow:0 -12px 30px var(--shade);z-index:5}
   .mm{display:none}
   .glegend{order:5;flex-basis:100%;margin-left:0;flex-wrap:nowrap;overflow-x:auto;font-size:11.5px;gap:12px;scrollbar-width:none}
   .zoom{right:12px;bottom:12px}
@@ -433,12 +397,15 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
   .col{flex-basis:84vw}
 }
 @media (max-width:760px){.hm{display:none!important}}
-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
+<nav class="mbar" id="mbar" aria-label="The swarms on this machine">
+  <a class="sw home" href="/" title="Every swarm on this machine"></a>
+  <span class="mbar-list" id="swarms"></span>
+</nav>
 <header class="top">
-  <div class="brand"><b id="proj">swarm</b><span>swarm</span></div>
+  <div class="brand"><b id="proj">swarm</b></div>
   <nav class="tabs" role="tablist" aria-label="Views" id="tabs"></nav>
   <div class="status">
     <span class="slots" id="slots"></span>
@@ -446,11 +413,13 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
     <span class="state" id="state"><span class="dot"></span><span>connecting</span></span>
   </div>
 </header>
+<p class="notice" id="notice" hidden></p>
 <main id="main" tabindex="-1"></main>
 <nav class="btabs" id="btabs" aria-label="Views"></nav>
 <div id="sheetroot"></div>
 <script>
 "use strict";
+/*{{shared.js}}*/
 // ---------------------------------------------------------------------------
 // State, helpers
 // ---------------------------------------------------------------------------
@@ -462,42 +431,20 @@ const TABS = [
   ["resources", "Resources", '<rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>'],
   ["activity", "Activity", '<path d="M4 6h16M4 12h10M4 18h13"/>'],
 ];
-const S = {tab: "overview", board: null, graph: null, usage: null, et: {}, skew: 0,
+const S = {tab: "overview", board: null, graph: null, usage: null,
   lastOk: 0, books: {mode: "open", view: "books", q: ""}, act: "finished",
   g: {mode: "open", book: "", q: "", hits: null, sel: null, vb: null, key: ""},
   res: {now: null, hist: null, table: null, tableUrl: "", cap: null, win: "24h", sort: "ended", dir: "desc", phase: "", limit: 50},
   shut: {done: true, excluded: true}, showAll: {}, infoOpen: false, sheet: null};
-const $ = (s, r = document) => r.querySelector(s);
-const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
-const now = () => Date.now() / 1000 + S.skew;
-const STATUS = {running: ["Running", "#5aa9ff"], ready: ["Ready", "#3dd6b0"], blocked: ["Blocked", "#7c879e"],
-  waiting: ["Waiting for a date", "#b592ff"], owner: ["Yours", "#f2a541"], failed: ["Failed", "#f2667a"], done: ["Done", "#4fae78"]};
+// Each status: its word, and the token that is its hue.
+const STATUS = {running: ["Running", "--run"], ready: ["Ready", "--ready"], blocked: ["Blocked", "--blocked"],
+  waiting: ["Waiting for a date", "--wait"], owner: ["Yours", "--owner"], failed: ["Failed", "--failed"], done: ["Done", "--done"]};
 const COL2S = {building: "running", merging: "running", operator: "done", done: "done", needs_you: "owner", excluded: "owner", failed: "failed", ready: "ready", blocked: "blocked"};
 function cstatus(c) {
   if (!c) return "blocked";
   if (c.col === "blocked" && !c.unmet && String(c.sub || "").startsWith("waits until")) return "waiting";
   return COL2S[c.col] || "blocked";
 }
-function dur(s) {
-  if (s == null || !isFinite(s)) return "—";
-  s = Math.max(0, s);
-  if (s < 60) return Math.round(s) + "s";
-  if (s < 3600) return Math.round(s / 60) + "m";
-  if (s < 86400) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + "h" + (m ? " " + m + "m" : ""); }
-  const d = Math.floor(s / 86400), h = Math.round((s % 86400) / 3600); return d + "d" + (h ? " " + h + "h" : "");
-}
-const rel = (t) => t == null ? "—" : t >= now() ? "in " + dur(t - now()) : dur(now() - t) + " ago";
-function when(t, withDay) {
-  if (!t) return "—";
-  const d = new Date(t * 1000), n = new Date(now() * 1000);
-  const hm = hhmm(t);
-  if (!withDay && d.toDateString() === n.toDateString()) return hm;
-  if (Math.abs(d - n) < 6 * 864e5 && !withDay) return d.toLocaleDateString([], {weekday: "short"}) + " " + hm;
-  return d.toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"}) + ", " + hm;
-}
-function hhmm(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hourCycle: "h23"}); }
-function day(t) { return t ? new Date(t * 1000).toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"}) : "—"; }
 function md(s) {
   let h = esc(s);
   h = h.replace(/\[([^\]\n]+)\]\([^)\s]*\)/g, "$1");
@@ -507,27 +454,19 @@ function md(s) {
 }
 const repos = (list) => list.map(r => r === "." ? "the project root" : r).join(", ");
 const clipTxt = (s, n) => (s = String(s || "")).length > n ? s.slice(0, n - 1).trimEnd() + "…" : s;
-const icon = (p, cls = "") => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="${cls}" aria-hidden="true">${p}</svg>`;
 const dotS = (s) => `<span class="dot s-${esc(s)}" title="${esc((STATUS[s] || [s])[0])}"></span>`;
 function allCards() { const out = {}; if (S.board) for (const col of S.board.columns) for (const c of col.cards) out[c.id] = c; return out; }
 
 // ---------------------------------------------------------------------------
 // Data: poll only while the page is visible; ETags make a quiet poll a 304.
 // ---------------------------------------------------------------------------
-async function get(url, key) {
-  const r = await fetch(url, {headers: S.et[key] ? {"If-None-Match": S.et[key]} : {}, cache: "no-store"});
-  if (r.status === 304) return null;
-  if (!r.ok) throw new Error(r.status);
-  S.et[key] = r.headers.get("ETag");
-  return r.json();
-}
 let CARDS = {};
 async function pollBoard() {
   try {
-    const b = await get("/api/board", "board");
+    const b = await get("api/board", "board");
     S.lastOk = Date.now();
     if (b) {
-      S.skew = (b.generated_at || Date.now() / 1000) - Date.now() / 1000;
+      SKEW = (b.generated_at || Date.now() / 1000) - Date.now() / 1000;
       S.board = b; CARDS = allCards();
       render(true);
     }
@@ -536,41 +475,50 @@ async function pollBoard() {
 }
 async function pollGraph() {
   if (S.tab !== "graph") return;
-  const g = S.g, url = `/api/graph?mode=${g.mode}${g.book ? "&book=" + encodeURIComponent(g.book) : ""}`;
+  const g = S.g, url = `api/graph?mode=${g.mode}${g.book ? "&book=" + encodeURIComponent(g.book) : ""}`;
   const key = "graph:" + g.mode + ":" + g.book;
-  try { const d = await get(url, key); if (d) { S.graph = d; drawGraph(); } else if (!S.graph || S.graph.mode !== g.mode || S.graph.book !== g.book) { S.et[key] = null; const d2 = await get(url, key); if (d2) { S.graph = d2; drawGraph(); } } } catch (e) {}
+  try { const d = await get(url, key); if (d) { S.graph = d; drawGraph(); } else if (!S.graph || S.graph.mode !== g.mode || S.graph.book !== g.book) { ETAGS[key] = null; const d2 = await get(url, key); if (d2) { S.graph = d2; drawGraph(); } } } catch (e) {}
 }
 async function pollUsage() {
   if (S.tab !== "usage" && S.tab !== "overview") return;
-  try { const u = await get("/api/usage", "usage"); if (u) { S.usage = u; render(true); } } catch (e) {}
+  try { const u = await get("api/usage", "usage"); if (u) { S.usage = u; render(true); } } catch (e) {}
 }
-const EVERY = {board: 5000, graph: 12000, usage: 30000, res: 5000, reshist: 15000, restable: 30000, rescap: 120000};
+const EVERY = {board: 5000, machine: 10000, graph: 12000, usage: 30000, res: 5000, reshist: 15000, restable: 30000, rescap: 120000};
 const timers = {};
 function loop(name, fn) {
   clearTimeout(timers[name]);
   const tick = async () => { if (!document.hidden) await fn(); timers[name] = setTimeout(tick, EVERY[name]); };
   tick();
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { pollBoard(); pollGraph(); pollUsage(); pollRes(); pollResHist(); pollResTable(); pollResCap(); } });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { pollBoard(); pollMachine(); pollGraph(); pollUsage(); pollRes(); pollResHist(); pollResTable(); pollResCap(); } });
 function status(failed) {
   const b = S.board; if (!b) return;
   const h = b.header, st = $("#state");
   let c = "var(--done)", txt = "Running", live = true;
-  if (!h.running) { c = "var(--mu2)"; txt = h.state ? "Stopped" : "Stopped"; live = false; }
-  else if (h.finished) { txt = "Finished"; live = false; }
-  else if (h.frozen) { c = "var(--owner)"; txt = "Frozen"; live = false; }
+  if (h.frozen) { c = "var(--owner)"; txt = "Frozen"; live = false; }
+  else if (!h.running) { c = h.finished ? "var(--run)" : "var(--mu2)"; txt = h.finished ? "Finished" : "Down"; live = false; }
   else if (h.drain) { c = "var(--owner)"; txt = "Draining"; }
   else if (h.restart) { c = h.restart_stage === "failed" ? "var(--failed)" : "var(--owner)"; txt = h.restart_stage === "planned" ? "Restart planned" : h.restart_stage === "failed" ? "Restart failed" : "Restarting"; }
   else if (h.paused) { c = "var(--owner)"; txt = "Paused"; live = false; }
-  else if (h.usage_hold) { c = "var(--owner)"; txt = "Held by usage cap"; live = false; }
+  else if (h.usage_hold) { c = "var(--owner)"; txt = "Held on a usage limit"; live = false; }
   if (failed || Date.now() - S.lastOk > 20000) { c = "var(--failed)"; txt = "Board unreachable"; live = false; }
   st.className = "state" + (live ? " live" : ""); st.style.setProperty("--c", c);
   st.innerHTML = `<span class="dot"></span><span>${esc(txt)}</span>`;
   st.title = h.frozen || h.drain || h.restart || h.usage_hold || h.state || "";
-  $("#slots").textContent = `${h.slots.busy} of ${h.slots.total} workers busy`;
+  $("#slots").textContent = h.running ? `${h.slots.busy} of ${h.slots.total} workers busy` : "";
   $("#upd").textContent = "updated " + rel(b.generated_at);
   $("#proj").textContent = b.project || "swarm";
   document.title = (h.needs_you ? `(${h.needs_you}) ` : "") + (b.project || "swarm");
+  // A swarm that is not up still shows how it stood; the page says so in words.
+  const n = $("#notice");
+  n.hidden = !!h.running;
+  if (!h.running) n.innerHTML = `<b>${esc(b.project || "This swarm")} is ${h.finished ? "finished" : "down"}.</b> This is how it stood when it ${h.finished ? "ended" : "stopped"}${h.last_event_at ? `, ${esc(rel(h.last_event_at))}` : ""}. Nothing here moves until it is started again.`;
+}
+
+// The other swarms of this machine, from the overview's data: a button each.
+const HERE = decodeURIComponent((location.pathname.match(/^\/s\/([^/]+)\//) || [])[1] || "");
+async function pollMachine() {
+  try { const m = await get("/api/machine", "machine"); if (m) $("#swarms").innerHTML = swarmButtons(m.swarms, HERE); } catch (e) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -763,19 +711,19 @@ function drawBand() {
   const t0 = now(), t1 = Math.max(e.p95 || e.p85 || e.p50, t0 + 3600) ;
   const span = (t1 - t0) * 1.06, x = (t) => 8 + (W - 16) * (t - t0) / span;
   const y = 36;
-  let h = `<line x1="8" x2="${W - 8}" y1="${y}" y2="${y}" stroke="#2b3550" stroke-width="2"/>`;
+  let h = `<line x1="8" x2="${W - 8}" y1="${y}" y2="${y}" style="stroke:var(--ln2)" stroke-width="2"/>`;
   // Day ticks
   const d0 = new Date(t0 * 1000); d0.setHours(24, 0, 0, 0);
-  const days = span / 86400, fit = Math.max(1, Math.floor((W - 16) / 58)), stepD = [1, 2, 3, 7, 14, 28].find(s => days / s <= fit) || 28;
+  const days = span / 86400, fit = Math.max(1, Math.floor((W - 16) / 58)), stepD = [1, 2, 3, 7, 14, 28].find(s => days / s <= fit) || Math.ceil(days / fit);
   for (let t = d0 / 1000, i = 0; t < t0 + span; t += 86400, i++) {
     if (i % stepD) continue;
-    const xx = x(t); h += `<line x1="${xx}" x2="${xx}" y1="${y - 4}" y2="${y + 4}" stroke="#39445f"/><text x="${xx}" y="${y + 22}" text-anchor="middle" fill="#667189" font-size="11">${esc(new Date(t * 1000).toLocaleDateString([], days > 8 ? {month: "short", day: "numeric"} : {weekday: "short"}))}</text>`;
+    const xx = x(t); h += `<line x1="${xx}" x2="${xx}" y1="${y - 4}" y2="${y + 4}" style="stroke:var(--ln2)"/><text x="${xx}" y="${y + 22}" text-anchor="middle" style="fill:var(--mu2)" font-size="11">${esc(new Date(t * 1000).toLocaleDateString([], days > 8 ? {month: "short", day: "numeric"} : {weekday: "short"}))}</text>`;
   }
-  if (!e.floor && e.p85) h += `<rect x="${x(e.p50)}" y="${y - 9}" width="${Math.max(3, x(e.p85) - x(e.p50))}" height="18" rx="9" fill="rgba(230,192,123,.32)" stroke="rgba(230,192,123,.55)"/>`;
-  if (!e.floor && e.p95) h += `<line x1="${x(e.p85)}" x2="${x(e.p95)}" y1="${y}" y2="${y}" stroke="rgba(230,192,123,.45)" stroke-width="2" stroke-dasharray="3 4"/>`;
-  h += `<circle cx="${x(t0)}" cy="${y}" r="5" fill="#e8ecf4"/><text x="${x(t0)}" y="${y - 16}" fill="#c3cad8" font-size="11.5">now</text>`;
-  h += `<circle cx="${x(e.p50)}" cy="${y}" r="6.5" fill="#e6c07b"/><text x="${x(e.p50)}" y="${y - 16}" text-anchor="middle" fill="#e6c07b" font-size="11.5" font-weight="600">${e.floor ? "earliest" : "P50"}</text>`;
-  if (!e.floor && e.p85 && x(e.p85) - x(e.p50) > 26) h += `<circle cx="${x(e.p85)}" cy="${y}" r="4" fill="#e6c07b" opacity=".8"/><text x="${x(e.p85)}" y="${y - 16}" text-anchor="middle" fill="#c9a86c" font-size="11.5">P85</text>`;
+  if (!e.floor && e.p85) h += `<rect x="${x(e.p50)}" y="${y - 9}" width="${Math.max(3, x(e.p85) - x(e.p50))}" height="18" rx="9" style="fill:color-mix(in srgb,var(--gold) 32%,transparent);stroke:color-mix(in srgb,var(--gold) 55%,transparent)"/>`;
+  if (!e.floor && e.p95) h += `<line x1="${x(e.p85)}" x2="${x(e.p95)}" y1="${y}" y2="${y}" style="stroke:color-mix(in srgb,var(--gold) 45%,transparent)" stroke-width="2" stroke-dasharray="3 4"/>`;
+  h += `<circle cx="${x(t0)}" cy="${y}" r="5" style="fill:var(--tx)"/>${x(e.p50) - x(t0) > 34 ? `<text x="${x(t0)}" y="${y - 16}" style="fill:var(--tx2)" font-size="11.5">now</text>` : ""}`;
+  h += `<circle cx="${x(e.p50)}" cy="${y}" r="6.5" style="fill:var(--gold)"/><text x="${x(e.p50)}" y="${y - 16}" text-anchor="middle" style="fill:var(--gold)" font-size="11.5" font-weight="600">${e.floor ? "earliest" : "P50"}</text>`;
+  if (!e.floor && e.p85 && x(e.p85) - x(e.p50) > 26) h += `<circle cx="${x(e.p85)}" cy="${y}" r="4" style="fill:var(--gold)" opacity=".8"/><text x="${x(e.p85)}" y="${y - 16}" text-anchor="middle" style="fill:var(--gold);opacity:.85" font-size="11.5">P85</text>`;
   svg.innerHTML = h;
 }
 
@@ -964,22 +912,27 @@ const tone = (p) => p >= 90 ? "var(--failed)" : p >= 70 ? "var(--owner)" : "var(
 const bar = (p) => p == null ? "" : `<div class="gauge" style="--c:${tone(p)}"><i style="width:${Math.max(0, Math.min(100, p)).toFixed(1)}%"></i></div>`;
 const tile = (lab, val, sub, g) => `<div class="rtile"><div class="lab">${lab}</div><b>${val}</b>${sub ? `<div class="sub">${sub}</div>` : ""}${g || ""}</div>`;
 const phaseBtn = (p) => p ? `<button class="id" data-phase="${esc(p)}">${esc(p)}</button>` : '<span class="mu">no phase</span>';
+// A build by its phase. The gate is the machine's, so a build here can be another
+// swarm's: that one is named with its swarm, and opens in that swarm's page.
+const buildWho = (b) => b.mine === false && b.swarm
+  ? `<a class="nb" href="/s/${encodeURIComponent(b.swarm)}/#resources${b.phase ? "&phase=" + encodeURIComponent(b.phase) : ""}" title="A build of ${esc(b.swarm_name || b.swarm)}, another swarm on this machine">${esc(b.swarm_name || b.swarm)}${b.phase ? ` <span class="id">${esc(b.phase)}</span>` : ""}</a>`
+  : phaseBtn(b.phase);
 async function pollRes() {
   if (S.tab !== "resources" && S.tab !== "overview") return;
-  try { const d = await get("/api/resources", "res"); if (d) { S.res.now = d; if (S.tab === "resources") paintResNow(); else paintHostLine(); } } catch (e) {}
+  try { const d = await get("api/resources", "res"); if (d) { S.res.now = d; if (S.tab === "resources") paintResNow(); else paintHostLine(); } } catch (e) {}
 }
 // A view the page holds for other parameters must be fetched whole, whatever its ETag says.
 async function resGet(url, key, fresh) {
   let d = await get(url, key);
-  if (!d && !fresh) { S.et[key] = null; d = await get(url, key); }
+  if (!d && !fresh) { ETAGS[key] = null; d = await get(url, key); }
   return d;
 }
 async function pollResHist() {
   if (S.tab !== "resources") return;
   const w = S.res.win;
-  try { const d = await resGet("/api/resources/history?window=" + w, "reshist:" + w, S.res.hist && S.res.hist.window === w); if (d && d.window === S.res.win) { S.res.hist = d; drawResCharts(); } } catch (e) {}
+  try { const d = await resGet("api/resources/history?window=" + w, "reshist:" + w, S.res.hist && S.res.hist.window === w); if (d && d.window === S.res.win) { S.res.hist = d; drawResCharts(); } } catch (e) {}
 }
-function resTableUrl() { const r = S.res; return `/api/resources/builds?window=${r.win}&sort=${r.sort}&dir=${r.dir}&limit=${r.limit}${r.phase ? "&phase=" + encodeURIComponent(r.phase) : ""}`; }
+function resTableUrl() { const r = S.res; return `api/resources/builds?window=${r.win}&sort=${r.sort}&dir=${r.dir}&limit=${r.limit}${r.phase ? "&phase=" + encodeURIComponent(r.phase) : ""}`; }
 async function pollResTable() {
   if (S.tab !== "resources") return;
   const url = resTableUrl();
@@ -987,7 +940,7 @@ async function pollResTable() {
 }
 async function pollResCap() {
   if (S.tab !== "resources") return;
-  try { const d = await get("/api/resources/capacity", "rescap"); if (d) { S.res.cap = d; paintResCap(); if (S.res.hist) drawResCharts(); } } catch (e) {}
+  try { const d = await get("api/resources/capacity", "rescap"); if (d) { S.res.cap = d; paintResCap(); if (S.res.hist) drawResCharts(); } } catch (e) {}
 }
 function resShell() {
   const seg = RWIN.map(([k, l]) => `<button data-rwin="${k}" aria-pressed="${S.res.win === k}">${l}</button>`).join("");
@@ -1036,14 +989,16 @@ function paintResNow() {
     dline = `<p class="rnote">${one("state", "State dir")} · ${one("wt", "worktrees")} · ${one("cache", "build caches")} · measured ${esc(rel(dirs.ts))}${caches.length ? ` · <details><summary>by repo</summary> ${caches.map(([k, v]) => `${esc(k)} ${fx(v)} G`).join(", ")}</details>` : ""}</p>`;
   }
   const g = n.gate || {}, idle = new Set(s.idle || []);
+  const frozen = new Set((g.slots || []).filter(x => x.id && x.frozen).map(x => x.id));
+  const theirs = (s.builds || []).filter(b => b.mine === false).length;
   const usual = Object.fromEntries((g.slots || []).filter(x => x.id).map(x => [x.id, x.usual_s]));
-  let builds = (s.builds || []).map(b => `<div class="ritem"><span>${b.slot != null ? `<span class="mu">slot ${esc(b.slot)}</span> ` : ""}${phaseBtn(b.phase)}${idle.has(b.id) || b.idle ? ` <span class="tag warn" title="It holds its slot at under 1% of a core">idle${s.idle_s ? " for " + dur(s.idle_s) + "+" : ""}</span>` : ""}${b.yielded ? ' <span class="tag">yielded</span>' : ""}</span>
+  let builds = (s.builds || []).map(b => `<div class="ritem"><span>${b.slot != null ? `<span class="mu">slot ${esc(b.slot)}</span> ` : ""}${buildWho(b)}${frozen.has(b.id) ? ' <span class="tag warn" title="Its swarm is frozen: it keeps its seat and goes on at the thaw">frozen with its swarm</span>' : ""}${idle.has(b.id) || b.idle ? ` <span class="tag warn" title="It holds its slot at under 1% of a core">idle${s.idle_s ? " for " + dur(s.idle_s) + "+" : ""}</span>` : ""}${b.yielded ? ' <span class="tag">yielded</span>' : ""}</span>
 <span class="fig">running <span data-since="${b.since || ""}">${dur(b.since ? now() - b.since : null)}</span>${usual[b.id] ? `<span class="mu">, usually ~${dur(usual[b.id])}</span>` : ""}</span>
 <span class="fig" style="grid-column:1/-1;white-space:normal"><b>${fx(b.cores, 2)}</b> cores · anon <b>${gb(b.anon_mb)}</b> <span class="mu">(peak ${gb(b.peak_anon_mb)})</span> · ${fx(b.cpu_s, 0)} CPU s · ${esc(b.procs)} procs <span class="mu">· pid ${esc(b.pid)}</span></span>
 <span class="cmd" title="${esc(b.cmd)}">${esc(b.cmd)}</span></div>`).join("");
   if (!builds) builds = '<p class="empty">No build holds a slot.</p>';
   const q = g.queue || [];
-  let queue = q.map((t, i) => `<div class="ritem"><span><span class="mu">${i + 1}.</span> ${phaseBtn(t.phase)}${t.stale ? ' <span class="tag warn" title="Its waiter stopped polling, so it is passed over">not polling</span>' : ""}${t.passed ? ` <span class="tag" title="Short builds went ahead of it">passed ${t.passed}×</span>` : ""}</span>
+  let queue = q.map((t, i) => `<div class="ritem"><span><span class="mu">${i + 1}.</span> ${buildWho(t)}${t.stale ? ' <span class="tag warn" title="Its waiter stopped polling, so it is passed over">not polling</span>' : ""}${t.passed ? ` <span class="tag" title="Short builds went ahead of it">passed ${t.passed}×</span>` : ""}</span>
 <span class="fig">waiting <span data-since="${t.queued_at || ""}">${dur(t.queued_at ? now() - t.queued_at : null)}</span></span>
 <span class="fig mu" style="grid-column:1/-1;white-space:normal">${t.starts_at ? `starts ${esc(rel(t.starts_at))}` : "start not timed"}${t.usual_s ? `, usually runs ~${dur(t.usual_s)}` : ", no history for this command yet"}</span>
 <span class="cmd" title="${esc(t.cmd)}">${esc(t.cmd)}</span></div>`).join("");
@@ -1054,7 +1009,7 @@ function paintResNow() {
   const o = s.sampler || {};
   const aside = n.stale ? `<span class="stale">The sampler is not running: last sample ${esc(rel(s.ts))}</span>` : `sampled <span id="res-age">${esc(rel(s.ts))}</span>`;
   el.innerHTML = head(aside) + `<div class="rtiles">${tiles}</div>${dline}
-<div class="rcols"><div class="rsub"><h3>Builds: ${(s.builds || []).length} running${g.max_concurrent != null ? ` of ${g.max_concurrent} at a time` : ""}</h3>${builds}
+<div class="rcols"><div class="rsub"><h3>Builds on this machine: ${(s.builds || []).length} running${g.max_concurrent != null ? ` of ${g.max_concurrent} at a time` : ""}${theirs ? `, ${theirs} of them another swarm's` : ""}</h3>${builds}
 <h3 style="margin-top:16px">Queue: ${q.length || s.queued || 0} waiting</h3>${queue}</div>
 <div class="rsub"><h3>Sessions: ${ws.length}</h3>${sessions}
 <p class="rnote">The sampler costs ${fx(o.pct_core, 2)}% of one core and writes about ${fx((o.bytes_per_day || 0) / 1048576, 0)} MiB a day.</p></div></div>`;
@@ -1188,7 +1143,7 @@ function paintResTable() {
   const rows = t.rows.map(r => {
     const ex = r.exit == null ? '<span class="tag warn" title="It died without an exit code">killed</span>' : r.exit === 0 ? "0" : `<span class="tag bad">${esc(r.exit)}</span>`;
     const marks = (r.yielded_s ? `<span class="tag" title="It gave its slot up while idle">yielded ${dur(r.yielded_s)}</span>` : "") + (r.idle ? '<span class="tag warn" title="It held its slot at under 1% of a core">idle</span>' : "") + (r.partial ? '<span class="tag" title="First seen already running: its early part is missing">partial</span>' : "");
-    return `<tr><td>${esc(when(r.ended))}</td><td>${phaseBtn(r.phase)}${marks}</td><td class="r">${dur(r.run_s)}</td><td class="r">${r.wait_s == null ? "—" : dur(r.wait_s)}</td><td class="r hm">${fx(r.cpu_s, 0)}</td><td class="r">${fx(r.avg_cores, 2)}</td><td class="r hm">${fx(r.peak_cores, 1)}</td><td class="r">${gb(r.peak_anon_mb)}</td><td class="r hm">${gb(r.min_avail_mb)}</td><td class="r hm">${r.psi_memf == null ? "—" : fx(r.psi_memf) + "%"}</td><td class="r">${r.psi_iof == null ? "—" : fx(r.psi_iof) + "%"}</td><td class="r">${ex}</td><td class="cmd" title="${esc(r.cmd)}${r.where ? " (in " + esc(r.where) + ")" : ""}">${esc(r.cmd)}</td></tr>`;
+    return `<tr><td>${esc(when(r.ended))}</td><td>${buildWho(r)}${marks}</td><td class="r">${dur(r.run_s)}</td><td class="r">${r.wait_s == null ? "—" : dur(r.wait_s)}</td><td class="r hm">${fx(r.cpu_s, 0)}</td><td class="r">${fx(r.avg_cores, 2)}</td><td class="r hm">${fx(r.peak_cores, 1)}</td><td class="r">${gb(r.peak_anon_mb)}</td><td class="r hm">${gb(r.min_avail_mb)}</td><td class="r hm">${r.psi_memf == null ? "—" : fx(r.psi_memf) + "%"}</td><td class="r">${r.psi_iof == null ? "—" : fx(r.psi_iof) + "%"}</td><td class="r">${ex}</td><td class="cmd" title="${esc(r.cmd)}${r.where ? " (in " + esc(r.where) + ")" : ""}">${esc(r.cmd)}</td></tr>`;
   }).join("");
   const more = t.matched > t.rows.length ? `<p class="rnote">The first ${t.rows.length} of ${t.matched} in this order. ${t.limit < 500 ? '<button class="linkish" data-rmore="1">Show up to 500</button>' : "Filter by phase or pick a shorter window to see the rest."}</p>` : "";
   el.innerHTML = `<div class="tscroll"><table class="tbl"><thead><tr>${th}</tr></thead><tbody>${rows || `<tr><td colspan="${RCOLS.length}" class="mu">${t.total ? "No build of that phase in this window." : "No build finished in this window."}</td></tr>`}</tbody></table></div>${more}
@@ -1323,7 +1278,7 @@ function drawGraph() {
   const chars = Math.floor((W - 26) / 6.5);
   for (const n of d.nodes) {
     const cls = `n s-${n.s}${n.k ? " ctxn" : ""}${crit.has(n.id) ? " cp" : ""}`;
-    h += `<g class="${cls}" transform="translate(${n.x},${n.y})"><rect class="b" width="${W}" height="${H}" rx="8"/><rect class="k" x="0" y="0" width="5" height="${H}" rx="2.5" style="--c:${STATUS[n.s][1]}"/><text class="i" x="14" y="19">${esc(clipTxt(n.id, 24))}</text><text class="tt" x="14" y="36">${esc(clipTxt(n.t || n.c, chars))}</text></g>`;
+    h += `<g class="${cls}" transform="translate(${n.x},${n.y})"><rect class="b" width="${W}" height="${H}" rx="8"/><rect class="k" x="0" y="0" width="5" height="${H}" rx="2.5" style="--c:var(${STATUS[n.s][1]})"/><text class="i" x="14" y="19">${esc(clipTxt(n.id, 24))}</text><text class="tt" x="14" y="36">${esc(clipTxt(n.t || n.c, chars))}</text></g>`;
   }
   svg.innerHTML = h;
   svg.classList.remove("focus", "find"); marked = [];
@@ -1511,7 +1466,7 @@ let sTimer;
 function searchServer() {
   clearTimeout(sTimer); const want = S.g.q.trim();
   if (want.length < 3) return;
-  sTimer = setTimeout(async () => { try { const r = await fetch("/api/search?q=" + encodeURIComponent(want)); const j = await r.json(); if (S.g.q.trim() === want) { S.g.hits = new Set(j.ids); applySearch(); } } catch (e) {} }, 250);
+  sTimer = setTimeout(async () => { try { const r = await fetch("api/search?q=" + encodeURIComponent(want)); const j = await r.json(); if (S.g.q.trim() === want) { S.g.hits = new Set(j.ids); applySearch(); } } catch (e) {} }, 250);
 }
 // Minimap
 let MM = null;
@@ -1524,7 +1479,7 @@ function minimap() {
   const base = document.createElement("canvas"); base.width = cv.width; base.height = cv.height;
   const ctx = base.getContext("2d"); ctx.scale(dpr, dpr);
   ctx.translate(4, 4);
-  for (const n of d.nodes) { ctx.globalAlpha = n.k || n.s === "done" ? 0.45 : 1; ctx.fillStyle = STATUS[n.s][1]; ctx.fillRect(n.x * kx, n.y * ky, Math.max(1.5, d.nw * kx), Math.max(1.5, d.nh * ky)); }
+  for (const n of d.nodes) { ctx.globalAlpha = n.k || n.s === "done" ? 0.45 : 1; ctx.fillStyle = cssVar(STATUS[n.s][1]); ctx.fillRect(n.x * kx, n.y * ky, Math.max(1.5, d.nw * kx), Math.max(1.5, d.nh * ky)); }
   MM = {cv, base, kx, ky, dpr, w, h};
   minimapView();
 }
@@ -1532,7 +1487,7 @@ function minimapView() {
   if (!MM || !S.g.vb) return;
   const {cv, base, kx, ky, dpr} = MM, ctx = cv.getContext("2d"), vb = S.g.vb;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(base, 0, 0);
-  ctx.scale(dpr, dpr); ctx.translate(4, 4); ctx.strokeStyle = "#e6c07b"; ctx.lineWidth = 1.5;
+  ctx.scale(dpr, dpr); ctx.translate(4, 4); ctx.strokeStyle = cssVar("--gold"); ctx.lineWidth = 1.5;
   ctx.strokeRect(vb.x * kx, vb.y * ky, Math.max(3, vb.w * kx), Math.max(3, vb.h * ky));
 }
 function mmJump(e) {
@@ -1555,7 +1510,7 @@ function openSheet(sh) {
 function refreshSheet() { if (!S.sheet) return; if (S.sheet.kind === "book") paintBook(S.sheet.id, true); else loadPhase(S.sheet.id, true); }
 async function loadPhase(id, keep) {
   try {
-    const r = await fetch("/api/phase/" + encodeURIComponent(id), {cache: "no-store"});
+    const r = await fetch("api/phase/" + encodeURIComponent(id), {cache: "no-store"});
     const d = r.ok ? await r.json() : {error: r.status === 404 ? "This phase is not on the board." : "The board did not answer. It retries on its own."};
     if (S.sheet && S.sheet.id === id) paintSheet(id, d, keep);
   } catch (e) { if (S.sheet && S.sheet.id === id) paintSheet(id, {error: "The board did not answer. It retries on its own."}, keep); }
@@ -1647,6 +1602,11 @@ setInterval(() => {
 // Old deep links (#phase=<id>) still open the row.
 if (/^#phase=/.test(location.hash)) location.replace("#overview&" + location.hash.slice(1));
 paintNav();
+$(".sw.home").innerHTML = icon('<path d="M4 11l8-7 8 7M6 10v9h4v-5h4v5h4v-9"/>') + "<span>All swarms</span>";
+loop("machine", pollMachine);
+// The page follows the device between night and daylight; what was drawn in the
+// old hues (the graph's overview is a canvas) is drawn again.
+matchMedia("(prefers-color-scheme:light)").addEventListener("change", () => { render(false); if (S.tab === "graph" && S.graph) drawGraph(); });
 pollBoard().then(() => { route(); loop("board", pollBoard); loop("usage", pollUsage); loop("graph", pollGraph); loop("res", pollRes); loop("reshist", pollResHist); loop("restable", pollResTable); loop("rescap", pollResCap); });
 </script>
 </body>

@@ -53,6 +53,7 @@ from . import keep as keep_mod
 from . import launch as launch_mod
 from . import ledger as ledger_mod
 from . import ledgerw
+from . import machine as machine_mod
 from . import opqueue
 from . import procs
 from . import pushowed
@@ -1980,27 +1981,27 @@ def _check_web(cfg: Config, st: State) -> Check:
     stopped run has no board by design.
     """
     if not cfg.web_enabled:
-        return Check("web.board", OK, "off ([web] enabled = false)")
-    where = " ".join(web_lifecycle.urls(cfg))
-    state, detail = web_lifecycle.probe(cfg)
-    if state == web_lifecycle.OURS:
-        return Check("web.board", OK, f"listening: {where}")
-    if state == web_lifecycle.TAKEN:
-        who = f" ({detail})" if detail else ""
-        return Check(
-            "web.board",
-            WARN,
-            f"port :{cfg.web_port} is held by another program{who}, not the board",
-            "set [web].port in .swarm.toml to a free port and restart",
-        )
+        return Check("web.board", OK, "off for this swarm ([web] enabled = false)")
+    try:
+        at = web_lifecycle.place(cfg.state_dir)
+    except machine_mod.SettingsError as exc:
+        return Check("web.board", WARN, str(exc), "fix the machine file, then run `swarm web`")
+    found = web_lifecycle.probe(at)
+    if found.state == web_lifecycle.OURS:
+        base = web_lifecycle.url(at)
+        return Check("web.board", OK, f"listening: {base} — this swarm: "
+                                      f"{web_lifecycle.link(base, web_lifecycle.slug_of(cfg))}")
+    if found.state == web_lifecycle.TAKEN:
+        return Check("web.board", WARN, web_lifecycle.taken_line(at, found), found.fix)
     if st.supervisor_pid and _pid_alive(st.supervisor_pid):
         return Check(
             "web.board",
             WARN,
-            f"the run is up but nothing answers on :{cfg.web_port}",
-            "the dashboard serves it (its status bar says why not), or run `swarm web`",
+            f"the run is up but nothing answers on :{at.port}",
+            "run `swarm web` to start the machine's board; its log is web.log in"
+            f" {at.mdir}",
         )
-    return Check("web.board", OK, f"not running — `swarm up` starts it on :{cfg.web_port}")
+    return Check("web.board", OK, f"not running — `swarm up` starts it on :{at.port}")
 
 
 def _check_usage(cfg: Config, st: State) -> Check:

@@ -1,69 +1,64 @@
 """Starting, stopping and finding the web board.
 
-``swarm up`` starts the board beside the run and ``swarm down`` stops it; the
-owner then needs one thing from ``swarm status`` / ``doctor``: *the address to
-type into the phone*. So this module owns the command line the board is started
-with, the pid file it leaves, the listening probe, and the address the owner is
-given: the machine's Tailscale IP, or its LAN addresses when Tailscale is absent.
+There is one board for the machine, whatever the number of swarms: one process,
+one port, one address to keep on the phone. It is a machine service
+(:mod:`swarm_orchestrator.service`): any ``swarm up`` starts it when it is not
+already answering, every later ``up`` leaves it alone, and the ``swarm down``
+of the last swarm that is still up stops it. ``swarm web`` does the same by
+hand.
 
-Under the tmux driver the dashboard serves the board from its own process
-(:mod:`swarm_orchestrator.tui.webboard`), so it lives and dies with the
-dashboard pane. With no dashboard (the headless ``bare`` driver, or
-``[tui] autostart`` off) ``up`` starts it as a detached process, which writes
-its pid to ``<state>/web.pid`` — only when started with ``--pidfile``, which
-only ``up`` passes: a ``swarm web`` run by hand against someone's live state
-dir writes nothing into it.
+**Why it stops with the last swarm.** The other choice was to keep serving
+until ``swarm web stop``. It stops, because after the owner has taken every
+swarm down nothing of the tool should still hold a port open to the network,
+and because a board that outlived every restart would go on serving the code
+of the day it was started. A run that finishes by itself is not a ``down``, so
+its board stays up and keeps showing how it ended; and ``swarm web`` starts the
+board again over swarms that are down, to read their last state.
+
+So this module owns the board's command line, the probe that tells our board
+from whatever else answers on the port (``/healthz``), and the address the
+owner is given: the machine's Tailscale IP, or its LAN addresses when Tailscale
+is absent. Where it listens is a machine setting (``[web]`` in
+``machine.toml``), never a project's.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import json
-import os
 import re
-import shlex
-import signal
 import socket
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
-from .. import freezer
+from .. import config as config_mod
+from .. import machine
+from .. import service as service_mod
 
-PIDFILE = "web.pid"
-LOG = "web.log"
-#: Must match :data:`swarm_orchestrator.web.server.APP_ID` — the string
-#: ``/healthz`` answers with when the listener is our own board.
+#: The board's name as a machine service: ``web.pid`` and ``web.log`` in the
+#: machine directory.
+NAME = "web"
+#: What ``/healthz`` answers under ``app`` when the listener is a board of ours.
 APP_ID = "swarm-web"
-#: :func:`probe` outcomes: our board, some other program on the port, or
-#: nothing listening at all. A plain connect-and-see (:func:`listening`) cannot
-#: tell the first two apart — that gap is what let a stray
-#: ``python3 -m http.server`` on :8765 read as "(listening)" in ``swarm status``
-#: while the board's own pane had died with "Address already in use".
+#: :func:`probe` outcomes: this machine's board, something else on the port, or
+#: nothing listening at all. A plain connect-and-see cannot tell the first two
+#: apart, and that gap once let a stray ``python3 -m http.server`` read as
+#: "(listening)" in ``swarm status``.
 OURS = "ours"
 TAKEN = "taken"
 CLOSED = "closed"
-#: The detail :func:`probe` gives with :data:`OURS` when the listener is this
-#: run's dashboard, which serves the board from its own process.
-DASHBOARD = "the dashboard is hosting it"
-#: A dashboard this young that holds the port without answering is still
-#: starting; an older one that stays silent is a board that hangs.
-DASHBOARD_BOOT_S = 120.0
 #: Interfaces that are never the LAN: container bridges and virtual links. A
 #: phone cannot reach 172.17.0.1, and printing it as "the address" would send
 #: the owner to a dead URL first.
 _VIRTUAL = re.compile(r"^(lo|docker\d*|br-|veth|virbr|cni|flannel|tun|tap|zt|tailscale)")
 
 
-def pidfile(cfg) -> Path:
-    return Path(cfg.state_dir) / PIDFILE
-
-
 def display_name(cfg) -> str | None:
-    """What the board calls the swarm: ``[swarm].name``, by default the project
+    """What the board calls a swarm: ``[swarm].name``, by default the project
     folder's name. None for a config that carries neither."""
     name = getattr(cfg, "name", None)
     if name:
@@ -72,34 +67,48 @@ def display_name(cfg) -> str | None:
     return Path(pdir).name if pdir else None
 
 
-def is_ours(cfg, body: object) -> bool:
-    """Whether a ``/healthz`` answer is from a board of this project.
+# -- where the board is -------------------------------------------------------
+@dataclass(frozen=True)
+class Place:
+    """Where a machine's board is: the state root whose swarms it shows, and
+    the address it binds."""
 
-    A board says which project it serves by its slug, which a change of
-    ``[swarm].name`` does not move (and which two projects never share, as they
-    may a name). A board started before boards said so answers only
-    ``project``, always the folder's name: it is still recognised by that, so
-    it is found and stopped with its run, never left serving beside a new one.
-    """
-    if not isinstance(body, dict) or body.get("app") != APP_ID:
-        return False
-    if "slug" in body:
-        return body["slug"] == cfg.slug
-    return body.get("project") == Path(cfg.project_dir).name
+    root: Path
+    host: str
+    port: int
+
+    @property
+    def mdir(self) -> Path:
+        """The machine directory its pid file and log are in."""
+        return self.root / machine.DIR_NAME
+
+    @property
+    def local(self) -> str:
+        """The address to ask on this machine itself."""
+        return self.host if self.host not in ("", "0.0.0.0", "::") else "127.0.0.1"
 
 
-def command(cfg) -> str:
-    """The shell command that serves this project's board, as ``up`` runs it.
+def place(state_dir: Path | None = None) -> Place:
+    """Where this machine's board is: of this machine, or (given a swarm's
+    ``state_dir``) of the machine that swarm is on, which is the same place for
+    every swarm in one state root. Where it listens is the machine file's to
+    say, as it reads now (:func:`config.machine_settings`): raises
+    :class:`machine.SettingsError` for one that does not read, unless this
+    process read it while it was sound."""
+    conf = config_mod.machine_settings()
+    return Place(machine.directory(state_dir).parent.resolve(), conf.web_host, conf.web_port)
 
-    The interpreter running ``swarm up`` itself, not whatever ``swarm`` is first
-    on PATH: the board must be the same install as the run it describes.
-    """
-    return " ".join([
-        shlex.quote(sys.executable), "-m", "swarm_orchestrator",
-        "--project-dir", shlex.quote(str(cfg.project_dir)),
-        "web", "--host", shlex.quote(cfg.web_host), "--port", str(int(cfg.web_port)),
-        "--pidfile", shlex.quote(str(pidfile(cfg))),
-    ])
+
+def the_service(at: Place) -> service_mod.Service:
+    """The board as a machine service: its command line says everything it
+    needs, because it is started with no swarm's environment."""
+    return service_mod.Service(
+        NAME,
+        ("web", "serve", "--state-root", str(at.root), "--host", at.host,
+         "--port", str(at.port)),
+        mark=("web", "serve"),
+        answers=lambda: probe(at).state == OURS,
+    )
 
 
 def lan_ips() -> list[str]:
@@ -160,71 +169,132 @@ def tailscale_ip() -> str | None:
     return None
 
 
-def urls(cfg) -> list[str]:
+def urls(at: Place) -> list[str]:
     """The board's address for the owner: Tailscale when this machine has it,
-    else the LAN addresses (so a box without Tailscale still says something)."""
-    host = cfg.web_host
-    if host in ("", "0.0.0.0", "::"):
+    else the LAN addresses (so a box without Tailscale still says something).
+    It is the overview of every swarm; :func:`link` is one swarm's page."""
+    if at.host in ("", "0.0.0.0", "::"):
         ts = tailscale_ip()
         hosts = [ts] if ts else (lan_ips() or ["localhost"])
     else:
-        hosts = [host]
-    return [f"http://{h}:{int(cfg.web_port)}/" for h in hosts]
+        hosts = [at.host]
+    return [f"http://{h}:{at.port}/" for h in hosts]
 
 
-def listening(cfg, timeout: float = 0.3) -> bool:
+def url(at: Place) -> str:
+    """The first of :func:`urls`: the one address to hand out."""
+    try:
+        found = urls(at)
+    except Exception:  # noqa: BLE001 - an address is a nicety
+        found = []
+    return found[0] if found else f"http://localhost:{at.port}/"
+
+
+def link(base: str, slug: str) -> str:
+    """One swarm's page under the board at ``base``."""
+    return f"{base.rstrip('/')}/s/{slug}/"
+
+
+def slug_of(cfg) -> str:
+    """The name a swarm has on the board: its state dir's, which is what the
+    machine's registry lists it by (:attr:`machine.Swarm.slug`)."""
+    return Path(cfg.state_dir).name
+
+
+# -- what answers on the port -------------------------------------------------
+@dataclass(frozen=True)
+class Found:
+    """What :func:`probe` found on the board's port.
+
+    ``holder`` says, for :data:`TAKEN`, who holds the port in words the owner
+    can act on, and ``fix`` what to change. ``pid`` is the board's own, when it
+    said so."""
+
+    state: str
+    holder: str = ""
+    fix: str = ""
+    pid: int | None = None
+
+
+def health_body(root: Path, pid: int) -> dict:
+    """What ``/healthz`` answers: enough for :func:`probe` to tell this
+    machine's board from whatever else might hold the port."""
+    return {"app": APP_ID, "machine": str(root), "pid": pid}
+
+
+def is_ours(at: Place, body: object) -> bool:
+    """Whether a ``/healthz`` answer is from the board of this state root. A
+    board of another root (another user's, a test's) is not, and neither is a
+    board from before boards were one per machine, which names one swarm."""
+    return (isinstance(body, dict) and body.get("app") == APP_ID
+            and body.get("machine") == str(at.root))
+
+
+def _move_port() -> str:
+    return (f"set [web].port in {machine.settings_path()} to a free port, then run"
+            " `swarm web`")
+
+
+def _taken(at: Place, body: object) -> Found:
+    """Who holds the port, from what it answered and what ``ss`` says."""
+    who, _ = _occupant(at.port)
+    proc = f" ({who})" if who else ""
+    if isinstance(body, dict) and body.get("app") == APP_ID:
+        if "machine" in body:
+            return Found(TAKEN, f"the board of another state root ({body['machine']}){proc}",
+                         _move_port())
+        name = body.get("project") or body.get("slug") or "another swarm"
+        return Found(
+            TAKEN, f"the board of the swarm {name!r}, started before boards were one per"
+                   f" machine{proc}",
+            "restart that swarm (`swarm down`, then `swarm up`, in its project) so it lets"
+            f" go of the port; or {_move_port()}")
+    return Found(TAKEN, who or "another program", _move_port())
+
+
+def listening(at: Place, timeout: float = 0.3) -> bool:
     """Whether something accepts connections on the board's port right now.
 
     Cheap, but cannot tell *our* board from an unrelated process that beat it to
-    the port — a plain TCP connect succeeds either way. Use :func:`probe` where
-    the answer needs to be trustworthy (``status``, ``doctor``, ``up``).
+    the port. :func:`probe` is the answer to trust.
     """
-    host = cfg.web_host if cfg.web_host not in ("", "0.0.0.0", "::") else "127.0.0.1"
     try:
-        with socket.create_connection((host, int(cfg.web_port)), timeout=timeout):
+        with socket.create_connection((at.local, at.port), timeout=timeout):
             return True
     except OSError:
         return False
 
 
-def probe(cfg, timeout: float = 0.5) -> tuple[str, str | None]:
+def probe(at: Place, timeout: float = 0.5) -> Found:
     """What answers on the board's port right now: :data:`OURS`, :data:`TAKEN`
     (something else holds it) or :data:`CLOSED` (nothing does).
 
-    ``GET /healthz`` and match its JSON body, rather than the connect-only check
-    :func:`listening` does — a squatter that merely accepts the connection
-    (another ``http.server``, say) must not read as our board. The second
-    element of the pair is the occupant's ``command (pid N)`` for ``TAKEN``,
-    when :func:`_occupant` can say so cheaply, and :data:`DASHBOARD` for an
-    ``OURS`` that is this run's dashboard not answering yet; otherwise ``None``.
+    ``GET /healthz`` and match its JSON body, rather than a connect-only check:
+    a squatter that merely accepts the connection (another ``http.server``, say)
+    must not read as our board.
     """
-    host = cfg.web_host if cfg.web_host not in ("", "0.0.0.0", "::") else "127.0.0.1"
-    port = int(cfg.web_port)
     try:
-        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=timeout) as resp:
+        with urllib.request.urlopen(f"http://{at.local}:{at.port}/healthz",
+                                    timeout=timeout) as resp:
             body = json.loads(resp.read())
     except (OSError, ValueError, urllib.error.URLError):
-        if not listening(cfg, timeout):
-            return CLOSED, None
-        who, pid = _occupant(port)
+        if not listening(at, timeout):
+            return Found(CLOSED)
         # The listener took the connection but did not answer /healthz in time.
-        # That is not proof of a squatter: ``serve`` binds (and the kernel starts
-        # accepting) before its request loop runs, so a board still starting up
-        # looks exactly like this, and calling it a squatter would tell the owner
-        # another program holds the port while naming its own board's pid. A
-        # board of this project on the port is ours, whatever its answer speed.
-        if pid is not None and _board_of(cfg, pid):
-            return OURS, None
-        # Under tmux the dashboard serves the board from its own process, and a
-        # dashboard still painting its first screen answers late. Its command is
-        # ``swarm tui``, not ``swarm web``: without this the run's own dashboard
-        # was reported as "another program (swarm (pid N))" holding the port.
-        if pid is not None and _dashboard_of(cfg, pid):
-            return OURS, DASHBOARD
-        return TAKEN, who
-    if is_ours(cfg, body):
-        return OURS, None
-    return TAKEN, _occupant(port)[0]
+        # That is not proof of a squatter: the server binds (and the kernel
+        # starts accepting) before it has read every swarm and begun to answer,
+        # so a board still starting looks exactly like this. The process we
+        # started holding the port is ours, whatever its answer speed; and
+        # where ``ss`` cannot say who holds it, a live board of ours gets the
+        # benefit of the doubt for the moment its start takes.
+        mine = running(at)
+        if mine is not None and _occupant(at.port)[1] in (None, mine):
+            return Found(OURS, pid=mine)
+        return _taken(at, None)
+    if is_ours(at, body):
+        pid = body.get("pid")
+        return Found(OURS, pid=pid if isinstance(pid, int) else None)
+    return _taken(at, body)
 
 
 def _occupant(port: int) -> tuple[str | None, int | None]:
@@ -243,146 +313,97 @@ def _occupant(port: int) -> tuple[str | None, int | None]:
     return f"{m.group(1)} (pid {m.group(2)})", int(m.group(2))
 
 
-def _board_of(cfg, pid: int) -> bool:
-    """Is ``pid`` a board serving *this* project — ``swarm web`` for the same
-    project dir, as :func:`command` (or the owner, by hand) starts it?"""
-    try:
-        args = [a.decode(errors="replace")
-                for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
-        cwd = Path(os.readlink(f"/proc/{pid}/cwd"))
-    except OSError:
-        return False
-    if "web" not in args or not any(
-        "swarm_orchestrator" in a or Path(a).name == "swarm" for a in args
-    ):
-        return False
-    where = Path(args[args.index("--project-dir") + 1]) if "--project-dir" in args[:-1] else cwd
-    try:
-        return (cwd / where).resolve() == Path(cfg.project_dir).resolve()
-    except OSError:
-        return False
+def wait_probe(at: Place, timeout: float = 5.0) -> Found:
+    """:func:`probe`, retried until it stops saying :data:`CLOSED` or ``timeout``
+    runs out: a board just started needs a moment to bind, so a single probe
+    right away cannot tell "still starting" from "never came up"."""
+    deadline = time.monotonic() + timeout
+    found = probe(at)
+    while found.state == CLOSED and time.monotonic() < deadline:
+        time.sleep(0.2)
+        found = probe(at)
+    return found
 
 
-def _dashboard_of(cfg, pid: int) -> bool:
-    """Is ``pid`` this run's dashboard, still starting? ``swarm up`` starts it
-    with the run's ``SWARM_STATE_DIR``, and it serves the board itself
-    (:mod:`swarm_orchestrator.tui.webboard`)."""
+# -- the lifecycle ------------------------------------------------------------
+def running(at: Place) -> int | None:
+    """The pid of the board this machine started, if it is still alive."""
+    return service_mod.running(the_service(at), at.mdir)
+
+
+def ensure(at: Place, timeout: float = 10.0) -> Found:
+    """Start the board unless it is there, and say what answers on its port.
+
+    A board already answering is left alone, whichever swarm started it. A port
+    something else holds is reported and nothing is started: a second process
+    would only fail to bind.
+    """
+    found = probe(at)
+    if found.state != CLOSED:
+        return found
+    service_mod.start(the_service(at), at.mdir)
+    return wait_probe(at, timeout)
+
+
+def _served_by_hand(at: Place) -> int | None:
+    """The pid of a board of ours that answers without a pid file."""
+    return probe(at).pid
+
+
+def stop(at: Place) -> bool:
+    """Stop the board, whoever started it. Returns whether one was running."""
+    return service_mod.stop(the_service(at), at.mdir, also=_served_by_hand(at))
+
+
+def stop_with_last(at: Place, leaving: Path | None = None) -> bool:
+    """``swarm down``'s half: stop the board unless a swarm other than the one
+    whose state dir is ``leaving`` is still up. Returns whether it was stopped."""
+    return service_mod.stop_with_last(the_service(at), at.mdir, leaving,
+                                      also=lambda: _served_by_hand(at))
+
+
+def restart(at: Place) -> bool:
+    """Start the board again, so it runs the code on disk; one that was not
+    running is started all the same. Returns whether it answers."""
+    stop(at)
+    return ensure(at).state == OURS
+
+
+# -- in words -----------------------------------------------------------------
+def taken_line(at: Place, found: Found) -> str:
+    """Why this machine's board is not on its port, in one line."""
+    return f"port :{at.port} is held by {found.holder}, not this machine's board"
+
+
+def machine_line(at: Place | None = None) -> str:
+    """One line for ``swarm ls`` and ``swarm web status``: the one address, and
+    whether the board answers on it."""
     try:
-        args = [a.decode(errors="replace")
-                for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
-        env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-    except OSError:
-        return False
-    if "tui" not in args or not any(
-        "swarm_orchestrator" in a or Path(a).name == "swarm" for a in args
-    ):
-        return False
-    if f"SWARM_STATE_DIR={cfg.state_dir}".encode() not in env:
-        return False
-    try:  # how long it has been running: uptime minus its start, both since boot
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        started = int(stat[stat.rfind(")") + 2:].split()[19]) / os.sysconf("SC_CLK_TCK")
-        age = float(Path("/proc/uptime").read_text().split()[0]) - started
-    except (OSError, ValueError, IndexError):
-        return False
-    return age < DASHBOARD_BOOT_S
+        at = place() if at is None else at
+    except machine.SettingsError as exc:
+        return f"web board: {exc}"
+    found = probe(at)
+    if found.state == OURS:
+        pid = f", pid {found.pid}" if found.pid else ""
+        return f"web board: {url(at)} (listening{pid})"
+    if found.state == TAKEN:
+        return f"web board: {taken_line(at, found)} — {found.fix}"
+    return f"web board: not running — `swarm up` starts it on :{at.port}, or run `swarm web`"
 
 
 def status_line(cfg) -> str:
-    """One line for ``swarm status``: where the board is, and whether it answers."""
+    """One line for ``swarm status``: where the board is, whether it answers,
+    and this swarm's own page on it."""
     if not cfg.web_enabled:
-        return "web: off ([web] enabled = false)"
-    where = " ".join(urls(cfg))
-    state, detail = probe(cfg)
-    if state == OURS:
-        return f"web: {where} ({detail or 'listening'})"
-    if state == TAKEN:
-        who = f" ({detail})" if detail else " (pid unknown)"
-        return (f"web: port :{cfg.web_port} is held by another program{who}, not the board — "
-                "set [web].port in .swarm.toml to a free port")
-    return f"web: not listening on :{cfg.web_port} — `swarm up` starts it, or run `swarm web`"
-
-
-def wait_probe(cfg, timeout: float = 5.0) -> tuple[str, str | None]:
-    """:func:`probe`, retried until it stops saying :data:`CLOSED` or ``timeout``
-    runs out — the board's pane/process needs a moment to bind after ``up``
-    starts it, so a single probe right away cannot yet distinguish "still
-    starting" from "never came up"."""
-    deadline = time.monotonic() + timeout
-    state, detail = probe(cfg)
-    while state == CLOSED and time.monotonic() < deadline:
-        time.sleep(0.2)
-        state, detail = probe(cfg)
-    return state, detail
-
-
-def start_detached(cfg) -> int | None:
-    """Start the board as its own process (the ``bare`` driver). Returns its pid.
-
-    A board already answering on the port is left alone: two would fight over
-    the socket, and the second would just fail to bind. In a scope of its own
-    where one can be made (:func:`freezer.scoped`), so it stays readable while
-    the sessions are frozen.
-    """
-    if not cfg.web_enabled or listening(cfg):
-        return None
-    log_dir = Path(cfg.log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "SWARM_STATE_DIR": str(cfg.state_dir)}
-    with (log_dir / LOG).open("ab") as log:
-        proc = subprocess.Popen(
-            freezer.scoped(shlex.split(command(cfg)), env), cwd=str(cfg.project_dir), env=env,
-            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
-        )
-    return proc.pid
-
-
-def _ours(pid: int) -> bool:
-    """Is ``pid`` a live board process (not a recycled pid now running something else)?"""
+        return "web: off for this swarm ([web] enabled = false)"
     try:
-        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
-    except OSError:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True  # no /proc to check against; the pid file is all we have
-    return b"swarm_orchestrator" in cmd and b" web" in cmd
-
-
-def running(cfg) -> int | None:
-    """The pid of the board ``up`` started as its own process, if it is still alive."""
-    try:
-        pid = int(pidfile(cfg).read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-    return pid if pid > 0 and _ours(pid) else None
-
-
-def stop(cfg, timeout: float = 5.0) -> bool:
-    """Stop the board ``up`` started, if it is still running. Returns whether one was."""
-    path = pidfile(cfg)
-    try:
-        pid = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return False
-    stopped = False
-    if pid > 0 and _ours(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-            stopped = True
-        except OSError:
-            pass
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and _ours(pid):
-            time.sleep(0.05)
-        if _ours(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-    try:
-        path.unlink()
-    except OSError:
-        pass
-    return stopped
+        at = place(cfg.state_dir)
+    except machine.SettingsError as exc:
+        return f"web: {exc}"
+    found = probe(at)
+    if found.state == OURS:
+        base = url(at)
+        return f"web: {base} (listening) — this swarm: {link(base, slug_of(cfg))}"
+    if found.state == TAKEN:
+        return f"web: {taken_line(at, found)} — {found.fix}"
+    return f"web: not listening on :{at.port} — `swarm up` starts it, or run `swarm web`"

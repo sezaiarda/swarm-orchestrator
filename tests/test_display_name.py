@@ -16,7 +16,6 @@ import os
 import shutil
 import threading
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
@@ -32,7 +31,8 @@ from swarm_orchestrator.web import board as board_mod
 from swarm_orchestrator.web import lifecycle
 from swarm_orchestrator.web import server as web_server
 
-from test_web_lifecycle import DEMO, _free_port
+from test_web_board import record
+from test_web_lifecycle import DEMO
 
 FOLDER = "Old_Project"
 BARE = '[swarm]\ndriver = "bare"\n[web]\nenabled = false\n'
@@ -155,27 +155,33 @@ def test_a_restart_that_changed_nothing_asks_nobody(project, tmp_path):
 
 
 def _board(cfg) -> dict:
+    """The swarm's board and its entry on the machine's overview, once its
+    supervisor has recorded ``cfg``."""
     cfg.ensure_dirs()
     state_mod.init_state(cfg)
-    srv = web_server.make_server(cfg, "127.0.0.1", 0)
+    record(cfg)
+    srv = web_server.make_server(cfg.state_dir.parent, "127.0.0.1", 0)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
-        port = srv.server_address[1]
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/board", timeout=5) as r:
+        at = f"http://127.0.0.1:{srv.server_address[1]}"
+        with urllib.request.urlopen(f"{at}/s/{cfg.state_dir.name}/api/board", timeout=5) as r:
             board = json.loads(r.read())
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as r:
-            return {"board": board, "health": json.loads(r.read())}
+        with urllib.request.urlopen(f"{at}/api/machine", timeout=5) as r:
+            return {"board": board, "entry": json.loads(r.read())["swarms"][0]}
     finally:
         web_server.close(srv)
 
 
-def test_the_board_is_titled_with_the_name(project):
+def test_the_board_is_titled_with_the_name(project, monkeypatch):
+    monkeypatch.setenv("SWARM_WEB", "1")
     named = _board(_load(project, '[swarm]\nname = "New Name"\n'))
     assert named["board"]["project"] == "New Name"  # the page's title and heading
-    assert named["health"]["project"] == "New Name"
+    assert named["entry"]["name"] == "New Name"  # its card and its button
     plain = _board(_load(project))
-    assert plain["board"]["project"] == FOLDER and plain["health"]["project"] == FOLDER
+    assert plain["board"]["project"] == FOLDER and plain["entry"]["name"] == FOLDER
+    # A rename moves no address: the swarm is listed by its state dir.
+    assert named["entry"]["slug"] == plain["entry"]["slug"]
 
 
 def test_a_config_without_a_name_still_titles_the_board():
@@ -185,73 +191,6 @@ def test_a_config_without_a_name_still_titles_the_board():
     assert lifecycle.display_name(Bare()) == "a-folder"
     assert lifecycle.display_name(object()) is None
     assert board_mod.lifecycle is lifecycle
-
-
-# -- a board started under the old name is still ours ------------------------
-def test_a_board_is_recognised_by_slug_whatever_it_is_called(project):
-    old = _load(project)
-    new = _load(project, '[swarm]\nname = "New Name"\n')
-    assert lifecycle.is_ours(new, web_server._health_body(old))
-    assert lifecycle.is_ours(old, web_server._health_body(new))
-    # A board from before boards said their slug answers the folder's name only.
-    assert lifecycle.is_ours(new, {"app": lifecycle.APP_ID, "project": FOLDER})
-    # Another project's board is not ours, even one that shows the same name.
-    assert not lifecycle.is_ours(
-        new, {"app": lifecycle.APP_ID, "project": "New Name", "slug": "other-12345678"})
-    assert not lifecycle.is_ours(new, {"app": lifecycle.APP_ID, "project": "elsewhere"})
-    assert not lifecycle.is_ours(new, {"app": "something-else", "slug": new.slug})
-    assert not lifecycle.is_ours(new, ["not", "a", "board"])
-
-
-def _serve_json(body: dict):
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 - http.server's name
-            data = json.dumps(body).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def log_message(self, *args):
-            pass
-
-    srv = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
-
-
-def _web(project, port: int, name: str = ""):
-    head = f'[swarm]\nname = "{name}"\n' if name else ""
-    return _load(project, head + f'[web]\nhost = "127.0.0.1"\nport = {port}\n')
-
-
-def test_a_running_old_name_board_is_found_and_not_doubled(project):
-    """The board the run started before the rename answers on the port. The
-    renamed swarm must read it as its own: `swarm status` says listening, and
-    the dashboard does not start a second board (or call the port taken)."""
-    port = _free_port()
-    old = _web(project, port)
-    old.ensure_dirs()
-    state_mod.init_state(old)
-    srv = web_server.make_server(old, "127.0.0.1", port)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        new = _web(project, port, "New Name")
-        assert lifecycle.probe(new) == (lifecycle.OURS, None)
-        assert lifecycle.start_detached(new) is None
-    finally:
-        web_server.close(srv)
-
-
-def test_a_board_from_before_the_slug_is_found_by_the_folder_name(project):
-    legacy = _serve_json({"app": lifecycle.APP_ID, "project": FOLDER})
-    try:
-        new = _web(project, legacy.server_address[1], "New Name")
-        assert lifecycle.probe(new) == (lifecycle.OURS, None)
-    finally:
-        legacy.shutdown()
-        legacy.server_close()
 
 
 # -- a bot started under the old name is still ours --------------------------

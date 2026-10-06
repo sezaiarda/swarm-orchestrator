@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#121722" media="(prefers-color-scheme:dark)">
+<meta name="theme-color" content="#f3f4f8" media="(prefers-color-scheme:light)">
+<title>Swarms</title>
+<style>
+/*{{shared.css}}*/
+
+/* The overview: every swarm on this machine on one page. In reading order:
+   what waits on you, the machine as a whole, then a card per swarm. */
+.top{position:sticky;top:0;z-index:30;height:calc(var(--hdr) + env(safe-area-inset-top));padding:env(safe-area-inset-top) 28px 0;display:flex;align-items:center;gap:14px;background:var(--glass);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--ln)}
+.brand{display:flex;align-items:baseline;gap:9px;min-width:0}
+.brand b{font:650 17px/1 var(--disp);letter-spacing:-.01em}
+.brand span{color:var(--mu);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status{margin-left:auto;display:flex;align-items:center;gap:14px;font-size:13px;color:var(--mu);white-space:nowrap}
+main{padding:28px 28px 64px;max-width:1360px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+
+/* What waits on you. Amber only when something does. */
+.ask{border-color:color-mix(in srgb,var(--owner) 45%,var(--ln));background:color-mix(in srgb,var(--owner) 7%,var(--sf))}
+.ask h1,.calm h1{font:680 clamp(22px,2.6vw,30px)/1.15 var(--disp);letter-spacing:-.02em}
+.ask h1 b{color:var(--owner)}
+.ask-g{display:flex;align-items:baseline;gap:6px 12px;flex-wrap:wrap;margin:18px 0 0;padding-bottom:8px;border-bottom:1px solid color-mix(in srgb,var(--owner) 30%,var(--ln))}
+.ask-g h2{font:650 15px/1.3 var(--disp)}
+.ask-g span{color:var(--mu);font-size:13px}
+.ask-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,430px),1fr));gap:0 28px}
+.ask-item{display:block;padding:14px 0;border-bottom:1px solid color-mix(in srgb,var(--owner) 18%,var(--ln))}
+.ask-item:hover .ask-go{text-decoration:underline}
+.ask-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:2px 9px 2px 8px;border-radius:999px;border:1px solid var(--ln2);background:var(--sf);font-size:12.5px;font-weight:600;color:var(--tx)}
+.chip .dot{background:var(--c,var(--mu2))}
+.ask-top .age{margin-left:auto;color:var(--mu);font-size:12.5px;white-space:nowrap}
+.ask-t{display:block;margin-top:6px;font-weight:600}
+.ask-q{margin-top:3px;color:var(--tx2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.ask-foot{display:flex;gap:10px;align-items:baseline;margin-top:6px;font-size:12.5px;color:var(--mu)}
+.ask-go{margin-left:auto;color:var(--run);font-weight:550;white-space:nowrap}
+.ask-more{padding-top:12px;color:var(--mu);font-size:13px}
+.calm{display:flex;align-items:center;gap:16px}
+.calm .mark{width:38px;height:38px;border-radius:50%;flex:none;display:grid;place-items:center;background:color-mix(in srgb,var(--done) 16%,transparent);color:var(--done)}
+.calm .mark svg{width:20px;height:20px}
+.calm p,.ask .lead{color:var(--tx2);font-size:15px;margin-top:4px}
+
+/* The machine as a whole. */
+.totals{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.5fr);gap:0;padding:0}
+.tot{padding:20px 22px;border-left:1px solid var(--ln);min-width:0}
+.tot:first-child{border-left:0}
+.tot .lab{color:var(--mu);font-size:13px}
+.tot .big{font:680 30px/1.15 var(--disp);letter-spacing:-.02em;margin-top:4px;white-space:nowrap}
+.tot .big small{font:600 14px/1 var(--sans);color:var(--mu);margin-left:5px;letter-spacing:0}
+.tot .sub{color:var(--mu);font-size:13px;margin-top:3px}
+.tot .stack{margin-top:12px}
+.use{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px 10px;align-items:center;margin-top:10px;font-size:13px}
+.use b{font:650 15px/1 var(--disp);min-width:3ch;text-align:right}
+.use .gauge{height:6px}
+.use .rs{color:var(--mu);font-size:12.5px;white-space:nowrap}
+.use .nm{color:var(--tx2)}
+
+/* A card per swarm. */
+.sec-t{display:flex;align-items:baseline;gap:12px;margin:8px 2px -6px}
+.sec-t h2{font:650 17px/1.3 var(--disp);letter-spacing:-.01em}
+.sec-t span{color:var(--mu);font-size:13px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,380px),1fr));gap:20px;align-items:stretch}
+.card{display:flex;flex-direction:column;gap:14px;padding:20px 22px;background:var(--sf);border:1px solid var(--ln);border-radius:var(--r3);min-width:0}
+.card.asks{border-color:color-mix(in srgb,var(--owner) 45%,var(--ln))}
+.card-h{display:flex;align-items:center;gap:12px}
+.card-h h3{font:680 20px/1.2 var(--disp);letter-spacing:-.015em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-h .state{margin-left:auto;font-size:13px}
+.why{color:var(--tx2);font-size:13px;margin-top:-6px}
+.prog-top{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.prog-top b{font:650 20px/1 var(--disp)}
+.prog-top .aside{margin-left:auto;color:var(--mu);font-size:13px;text-align:right}
+.now h4{font-size:13px;color:var(--mu);font-weight:550;margin:0 0 2px}
+.now-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:baseline;padding:6px 0;border-top:1px solid var(--ln);font-size:13px}
+.now-row:first-of-type{border-top:0}
+.now-row .t{color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.now-row .el{color:var(--mu);white-space:nowrap}
+.now .quiet{color:var(--mu);font-size:13px}
+.card-f{display:flex;gap:10px;align-items:center;margin-top:auto;padding-top:2px}
+.go{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:9px 16px;border-radius:10px;border:1px solid var(--ln2);background:var(--sf2);color:var(--tx);font-weight:600;font-size:14px}
+.go:hover{background:var(--sf3)}
+.go svg{width:16px;height:16px}
+.need{flex:none;color:var(--tx2);font-weight:550;white-space:nowrap}
+.need b{display:inline-block;min-width:22px;margin-right:4px;padding:0 6px;border-radius:999px;background:var(--owner);color:var(--bg);font-weight:700;text-align:center}
+.card.rest{background:color-mix(in srgb,var(--sf) 55%,var(--bg))}
+.foot{color:var(--mu2);font-size:12.5px;margin:4px 2px 0}
+.none{padding:34px 22px;text-align:center}
+.none h1{font:650 20px/1.3 var(--disp)}
+.none p{color:var(--mu);margin-top:6px}
+.none code{font-family:var(--mono);background:var(--sf3);padding:1px 6px;border-radius:5px;color:var(--tx)}
+
+@media (max-width:1000px){
+  .totals{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .tot{border-left:0;border-top:1px solid var(--ln)}
+  .tot:first-child{border-top:0}
+  .tot.wide{grid-column:1/-1}
+  .tot.right{border-left:1px solid var(--ln)}
+}
+@media (max-width:760px){
+  .top{padding:env(safe-area-inset-top) 16px 0}
+  .status .upd{display:none}
+  main{padding:16px 14px calc(40px + env(safe-area-inset-bottom));gap:14px}
+  .tot{padding:14px 16px}
+  .tot .big{font-size:26px}
+  .card{padding:16px}
+  .cards{gap:14px}
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><b>Swarms</b><span id="host"></span></div>
+  <div class="status">
+    <span class="upd" id="upd"></span>
+    <span class="state" id="state"><span class="dot"></span><span>connecting</span></span>
+  </div>
+</header>
+<main id="main"><p class="empty">Loading…</p></main>
+<script>
+"use strict";
+/*{{shared.js}}*/
+let M = null, lastOk = 0;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const pct = (v) => v == null ? null : Math.max(0, Math.min(100, v));
+const tone = (p) => p == null ? "var(--mu2)" : p >= 90 ? "var(--failed)" : p >= 70 ? "var(--owner)" : "var(--run)";
+const arrow = icon('<path d="M5 12h14M13 6l6 6-6 6"/>');
+const page = (slug) => `/s/${encodeURIComponent(slug)}/`;
+
+// One sentence for the whole machine: how many swarms stand how.
+function standing(swarms) {
+  const by = {};
+  for (const s of swarms) by[s.word] = (by[s.word] || 0) + 1;
+  const parts = Object.entries(by).map(([word, n]) => `${n} ${n === 1 ? "is" : "are"} ${word}`);
+  if (!parts.length) return "";
+  if (swarms.length === 1) return `${swarms[0].name} is ${swarms[0].word}.`;
+  return parts.join(", ").replace(/, ([^,]*)$/, " and $1") + ".";
+}
+
+// One thing that waits: a question (a session asks and waits for the answer)
+// or a to-do (something only the owner can do). It opens in its swarm's page.
+function waitItem(a, byslug, todo) {
+  const s = byslug[a.slug] || {};
+  const href = page(a.slug) + (todo && !a.row ? "#activity" : `#overview&phase=${encodeURIComponent(a.id)}`);
+  const sub = todo ? `${a.sub || ""}${a.behind ? `, ${plural(a.behind, "row waits", "rows wait")} on it` : ""}` : a.sub || "";
+  return `<a class="ask-item" href="${esc(href)}"><span class="ask-top"><span class="chip st-${esc(s.status || "")}"><span class="dot"></span>${esc(a.swarm)}</span>${todo && !a.row ? "" : `<span class="id">${esc(a.id)}</span>`}${a.since ? `<span class="age">${todo ? "since" : "asked"} ${esc(rel(a.since))}</span>` : ""}</span>
+${a.t ? `<span class="ask-t">${esc(a.t)}</span>` : ""}${a.q ? `<p class="ask-q">${esc(a.q)}</p>` : ""}
+<span class="ask-foot"><span>${esc(sub)}</span><span class="ask-go">Open in ${esc(a.swarm)}</span></span></a>`;
+}
+
+function attention(m, byslug) {
+  const w = m.waiting;
+  if (!w.n) {
+    return `<section class="panel calm" aria-label="What waits for you"><span class="mark">${icon('<path d="M5 12.5l4.5 4.5L19 7.5"/>')}</span><div><h1>Nothing waits for you</h1><p>${esc(standing(m.swarms))}</p></div></section>`;
+  }
+  const where = m.swarms.filter(s => s.needs_you).length;
+  const kinds = [w.questions_n ? plural(w.questions_n, "question to answer", "questions to answer") : "", w.todos_n ? plural(w.todos_n, "thing to do", "things to do") : ""].filter(Boolean).join(" and ");
+  const group = (title, hint, items, total, todo) => !total ? "" : `<div class="ask-g"><h2>${title}</h2><span>${hint}</span></div>
+<div class="ask-list">${items.map(x => waitItem(x, byslug, todo)).join("")}</div>${total > items.length ? `<p class="ask-more">And ${total - items.length} more: each swarm's page lists all of its own.</p>` : ""}`;
+  return `<section class="panel ask" aria-label="What waits for you"><h1><b>${w.n}</b> ${w.n === 1 ? "thing waits" : "things wait"} for you</h1>
+<p class="lead">${kinds}${where > 1 ? `, in ${where} swarms` : ""}. ${esc(standing(m.swarms))}</p>
+${group("Questions", "a session waits for your answer; newest first", w.questions, w.questions_n, false)}
+${group("To do", "only you can do these; <span class=\"id\">swarm guide</span> walks you through them", w.todos, w.todos_n, true)}</section>`;
+}
+
+function stack(p) {
+  const t = Math.max(1, p.total), rest = Math.max(0, p.total - p.done - p.running);
+  const seg = (cls, n, word) => n ? `<i class="${cls}" style="width:${(100 * n / t).toFixed(2)}%" title="${n} ${word}"></i>` : "";
+  return `<div class="stack" role="img" aria-label="${p.done} of ${p.total} phases built">${seg("s-done", p.done, "built")}${seg("s-running", p.running, "running")}${rest ? `<i style="width:${(100 * rest / t).toFixed(2)}%;background:none"></i>` : ""}</div>`;
+}
+
+// Whose builds: "glasheim 2, Magnar 1". One with no swarm on record is "no swarm".
+function whose(by, kind) {
+  return (by || []).filter(b => b[kind]).map(b => `${esc(b.name || "no swarm")} ${b[kind]}`).join(", ");
+}
+
+function totals(m) {
+  const t = m.totals, p = t.phases, open = Math.max(0, p.open - p.running);
+  const share = p.total ? Math.round(100 * p.done / p.total) : 0;
+  const u = m.usage;
+  const use = (lab, w) => { const v = pct(w && w.pct); return `<span class="nm">${lab}</span><div class="gauge" style="--c:${tone(v)}"><i style="width:${v || 0}%"></i></div><b>${v == null ? "—" : Math.round(v) + "%"}</b>${w && w.resets_at ? `<span></span><span class="rs" style="grid-column:2/-1">resets ${esc(when(w.resets_at))}</span>` : ""}`; };
+  return `<section class="panel totals" aria-label="Every swarm together">
+<div class="tot wide"><div class="lab">Phases, every swarm together</div><div class="big">${share}%<small>${p.done} of ${p.total} built</small></div>${stack(p)}
+<div class="legend"><span><span class="dot s-done"></span>Built <b>${p.done}</b></span><span><span class="dot s-running"></span>Building <b>${p.running}</b></span><span><span class="dot"></span>To go <b>${open}</b></span></div></div>
+<div class="tot"><div class="lab">Sessions at work</div><div class="big">${t.workers.busy}<small>of ${t.workers.total}</small></div><div class="sub">${t.up ? `worker slots busy, in ${plural(t.up, "swarm", "swarms")}` : "no swarm is up"}</div></div>
+<div class="tot right"><div class="lab">Builds on this machine</div><div class="big">${t.builds.running}<small>running</small></div>${whose(t.builds.by, "running") ? `<div class="sub">${whose(t.builds.by, "running")}</div>` : ""}<div class="sub">${t.builds.waiting ? `${t.builds.waiting} waiting: ${whose(t.builds.by, "waiting")}` : "none waiting"}</div></div>
+<div class="tot wide"><div class="lab">Usage of the account</div>${u ? `<div class="use">${use("5-hour", u.five)}${use("Weekly", u.week)}</div><div class="sub" style="margin-top:8px">read ${esc(rel(u.read_at))}${u.from ? ` by ${esc(u.from)}` : ""}</div>` : `<div class="sub" style="margin-top:8px">No reading yet. A worker reports it once one has run.</div>`}</div>
+</section>`;
+}
+
+function finish(s) {
+  const e = s.eta || {}, p = s.phases;
+  if (p && p.total && p.done >= p.total) return "all built";
+  if (!s.up) return "";
+  if (e.p50 == null) return "";
+  return e.floor || !e.p85 ? `earliest ${esc(when(e.p50))}` : `likely done ${esc(when(e.p85))}`;
+}
+
+function card(s) {
+  const p = s.phases, live = s.status === "running";
+  const share = p && p.total ? Math.round(100 * p.done / p.total) : 0;
+  const open = p ? Math.max(0, p.open - p.running) : 0;
+  let body;
+  if (!p) body = `<p class="why">Its ledger cannot be read${s.problem ? `: ${esc(s.problem)}` : ""}.</p>`;
+  else body = `<div><div class="prog-top"><b>${share}%</b><span class="mu">${p.done} of ${p.total} built</span><span class="aside">${finish(s)}</span></div>${stack(p)}
+${p.running || open || s.builds.running || s.builds.waiting ? `<div class="legend">${p.running ? `<span><span class="dot s-running"></span>Building <b>${p.running}</b></span>` : ""}${open ? `<span><span class="dot"></span>To go <b>${open}</b></span>` : ""}${s.builds.running || s.builds.waiting ? `<span>Builds <b>${s.builds.running}</b> running${s.builds.waiting ? `, <b>${s.builds.waiting}</b> waiting` : ""}</span>` : ""}</div>` : ""}</div>`;
+  let nowHtml = "";
+  if (s.up) {
+    const rows = s.building.map(b => `<div class="now-row"><span class="id">${esc(b.id)}</span><span class="t">${esc(b.t || "")}</span><span class="el">${b.merging ? "merging" : `<span data-since="${b.since || ""}">${dur(b.since ? now() - b.since : null)}</span>`}</span></div>`).join("");
+    const more = s.building_n - s.building.length;
+    nowHtml = `<div class="now"><h4>Building now${s.workers.total ? ` · ${s.workers.busy} of ${s.workers.total} workers busy` : ""}</h4>${rows || '<p class="quiet">Nothing is building right now.</p>'}${more > 0 ? `<p class="quiet">and ${more} more</p>` : ""}</div>`;
+  } else if (s.last_event_at) {
+    nowHtml = `<div class="now"><p class="quiet">Not running. Last activity ${esc(rel(s.last_event_at))}; the page shows how it stood.</p></div>`;
+  }
+  return `<article class="card${s.needs_you ? " asks" : ""}${s.up ? "" : " rest"}" aria-label="${esc(s.name)}">
+<div class="card-h"><h3>${esc(s.name)}</h3><span class="state st-${esc(s.status)}${live ? " live" : ""}"><span class="dot"></span><span>${esc(s.word)}</span></span></div>
+${s.why ? `<p class="why">${esc(s.why)}</p>` : ""}${body}${nowHtml}
+<div class="card-f">${s.needs_you ? `<span class="need"><b>${s.needs_you}</b> ${s.needs_you === 1 ? "waits" : "wait"} for you</span>` : ""}<a class="go" href="${page(s.slug)}">Open ${esc(s.name)} ${arrow}</a></div></article>`;
+}
+
+function hidden(h) {
+  const parts = [];
+  if (h.empty) parts.push(`${plural(h.empty, "folder", "folders")} where no swarm ever ran`);
+  if (h.stale) parts.push(`${h.stale} whose project folder is gone`);
+  if (h.off) parts.push(`${h.off} with the board turned off`);
+  if (h.unreadable) parts.push(`${h.unreadable} whose records could not be read`);
+  return parts.length ? `<p class="foot">Not shown: ${parts.join(", ")}. <span class="id">swarm ls</span> lists them.</p>` : "";
+}
+
+function render() {
+  const m = M, main = $("#main");
+  $("#host").textContent = m.host ? `on ${m.host}` : "";
+  document.title = (m.waiting.n ? `(${m.waiting.n}) ` : "") + "Swarms";
+  if (!m.swarms.length) {
+    main.innerHTML = `<section class="panel none"><h1>No swarm on this machine yet</h1><p>Run <code>swarm up</code> in a project, and it shows here.</p></section>${hidden(m.hidden || {})}`;
+    return;
+  }
+  const byslug = Object.fromEntries(m.swarms.map(s => [s.slug, s]));
+  const y = window.scrollY;
+  main.innerHTML = attention(m, byslug) + totals(m)
+    + `<div class="sec-t"><h2>${plural(m.swarms.length, "swarm", "swarms")}</h2><span>${plural(m.totals.up, "is", "are")} up</span></div>`
+    + `<div class="cards">${m.swarms.map(card).join("")}</div>` + hidden(m.hidden || {});
+  window.scrollTo(0, y);
+}
+
+function status(failed) {
+  const st = $("#state"), bad = failed || Date.now() - lastOk > 20000;
+  st.className = "state" + (bad ? "" : " live");
+  st.style.setProperty("--c", bad ? "var(--failed)" : "var(--done)");
+  st.innerHTML = `<span class="dot"></span><span>${bad ? "Board unreachable" : "Live"}</span>`;
+  if (M) $("#upd").textContent = "updated " + rel(M.generated_at);
+}
+
+async function poll() {
+  try {
+    const m = await get("/api/machine", "machine");
+    lastOk = Date.now();
+    if (m) { SKEW = (m.generated_at || Date.now() / 1000) - Date.now() / 1000; M = m; render(); }
+    status();
+  } catch (e) { status(true); }
+}
+let timer;
+const tick = async () => { clearTimeout(timer); if (!document.hidden) await poll(); timer = setTimeout(tick, 5000); };
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+// Live clocks without a re-render.
+setInterval(() => {
+  $$("[data-since]").forEach(el => { if (+el.dataset.since) el.textContent = dur(now() - +el.dataset.since); });
+  if (M) $("#upd").textContent = "updated " + rel(M.generated_at);
+}, 10000);
+tick();
+</script>
+</body>
+</html>

@@ -110,7 +110,8 @@ the keys it does not know. `status`, `doctor`, the dashboard and the board read
 it, and every step is a `RESTART-*` line in the supervisor log.
 
 **In place (the default).** Only the supervisor process is replaced, then the
-dashboard, the web board and the Telegram listener are started again. The tmux
+dashboard, the web board (the machine's one, so the other swarms' pages blink)
+and the Telegram listener are started again. The tmux
 session, the worker panes, parked sessions, the operator, the master pane and
 the owner console are not touched, and nothing is drained.
 
@@ -221,13 +222,13 @@ group goes by the session in it (`worker P3`, `operator <job>`, `overseer
 what gives the thaw its order.
 
 **What stays awake, and why.** The groups of the supervisor, the Telegram
-listener, a headless web board, the tmux server and whoever ran the command are
+listener, the web board, the tmux server and whoever ran the command are
 never frozen: something has to be there to thaw, to answer `status`, and to
 keep the panes' terminals alive. One of those groups that also holds sessions
 is reported `shared`, and its sessions stay awake with it. So that this does
 not happen by accident, the swarm starts its own long-lived processes in a
 systemd user scope of their own where one can be made (`systemd-run --user
---scope`): the supervisor, the listener, a headless board and each lane check.
+--scope`): the supervisor, the listener, the web board and each lane check.
 Freezing the terminal `swarm up` was typed in then never freezes the supervisor,
 and a lane check is frozen with the rest. Where no scope can be made (no user
 systemd, or `SWARM_SCOPE=0`) `up` and `freeze` say that the supervisor shares
@@ -2052,7 +2053,9 @@ the state every 2 s, and probes panes and git every 10 s. The status bar shows:
   2 hours while a slot is busy;
 - how many phases wait on you.
 
-It also serves the web board (below), and the status bar ends with its address.
+The status bar ends with where this swarm's page on the web board (below) is,
+or with why the board is not there; `u` copies that address. The dashboard does
+not serve the board: it is the machine's, a process of its own.
 
 `n` opens the **needs-you** drawer; `o` reopens the owner console (or moves you
 to it while it runs). `1`–`9` and `0` switch between the tabs (the
@@ -2120,17 +2123,80 @@ columns hide as it narrows.
 
 ## The web board (`swarm web`)
 
-A read-only board for a phone or a browser. Under tmux the dashboard
-serves it from its own process and stops it when it exits; it first checks the
-port, so a board already answering there (a `swarm web` run by hand) is left
-alone and named in the status bar, and it takes over once that one stops. With no
-dashboard (the `bare` driver, or `[tui] autostart = false`) `swarm up` starts it
-as a detached process and `swarm down` stops it. A board that starts while the
-previous one is still closing waits up to 5 s for the port instead of failing. `swarm up`, `swarm status` and
-`swarm doctor` print its address: the machine's Tailscale IP (`tailscale ip -4`),
-or its LAN addresses when Tailscale is not running.
+A read-only board for a phone or a browser, **one for the machine**: one
+process, one port and one address, whatever the number of swarms. `/` is the
+overview of every swarm and `/s/<slug>/` is one swarm's board, where `<slug>` is
+the swarm's state dir name (what `swarm ls --json` lists it by; a rename of the
+swarm does not move it). `swarm up`, `swarm status`, `swarm doctor` and
+`swarm ls` print the address: the machine's Tailscale IP (`tailscale ip -4`), or
+its LAN addresses when Tailscale is not running. `up`, `status` and `doctor`
+also print the swarm's own page.
 
-**Tabs:**
+**Who runs it.** Nobody has to. It is a detached process of its own, not the
+dashboard's and not a tmux window:
+
+- Any `swarm up` starts it when it is not already answering (`/healthz`), and
+  does nothing when it is: a second swarm's `up` finds the first one's board.
+- The `swarm down` of the last swarm that is up stops it. While another swarm
+  is up it stays, and the swarm that went down is still on it, marked as down.
+- `swarm web` does the same by hand: `swarm web` (or `swarm web start`) starts
+  it unless it is running and prints its address and every swarm's page,
+  `swarm web stop` stops it, `swarm web status` only says, and
+  `swarm web serve` runs it in the foreground. It needs no project.
+- `swarm restart` starts it again with the supervisor, so it runs the code on
+  disk. Its pages find it again by themselves.
+
+It stops with the last swarm, instead of serving on until `swarm web stop`, so
+that after you have taken everything down nothing of the tool still holds a port
+open to the network, and so that a board never outlives the code it was started
+with. A run that finishes by itself is not a `down`: its board stays and shows
+how it ended. To read swarms that are down, `swarm web` starts it over them.
+
+Its pid file, log and lock are `web.pid`, `web.log` and `web.lock` in the
+machine directory (`<state root>/machine/`). It is started with no swarm's
+environment (no `SWARM_*` variable), so nothing typed for one project decides
+what it shows for all of them, and it reads each swarm on the settings that
+swarm's supervisor last recorded (`<state>/config.json`): an edit of
+`.swarm.toml` shows once the swarm has taken it (`swarm reload`, or its next
+`swarm up`). A board that starts while the previous one is still closing waits
+up to 5 s for the port instead of failing.
+
+**Where it listens** is `[web] host` and `port` in
+[`machine.toml`](config.md#the-machine-file-machinetoml), not in any project's
+file. When the port is held by something else, `swarm up`, `swarm status`,
+`swarm doctor` and `swarm ls` say what holds it (the program and its pid; or
+which swarm's board, for one started before boards were one per machine; or
+which state root's) and what to change. Nothing is started against a taken
+port.
+
+**Which swarms it shows.** Every state dir under the state root whose project
+folder still exists and whose `[web] enabled` is on, running or not. A state
+dir no supervisor ever ran in, one whose project is gone and one that opted out
+are not shown; the overview's last line counts them, and `swarm ls` lists them.
+It looks again every few seconds while a page is open, so a swarm that comes
+up or goes shows without a restart.
+
+**The overview (`/`)**, in reading order:
+
+- **What waits for you**, across every swarm: the questions (a session asks and
+  waits for your answer; newest first) and the to-dos (what `swarm todo`
+  lists), each naming its swarm and opening that swarm's page on the row. When
+  nothing waits it says so, and how the swarms stand.
+- **Every swarm together:** phases built, building and to go; worker slots busy;
+  the builds running and waiting at the machine's one build gate, and whose
+  they are ("atlas 1", "1 waiting: borealis 1"); the account's 5-hour and
+  weekly usage, from whichever swarm read it last.
+- **A card per swarm:** its name, its standing in a plain word (running, paused,
+  frozen, held on a usage limit, finished, down), its progress and likely
+  finish, what it is building now, how many things wait for you there, and a
+  button into its board. The swarms that are up come first.
+
+Every swarm page carries the same swarms as buttons along its top, each with
+its count of what waits for you, and the way back to the overview. A swarm that
+is not up says so under its header; its page shows how it stood. Both pages
+follow the device between a dark and a light scheme.
+
+**A swarm's tabs:**
 
 - **Overview:** when every phase is done (the forecast's P50, P85 behind it, the
   method behind an info toggle), progress by status, what each worker is
@@ -2164,7 +2230,10 @@ or its LAN addresses when Tailscale is not running.
   so a one-second burst is still there at 30 days; the builds are shaded columns
   behind every chart, and hovering names the build under the pointer. *Builds*:
   the finished builds of the same window, sortable by any column and filtered by
-  phase. *Capacity*: the scenarios `swarm resources` works out (as configured,
+  phase. The gate is the machine's, so the running builds, the queue and the
+  finished builds are every swarm's: another swarm's build is named with that
+  swarm in front of its phase and opens in that swarm's page, and one whose
+  swarm is frozen says so. *Capacity*: the scenarios `swarm resources` works out (as configured,
   2 builds, 8 workers, both, more jobs) with their arithmetic and its notes
   (too little data, pressure already seen during builds). The Overview carries
   one line of it.
@@ -2173,13 +2242,17 @@ or its LAN addresses when Tailscale is not running.
 - **Row sheet:** the ledger row, recap, notes, dependencies, operator jobs and
   attempts. Deep links use `#<tab>&phase=<id>` (the old `#phase=<id>` still works).
 
-Endpoints: `/api/board`, `/api/graph?mode=open|all&book=<name>`, `/api/usage`,
-`/api/phase/<id>`, `/api/search?q=`, `/api/resources`,
-`/api/resources/history?window=1h|6h|24h|7d|30d`,
-`/api/resources/builds?window=&sort=&dir=&phase=&limit=`,
-`/api/resources/capacity`, all gzip + ETag. The page polls them only
-while it is visible, only the tab on screen asks for its data, and an unchanged
-answer is a 304. (`/events`, Server-Sent Events, is still served.)
+Endpoints. For the machine: `/api/machine` (the overview's data, and every
+page's swarm buttons) and `/healthz`. For one swarm, all under `/s/<slug>/`:
+`api/board`, `api/graph?mode=open|all&book=<name>`, `api/usage`,
+`api/phase/<id>`, `api/search?q=`, `api/resources`,
+`api/resources/history?window=1h|6h|24h|7d|30d`,
+`api/resources/builds?window=&sort=&dir=&phase=&limit=`,
+`api/resources/capacity`. All are gzip + ETag. A page polls them only while it
+is visible, only the tab on screen asks for its data, and an unchanged answer
+is a 304. (`/s/<slug>/events`, Server-Sent Events, is still served.) A slug no
+swarm here has is a 404, and a swarm's routes serve that swarm only: the slug
+picks one of the swarms the board found, and is never joined into a path.
 
 The Resources tab costs nothing while nobody has it open, and little when
 somebody does. The sampler's history (`meters/resources.jsonl`, tens of megabytes
@@ -2194,13 +2267,13 @@ paths shortened (`<state>`, `<project>`, `~`), cut to 96 characters and scrubbed
 like every other payload; its working directory is reduced to its place inside
 the worktree.
 
-It is plain `http.server`, GET and HEAD only, and no URL path ever maps to a file.
-Every payload is scrubbed of credential-shaped strings. It listens on every
-interface **with no token**, by the owner's choice (`[web].host = "0.0.0.0"`). `/healthz`
-answers `{"app": "swarm-web", "project": …, "slug": …}`, which is how `swarm up` tells its own
-board from another program holding the port. `project` is the swarm's display
-name (`[swarm].name`); the board is recognised by `slug`, so one started under
-an earlier name is still this swarm's.
+It is plain `http.server`, GET and HEAD only, and no URL path ever maps to a file:
+each page is one self-contained document with no external host in it. Every
+payload is scrubbed of credential-shaped strings. It listens on every interface
+**with no token**, by the owner's choice (`[web].host = "0.0.0.0"` in
+`machine.toml`). `/healthz` answers `{"app": "swarm-web", "machine": <state
+root>, "pid": …}`, which is how `swarm up` tells this machine's board from
+another program holding the port, and from the board of another state root.
 
 Tailscale inside WSL needs nothing more. Without it, under WSL with mirrored
 networking, a phone on the LAN reaches the board only once Windows lets the port in:
@@ -2208,6 +2281,9 @@ networking, a phone on the LAN reaches the board only once Windows lets the port
 ```powershell
 New-NetFirewallRule -DisplayName "swarm web" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow
 ```
+
+`8765` is the default; use the port `[web].port` in `machine.toml` names. It is
+one rule for the machine: every swarm is behind that one port.
 
 If it still does not answer, also run
 `Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow`.

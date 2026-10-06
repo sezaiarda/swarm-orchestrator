@@ -19,6 +19,8 @@ import time
 from types import SimpleNamespace
 
 import pytest
+
+from conftest import machine_toml
 from rich.console import Console
 from rich.text import Text
 
@@ -357,7 +359,6 @@ def _boot(cfg, size, steps, monkeypatch, capfd, **kw):
             app.refresh_all()
             await pilot.pause()
             await steps(app, pilot, got)
-        app.stop_board()
 
     with capfd.disabled():
         asyncio.run(asyncio.wait_for(drive(), timeout=30))
@@ -432,7 +433,7 @@ def test_x_on_home_acknowledges_the_lost_pings(seeded, monkeypatch, capfd):
     assert telegram.acked_at(seeded.state_dir) > 0
 
 
-# -- the web board, in the dashboard -------------------------------------------------
+# -- the web board: the dashboard says where it is, and does not serve it ---------------
 @pytest.fixture
 def web_cfg(tmp_path, monkeypatch):
     project = tmp_path / "project"
@@ -440,109 +441,113 @@ def web_cfg(tmp_path, monkeypatch):
     (project / "docs" / "PHASE-LEDGER.md").write_text("P0\n", encoding="utf-8")
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("SWARM_WEB", "1")
-    monkeypatch.setenv("SWARM_WEB_HOST", "127.0.0.1")
-    monkeypatch.setenv("SWARM_WEB_PORT", str(free_port()))
+    machine_toml(web={"host": "127.0.0.1", "port": free_port()})
     cfg = load(project_dir=str(project))
     cfg.ensure_dirs()
     return cfg
 
 
-def test_the_dashboard_serves_the_board_and_stops_it(web_cfg):
-    from swarm_orchestrator.tui.webboard import SERVING, WebBoard
+def _serving(at):
+    srv = web_server.make_server(at.root, at.host, at.port)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    return srv
 
-    board = WebBoard(web_cfg)
+
+def test_the_status_bar_says_where_this_swarms_page_is(web_cfg):
+    from swarm_orchestrator.tui.app import board_standing
+
+    at = lifecycle.place(web_cfg.state_dir)
+    (text, tone), link = board_standing(web_cfg)
+    assert "not running" in text and "swarm web" in text and (tone, link) == ("muted", "")
+    srv = _serving(at)
     try:
-        assert board.ensure() == SERVING
-        assert lifecycle.probe(web_cfg)[0] == lifecycle.OURS
-        assert board.url.endswith(f":{web_cfg.web_port}/")
-        assert board.ensure() == SERVING  # a second tick changes nothing
+        (text, tone), link = board_standing(web_cfg)
+        assert link == f"http://127.0.0.1:{at.port}/s/state/"
+        assert (text, tone) == (f"board {link}", "muted")
     finally:
-        board.stop()
-    assert lifecycle.probe(web_cfg)[0] == lifecycle.CLOSED
-    assert board.ensure() == "off"  # stopped for good: the dashboard is exiting
+        web_server.close(srv)
 
 
-def test_a_board_already_served_is_never_started_twice(web_cfg):
-    from swarm_orchestrator.tui.webboard import ELSEWHERE, SERVING, WebBoard
+def test_a_port_held_by_another_program_is_reported_not_fought(web_cfg, monkeypatch):
+    from swarm_orchestrator.tui.app import board_standing
 
-    first, second = WebBoard(web_cfg), WebBoard(web_cfg)
-    try:
-        assert first.ensure() == SERVING
-        assert second.ensure() == ELSEWHERE and not second.serving
-        assert "another process" in second.line()[0]
-    finally:
-        first.stop()
-        second.stop()
+    monkeypatch.setattr(lifecycle, "probe", lambda at: lifecycle.Found(
+        lifecycle.TAKEN, "nginx (pid 7)", "set [web].port"))
+    (text, tone), link = board_standing(web_cfg)
+    assert "held by nginx (pid 7)" in text and (tone, link) == ("warn", "")
 
 
-def test_a_port_held_by_another_program_is_reported_not_fought(web_cfg):
-    from swarm_orchestrator.tui.webboard import TAKEN, WebBoard
+def test_the_app_shows_where_the_board_is_and_serves_none(web_cfg, monkeypatch, capfd):
+    at = lifecycle.place(web_cfg.state_dir)
 
-    board = WebBoard(web_cfg, probe=lambda cfg: (lifecycle.TAKEN, "nginx (pid 7)"))
-    assert board.ensure() == TAKEN and not board.serving
-    text, tone = board.line()
-    assert "held by nginx (pid 7)" in text and tone == "warn"
-
-
-def test_the_app_starts_the_board_and_shows_where(web_cfg, monkeypatch, capfd):
     async def steps(app, pilot, got):
         for _ in range(40):
-            if app.web_board.state != "off":
+            if app.board_line[0]:
                 break
             await pilot.pause(0.1)
-        app.refresh_all()
-        await pilot.pause()
-        got["state"] = app.web_board.state
-        got["bar"] = str(app.query_one("#statusbar").render())
-        got["probe"] = lifecycle.probe(web_cfg)[0]
+        got["closed"] = (app.board_line[0], lifecycle.probe(at).state)
+        srv = _serving(at)
+        try:
+            app._board_tick()
+            for _ in range(40):
+                if app.board_link:
+                    break
+                await pilot.pause(0.1)
+            app.refresh_all()
+            await pilot.pause()
+            got["bar"] = str(app.query_one("#statusbar").render())
+            got["url"] = app.board_url()
+        finally:
+            web_server.close(srv)
 
-    got = _boot(web_cfg, (160, 40), steps, monkeypatch, capfd)
-    assert got["state"] == "serving" and got["probe"] == lifecycle.OURS
-    assert f":{web_cfg.web_port}/" in got["bar"]
-    assert lifecycle.probe(web_cfg)[0] == lifecycle.CLOSED  # gone with the dashboard
+    got = _boot(web_cfg, (200, 40), steps, monkeypatch, capfd)
+    # The dashboard starts no board: the machine's is `swarm up`'s to start.
+    assert "not running" in got["closed"][0] and got["closed"][1] == lifecycle.CLOSED
+    assert got["url"] == f"http://127.0.0.1:{at.port}/s/state/" and got["url"] in got["bar"]
 
 
 def test_the_app_leaves_the_board_alone_when_web_is_off(seeded, monkeypatch, capfd):
     async def steps(app, pilot, got):
-        got["board"] = app.web_board
+        await pilot.pause(0.3)
+        got["board"] = (app.shows_board, app.board_line, app.board_link)
 
-    assert _boot(seeded, (120, 40), steps, monkeypatch, capfd)["board"] is None
+    assert _boot(seeded, (120, 40), steps, monkeypatch, capfd)["board"] == (False, ("", ""), "")
 
 
 # -- the restart bug: a new board while the old one still holds the port ------------------
 def test_the_server_socket_reuses_the_address(web_cfg):
-    srv = web_server.make_server(web_cfg, "127.0.0.1", 0)
+    srv = web_server.make_server(web_cfg.state_dir.parent, "127.0.0.1", 0)
     try:
         assert srv.socket.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
     finally:
-        srv.feed.stop()
+        srv.hub.stop()
         srv.server_close()
 
 
 def test_a_restart_waits_for_the_old_board_to_let_go_of_the_port(web_cfg):
-    port = int(web_cfg.web_port)
+    port = lifecycle.place(web_cfg.state_dir).port
     old = socket.socket()
     old.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     old.bind(("127.0.0.1", port))
     old.listen(5)
     threading.Timer(0.6, old.close).start()  # the old board finishes closing
     began = time.monotonic()
-    srv = web_server.make_server(web_cfg, "127.0.0.1", port, bind_wait_s=5.0)
+    srv = web_server.make_server(web_cfg.state_dir.parent, "127.0.0.1", port, bind_wait_s=5.0)
     try:
         assert srv.server_address[1] == port
         assert time.monotonic() - began >= 0.5
     finally:
-        srv.feed.stop()
+        srv.hub.stop()
         srv.server_close()
 
 
 def test_a_port_that_stays_taken_still_fails(web_cfg):
-    port = int(web_cfg.web_port)
+    port = lifecycle.place(web_cfg.state_dir).port
     with socket.socket() as held:
         held.bind(("127.0.0.1", port))
         held.listen(1)
         with pytest.raises(OSError):
-            web_server.make_server(web_cfg, "127.0.0.1", port, bind_wait_s=0.3)
+            web_server.make_server(web_cfg.state_dir.parent, "127.0.0.1", port, bind_wait_s=0.3)
 
 
 # -- the owner console ---------------------------------------------------------------

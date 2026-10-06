@@ -292,11 +292,15 @@ def _resources_off(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _web_off(monkeypatch):
-    """The web board is on by default in a real project; in the suite it is off.
+    """A real project is on the machine's web board by default; in the suite no
+    swarm is.
 
-    Every end-to-end ``swarm up`` would otherwise start a server on the fixed
-    default port, and two tests (or the owner's live board) would fight over it.
-    ``tests/test_web_lifecycle.py`` turns it back on, on a free port.
+    The board is one per machine, on the one port ``machine.toml`` names. Every
+    test is a machine of its own (its own state root), so every end-to-end
+    ``swarm up`` would otherwise start a server, each on that same port: the
+    first would hold it (or the owner's live board would) and the rest would
+    report it taken. ``tests/test_web_lifecycle.py`` and
+    ``tests/test_web_machine.py`` turn it back on, on a free port.
     """
     monkeypatch.setenv("SWARM_WEB", "0")
 
@@ -313,7 +317,7 @@ def _tg_bot_off(monkeypatch):
 def _no_scopes(monkeypatch):
     """Nothing the suite starts gets a systemd scope of its own.
 
-    ``swarm up`` starts the supervisor, the bot, a headless board and each lane
+    ``swarm up`` starts the supervisor, the bot, the web board and each lane
     check through :func:`freezer.scoped`, which asks systemd for a scope where
     it can. The suite must not: it would leave units on the user's manager for
     every test. The switch is the documented one, and the runtime dir the probe
@@ -428,8 +432,8 @@ class FakeCgroups:
     the kernel in them, for :class:`swarm_orchestrator.freezer.Cgroups`.
 
     Every process that carries the test's ``SWARM_STATE_DIR`` is given a group:
-    one per ``SWARM_SESSION_ID`` (``/run/<kind>-<id>``), ``/supervisor``,
-    ``/bot`` and ``/board`` for the run's own processes, and ``/login`` for the
+    one per ``SWARM_SESSION_ID`` (``/run/<kind>-<id>``), ``/supervisor`` and
+    ``/bot`` for the run's own processes, and ``/login`` for the
     rest, the caller of a ``swarm`` command among them (``<proc>/self``).
     :meth:`place` puts any other process where a test wants it. A write to a
     group's ``cgroup.freeze`` shows in its ``cgroup.events`` a moment later,
@@ -527,8 +531,6 @@ class FakeCgroups:
             return "/supervisor"
         if b" telegram-bot" in cmd:
             return "/bot"
-        if b" web" in cmd:
-            return "/board"
         return "/login"
 
     def _scan(self) -> None:

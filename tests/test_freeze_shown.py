@@ -134,14 +134,19 @@ def test_the_web_board_header_says_frozen_in_words(feed):  # noqa: F811
     said = feed.board["header"]["frozen"]
     assert said.startswith("Frozen since ") and "2 groups frozen" in said
     assert "`swarm thaw`" in said
+    # The first forecast landing is a real change; once it has, time passing
+    # changes nothing.
+    assert feed.dash.eta.wait(30)
+    feed.refresh(force=True)
     v = feed.version
-    assert feed.refresh(force=True) is False and feed.version == v  # time passing changes nothing
+    assert feed.refresh(force=True) is False and feed.version == v
 
 
 def test_the_web_page_shows_the_frozen_pill_before_the_other_holds():
-    page = (Path(board_mod.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    page = (Path(board_mod.__file__).parent / "static" / "swarm.html").read_text(encoding="utf-8")
     frozen, drain = page.index('txt = "Frozen"'), page.index('txt = "Draining"')
-    assert page.index('txt = "Finished"') < frozen < drain
+    # First of all, as `swarm ls` has it: a frozen swarm is frozen whatever else it is.
+    assert frozen < page.index('"Finished"') < drain
     assert "st.title = h.frozen || h.drain" in page
 
 

@@ -39,6 +39,7 @@ from swarm_orchestrator import tmux
 from swarm_orchestrator.config import load
 from swarm_orchestrator.state import State
 from swarm_orchestrator.supervisor import FROZEN_POLL_S, Supervisor
+from swarm_orchestrator import service as service_mod
 from swarm_orchestrator.web import lifecycle as web_lifecycle
 
 LEDGER = "- [ ] `P0` · needs:—\n- [ ] `P1` · needs:—\n- [ ] `P2` · needs:—\n"
@@ -199,8 +200,9 @@ def test_the_run_starts_its_own_processes_through_the_scope_seam(cfg, monkeypatc
     asked: list[dict | None] = []
     monkeypatch.setattr(freezer, "can_scope", lambda env=None: asked.append(env) or True)
     monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(cfg, "web_enabled", True)
-    monkeypatch.setattr(web_lifecycle, "listening", lambda *_a, **_k: False)
+    at = web_lifecycle.place(cfg.state_dir)
+    monkeypatch.setattr(web_lifecycle, "probe",
+                        lambda *_a, **_k: web_lifecycle.Found(web_lifecycle.CLOSED))
     monkeypatch.setattr(restart_mod, "START_TIMEOUT_S", 0.0)
     monkeypatch.setattr(cfg, "telegram_commands", True)
     monkeypatch.setattr(tgbot, "credentials", lambda _c: ("token", "chat"))
@@ -209,7 +211,7 @@ def test_the_run_starts_its_own_processes_through_the_scope_seam(cfg, monkeypatc
     log = Log(cfg.supervisor_log)
     try:
         landing_mod._spawn_check(cfg, "P0", cfg.project_dir)
-        web_lifecycle.start_detached(cfg)
+        service_mod.start(web_lifecycle.the_service(at), at.mdir)  # the machine's board
         tgbot.start_detached(cfg)
         theirs = {**os.environ, "FZ_WHOSE": "the last supervisor's"}
         restart_mod.start_supervisor(cfg, theirs, log)

@@ -13,8 +13,8 @@ full pane / 2 LEFT|RIGHT / 3-4 tiled; or a pinned preset such as
 ``even-vertical`` for a TOP/BOTTOM stack). Windows are referenced by captured id everywhere downstream; slot pane ids
 are recorded in state so accounting is tag-driven (workers run their own teammates
 in-process, so no teammate panes ever appear). There is no ``web`` window: the
-dashboard serves the board itself (:mod:`swarm_orchestrator.tui.webboard`), and
-without a dashboard ``swarm up`` starts it detached.
+board is the machine's, one detached process for every swarm
+(:mod:`swarm_orchestrator.web.lifecycle`).
 """
 
 from __future__ import annotations

@@ -404,7 +404,7 @@ class Config:
 
     # -- [build] ----------------------------------------------------------
     # What describes this project's builds. The gate they queue at is the
-    # machine's, and so are its limits: `machine.toml` (see MACHINE_BUILD).
+    # machine's, and so are its limits: `machine.toml` (see MACHINE_KEYS).
     build_jobs: int = _k(
         "build", "jobs", 6, NEXT, env="SWARM_BUILD_JOBS", minimum=0,
         doc="CARGO_BUILD_JOBS handed to each build",
@@ -735,21 +735,14 @@ class Config:
             " the command it started with")
 
     # -- [web] ------------------------------------------------------------
-    # Open to the LAN by the owner's choice: it serves computed JSON only, never
-    # a file by path, and redacts anything shaped like a secret.
+    # The board is the machine's (one address for every swarm), so its host and
+    # port are in ``machine.toml`` (:class:`machine.Settings`). What is a
+    # project's own is whether this swarm is on it.
     web_enabled: bool = _k(
         "web", "enabled", True, RESTART, env="SWARM_WEB",
-        doc="serve the web board (the dashboard serves it)",
-        why="the dashboard decides at start whether it serves the board, and `swarm up`"
-            " whether to start one; there is no later moment a reload could reach")
-    web_host: str = _k(
-        "web", "host", "0.0.0.0", RESTART, env="SWARM_WEB_HOST",
-        doc="web board bind address (0.0.0.0 = all)",
-        why="the listening socket is bound once, when the board starts")
-    web_port: int = _k(
-        "web", "port", 8765, RESTART, env="SWARM_WEB_PORT", minimum=0,
-        doc="port the web board listens on",
-        why="the listening socket is bound once, when the board starts")
+        doc="show this swarm on the machine's web board",
+        why="`swarm up` decides whether to start the board, and the board reads what"
+            " the supervisor recorded at its start")
 
     # -- (cli) ------------------------------------------------------------
     project_dir: Path = _k(
@@ -889,9 +882,11 @@ SETTINGS: dict[str, Setting] = {
 }
 
 
-#: ``[build]`` keys that were a project's and are the machine's: the gate is one
-#: for every swarm on the machine, so its limits are in ``machine.toml``.
-MACHINE_BUILD = tuple(k.key for k in machine.keys() if k.table == "build")
+#: The keys that are the machine's, as ``(table, key)``: every one
+#: ``machine.toml`` declares. Each was a project's once (the build gate's
+#: limits, where the web board listens) and is now one thing for every swarm on
+#: the machine.
+MACHINE_KEYS = tuple((k.table, k.key) for k in machine.keys())
 
 # The last reading of machine.toml: what the file was (path, mtime, size), and
 # what it said, or the error it gave.
@@ -929,19 +924,21 @@ def machine_settings(sound: bool = False) -> machine.Settings:
 
 
 def _refuse_machine_keys(cfg_file: Path, data: dict) -> None:
-    """A project file that still sets one of the machine's build limits is an
-    error, never a key read from the wrong place or passed over in silence: the
-    owner who wrote ``max_concurrent = 1`` there believes it is in force."""
-    table = data.get("build")
-    found = [k for k in MACHINE_BUILD if k in table] if isinstance(table, dict) else []
+    """A project file that still sets one of the machine's keys is an error,
+    never a key read from the wrong place or passed over in silence: the owner
+    who wrote ``max_concurrent = 1`` or ``port = 8780`` there believes it is in
+    force."""
+    found = [f"[{table}].{key}" for table, key in MACHINE_KEYS
+             if isinstance(data.get(table), dict) and key in data[table]]
     if not found:
         return
-    keys = ", ".join(f"[build].{k}" for k in found)
+    one = len(found) == 1
     raise ValueError(
-        f"{cfg_file}: {keys} {'is' if len(found) == 1 else 'are'} not a project's to set."
-        " Every swarm on this machine queues at one build gate, and its limits are the"
-        f" machine's: move {'it' if len(found) == 1 else 'them'} to [build] in"
-        f" {machine.settings_path()} and delete {'it' if len(found) == 1 else 'them'} here")
+        f"{cfg_file}: {', '.join(found)} {'is' if one else 'are'} not a project's to set."
+        f" {'It is' if one else 'They are'} the same for every swarm on this machine (one"
+        f" build gate, one web board), so {'it is a machine setting' if one else 'they are machine settings'}:"
+        f" move {'it' if one else 'them'} to the same table of {machine.settings_path()}"
+        f" and delete {'it' if one else 'them'} here")
 
 
 def _find_config_file(explicit: str | None, project_dir: Path) -> Path | None:

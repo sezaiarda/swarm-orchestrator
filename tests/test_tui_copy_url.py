@@ -13,6 +13,8 @@ import time
 
 import pytest
 
+from conftest import machine_toml
+
 from swarm_orchestrator.config import load as load_config
 
 
@@ -53,11 +55,15 @@ def test_u_copies_the_board_url_and_shows_it(cfg, monkeypatch, capfd):
     assert any("http://100.1.2.3:8780/" in m for m in shown)
 
 
-def test_the_url_falls_back_to_the_boards_own_address(cfg, monkeypatch):
+def test_the_url_is_this_swarms_page_on_the_machines_board(cfg, monkeypatch):
+    """Before the probe has found the board (or with it down) the URL is still
+    where this swarm's page will be: the machine's address, then the swarm."""
     from swarm_orchestrator.tui.app import SwarmApp
     from swarm_orchestrator.web import lifecycle
 
-    monkeypatch.setattr(lifecycle, "urls", lambda c: ["http://100.9.9.9:8780/"])
+    monkeypatch.setattr(lifecycle, "urls", lambda at: [f"http://100.9.9.9:{at.port}/"])
+    machine_toml(web={"port": 8780})
     app = SwarmApp(cfg)
-    app.web_board = None
-    assert app.board_url() == "http://100.9.9.9:8780/"
+    assert app.board_url() == "http://100.9.9.9:8780/s/state/"
+    app.board_link = "http://100.1.2.3:8780/s/state/"  # what the probe found
+    assert app.board_url() == "http://100.1.2.3:8780/s/state/"

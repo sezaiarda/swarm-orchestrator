@@ -393,7 +393,13 @@ Each worker's environment carries:
 - under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN` and the
   build-gate limits.
 
-The folder-trust dialog is accepted ahead of time for every new mirror. If it
+The folder-trust dialog is accepted ahead of time for every new mirror, by
+adding the folder to `~/.claude.json`. That file is the owner's, shared with
+every Claude session and with every other swarm on the machine, so the
+rewrite is done under one lock for the machine (`claude-json.lock` in the
+[machine directory](#several-swarms-on-one-machine-machinepy)) and through a
+temp file of its own. A lock that stays taken for five seconds is given up on
+and the file left alone (`PRETRUST-SKIPPED`). If the dialog
 appears anyway, in a worker's pane or any other session's, the wait for the
 session to boot answers it: it reads the answers and the cursor from the pane,
 walks the cursor to the answer that trusts the folder one Up or Down at a time,
@@ -1050,8 +1056,9 @@ finish their job after the worker is gone.
 
 **`swarm down`** still ends everything carrying the run's `SWARM_STATE_DIR`,
 orphaned sessions and whatever detached from them included. It tears down only
-a tmux session this swarm created (marked with its state dir; a session made
-before that marker counts when state records its windows), and signals the
+a tmux session this swarm created, which is one marked with its state dir
+(`@swarm_state_dir`): a session of the same name that carries another swarm's
+mark, or none, is left alone and said to be. It signals the
 recorded supervisor pid only while that pid is still this project's
 `swarm _supervise`. Every tmux call has a 15 s timeout, so a hung tmux server
 cannot freeze the supervisor.
@@ -1742,7 +1749,8 @@ the TUI, the web board, `swarm status`, `swarm why` and `swarm doctor`
 **`swarm doctor [--json]`** answers "what is wrong right now?". It is read-only,
 and exits 1 if any check FAILs. It checks:
 
-- **supervisor:** pid alive, FIFO has a reader, no stray second supervisor;
+- **supervisor:** pid alive, FIFO has a reader, no stray second supervisor (the fix
+  names the pid that holds this swarm's FIFO, never every swarm's supervisor);
 - **slots:** busy panes run `claude`; a busy slot with no edits or commits
   20 minutes after launch (the lost-prompt signature);
 - **run:** frozen (`run.frozen`, a WARN for as long as it lasts: since when,
@@ -2215,6 +2223,20 @@ does not hide the others.
 state dir, bound to that state dir whatever the caller's own environment
 names. That is how one process reads another swarm without becoming a session
 of it.
+
+**One tmux server.** The swarms share the owner's tmux server with each other
+and with the owner's own sessions. Each swarm has one session, named after the
+swarm unless `[tmux].session` says otherwise, and marks it with its state dir.
+What a swarm sets in tmux it sets on its own: dead panes staying on screen and
+no renaming by a program's title are set on each of its windows as the window
+is made, and no renumbering on its session, never server-wide, so the owner's
+windows and another swarm's keep the options they had. Two swarms cannot share
+a session name. `swarm up` refuses when a session of its name exists and says
+whose it is: this swarm's own (already up), another swarm's (its name and
+project, and that this one needs a `[tmux].session` of its own), or one of the
+owner's own (rename it, or name this swarm's differently). Attaching names the
+session exactly, so a session name that is the start of another's still gets
+its own.
 
 **A command still acts on one swarm only.** Listing is the one thing that
 crosses swarms. Every other command resolves one project (see

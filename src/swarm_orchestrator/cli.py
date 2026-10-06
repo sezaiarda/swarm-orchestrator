@@ -240,11 +240,13 @@ def _attach(cfg: Config) -> None:
         return
     if not tmux.session_exists(cfg.session):
         return
+    # `=`: this session exactly. A bare name is a prefix to tmux, so `mag`
+    # would land in `magnar`.
     if os.environ.get("TMUX"):
-        subprocess.run(["tmux", "switch-client", "-t", cfg.session], check=False)
+        subprocess.run(["tmux", "switch-client", "-t", f"={cfg.session}"], check=False)
         return
     try:
-        os.execvp("tmux", ["tmux", "attach", "-t", cfg.session])
+        os.execvp("tmux", ["tmux", "attach", "-t", f"={cfg.session}"])
     except OSError as exc:
         print(f"could not attach to tmux session {cfg.session!r}: {exc}", file=sys.stderr)
 
@@ -337,11 +339,7 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
     if cfg.driver == "tmux" and tmux.session_exists(cfg.session):
         # Checked before anything is touched: session.setup refuses the same
         # thing, but only after state was reset and the run restarted.
-        print(
-            f"the swarm is already up: tmux session {cfg.session!r} exists -- "
-            f"`tmux attach -t {cfg.session}` to look at it, or `swarm down` first",
-            file=sys.stderr,
-        )
+        print(session_mod.taken_words(cfg), file=sys.stderr)
         return 1
     if not _drop_stale_freeze(cfg):
         return 1
@@ -483,7 +481,7 @@ def cmd_down(cfg: Config) -> int:
     # session only hangs up on its panes, and a claude can outlive its SIGHUP:
     # some workers, the Overseer and an operator could keep running after
     # `down` until the owner killed them by hand.
-    owned = cfg.driver == "tmux" and session_mod.owns_session(cfg, st.windows)
+    owned = cfg.driver == "tmux" and session_mod.owns_session(cfg)
     if cfg.driver == "tmux" and not owned and tmux.session_exists(cfg.session):
         print(f"swarm down: tmux session {cfg.session!r} is not this swarm's; left"
               " alone", file=sys.stderr)

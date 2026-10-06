@@ -397,7 +397,7 @@ def test_down_ends_the_old_named_session_and_the_next_up_gets_the_new_name(tmux_
 
     renamed = named(now)
     assert (renamed.name, renamed.session, renamed.session_wanted) == (now, was, now)
-    assert session_mod.owns_session(renamed, {})
+    assert session_mod.owns_session(renamed)
 
     assert cli.cmd_down(renamed) == 0
     assert not tmux.session_exists(was), "the old-named session was left running"

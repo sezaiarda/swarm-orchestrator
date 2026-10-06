@@ -112,12 +112,18 @@ def test_up_refuses_an_existing_session_before_touching_state(cfg, monkeypatch, 
 
     cfg.driver = "tmux"
     monkeypatch.setattr(tmux, "session_exists", lambda name: name == cfg.session)
+    monkeypatch.setattr(tmux, "session_owner", lambda name: str(cfg.state_dir))
     before = cfg.state_path.read_bytes()
     assert cli.cmd_up(cfg, attach=False) == 1
     err = capsys.readouterr().err
     assert "already up" in err and "swarm down" in err and "tmux attach" in err
     assert cfg.state_path.read_bytes() == before  # nothing was reset
     assert not cfg.fifo_path.exists()
+    # A session tmux cannot place is nobody's by guesswork, and still refused.
+    monkeypatch.setattr(tmux, "session_owner", lambda name: None)
+    assert cli.cmd_up(cfg, attach=False) == 1
+    assert "would not say whose" in capsys.readouterr().err
+    assert cfg.state_path.read_bytes() == before
 
 
 # -- swarm skip ------------------------------------------------------------

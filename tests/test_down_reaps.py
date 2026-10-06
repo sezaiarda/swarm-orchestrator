@@ -164,19 +164,22 @@ def test_down_leaves_a_session_another_swarm_marked(tmux_cfg):
     assert tmux.session_exists(tmux_cfg.session)
 
 
-def test_down_ends_its_own_session_and_a_legacy_one_state_records(tmux_cfg):
+def test_down_ends_its_own_session_and_no_unmarked_one_whatever_state_records(tmux_cfg):
     session_mod.setup(tmux_cfg)
     assert tmux.session_owner(tmux_cfg.session) == str(tmux_cfg.state_dir)
     cli.cmd_down(tmux_cfg)
     assert not tmux.session_exists(tmux_cfg.session)
 
-    # Made before the marker existed: no option, but state holds its windows.
+    # A session with no marker is not a swarm's, even when a window id this run
+    # once recorded is in it: window ids start again with every tmux server, so
+    # the id names whatever window got that number since.
     win = tmux.new_session(tmux_cfg.session)
     assert tmux.session_owner(tmux_cfg.session) == ""
     with state_mod.transaction(tmux_cfg) as st:
         st.windows = {"dash": win}
+    assert not session_mod.owns_session(tmux_cfg)
     cli.cmd_down(tmux_cfg)
-    assert not tmux.session_exists(tmux_cfg.session)
+    assert tmux.session_exists(tmux_cfg.session)
 
 
 def test_down_never_signals_a_pid_that_is_no_longer_the_supervisor(cfg, capsys):

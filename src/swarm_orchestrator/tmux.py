@@ -157,14 +157,6 @@ def session_owner(session: str) -> str | None:
     return "" if "invalid option" in out.stderr else None
 
 
-def window_session(target: str) -> str | None:
-    """The name of the session a window or pane id is in; None if tmux has no such id."""
-    out = run(["display-message", "-p", "-t", target, "#{session_name}"])
-    if out.returncode != 0:
-        return None
-    return out.stdout.strip() or None
-
-
 def kill_session(session: str) -> None:
     run(["kill-session", "-t", f"={session}"])
 
@@ -214,19 +206,36 @@ def new_session(session: str) -> str:
     return out.stdout.strip()
 
 
-def harden(session: str) -> None:
-    """Stop claude's title escapes from renaming our windows, and keep dead panes
-    on screen.
+#: What every window of a swarm's session is set to (:func:`harden_window`).
+#: ``remain-on-exit`` is FIRST: without it a pane whose command exits simply
+#: vanishes, so "the worker crashed on startup" and "the worker was never
+#: launched" look identical — an empty slot either way, with whatever the
+#: command printed gone with it. The other two stop claude's title escapes
+#: from renaming our windows.
+WINDOW_OPTS = (("remain-on-exit", "on"), ("automatic-rename", "off"), ("allow-rename", "off"))
 
-    ``remain-on-exit`` is set FIRST because it only governs panes created after
-    it: without it a pane whose command exits simply vanishes, so "the worker
-    crashed on startup" and "the worker was never launched" look identical —
-    an empty slot either way, with whatever the command printed gone with it.
-    """
-    run(["set-option", "-t", f"={session}", "-g", "remain-on-exit", "on"])
-    run(["set-option", "-t", f"={session}", "-g", "automatic-rename", "off"])
-    run(["set-option", "-t", f"={session}", "-g", "allow-rename", "off"])
-    run(["set-option", "-t", f"={session}", "-g", "renumber-windows", "off"])
+
+def harden_window(window_id: str) -> None:
+    """Set :data:`WINDOW_OPTS` on one window, and on that window only.
+
+    Never with ``-g``: the tmux server is the owner's, and a global option
+    reaches every window of every session on it, the owner's own and other
+    swarms' included, and stays after this swarm is gone. A window is hardened
+    while it still runs its holding command, so the options are in force before
+    anything that can exit runs in it."""
+    for name, value in WINDOW_OPTS:
+        run(["set-option", "-w", "-t", window_id, name, value])
+
+
+def harden(session: str) -> None:
+    """Harden a new session: every window it has now (:func:`harden_window`),
+    and no renumbering when one closes, for this session alone. Windows made
+    later are hardened where they are made (:func:`new_window`,
+    :func:`break_pane`)."""
+    out = run(["list-windows", "-t", f"={session}", "-F", "#{window_id}"])
+    for window_id in out.stdout.split():
+        harden_window(window_id)
+    run(["set-option", "-t", f"={session}:", "renumber-windows", "off"])
 
 
 def rename_window(window_id: str, name: str) -> None:
@@ -268,7 +277,7 @@ def kill_pane(pane_id: str) -> None:
 def new_window(
     session: str, name: str, hold: str = "sleep infinity", after: str | None = None
 ) -> str:
-    """Create a window running a holding command; return its window id.
+    """Create a hardened window running a holding command; return its window id.
 
     ``after`` (a window id) places it right after that window, moving later ones
     up, instead of at the next free index."""
@@ -286,7 +295,9 @@ def new_window(
         ],
         check=True,
     )
-    return out.stdout.strip()
+    window_id = out.stdout.strip()
+    harden_window(window_id)
+    return window_id
 
 
 def split_layout(
@@ -374,7 +385,10 @@ def break_pane(pane_id: str, name: str, session: str) -> str:
     ``TMUX`` in its environment), so with no destination tmux falls back to the
     *most recently used* session — whichever one the owner happens to be attached
     to — and the parked worker lands in the owner's own session instead of the
-    swarm's. An empty window part means "next free index" in ``session``."""
+    swarm's. An empty window part means "next free index" in ``session``.
+
+    The new window is hardened like every other: a window's options stay with
+    the window the pane left, not with the pane."""
     out = run(
         [
             "break-pane",
@@ -391,7 +405,10 @@ def break_pane(pane_id: str, name: str, session: str) -> str:
         ],
         check=True,
     )
-    return out.stdout.strip()
+    window_id = out.stdout.strip()
+    if window_id:
+        harden_window(window_id)
+    return window_id
 
 
 def list_panes(window_id: str) -> list[str]:

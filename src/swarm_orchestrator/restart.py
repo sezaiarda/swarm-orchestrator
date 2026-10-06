@@ -751,7 +751,7 @@ def in_place(cfg: Config, plan: dict, log: Log) -> tuple[str, str]:
     st = state_mod.read(cfg)
     old = live_supervisor(cfg, st)
     if cfg.driver == "tmux" and not (
-            tmux.session_exists(cfg.session) and session_mod.owns_session(cfg, st.windows)):
+            tmux.session_exists(cfg.session) and session_mod.owns_session(cfg)):
         return UNCHANGED, (f"the swarm's tmux session {cfg.session!r} is not up, so there is"
                            " nothing to keep running: `swarm up` starts it")
     if old is None and has_reader(cfg):

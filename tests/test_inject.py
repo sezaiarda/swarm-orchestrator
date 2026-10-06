@@ -626,15 +626,28 @@ def test_settle_env_shortens_the_wait(pane, monkeypatch):
 
 
 # -- session hardening ----------------------------------------------------
-def test_harden_sets_remain_on_exit_first(pane):
+def test_a_window_is_hardened_by_itself_and_remain_on_exit_comes_first(pane):
     """Set before any pane command runs, or a pane that crashed on startup just
-    disappears and looks exactly like one that was never launched."""
+    disappears and looks exactly like one that was never launched. And set on
+    the window alone: the tmux server is the owner's, shared with their own
+    sessions and with other swarms."""
+    fake = pane()
+
+    tmux.harden_window("@7")
+
+    assert fake.calls == [["set-option", "-w", "-t", "@7", "remain-on-exit", "on"],
+                          ["set-option", "-w", "-t", "@7", "automatic-rename", "off"],
+                          ["set-option", "-w", "-t", "@7", "allow-rename", "off"]]
+
+
+def test_hardening_a_session_sets_nothing_server_wide(pane):
     fake = pane()
 
     tmux.harden("swarm-test")
 
     opts = [c for c in fake.calls if c[0] == "set-option"]
-    assert opts[0] == ["set-option", "-t", "=swarm-test", "-g", "remain-on-exit", "on"]
+    assert opts and not [c for c in opts if "-g" in c]
+    assert opts[-1] == ["set-option", "-t", "=swarm-test:", "renumber-windows", "off"]
 
 
 def test_kill_pane(pane):

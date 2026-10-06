@@ -54,6 +54,7 @@ from . import launch as launch_mod
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import opqueue
+from . import procs
 from . import pushowed
 from . import restart as restart_mod
 from . import session as session_mod
@@ -477,6 +478,23 @@ def _human_bytes(n: int | None) -> str:
 
 
 # -- individual checks ----------------------------------------------------
+def _fifo_holders(fifo: Path, but: int | None = None) -> list[int]:
+    """The pids that hold ``fifo`` open, ``but`` left out: this swarm's
+    supervisors, and no other swarm's. Empty when ``/proc`` cannot say."""
+    return sorted(pid for pid in procs.table()
+                  if pid != but and _pid_holds_fifo(pid, fifo))
+
+
+def _stray_hint(cfg: Config, pid: int | None) -> str:
+    """What to do about a stray supervisor: its own pid. Never a search by
+    name: `pgrep _supervise` lists the supervisor of every swarm on the
+    machine, and the one to kill is not told apart there."""
+    strays = _fifo_holders(cfg.fifo_path, but=pid)
+    if strays:
+        return f"kill {' '.join(map(str, strays))}  # what holds this swarm's control FIFO"
+    return f"find what holds {cfg.fifo_path} open (`lsof {cfg.fifo_path}`) and kill it"
+
+
 def _check_supervisor(cfg: Config, st: State) -> list[Check]:
     """Recorded pid, actual FIFO readership, and any stray second supervisor.
 
@@ -565,7 +583,7 @@ def _check_supervisor(cfg: Config, st: State) -> list[Check]:
                 FAIL,
                 f"a supervisor holds the FIFO but it is NOT pid {pid} — two "
                 "supervisors are racing; each event reaches only one of them",
-                f"find it (`pgrep -fa _supervise`), kill it, then re-check pid {pid}",
+                f"{_stray_hint(cfg, pid)}, then re-check pid {pid}",
             )
         )
     elif reader and not alive and pid:
@@ -575,7 +593,7 @@ def _check_supervisor(cfg: Config, st: State) -> list[Check]:
                 FAIL,
                 f"the FIFO has a reader but recorded pid {pid} is dead — a stray "
                 "supervisor from an earlier `up` co-opted this run",
-                "pgrep -fa _supervise",
+                _stray_hint(cfg, pid),
             )
         )
     else:

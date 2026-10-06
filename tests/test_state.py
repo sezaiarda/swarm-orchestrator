@@ -252,6 +252,100 @@ def test_pretrust_dir_recovers_from_a_torn_read(tmp_path, monkeypatch):
     assert data["projects"][str(wt.resolve())]["hasTrustDialogAccepted"] is True
 
 
+def _pretrust_env(tmp_path, monkeypatch):
+    """A claude config of the test's own, as two swarms on one machine share it."""
+    import json
+
+    conf = tmp_path / "claude.json"
+    conf.write_text(json.dumps({"projects": {}}))
+    monkeypatch.setenv("SWARM_CLAUDE_CONFIG", str(conf))
+    monkeypatch.delenv("SWARM_STATE_DIR", raising=False)
+    return conf
+
+
+def test_pretrust_dir_waits_its_turn_behind_another_swarms_write(tmp_path, monkeypatch):
+    """Two supervisors launch at the same moment (a usage window they share
+    resets). Both rewrote the file from their own read: one entry was lost, or
+    the live file was replaced by one still being written."""
+    import fcntl
+    import json
+    import threading
+
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator import machine
+    from swarm_orchestrator.logutil import Log
+
+    conf = _pretrust_env(tmp_path, monkeypatch)
+    lock = machine.directory() / launch_mod.CLAUDE_LOCK
+    lock.parent.mkdir(parents=True)
+    log = Log(tmp_path / "l.log")
+    try:
+        with lock.open("a") as other:  # another swarm, mid-write
+            fcntl.flock(other, fcntl.LOCK_EX)
+            mine = threading.Thread(target=launch_mod.pretrust_dir, args=(tmp_path / "a", log))
+            mine.start()
+            mine.join(0.5)
+            assert mine.is_alive() and json.loads(conf.read_text()) == {"projects": {}}
+            conf.write_text(json.dumps({"projects": {"/theirs": {"hasTrustDialogAccepted": True}}}))
+            fcntl.flock(other, fcntl.LOCK_UN)
+        mine.join(10)
+        assert not mine.is_alive()
+    finally:
+        log.close()
+    projects = json.loads(conf.read_text())["projects"]
+    assert projects["/theirs"] == {"hasTrustDialogAccepted": True}  # not written over
+    assert projects[str((tmp_path / "a").resolve())]["hasTrustDialogAccepted"] is True
+
+
+def test_pretrust_dir_gives_up_on_a_lock_that_stays_taken_and_touches_nothing(
+        tmp_path, monkeypatch):
+    """Its holder may be frozen (`swarm freeze`); a launch never waits on that."""
+    import fcntl
+
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator import machine
+    from swarm_orchestrator.logutil import Log
+
+    conf = _pretrust_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(launch_mod, "CLAUDE_LOCK_WAIT_S", 0.2)
+    before = conf.read_text()
+    lock = machine.directory() / launch_mod.CLAUDE_LOCK
+    lock.parent.mkdir(parents=True)
+    log = Log(tmp_path / "l.log")
+    try:
+        with lock.open("a") as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            launch_mod.pretrust_dir(tmp_path / "a", log)
+    finally:
+        log.close()
+    assert conf.read_text() == before and sorted(p.name for p in tmp_path.iterdir() if
+                                                 p.name.startswith("claude.json")) == ["claude.json"]
+    assert "PRETRUST-SKIPPED" in (tmp_path / "l.log").read_text()
+
+
+def test_pretrust_dir_writes_through_a_temp_file_of_its_own(tmp_path, monkeypatch):
+    """The name was fixed (``.swarm-tmp``): two writers shared one temp file."""
+    import os
+
+    from swarm_orchestrator import launch as launch_mod
+    from swarm_orchestrator.logutil import Log
+
+    conf = _pretrust_env(tmp_path, monkeypatch)
+    used: list[str] = []
+    real = os.replace
+    monkeypatch.setattr(launch_mod.os, "replace",
+                        lambda src, dst: (used.append(str(src)), real(src, dst))[1])
+    log = Log(tmp_path / "l.log")
+    try:
+        for name in ("a", "b"):
+            launch_mod.pretrust_dir(tmp_path / name, log)
+    finally:
+        log.close()
+    assert len(set(used)) == 2 and str(conf) + ".swarm-tmp" not in used
+    assert all(u.startswith(str(conf) + ".swarm-tmp.") for u in used)
+    assert [p.name for p in tmp_path.iterdir() if "swarm-tmp" in p.name] == []
+
+
 # -- flock check-and-set under real concurrency ---------------------------
 def test_concurrent_launch_never_double_claims(swarm):
     """8 concurrent `swarm launch` against 4 slots -> exactly 4 claim.

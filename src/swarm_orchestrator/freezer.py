@@ -500,7 +500,7 @@ def plan(cfg: Config, st: state_mod.State, cg: Cgroups | None = None) -> Plan:
     }
     sessions = {pid for pid, label in members.items() if label[0] != OTHER}
     server = None
-    if cfg.driver == "tmux" and session_mod.owns_session(cfg, st.windows):
+    if cfg.driver == "tmux" and session_mod.owns_session(cfg):
         server = tmux.server_pid()
         named = {console_mod.WINDOW: CONSOLE, "dash": DASHBOARD}
         for root, window in tmux.session_pane_windows(cfg.session):

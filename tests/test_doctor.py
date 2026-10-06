@@ -169,6 +169,10 @@ def test_a_second_supervisor_holding_the_fifo_is_a_stray(cfg):
         other.wait()
     stray = by_name(checks, "supervisor.stray")
     assert stray.status == FAIL and f"NOT pid {other.pid}" in stray.detail
+    # The fix names what holds THIS swarm's FIFO (here, the test itself). A
+    # search by name would list every swarm's supervisor on the machine.
+    assert stray.fix_hint.startswith(f"kill {os.getpid()} ")
+    assert "pgrep" not in stray.fix_hint
 
 
 def test_a_reader_behind_a_dead_recorded_pid_is_a_stray(cfg):
@@ -178,6 +182,29 @@ def test_a_reader_behind_a_dead_recorded_pid_is_a_stray(cfg):
         checks = doctor._check_supervisor(cfg, save(cfg, st))
     stray = by_name(checks, "supervisor.stray")
     assert stray.status == FAIL and "co-opted" in stray.detail
+    assert stray.fix_hint.startswith(f"kill {os.getpid()} ") and "pgrep" not in stray.fix_hint
+
+
+def test_the_stray_hint_never_names_another_swarms_supervisor(cfg, tmp_path):
+    """Two swarms, two FIFOs, each with its reader: the hint for one names the
+    holder of that one only."""
+    elsewhere = tmp_path / "other-swarm.fifo"
+    code = ("import os,sys,time; fd=os.open(sys.argv[1], os.O_RDONLY|os.O_NONBLOCK);"
+            " print('up', flush=True); time.sleep(60)")
+    os.mkfifo(elsewhere)
+    theirs = subprocess.Popen([sys.executable, "-c", code, str(elsewhere)],
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        assert theirs.stdout.readline().strip() == "up"
+        with Reader(cfg.fifo_path):
+            assert doctor._fifo_holders(cfg.fifo_path) == [os.getpid()]
+            assert doctor._fifo_holders(elsewhere) == [theirs.pid]
+            assert str(theirs.pid) not in doctor._stray_hint(cfg, None)
+        # Nothing found (the holder is gone by now): still this FIFO, by path.
+        assert str(cfg.fifo_path) in doctor._stray_hint(cfg, None)
+    finally:
+        theirs.kill()
+        theirs.wait()
 
 
 # -- panes and the watchdog -------------------------------------------------

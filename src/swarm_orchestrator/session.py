@@ -25,7 +25,9 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 
+from . import config as config_mod
 from . import keep as keep_mod
 from . import procs
 from . import restart as restart_mod
@@ -63,9 +65,7 @@ def plan_worker_windows(
 def setup(cfg: Config) -> dict[str, str]:
     """Create the hardened session + windows + tagged slots. Records state."""
     if tmux.session_exists(cfg.session):
-        raise RuntimeError(
-            f"tmux session {cfg.session!r} already exists; run `swarm down` first"
-        )
+        raise RuntimeError(taken_words(cfg))
     dash_win = tmux.new_session(cfg.session)
     tmux.mark_owner(cfg.session, str(cfg.state_dir))
     tmux.harden(cfg.session)
@@ -191,20 +191,38 @@ def add_slot_panes(
     return panes, windows, failed
 
 
-def owns_session(cfg: Config, windows: dict[str, str]) -> bool:
+def owns_session(cfg: Config) -> bool:
     """Whether the tmux session named ``cfg.session`` is this run's.
 
-    The name alone proves nothing: by default it is the project directory's
-    name, which the owner may use for a session of their own. A session carries
-    its swarm's state dir (:data:`tmux.OWNER_OPT`); one made before that marker
-    existed is ours when a window or pane this run recorded (``windows``, from
-    state) is in it."""
-    owner = tmux.session_owner(cfg.session)
-    if owner:
-        return owner == str(cfg.state_dir)
+    The name alone proves nothing: by default it is the swarm's name, which the
+    owner may use for a session of their own, and which another swarm may share.
+    A swarm's session carries its state dir (:data:`tmux.OWNER_OPT`), set when it
+    is made; a session that carries another one, or none, is not this run's."""
+    return tmux.session_owner(cfg.session) == str(cfg.state_dir)
+
+
+def taken_words(cfg: Config) -> str:
+    """Why ``swarm up`` cannot make its tmux session: one of that name exists.
+    Says whose it is, and what gets this swarm started."""
+    name = cfg.session
+    owner = tmux.session_owner(name)
+    if owner == str(cfg.state_dir):
+        return (f"the swarm is already up: tmux session {name!r} exists -- "
+                f"`tmux attach -t ={name}` to look at it, or `swarm down` first")
     if owner is None:
-        return False
-    return any(tmux.window_session(w) == cfg.session for w in windows.values())
+        return (f"tmux session {name!r} exists, but tmux would not say whose it is:"
+                " nothing was started. `tmux ls` shows it; try `swarm up` again")
+    rename = ("give this swarm a session name of its own (`session = \"<name>\"` under"
+              " [tmux] in .swarm.toml), then `swarm up`")
+    if owner:
+        other = config_mod.recorded(Path(owner))
+        whose = (f"the swarm {other.get('name') or Path(owner).name}"
+                 f" ({other.get('project_dir') or owner})")
+        return (f"tmux session {name!r} belongs to another swarm: {whose}. `swarm down`"
+                f" here will not end it, and two swarms cannot share a session: {rename}")
+    return (f"tmux session {name!r} already exists and is not a swarm's: it is one of your"
+            f" own. `swarm down` will not end it. Rename yours (`tmux rename-session -t"
+            f" ={name} <new>`), or {rename}")
 
 
 def teardown(cfg: Config) -> None:

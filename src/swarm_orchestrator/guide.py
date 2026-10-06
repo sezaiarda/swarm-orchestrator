@@ -29,7 +29,6 @@ from pathlib import Path
 from . import launch as launch_mod
 from . import resolver
 from . import session as session_mod
-from . import state as state_mod
 from . import tmux
 from .config import Config
 from .logutil import Log
@@ -110,7 +109,7 @@ def open_window(cfg: Config) -> tuple[str, str]:
     if not tmux.session_exists(cfg.session):
         raise GuideError(f"the swarm's tmux session {cfg.session!r} is not running"
                          " (`swarm up` starts it)")
-    if not session_mod.owns_session(cfg, state_mod.read(cfg).windows):
+    if not session_mod.owns_session(cfg):
         raise GuideError(f"tmux session {cfg.session!r} is not this swarm's")
     with _locked(cfg):
         win = find(cfg)

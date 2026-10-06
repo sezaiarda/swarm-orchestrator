@@ -14,15 +14,19 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import fcntl
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 from . import blockedping
 from . import freezer
@@ -30,6 +34,7 @@ from . import gitq
 from . import lanes as lanes_mod
 from . import ledger as ledger_mod
 from . import ledgerw
+from . import machine
 from . import meters, opqueue
 from . import models as models_mod
 from . import state as state_mod
@@ -138,6 +143,40 @@ def _stamp(cfg_path: Path) -> tuple[int, int] | None:
     return st.st_mtime_ns, st.st_size
 
 
+#: The lock every writer of ``~/.claude.json`` takes, in the machine directory:
+#: one for all the swarms on the machine, since they all write the one file.
+CLAUDE_LOCK = "claude-json.lock"
+#: How long :func:`pretrust_dir` waits for it. Whoever holds it is done in
+#: milliseconds unless it is frozen (`swarm freeze` stops a dashboard where it
+#: stands), and a launch must not wait on another swarm's freeze.
+CLAUDE_LOCK_WAIT_S = 5.0
+
+
+@contextmanager
+def _claude_config_lock() -> Iterator[bool]:
+    """Hold :data:`CLAUDE_LOCK` for the block; yields whether it was taken
+    within :data:`CLAUDE_LOCK_WAIT_S`."""
+    path = machine.directory() / CLAUDE_LOCK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + CLAUDE_LOCK_WAIT_S
+    with path.open("a") as lockf:
+        got = True
+        while True:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    got = False
+                    break
+                time.sleep(0.02)
+        try:
+            yield got
+        finally:
+            if got:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
 def pretrust_dir(path: Path, log: Log) -> None:
     """Mark ``path`` trusted in claude's config so no folder-trust dialog appears.
 
@@ -153,9 +192,29 @@ def pretrust_dir(path: Path, log: Log) -> None:
     that cannot be parsed, or that changed between the read and the write, is
     read again a few times and otherwise left alone (the dialog then appears,
     which is harmless).
+
+    It is also shared with every other swarm on the machine, and swarms launch
+    together exactly when a usage window they share resets. So the whole
+    read-modify-replace is done under one machine-wide lock, into a temp file
+    of this call's own: two supervisors once wrote the same temp file, and
+    either lost an entry or had the live file replaced by one still being
+    written.
     """
     cfg_path = _claude_config_path()
     key = str(path.resolve())
+    try:
+        with _claude_config_lock() as locked:
+            if not locked:
+                log.line(f"PRETRUST-SKIPPED {key} another swarm holds the lock on"
+                         f" {cfg_path}; left untouched")
+                return
+            _pretrust(cfg_path, key, log)
+    except OSError as exc:
+        log.line(f"PRETRUST-FAIL {key} {exc}")
+
+
+def _pretrust(cfg_path: Path, key: str, log: Log) -> None:
+    """:func:`pretrust_dir`, with the lock in hand."""
     for attempt in range(PRETRUST_TRIES):
         if attempt:
             time.sleep(PRETRUST_RETRY_S)
@@ -171,17 +230,15 @@ def pretrust_dir(path: Path, log: Log) -> None:
             entry = projects[key] = {}
         entry["hasTrustDialogAccepted"] = True
         entry.setdefault("hasCompletedProjectOnboarding", True)
-        tmp = cfg_path.with_name(cfg_path.name + ".swarm-tmp")
+        tmp = cfg_path.with_name(f"{cfg_path.name}.swarm-tmp.{os.getpid()}.{secrets.token_hex(4)}")
         try:
             cfg_path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             if _stamp(cfg_path) != stamp:
-                tmp.unlink(missing_ok=True)
                 continue  # claude wrote it meanwhile; start over from its version
             os.replace(tmp, cfg_path)
-        except OSError as exc:
-            log.line(f"PRETRUST-FAIL {key} {exc}")
-            return
+        finally:
+            tmp.unlink(missing_ok=True)
         log.line(f"PRETRUST {key}")
         return
     log.line(f"PRETRUST-SKIPPED {key} {cfg_path} unreadable or changing; left untouched")

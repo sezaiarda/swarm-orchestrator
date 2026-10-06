@@ -13,18 +13,26 @@ And a command names a swarm only where there is one. A folder with no
 own, so a command one folder off, in a renamed folder or with a mistyped
 ``--project-dir`` addressed a new, empty swarm in silence. Real supervisors, the
 bare driver, fake master and workers.
+
+The swarms also share one tmux server, with each other and with the owner's own
+sessions: what a swarm sets there it sets on its own windows, and a session of
+the same name that is somebody else's is said to be. Those tests run a real
+tmux, on a server of their own (its own ``TMUX_TMPDIR``, killed after).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import console, restart
+from swarm_orchestrator import cli, console, restart
 from swarm_orchestrator import session as session_mod
 from swarm_orchestrator import tmux
 from swarm_orchestrator.cli import main as cli_main
@@ -389,3 +397,133 @@ def test_a_read_only_command_creates_no_state_dir(two_swarms, command):
     assert "Traceback" not in r.stderr
     assert not a.state_dir.exists()
     assert not _state_root(a).exists() or not any(_state_root(a).iterdir())
+
+
+# -- one tmux server, several sessions -------------------------------------------
+@pytest.fixture
+def server(monkeypatch):
+    """A tmux server of the test's own, with one session that is the owner's."""
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux not available")
+    sockdir = tempfile.mkdtemp(prefix="swarm-multi-")
+    monkeypatch.setenv("TMUX_TMPDIR", sockdir)
+    monkeypatch.delenv("TMUX", raising=False)  # never nest onto the outer server
+    try:
+        tmux.new_session("mine")
+        yield
+    finally:
+        tmux.run(["kill-server"])
+        shutil.rmtree(sockdir, ignore_errors=True)
+
+
+def _opt(*args: str) -> str:
+    return tmux.run(["show-options", *args]).stdout.strip()
+
+
+def _eventually(pred, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _tmux_cfg(project: Path, state: Path, monkeypatch, session: str = "shared"):
+    project.mkdir(parents=True, exist_ok=True)
+    (project / ".swarm.toml").write_text(
+        f'[tmux]\nsession = "{session}"\n[tui]\nautostart = false\n')
+    monkeypatch.setenv("SWARM_STATE_DIR", str(state))
+    monkeypatch.setenv("SWARM_DRIVER", "tmux")
+    monkeypatch.delenv("SWARM_SESSION", raising=False)
+    return load(project_dir=str(project))
+
+
+def test_a_swarm_sets_its_tmux_options_on_its_own_windows_only(server, tmp_path, monkeypatch):
+    """They were set with ``-g``: on every window of every session on the
+    owner's server, and still there after the swarm was gone."""
+    tmux.run(["set-option", "-g", "renumber-windows", "on"])  # the owner's own choice
+    cfg = _tmux_cfg(tmp_path / "project", tmp_path / "state", monkeypatch, "swarm-a")
+    windows = session_mod.setup(cfg)
+    pane = tmux.split_layout(windows["workers"], 2)[0]
+    parked, _ = tmux.park_pane(windows["workers"], pane, 0, "wait:P1", cfg.session)
+
+    # Nothing server-wide, and nothing on the owner's session.
+    assert _opt("-g", "-w", "-v", "remain-on-exit") == "off"
+    assert _opt("-g", "-w", "-v", "automatic-rename") == "on"
+    assert _opt("-g", "-v", "renumber-windows") == "on"
+    assert _opt("-w", "-t", "=mine:", "-v", "remain-on-exit") == ""
+    assert _opt("-t", "=mine:", "-v", "renumber-windows") == ""
+    # Every window of the swarm's, the one a parked pane was moved into too.
+    assert _opt("-t", f"={cfg.session}:", "-v", "renumber-windows") == "off"
+    for win in (*windows.values(), parked):
+        got = [_opt("-w", "-t", win, "-v", name) for name, _ in tmux.WINDOW_OPTS]
+        assert got == [value for _, value in tmux.WINDOW_OPTS], win
+
+    # And they do what they are for: a command that exits leaves its pane.
+    for target in (windows["master"], parked):
+        dying = tmux.list_panes(target)[0]
+        tmux.respawn_pane(dying, "true")
+        assert _eventually(lambda: tmux.pane_states(cfg.session).get(dying) is True)
+    # In the owner's session it still closes, as they left it.
+    tmux.run(["respawn-pane", "-k", "-t", "=mine:", "true"])
+    assert _eventually(lambda: not tmux.session_exists("mine"))
+
+
+def test_two_swarms_with_one_session_name_the_second_is_told_whose_it_is(
+        server, tmp_path, monkeypatch, capsys):
+    """It was told "the swarm is already up … or `swarm down` first", and that
+    `down` then said the session was not its own: it could never start."""
+    first = _tmux_cfg(tmp_path / "one", tmp_path / "state-one", monkeypatch)
+    session_mod.setup(first)
+    Path(first.state_dir, "config.json").write_text(
+        '{"name": "the first", "project_dir": "%s"}' % first.project_dir)
+    second = _tmux_cfg(tmp_path / "two", tmp_path / "state-two", monkeypatch)
+    assert second.session == first.session == "shared"
+
+    assert cli.cmd_up(second, attach=False) == 1
+    said = capsys.readouterr().err
+    assert "belongs to another swarm: the swarm the first" in said
+    assert str(first.project_dir) in said and "[tmux]" in said and "already up" not in said
+    assert not session_mod.owns_session(second) and session_mod.owns_session(first)
+    assert not (second.state_dir / "state.json").exists()  # refused before anything
+    # Its `down` leaves the other swarm's session alone, and says so.
+    assert cli.cmd_down(second) == 0
+    assert tmux.session_exists("shared") and "not this swarm's" in capsys.readouterr().err
+    with pytest.raises(RuntimeError, match="belongs to another swarm"):
+        session_mod.setup(second)
+
+
+def test_a_session_of_the_owners_own_with_the_swarms_name_is_said_to_be_theirs(
+        server, tmp_path, monkeypatch, capsys):
+    cfg = _tmux_cfg(tmp_path / "project", tmp_path / "state", monkeypatch, "mine")
+    assert cli.cmd_up(cfg, attach=False) == 1
+    said = capsys.readouterr().err
+    assert "is not a swarm's" in said and "tmux rename-session -t =mine" in said
+    assert "[tmux]" in said and "`swarm down` first" not in said
+    assert tmux.session_exists("mine") and tmux.session_owner("mine") == ""
+
+
+def test_its_own_session_left_up_is_still_said_to_be_up(server, tmp_path, monkeypatch, capsys):
+    cfg = _tmux_cfg(tmp_path / "project", tmp_path / "state", monkeypatch, "swarm-a")
+    session_mod.setup(cfg)
+    assert cli.cmd_up(cfg, attach=False) == 1
+    said = capsys.readouterr().err
+    assert "already up" in said and "tmux attach -t =swarm-a" in said and "swarm down" in said
+
+
+@pytest.mark.parametrize("inside", [True, False], ids=["switch", "attach"])
+def test_attach_names_the_session_exactly(tmp_path, monkeypatch, inside):
+    """A bare name is a prefix to tmux: ``mag`` landed in ``magnar``."""
+    cfg = _tmux_cfg(tmp_path / "project", tmp_path / "state", monkeypatch, "mag")
+    ran: list[list[str]] = []
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(tmux, "session_exists", lambda name: True)
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **_k: ran.append(argv))
+    monkeypatch.setattr(cli.os, "execvp", lambda _file, argv: ran.append(argv))
+    if inside:
+        monkeypatch.setenv("TMUX", "/tmp/tmux-0/default,1,0")
+    else:
+        monkeypatch.delenv("TMUX", raising=False)
+    cli._attach(cfg)
+    assert ran == [["tmux", "switch-client" if inside else "attach", "-t", "=mag"]]

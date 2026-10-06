@@ -158,20 +158,24 @@ def pytest_configure(config) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _own_state_root(tmp_path_factory, monkeypatch):
-    """No test reads or writes the machine's own state root.
+def _own_machine(tmp_path_factory, monkeypatch):
+    """No test reads or writes this machine's own swarm directories.
 
     A config loaded with no ``SWARM_STATE_DIR`` keeps its run under
     ``$XDG_STATE_HOME/swarm-orchestrator``, which is where the swarms really
-    running on this machine keep theirs. Set in the environment, so every
-    ``swarm`` a test starts looks in the same throwaway root.
+    running on this machine keep theirs, and the machine settings are read from
+    ``$XDG_CONFIG_HOME/swarm-orchestrator/machine.toml``, which the owner may
+    have written. Set in the environment, so every ``swarm`` a test starts looks
+    in the same throwaway places.
 
     Nor the run of a session the suite itself is started in: with that session's
     ``SWARM_STATE_DIR`` still set, a test's config would land in a live swarm's
     state dir, and is refused there (it names another project). A test that
     needs the variable sets it.
     """
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))
+    base = tmp_path_factory.mktemp("machine")
+    monkeypatch.setenv("XDG_STATE_HOME", str(base / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(base / "config"))
     monkeypatch.delenv("SWARM_STATE_DIR", raising=False)
 
 
@@ -368,20 +372,22 @@ def swarm(tmp_path: Path):
 
 
 @pytest.fixture
-def two_swarms(tmp_path: Path):
+def two_swarms(tmp_path: Path, monkeypatch):
     """Two projects side by side on one machine, as two real swarms are: one
     state root (``XDG_STATE_HOME``), and each run in the state dir its own path
-    gives it — no ``SWARM_STATE_DIR``, no ``SWARM_SLUG``. Neither is up."""
+    gives it — no ``SWARM_STATE_DIR``, no ``SWARM_SLUG``, here or in the
+    ``swarm`` commands they run. Neither is up."""
+    from swarm_orchestrator import machine
     from swarm_orchestrator.config import _default_slug
 
-    root = Path(os.environ["XDG_STATE_HOME"])
+    for key in ("SWARM_STATE_DIR", "SWARM_SLUG", "SWARM_NAME"):
+        monkeypatch.delenv(key, raising=False)
     pair = []
     for name in ("alpha", "beta"):
         project = tmp_path / name
         shutil.copytree(DEMO, project)
         env = _fake_env(tmp_path / f"tg-{name}.log")
-        env.pop("SWARM_STATE_DIR", None)
-        pair.append(Swarm(project, root / "swarm-orchestrator" / _default_slug(project), env))
+        pair.append(Swarm(project, machine.state_root() / _default_slug(project), env))
     try:
         yield tuple(pair)
     finally:

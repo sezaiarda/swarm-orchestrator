@@ -15,7 +15,8 @@ summarised in a line rather than averaged into the headline.
 
 Nothing here reads the filesystem: it takes the graph and the done map (or a
 dashboard that already holds them, :func:`standings`) and returns dataclasses,
-so it is trivially testable and cannot fail a render.
+so it is trivially testable and cannot fail a render. The one exception is
+:func:`counts`, for a caller that holds a config and a state and no dashboard.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .. import ledger as ledger_mod
 from .. import ledgerw, statuses
 
 # `dash-W3` / `inventory-P4` / `billing-P0-ops` -> campaign `dash`, `inventory`, `billing`.
@@ -245,6 +247,33 @@ def overall(campaigns: list[Campaign]) -> Campaign:
         excluded=sum(c.excluded for c in campaigns),
         held=sum(c.held for c in campaigns),
     )
+
+
+def counts(cfg, st) -> dict:
+    """The whole ledger of one swarm, counted exactly as the dashboard counts it.
+
+    :func:`summarise` over the launcher's done view, read from the project's
+    ledger and the run's state, so `swarm status`, `swarm ls`, the TUI header
+    and the web board can never disagree about what is done. ``done``,
+    ``running``, ``asking``, ``ready``, ``blocked``, ``dated`` and ``failed``
+    are disjoint and add up to ``total``.
+    """
+    path = cfg.project_dir / cfg.ledger
+    graph = ledger_mod.load(path)
+    ticked = ledger_mod.load_ticked(path)
+    dated = ledgerw.dated(cfg)
+    # At work: in a slot, or parked and working on the owner's answer.
+    busy = {s.phase for s in st.busy_slots() if s.phase} | set(st.working_parked())
+    # Its worker waits on the owner, in its slot or parked: the launcher will
+    # not start it, so it is never ready, and it builds nothing until answered.
+    asking = set(st.on_owner())
+    landed = ledger_mod.with_ticked(st.done, ticked, busy | set(st.parked) | set(st.waiting))
+    t = overall(summarise(graph, landed, busy, set(cfg.exclude or []), ticked, dated, asking))
+    return {"done": t.built, "total": t.live_total, "held": t.held, "running": len(t.running),
+            "asking": len(t.asking), "ready": len(t.ready), "blocked": t.blocked,
+            "dated": t.dated, "failed": t.failed, "excluded": t.excluded,
+            "dates": {p: d for p, d in sorted(dated.items(), key=lambda kv: kv[::-1])
+                      if p in graph and p not in busy and p not in asking}}
 
 
 def history_line(campaigns: list[Campaign]) -> str:

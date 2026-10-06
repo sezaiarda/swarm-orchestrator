@@ -886,6 +886,7 @@ The full list, one line per subcommand and grouped by purpose, is in
 | you want to | run |
 |---|---|
 | start, watch, stop | `swarm up`, `swarm status`, `swarm down` |
+| see every swarm on this machine | `swarm ls` |
 | see what is wrong | `swarm doctor`, `swarm why <phase>` |
 | see and do what waits on you | `swarm todo`, `swarm guide` |
 | talk to the swarm in your own Claude session | `swarm console` |
@@ -929,6 +930,16 @@ State lives outside the project, under
 project path, so two projects with the same folder name never share state.
 `SWARM_STATE_DIR` overrides the location. The directory is made by `swarm up`
 or the first command that changes something, never by one that only reads.
+
+Several projects can each run a swarm on one machine. Their state dirs sit
+side by side in `~/.local/state/swarm-orchestrator/`, and `swarm ls` lists
+them from any folder: which are running, how far along each is, and how much
+waits on you in each. Beside them, `machine/` is for what all of them share,
+and settings that describe the machine rather than a project go in
+`~/.config/swarm-orchestrator/machine.toml`
+([docs/config.md](docs/config.md#the-machine-file-machinetoml)). A command
+acts on one swarm only, and a session of one swarm cannot run a command on
+another ([docs/cli.md](docs/cli.md)).
 
 | path | what it holds |
 |---|---|

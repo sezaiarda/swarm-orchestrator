@@ -39,7 +39,7 @@ from swarm_orchestrator.eta import plan as plan_mod
 from swarm_orchestrator.eta import sim as sim_mod
 from swarm_orchestrator.logutil import Log
 from swarm_orchestrator.state import State
-from swarm_orchestrator.tui import books, data
+from swarm_orchestrator.tui import books, campaign, data
 from swarm_orchestrator.web.feed import Feed
 
 H = 3600.0
@@ -164,7 +164,7 @@ def test_swarm_status_says_a_parked_session_is_working_and_counts_nothing_on_the
     assert "eta: 3 rows left" in out
     # The ledger's count has it running, as the dashboard's headline does, not
     # ready to launch.
-    standing = cli._phase_standing(cfg, state_mod.read(cfg))
+    standing = campaign.counts(cfg, state_mod.read(cfg))
     assert (standing["running"], standing["ready"]) == (2, 0)
 
 
@@ -172,7 +172,7 @@ def test_swarm_status_says_a_parked_session_is_working_and_counts_nothing_on_the
 def test_swarm_status_keeps_its_line_and_its_count_for_a_session_that_asks(cfg, capsys, mark):
     run(cfg, mark)
     # The count has it waiting on the owner: not ready to launch, and not at work.
-    standing = cli._phase_standing(cfg, state_mod.read(cfg))
+    standing = campaign.counts(cfg, state_mod.read(cfg))
     assert (standing["running"], standing["asking"], standing["ready"]) == (1, 1, 0)
     assert cli.cmd_status(cfg) == 0
     out = capsys.readouterr().out

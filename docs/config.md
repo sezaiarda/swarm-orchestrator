@@ -47,7 +47,7 @@ last recorded (`<state>/config.json`), never on another folder's file.
 | `name` | the project folder's name | `SWARM_NAME` | hot | The swarm's display name: what you read wherever the swarm names itself. `""` means the folder's name. It names nothing on disk: the slug, the state dir, the worktrees and `SWARM_PROJECT` follow the folder, so renaming the swarm moves no state and needs no folder rename. See [the display name](#the-display-name-swarmname) for what an edit reaches when. |
 | `max_workers` | `4` | | hot | Worker slots. Must be at least 1. Growing adds panes live; shrinking marks the extra slots retiring, and a busy one finishes its phase first. |
 | `master_model` | `""` | | next | `--model` for the init pass and, by default, the Overseer. `""` inherits the user's setting. |
-| `slug` | `<dirname>-<sha1 of path, 8 chars>` | `SWARM_SLUG` | restart | Names the state dir. The hash keeps two projects with the same folder name apart. A slug another project already runs under is refused: two swarms cannot share a state dir, and the second is told both paths. A project that is moved keeps its state when its slug is set here. |
+| `slug` | `<dirname>-<sha1 of path, 8 chars>` | `SWARM_SLUG` | restart | Names the state dir. The hash keeps two projects with the same folder name apart. `machine` is refused: that folder of the state root is shared by every swarm. So is a slug another project already runs under: two swarms cannot share a state dir, and the second is told both paths. A project that is moved keeps its state when its slug is set here. |
 | `driver` | `"tmux"` | `SWARM_DRIVER` | restart | `tmux`, or `bare` (headless subprocesses, no panes; the hermetic tests use it). |
 | `master_cmd` | `""` | `SWARM_MASTER_CMD` | next | Replaces the built-in `claude` command in the overseer window (the init pass, and the Overseer when `[overseer].cmd` is empty). With it set, no prompt is typed in. The tests use it to inject a fake master. |
 | `resolver_cmd` | `""` | `SWARM_RESOLVER_CMD` | next | Replaces `cd <repo> && exec claude` for the merge-conflict resolver. With it set, no prompt is typed in. |
@@ -413,12 +413,42 @@ and `swarm resources` in [cli.md](cli.md)). It reads `/proc` and never signals a
 | `host` | `"0.0.0.0"` | `SWARM_WEB_HOST` | restart | The bind address. The default is every interface, so the board answers on the Tailscale IP that `swarm status` prints (or the LAN address when Tailscale is absent). |
 | `port` | `8765` | `SWARM_WEB_PORT` | restart | The TCP port. |
 
+## The machine file: `machine.toml`
+
+Some settings are true of the computer, whichever project asks. They do not
+belong in a project's `.swarm.toml`: with several swarms on one machine each
+would hold its own copy, and the copies would disagree. They live in one file
+for the user who runs the swarms:
+
+    $XDG_CONFIG_HOME/swarm-orchestrator/machine.toml
+    (default ~/.config/swarm-orchestrator/machine.toml)
+
+- The file is optional. Without it every key takes its default.
+- **Precedence** is the same as for `.swarm.toml`: an environment variable,
+  when a key has one and it is set, beats the file, which beats the default.
+- **Mistakes are errors.** A table or key this section does not list, a value
+  of the wrong type or out of range, or a file that is not TOML stops the
+  command that read it, with the file and the key in the message. Nothing falls
+  back to a default in silence. This is stricter than `.swarm.toml`, which
+  ignores a key it does not know: this file holds the limits that protect the
+  machine, and a mistyped key would otherwise leave the default in force with
+  nothing to say so.
+- It is read each time a command asks for it, and nothing caches it.
+
+It has no tables yet: every key the tool has today describes a project. Each
+table is listed here when it is added, under a third-level heading with the
+table's name and one row per key (key, default, environment variable,
+meaning). The keys are declared once, on the `Settings` class in
+`src/swarm_orchestrator/machine.py`, and a test checks this section against
+that class.
+
 ## Environment-only variables
 
 | variable | effect |
 |---|---|
 | `SWARM_STATE_DIR` | Use this directory as the state dir instead of `$XDG_STATE_HOME/swarm-orchestrator/<slug>`. Every session the swarm starts gets it, and so does the supervisor. Once a supervisor has run there the directory belongs to that project: a command that names any other project while this is set is refused. |
-| `XDG_STATE_HOME` | The state root. Default `~/.local/state`. |
+| `XDG_STATE_HOME` | The state root is `$XDG_STATE_HOME/swarm-orchestrator`. Default `~/.local/state`. Every swarm on the machine keeps its state dir there, beside the machine directory `machine/`; `swarm ls` lists them. |
+| `XDG_CONFIG_HOME` | The machine file is `$XDG_CONFIG_HOME/swarm-orchestrator/machine.toml`. Default `~/.config`. |
 | `SWARM_TG_SINK` | Append telegrams to this file instead of sending them. The tests use it; it also skips recap generation. |
 | `SWARM_TG_ENV` | The credentials file the bundled `notify.sh` reads, and the command listener too. |
 | `SWARM_TG_API` | The Bot API base URL the command listener polls (default `https://api.telegram.org`). The tests point it at a fake. |

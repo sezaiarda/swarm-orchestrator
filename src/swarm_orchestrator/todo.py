@@ -373,10 +373,10 @@ def _row_item(cfg: Config, row: str, graph, done, excluded, rows, order) -> Todo
 
 
 # -- text ------------------------------------------------------------------------
-def count(cfg: Config) -> int:
+def count(cfg: Config, st: state_mod.State | None = None) -> int:
     """How many to-dos there are; 0 when the records cannot be read."""
     try:
-        return len(collect(cfg).items)
+        return len(collect(cfg, st).items)
     except Exception:  # noqa: BLE001 - a count on a status line must never fail it
         return 0
 

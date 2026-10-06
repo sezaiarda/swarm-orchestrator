@@ -5,6 +5,9 @@ exact flags.
 
 `swarm [--config PATH] [--project-dir DIR] <command>`. Every command takes `-h`.
 
+Every command runs on one project, bar `swarm ls`, which lists the swarms on
+the machine and works from any folder.
+
 The project is `--project-dir`; without it, the project of the session the
 command runs in (`SWARM_PROJECT`, set for every worker, operator job and
 Overseer pass, the console and the dashboard), and outside a session the
@@ -21,7 +24,7 @@ above it are not searched. So a mistyped path, a renamed folder or a command
 typed one folder off can no longer start, or build in, a new and empty swarm.
 
 A run's state dir is made by `swarm up` or by the first command that changes
-something. A command that only reads (`status`, `context`, `why`, `report`,
+something. A command that only reads (`ls`, `status`, `context`, `why`, `report`,
 `todo`, `check`, `doctor`, `usage`, `resources`, `overseer`, `big-picture`,
 `layout`, `reload --dry-run`, `build --status`, `keep --list`, a `gc` dry run)
 never makes one, so looking at a project that was never started leaves nothing
@@ -60,6 +63,7 @@ drop the session's two variables:
 
 | command | what it does |
 |---|---|
+| `ls [--json]` | Every swarm on this machine, one line each, from any folder (it needs no project and loads no `.swarm.toml`). Read from the state root, where each swarm's state dir is the record, so none can be running and missing. Columns: the swarm's name; its status (`running`, `paused`, `held` by a usage cap, `frozen`, `finished`, `stopped` = no supervisor and not finished, `stale` = its project folder is gone, `empty` = no supervisor ever ran in that state dir, so no project is recorded); ledger rows done, running and open, counted as `status` counts them; how many things wait on you (sessions asking, plus `todo`'s list); its tmux session; its project. A stale or empty one is shown, never hidden: it is a leftover to delete. `--json` gives the same per swarm with every flag apart, and the state root, the machine directory and the machine file's path. |
 | `status [--all] [--json]` | A drain and what it still waits for, a restart that is planned, under way or failed and who asked for it (`restart`, `restart_line` in `--json`), slots, merge queue, waiting and parked sessions (`working=[…]` names the parked ones you have answered), operator queue, owner-run rows only you can do (`owner_rows` in `--json`), the count of your to-dos (`owner to-dos:`; `owner_todos` in `--json`), owed pushes, the big-picture doc's last refresh, the whole ledger's standing counted as the dashboard counts it (`phases:`; `phases` in `--json`), this machine's done records as counts per status (naming failures), board address, kept processes, the build gate's line (slots busy, builds waiting), and a resources line (host CPU, memory and disk; an idle build holder gets a line of its own). `--all` prints the whole done map; `--json` prints the state as JSON. Rows waiting for a date are counted as such and listed with their dates (`phases.dates` in `--json`), never under `failed`. A row whose worker asked you something and has no answer yet, in its slot or parked, is counted `waiting on you` (`phases.asking` in `--json`), never `ready` or `running`: the launcher will not start it, and it builds nothing until you answer. `done`, `running`, `asking`, `ready`, `blocked`, `dated` and `failed` add up to `total`. |
 | `todo [--json]` | What waits on you that is not a question: owner-run and excluded rows that are ready and whose row says you do something, queued operator jobs that need your devices (folded into the row that closes them), to-dos a finish sent you, and the Overseer's latest "Left for the owner". Ordered by what each unblocks, then by whether time must pass afterwards. `--json` adds each item's full text, files and the commands that close it, plus rows coming later and owner rows left out as standing targets. |
 | `guide` | Open the owner guide: a Claude chat in its own tmux window, `guide`, that walks you through `todo` one item at a time and records what you report with `record`, `operator-done`, `follow-up` and `lesson`. Again while it is open moves you back to it; it closes when the session ends. `g` in the dashboard does the same. |

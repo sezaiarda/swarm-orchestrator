@@ -30,6 +30,11 @@ brings it back with `/resume`.
 Run every swarm command as `{{swarm}} <command>` (the full form resolves this
 project from any cwd). `<command> -h` prints its exact flags.
 
+Other projects may run swarms of their own on this machine. `{{swarm}} ls`
+lists them all: which are running, how far along each is, how much waits on the
+owner in each. That is all you can do to another swarm from here: you act on
+this one only, and a command that names another project is refused.
+
 ## Doing what the owner asks
 
 - **Look before you answer.** `status`, `why <phase>`, `report --phase <phase>`,

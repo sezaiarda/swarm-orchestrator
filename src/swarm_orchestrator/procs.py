@@ -7,6 +7,7 @@ time (``/proc/<pid>/stat`` field 22, in clock ticks since boot).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 #: Every session the swarm spawns carries ``SWARM_SESSION_ID=<kind>:<id>`` (a
@@ -87,3 +88,17 @@ def comm(pid: int) -> str:
         return Path(f"/proc/{pid}/comm").read_text().strip()
     except OSError:
         return ""
+
+
+def fifo_has_reader(path: Path) -> bool:
+    """Is anything reading the FIFO at ``path``? A supervisor holds its control
+    FIFO open for its whole life, so this is "is that swarm's supervisor up".
+    Opening for writing without blocking succeeds only when a reader is there."""
+    if not path.exists():
+        return False
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    os.close(fd)
+    return True

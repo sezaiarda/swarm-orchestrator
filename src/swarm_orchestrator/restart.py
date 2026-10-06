@@ -438,14 +438,7 @@ def live_supervisor(cfg: Config, st: state_mod.State | None = None) -> int | Non
 
 def has_reader(cfg: Config) -> bool:
     """Is anything reading the control FIFO?"""
-    if not cfg.fifo_path.exists():
-        return False
-    try:
-        fd = os.open(cfg.fifo_path, os.O_WRONLY | os.O_NONBLOCK)
-    except OSError:
-        return False
-    os.close(fd)
-    return True
+    return procs.fifo_has_reader(cfg.fifo_path)
 
 
 def code_stamp() -> float:

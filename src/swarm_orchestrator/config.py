@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .buildclass import ALONE_DEFAULT
-from . import tmux
+from . import machine, tmux
 from .tmux import AUTO_LAYOUT, LAYOUTS, normalize_layout
 
 
@@ -867,10 +867,7 @@ class Config:
         if base:
             self.state_dir = Path(base).expanduser()
         else:
-            root = Path(
-                os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")
-            )
-            self.state_dir = root / "swarm-orchestrator" / self.slug
+            self.state_dir = machine.state_root() / self.slug
 
     @property
     def state_path(self) -> Path:
@@ -977,6 +974,9 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
                and os.environ.get(SETTINGS["session"].env) is None)
     if follows:
         values["session"] = session_default(values["name"])
+    if values["slug"] == machine.DIR_NAME:
+        raise ValueError(f"[swarm].slug must not be {machine.DIR_NAME!r}: that folder of the"
+                         " state root is the machine's own, shared by every swarm")
     cfg = Config(project_dir=pdir, **values)
     _refuse_other_state(cfg)
     cfg.session_wanted = cfg.session
@@ -1020,7 +1020,8 @@ def _refuse_other_state(cfg: Config) -> None:
         raise WrongSwarm(
             f"this command names the project {cfg.project_dir}, but SWARM_STATE_DIR"
             f" ({cfg.state_dir}) is the run state of {was}. A session of one swarm cannot"
-            " act on another: run the command from a shell outside the swarm, or with"
+            " act on another (`swarm ls` shows how the others stand): run the command"
+            " from a shell outside the swarm, or with"
             " `env -u SWARM_STATE_DIR -u SWARM_PROJECT`")
     raise WrongSwarm(
         f"the project {cfg.project_dir} has the slug {cfg.slug!r}, and so has {was}, whose"
@@ -1097,7 +1098,8 @@ def find_project(project_dir: str | None = None, explicit: str | None = None) ->
             return folder
     raise NoProject(
         f"no {CONFIG_NAME} in {cwd} or in any folder above it: this is not a swarm"
-        " project. Run the command in the project, or name it with --project-dir")
+        " project. Run the command in the project, or name it with --project-dir"
+        " (`swarm ls` lists the swarms on this machine)")
 
 
 def claude_version() -> str:

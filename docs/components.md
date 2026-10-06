@@ -2165,6 +2165,62 @@ measured time-wasters as *wasteful*: `sleep` loops, `git status` polling, and
 heredoc string-replace edits. The command exits 1 on a
 Telegram or ledger failure, or on a *contradicted* finding.
 
+## Several swarms on one machine (`machine.py`)
+
+One machine can run several swarms, one per project. Each has its own
+`.swarm.toml`, its own state dir, its own supervisor, tmux session and FIFO,
+and none of that is shared. Three things do describe the machine rather than a
+project, and `machine.py` owns them.
+
+**The state root** is `$XDG_STATE_HOME/swarm-orchestrator` (default
+`~/.local/state/swarm-orchestrator`). Every swarm's state dir is a folder in
+it, named `<folder>-<hash of the project path>`. Inside a session the state
+root is the folder that session's own state dir is in, which is the same
+place.
+
+**The machine directory** is `machine/` in the state root
+(`machine.directory()`), beside the swarms' state dirs: the place for run
+state that every swarm on the machine shares. Nothing is kept in it yet. It
+moves with the state root, so a test that redirects a run's state redirects
+what the run shares too. No swarm can take its name: `[swarm].slug =
+"machine"` is refused.
+
+**The machine file** is `machine.toml` in the user's config folder, for
+settings that are true of the box whichever project asks
+([docs/config.md](config.md#the-machine-file-machinetoml)). `machine.settings()`
+reads it.
+
+**The registry** is the list of swarms, `machine.swarms()`, and `swarm ls`
+prints it. No file holds it: it is read from the state root each time, one
+entry per state dir, so a swarm cannot be running and missing from the list.
+For each it gives:
+
+- the name, the tmux session and the project, from what the swarm's last
+  supervisor recorded in `<state>/config.json`;
+- whether it is running: something reads its control FIFO, the same test
+  `swarm up` uses to refuse a second supervisor;
+- paused, frozen, held by a usage cap, finished, and how many sessions are
+  asking you, from `state.json` (read without the lock, so a frozen session
+  holding it never blocks the list);
+- ledger rows done, running and open, counted by the function `swarm status`
+  uses, and the number of to-dos `swarm todo` lists.
+
+A state dir whose project folder is gone is listed as `stale`, and one no
+supervisor ever ran in as `empty`. Neither is hidden: each is a leftover, and
+the list is where you find it. One swarm that cannot be read (a torn
+`state.json`) shows what could be read and says why the rest is missing; it
+does not hide the others.
+
+`machine.swarm_config(state_dir)` gives the config of the swarm that owns a
+state dir, bound to that state dir whatever the caller's own environment
+names. That is how one process reads another swarm without becoming a session
+of it.
+
+**A command still acts on one swarm only.** Listing is the one thing that
+crosses swarms. Every other command resolves one project (see
+[docs/cli.md](cli.md)), and a session of one swarm is refused a command that
+names another.
+
 ## Smaller modules
 
 - **`blockedping.py`:** under `[telegram].pings = "necessary"`, gathers a burst of

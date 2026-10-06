@@ -32,6 +32,7 @@ from . import opqueue
 from . import overseer as overseer_mod
 from . import ovrecord
 from . import tui as tui_mod
+from .tui import campaign
 from . import doctor as doctor_mod
 from . import drain as drain_mod
 from . import freezer
@@ -48,6 +49,7 @@ from . import why as why_mod
 from . import gitq
 from . import keep as keep_mod
 from . import lanes as lanes_mod
+from . import machine as machine_mod
 from . import landing as landing_mod
 from . import ledger as ledger_mod
 from . import ledgerw
@@ -2713,41 +2715,12 @@ def _done_summary(done: dict[str, str]) -> str:
 
     These are this machine's records only — phases built elsewhere and ticked in
     the ledger are not among them — so it is labelled as such; how far along the
-    ledger is, is :func:`_phase_standing`'s line.
+    ledger is, is :func:`tui.campaign.counts`'s line.
     """
     parts = " ".join(f"{k}={v}" for k, v in _done_counts(done).items())
     failed = sorted(p for p, s in done.items() if s == statuses.FAIL)
     tail = f" failed: {' '.join(failed)}" if failed else ""
     return f"records here: {len(done)} ({parts or 'none'}){tail} — `--all` lists every phase"
-
-
-def _phase_standing(cfg: Config, st) -> dict:
-    """The whole ledger counted exactly as the dashboard counts it.
-
-    :func:`tui.campaign.summarise` over the launcher's done view, so this line,
-    the TUI header and the web board can never disagree about what is done.
-    ``done``, ``running``, ``asking``, ``ready``, ``blocked``, ``dated`` and
-    ``failed`` are disjoint and add up to ``total``.
-    """
-    from .tui import campaign
-
-    path = cfg.project_dir / cfg.ledger
-    graph = ledger_mod.load(path)
-    ticked = ledger_mod.load_ticked(path)
-    dated = ledgerw.dated(cfg)
-    # At work: in a slot, or parked and working on the owner's answer.
-    busy = {s.phase for s in st.busy_slots() if s.phase} | set(st.working_parked())
-    # Its worker waits on the owner, in its slot or parked: the launcher will
-    # not start it, so it is never ready, and it builds nothing until answered.
-    asking = set(st.on_owner())
-    landed = ledger_mod.with_ticked(st.done, ticked, busy | set(st.parked) | set(st.waiting))
-    t = campaign.overall(campaign.summarise(graph, landed, busy, set(cfg.exclude or []), ticked,
-                                            dated, asking))
-    return {"done": t.built, "total": t.live_total, "held": t.held, "running": len(t.running),
-            "asking": len(t.asking), "ready": len(t.ready), "blocked": t.blocked,
-            "dated": t.dated, "failed": t.failed, "excluded": t.excluded,
-            "dates": {p: d for p, d in sorted(dated.items(), key=lambda kv: kv[::-1])
-                      if p in graph and p not in busy and p not in asking}}
 
 
 def _standing_line(n: dict) -> str:
@@ -2796,7 +2769,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
             data.pop("done")
             data["done_counts"] = _done_counts(st.done)
             data["failed"] = sorted(p for p, s in st.done.items() if s == statuses.FAIL)
-        data["phases"] = _phase_standing(cfg, st)
+        data["phases"] = campaign.counts(cfg, st)
         data["config"] = {
             "name": cfg.name, "slug": cfg.slug, "driver": cfg.driver,
             "isolation": cfg.git_isolation,
@@ -2860,7 +2833,7 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
     for line in pushowed.describe(st.push_owed):
         lines.append(f"push owed: {line}")
     lines.extend(caps.summary_for(cfg, st.usage_hold))
-    standing = _phase_standing(cfg, st)
+    standing = campaign.counts(cfg, st)
     lines.append(_standing_line(standing))
     if standing["dates"]:
         lines.append(_dates_line(standing["dates"]))
@@ -2896,6 +2869,16 @@ def cmd_resources(cfg: Config, as_json: bool = False, hours: float = 24.0,
         print(json.dumps(data, indent=2, sort_keys=True))
     else:
         print(resources_view.render(data))
+    return 0
+
+
+def cmd_ls(as_json: bool = False) -> int:
+    """Every swarm on this machine (:mod:`machine`), whatever folder this is."""
+    found = machine_mod.swarms()
+    if as_json:
+        print(json.dumps(machine_mod.listing(found), indent=2, sort_keys=True))
+    else:
+        print(machine_mod.render(found))
     return 0
 
 
@@ -3026,6 +3009,17 @@ def _build_parser() -> argparse.ArgumentParser:
     fnp.add_argument("--force", action="store_true",
                      help="stop even with operator hand-offs still queued")
     fnp.set_defaults(func=lambda cfg, a: cmd_finish(cfg, a.force))
+    # The one command about the machine, not a project: it loads no config.
+    lsp = sub.add_parser(
+        "ls", help="every swarm on this machine: running or not, progress, what waits on you",
+        description="One line per swarm found under the state root, from any folder: its"
+                    " status (running, paused, held by a usage cap, frozen, finished,"
+                    " stopped; stale when its project folder is gone; empty when no"
+                    " supervisor ever ran there), its ledger rows done, running and open,"
+                    " how many questions and to-dos wait on you, its tmux session and its"
+                    " project.")
+    lsp.add_argument("--json", action="store_true", help="machine-readable")
+    lsp.set_defaults(func=lambda a: cmd_ls(a.json), machine=True)
     stp = sub.add_parser("status", help="human-readable state dump")
     stp.add_argument("--json", action="store_true", help="machine-readable output")
     stp.add_argument("--all", action="store_true",
@@ -3475,6 +3469,8 @@ def main(argv: list[str] | None = None) -> int:
     # older or newer prompt passes: an unknown one is ignored, never fatal.
     if extra and not getattr(args, "tolerant", False):
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    if getattr(args, "machine", False):
+        return args.func(args)
     try:
         cfg = _load_config(args.config, args.project_dir)
     except (WrongSwarm, NoProject) as exc:

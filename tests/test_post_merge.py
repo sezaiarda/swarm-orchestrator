@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import machine_toml
 
 from swarm_orchestrator import buildlog, buildsem, buildstatus, gitq, pushowed, repocmd
 from swarm_orchestrator import state as state_mod
@@ -122,7 +123,7 @@ class Ws:
         monkeypatch.setenv("SWARM_MASTER_CMD", "true")
         monkeypatch.setenv("SWARM_SLUG", "postmerge")
         for leak in ("SWARM_WORKER_CMD", "SWARM_READY_MARKER", "SWARM_GIT_REPOS",
-                     "SWARM_BUILD_MAX", "SWARM_BUILD_HEAVY", "SWARM_BUILD_LIGHT"):
+                     "SWARM_BUILD_HEAVY", "SWARM_BUILD_LIGHT"):
             monkeypatch.delenv(leak, raising=False)
         self.cfg = load(project_dir=str(self.project))
         state_mod.init_state(self.cfg)
@@ -239,7 +240,8 @@ def test_a_failing_command_leaves_the_push_owed_with_its_reason_and_the_queue_mo
 # -- the build gate, the timeout, the checkout ------------------------------
 def test_a_command_that_gets_no_build_slot_in_time_runs_nothing_and_the_push_is_owed(
         monkeypatch, tmp_path):
-    ws = Ws(monkeypatch, tmp_path, timeout_s=1, extra="max_concurrent = 1\n")
+    machine_toml(build={"max_concurrent": 1})
+    ws = Ws(monkeypatch, tmp_path, timeout_s=1)
     (ws.project / "pin.txt").write_text("2\n")
     _git(ws.project, "commit", "-am", "pin 2")
     try:
@@ -399,7 +401,8 @@ def test_the_table_is_read_by_repo_name_then_the_default(monkeypatch, tmp_path):
 
 
 def test_a_light_command_runs_at_once_beside_a_build(monkeypatch, tmp_path):
-    ws = Ws(monkeypatch, tmp_path, extra="max_concurrent = 1\n")
+    machine_toml(build={"max_concurrent": 1})
+    ws = Ws(monkeypatch, tmp_path)
     ws.log.close()
     out = tmp_path / "out.log"
     with out.open("w") as fh, buildsem.slot(ws.cfg, "a long build", tmp_path, "P9"):

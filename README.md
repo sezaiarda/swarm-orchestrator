@@ -55,8 +55,8 @@ repository layout: it drives one repo or an umbrella of many, configured by one
   failures, clears stuck state, reshapes the ledger when slots starve, asks you
   for what only you can do, and writes you a two-sentence summary every four
   hours.
-- Cap concurrent heavy builds swarm-wide, so parallel workers cannot run the host
-  out of memory.
+- Cap concurrent heavy builds on the machine, across every swarm on it, so
+  parallel workers cannot run the host out of memory.
 - Show everything live: a terminal dashboard in window 0, a read-only web board
   for a phone or laptop, `swarm status`, `swarm doctor`, `swarm why <phase>`,
   and `swarm report`.
@@ -387,44 +387,59 @@ flowchart TD
 
 ### Build gate (`swarm build`)
 
-- **Is:** a swarm-wide gate over heavy builds. At most `[build].max_concurrent`
-  run at once; the rest wait in a queue, served in arrival order. A build that
-  usually takes under `[build].short_s` may pass a long one, but no long one is
-  passed more than `[build].overtake` times. For `cargo` it also sets
-  `CARGO_BUILD_JOBS` to `[build].jobs`.
+- **Is:** one gate over heavy builds for the whole machine. Every swarm on it
+  queues at the same gate: at most `max_concurrent` builds run at once,
+  whichever swarms started them, and the rest wait in a queue, served in
+  arrival order. A build that usually takes under `short_s` may pass a long
+  one, but no long one is passed more than `overtake` times, so one swarm with
+  many builds queued cannot starve another. For `cargo` it also sets
+  `CARGO_BUILD_JOBS` to the project's `[build].jobs`.
+- **Its limits are the machine's:** `max_concurrent`, `short_s`, `overtake`,
+  `idle_yield_s`, `idle_yield_max`, `pair` and `alone` are `[build]` in
+  `~/.config/swarm-orchestrator/machine.toml`
+  ([docs/config.md](docs/config.md#the-machine-file-machinetoml)), not in a
+  project's `.swarm.toml`, and none has an environment variable. The file is
+  read live: an edit applies to every swarm at once, with no reload or
+  restart. A `.swarm.toml` that still sets one of them does not load, and the
+  error names the key and `machine.toml`. A project's `[build]` keeps `jobs`,
+  `cache`, `heavy` and `light`.
 - **Idle holders yield:** a build whose whole process tree does nothing for
-  `[build].idle_yield_s` (150 s) is set aside. It is never stopped; it just
-  stops counting, so the next build starts beside it, and it counts again if it
-  wakes up. At most `[build].idle_yield_max` are set aside at once. Commands
-  whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield,
-  and neither does one started with `swarm build --hold` (a measurement that
-  must have the machine to itself). A command that was set aside is told so in
-  its own output.
-- **Pairing rules (opt-in):** with `[build].pair = "distinct-repo"` two builds
-  run side by side only if they are in different repositories (a repo is the
-  same repo from every worktree and mirror of it), and an image build
-  (`[build].alone`, by default the container clients), a `--hold` or a build
-  in no git checkout runs with no build beside it: it waits for the gate to
-  empty and nothing starts while it runs. A script that turns out to call
-  `docker build` is alone from that moment. A waiter the rules hold back is
-  passed by one they allow, at most `overtake` times; `swarm build --status`
-  says why each waiter waits.
+  `idle_yield_s` (150 s) is set aside. It is never stopped; it just stops
+  counting, so the next build starts beside it, and it counts again if it
+  wakes up. At most `idle_yield_max` are set aside at once. Commands whose
+  work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield, and
+  neither does one started with `swarm build --hold` (a measurement that must
+  have the machine to itself). A command that was set aside is told so in its
+  own output. A build whose swarm is frozen (`swarm freeze`) keeps its seat
+  and is set aside at once, so the other swarms do not wait on it.
+- **Pairing rules (opt-in):** with `pair = "distinct-repo"` two builds, of any
+  swarm, run side by side only if they are in different repositories (a repo
+  is the same repo from every worktree and mirror of it, and from every swarm
+  whose project holds that checkout), and an image build (`alone`, by default
+  the container clients), a `--hold` or a build in no git checkout runs with
+  no build beside it: it waits for the gate to empty and nothing starts while
+  it runs. A script that turns out to call `docker build` is alone from that
+  moment. A waiter the rules hold back is passed by one they allow, at most
+  `overtake` times; `swarm build --status` says why each waiter waits.
 - **Light commands skip it:** `git`, `ls`, `cargo update`/`metadata`/`fmt`/`tree`,
   `docker buildx bake --print`, python scripts that start no processes. Unknown
   commands count as heavy; `[build].heavy`/`light` add patterns.
 - **Fails fast:** a heavy command whose program, `cd` target, `-f` file or
   manifest does not exist is refused before it queues.
-- **Says what it is doing:** while queued, its place, who holds each slot and an
-  ETA from past runs (stderr); then the wait and run times.
-  `swarm build --status` shows the gate, and every call is logged to
-  `buildsem/events.jsonl`.
+- **Says what it is doing:** while queued, its place, who is ahead, who holds
+  each slot and an ETA from past runs (stderr); then the wait and run times.
+  `swarm build --status` shows the gate with every swarm's builds, and so does
+  the `build gate:` line of `swarm status`. A build that is another swarm's
+  has that swarm's name in front: ``slot 0: [glasheim] W3 `cargo nextest run`
+  running 4m``. Every call is logged to `machine/buildsem/events.jsonl` in the
+  state root, each line naming its swarm.
 - **How:** the build inherits its locks (a seat of its own, and its slot,
   shared), so a killed build frees them, and an older `swarm build` still shares
   the same cap. Workers wrap their gates in it (`swarm build cargo nextest run`;
   several steps in one turn with `swarm build -- sh -c 'a && b'`). gc holds
-  every slot while it deletes, so it never runs while a build is alive; it
-  waits for that as a ticket in the same queue, holding no slot, and builds
-  pass it until the last `[gc].hold_s` of its wait.
+  every slot while it deletes, so it never runs while a build of any swarm is
+  alive; it waits for that as a ticket in the same queue, holding no slot, and
+  builds pass it until the last `[gc].hold_s` of its wait.
 
 ### Resource tracking (`swarm resources`)
 
@@ -432,8 +447,12 @@ flowchart TD
   memory (anon and page cache apart), swap, disk throughput and real free space
   (WSL-aware), and attributes CPU, memory and IO to each gated build and each
   worker session. One sample a second while a build runs, one every 15 s idle.
-- **Why:** so raising `[build].max_concurrent`, `[build].jobs` or
-  `[swarm].max_workers` is decided from measured peaks, not guessed.
+  The gate is the machine's, so it measures every swarm's builds and says whose
+  each is: a neighbour's build is not counted as this swarm's, nor left in
+  "everything else on the host".
+- **Why:** so raising the machine's `max_concurrent` (`machine.toml`), or a
+  project's `[build].jobs` or `[swarm].max_workers`, is decided from measured
+  peaks, not guessed.
   `swarm resources` shows now, the last day, the worst builds and the capacity
   arithmetic. A build that holds a slot idle for 10 minutes is reported (never
   killed), with what the gate did about it. Details: [components.md](docs/components.md#resource-tracking-swarm-resources).
@@ -941,8 +960,9 @@ or the first command that changes something, never by one that only reads.
 Several projects can each run a swarm on one machine. Their state dirs sit
 side by side in `~/.local/state/swarm-orchestrator/`, and `swarm ls` lists
 them from any folder: which are running, how far along each is, and how much
-waits on you in each. Beside them, `machine/` is for what all of them share,
-and settings that describe the machine rather than a project go in
+waits on you in each. Beside them, `machine/` is for what all of them share
+(the build gate, below), and settings that describe the machine rather than a
+project, the gate's limits among them, go in
 `~/.config/swarm-orchestrator/machine.toml`
 ([docs/config.md](docs/config.md#the-machine-file-machinetoml)). A command
 acts on one swarm only, and a session of one swarm cannot run a command on
@@ -967,11 +987,7 @@ another ([docs/cli.md](docs/cli.md)).
 | `logs/restart.log`, `logs/supervisor-start.err` | What each restart's detached helper printed, and what a supervisor that would not start said. |
 | `logs/supervisor.log`, `logs/web.log`, `logs/telegram-bot.log` | Logs. The supervisor log rotates at 16 MiB, keeping three old files (`supervisor.log.1`, newest, to `.3`); `swarm report`, `swarm usage`, the run history and the dashboard read the old files too. `web.log` and `telegram-bot.log` are not rotated. |
 | `wt/<name>/` | Worktree mirrors (`<phase>`, `op-<job>`, `ovs-<id>`). |
-| `git/<repo>.lock`, `buildsem/slot<N>`, `buildsem/seat<K>` | Per-repo integration locks; build-gate slots (shared by the builds on them, taken whole by gc) and seats (one per build alive, with its record). |
-| `buildsem/queue/`, `queue.json`, `queue.lock` | The build gate's waiting tickets, sequence and overtake counts. |
-| `buildsem/idle.json` | The waiters' running measurement of each holder: when it went quiet, and whether it is set aside as idle. |
-| `buildsem/pair.json` | Under `[build].pair = "distinct-repo"`: the running builds found to hold a command that runs alone (a script that turned out to build an image). |
-| `buildsem/events.jsonl` | Every `swarm build` call: `queued`, `start`, `end`, `bypass`, `preflight_fail`, `yield`/`unyield` for an idle holder set aside or counted again, and `passed`/`alone` under the pairing rules (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
+| `git/<repo>.lock` | Per-repo integration locks. |
 | `cache/target/<repo>/` | The shared cargo target cache. |
 | `.cargo/config.toml`, `.cargo/rustc-wrap` | With `[build].cache`: the cargo config every build under the state dir reads, and the rustc wrapper it names. The wrapper makes the build paths a Rust test compiles in the cache's own, so a test built in one mirror still starts its binary after that mirror is removed (see [components.md](docs/components.md#worktree-isolation-and-mirrors)). Checked whenever a mirror is made, and removed when the cache is turned off. |
 | `console.lock` | The lock that keeps two opens of the owner console from racing. |
@@ -979,6 +995,19 @@ another ([docs/cli.md](docs/cli.md)).
 | `tmp/<session>/` | Each session's `TMPDIR`. It is on disk because `/tmp` may be RAM, and it is dropped when the session's work lands. |
 | `web.pid`, `gc-auto.json`, `.doctor-disk.json` | The board's pid, the last automatic gc, doctor's disk-growth baseline. |
 | `telegram-bot.pid`, `.offset.json`, `.status.json` | The command listener's pid, the next Telegram update id it will ask for, and what it is doing (polling, backing off a 409, …). |
+
+The build gate is not in a swarm's state dir. It is one for the machine, so its
+files are in the machine directory, `~/.local/state/swarm-orchestrator/machine/`,
+which every swarm on the machine reads and writes:
+
+| path | what it holds |
+|---|---|
+| `buildsem/slot<N>`, `buildsem/seat<K>` | Build-gate slots (shared by the builds on them, taken whole by gc) and seats (one per build alive, with its record, which names its swarm). |
+| `buildsem/queue/`, `queue.json`, `queue.lock` | The build gate's waiting tickets, sequence and overtake counts. |
+| `buildsem/idle.json` | The waiters' running measurement of each holder: when it went quiet, and whether it is set aside as idle. |
+| `buildsem/pair.json` | Under `pair = "distinct-repo"` (`machine.toml`): the running builds found to hold a command that runs alone (a script that turned out to build an image). |
+| `buildsem/gc` | The record of a gc that holds the gate, locked for as long as it does. |
+| `buildsem/events.jsonl` | Every `swarm build` call of every swarm, each line naming its swarm: `queued`, `start`, `end`, `bypass`, `preflight_fail`, `yield`/`unyield` for an idle holder set aside or counted again, and `passed`/`alone` under the pairing rules (shape in [components.md](docs/components.md#build-gate-swarm-build)). Rotates to `.1` at 20 MB. |
 
 ## Tests
 

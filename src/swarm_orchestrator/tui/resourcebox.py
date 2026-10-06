@@ -2,9 +2,11 @@
 
 A few lines from the sampler's snapshot (``<state>/resources-now.json``, see
 :mod:`swarm_orchestrator.resources`): CPU, memory with page cache apart, swap,
-pressure, disk throughput and real free space, then one line per running
-build — an idle holder marked. History and the capacity estimate are
-``swarm resources``; this box only says what is happening now.
+pressure, disk throughput and real free space, then one line per build running
+on the machine's gate. Another swarm's build carries that swarm's name, and
+only this swarm's own is marked as an idle holder: a neighbour's idle build is
+said to be idle and left to its own swarm. History and the capacity estimate
+are ``swarm resources``; this box only says what is happening now.
 
 Text in, text out: :func:`box_lines` does no I/O.
 """
@@ -13,7 +15,7 @@ from __future__ import annotations
 
 from rich.markup import escape
 
-from ..resources.view import STALE_S
+from ..resources.view import STALE_S, who
 from .theme import BAD, MUTED, WARN, paint
 
 
@@ -48,16 +50,21 @@ def box_lines(snap: dict | None, now: float) -> list[str]:
     if not builds:
         lines.append(paint(f"no build running · {snap.get('queued', 0)} queued", MUTED))
     for b in builds:
-        text = (f"slot {b.get('slot')} {escape(str(b.get('phase') or '?'))} {b['age_s'] / 60:.0f}m"
+        text = (f"slot {b.get('slot')} {escape(who(b))} {b['age_s'] / 60:.0f}m"
                 f" · {b['cores']:.1f} cores · {_g(b['anon_mb'])} anon")
+        theirs = b.get("mine") is False
         if b.get("yielded"):  # the gate set it aside: nothing queues behind it
-            lines.append(paint(text + " · idle, slot released", WARN))
+            lines.append(paint(text + " · idle, slot released", MUTED if theirs else WARN))
         elif b.get("idle"):
-            lines.append(paint(text + " · IDLE holder", BAD))
+            lines.append(paint(text + " · idle (its swarm's to look at)", MUTED) if theirs
+                         else paint(text + " · IDLE holder", BAD))
         else:
             lines.append(text)
     if builds and snap.get("queued"):
-        lines.append(paint(f"{snap['queued']} build(s) queued behind", WARN))
+        ours = snap.get("queued_mine")
+        lines.append(paint(f"{snap['queued']} build(s) queued behind"
+                           + (f" ({ours} this swarm's)" if ours is not None else ""),
+                           MUTED if ours == 0 else WARN))
     return lines
 
 

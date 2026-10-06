@@ -3,7 +3,9 @@
 ``[build].max_concurrent = 2`` lets any two heavy builds run at once. Where the
 disk is what a build strains, two limits make that safe, and
 ``[build].pair = "distinct-repo"`` has the gate keep them (``"any"``, the
-default, keeps neither):
+default, keeps neither). Both keys are the machine's (``machine.toml``), and so
+are the rules: they hold between the builds of every swarm on the machine, as
+the gate does:
 
 1. **Never two builds in one repository.** Two builds of one repo share its
    build output (the per-repo cache ``[build].cache`` links into every
@@ -14,19 +16,24 @@ default, keeps neither):
    does its work in a daemon, straight onto the disk), a ``--hold`` build, and
    a build whose repo cannot be told.
 
-**Which repo.** A build belongs to the repository its working directory is in,
-under the name the swarm already uses for it: its path inside the project
-(``lib``; ``.`` for the project's own repo), which is the lane it is scheduled
-by and the directory its shared build cache is kept under. A phase's mirror
-(``<state>/wt/<phase>/<path>``) has the project's layout, so the path inside
-the mirror is the name; any other checkout is traced through its git common
-directory, so every worktree of a repo is that repo. A repo outside the project
-is named by its lane if ``[lanes].external`` declares it, else by its path. To that the repos the command itself names are added (a
-``cd`` target, a ``--manifest-path``, a script's own place: what the classifier
-checks before queueing): ``cargo test --manifest-path lib/Cargo.toml`` run from
-the project root builds in ``lib``. Two builds collide when they share any
-repo. A working directory in no git checkout has no repo: such a build runs
-alone.
+**Which repo.** A build belongs to the repository its working directory is in.
+The rules know a repository by its place on the machine (:func:`place_of`), the
+one thing two swarms agree on: a phase's mirror (``<state>/wt/<phase>/<path>``)
+has the project's layout, so it stands for the project's own checkout at that
+path; any other checkout is traced through its git common directory, so every
+worktree of a repo is that repo. Two swarms whose projects hold the same
+checkout (an umbrella project and one of its components) therefore never build
+in it side by side, and two projects that each call their own repo ``.`` are
+not taken for one. What a waiter is *told* uses the name its own swarm has for
+the repo (:func:`name`): its path inside the project (``lib``; ``.`` for the
+project's own repo), which is the lane it is scheduled by and the directory its
+shared build cache is kept under; the lane, for a repo outside the project that
+``[lanes].external`` declares; else the path. To the working directory's repo
+the repos the command itself names are added (a ``cd`` target, a
+``--manifest-path``, a script's own place: what the classifier checks before
+queueing): ``cargo test --manifest-path lib/Cargo.toml`` run from the project
+root builds in ``lib``. Two builds collide when they share any repo. A working
+directory in no git checkout has no repo: such a build runs alone.
 
 **Which builds are alone.** Read from the command before it queues
 (:mod:`buildclass`): a heavy step that matches ``[build].alone``, through every
@@ -36,15 +43,19 @@ binary, ``make``, a script that calls a script) is caught while it runs: the
 build's own ``swarm build`` looks at its process tree every
 :data:`SCAN_S`, and whoever is about to start beside a running build looks at
 that build's tree first. A process that matches marks the build alone from then
-on (``buildsem/pair.json``, an ``alone`` event): nothing new starts beside it.
+on (``pair.json`` beside the gate's other files, an ``alone`` event): nothing
+new starts beside it.
 A build that was already running beside it is not stopped; that one overlap is
 what a late discovery costs.
 
-**Who counts.** Every build alive on a seat, including one set aside as idle:
-it has stopped counting against ``max_concurrent``, but it may wake up, and
-then it works in its repo again. Idle yield frees a slot, not a repo. Only a
-build whose command has ended, with a process it left behind still holding the
-seat, no longer counts for these rules.
+**Who counts.** Every build alive on a seat, whichever swarm's, including one
+set aside as idle: it has stopped counting against ``max_concurrent``, but it
+may wake up, and then it works in its repo again. Idle yield frees a slot, not
+a repo. That goes for a build whose swarm stands frozen too: it is set aside at
+once (:mod:`buildidle`), and it keeps its repo, and the gate if it runs alone,
+until its swarm is thawed or stopped. Only a build whose command has ended,
+with a process it left behind still holding the seat, no longer counts for
+these rules.
 """
 
 from __future__ import annotations
@@ -55,10 +66,14 @@ import subprocess
 from pathlib import Path
 
 from . import buildclass, buildidle
-from .config import BUILD_PAIR_DISTINCT, Config
+from .config import Config
 from .resources import ptree
 
 STATE = "pair.json"
+#: ``[build].pair``: any two builds may run side by side, or only two that share
+#: no repository (and none beside a build that must run alone).
+ANY = "any"
+DISTINCT = "distinct-repo"
 #: A running build's own ``swarm build`` looks at its process tree this often.
 SCAN_S = 2.0
 #: A command names at most this many places besides its working directory.
@@ -70,7 +85,7 @@ OLD_HOLDER = "an older swarm build started it"
 
 
 def enabled(cfg: Config) -> bool:
-    return cfg.build_pair == BUILD_PAIR_DISTINCT and cfg.build_max_concurrent >= 1
+    return cfg.build_pair == DISTINCT and cfg.build_max_concurrent >= 1
 
 
 # -- which repo -------------------------------------------------------------
@@ -97,9 +112,9 @@ def _checkout(path: Path) -> tuple[Path, Path | None] | None:
     return common, (Path(got[1]).resolve() if len(got) > 1 else None)
 
 
-def repo_of(cfg: Config, path: str | Path) -> str | None:
-    """The repository ``path`` is in, by the swarm's name for it (see the module
-    docstring); ``None`` when it is in no git checkout."""
+def place_of(cfg: Config, path: str | Path) -> Path | None:
+    """The repository ``path`` is in, as its place on this machine (see the
+    module docstring); ``None`` when it is in no git checkout."""
     p = Path(path)
     while not p.is_dir():
         if p.parent == p:
@@ -115,26 +130,41 @@ def repo_of(cfg: Config, path: str | Path) -> str | None:
         except ValueError:
             parts = ()
         if parts:  # <state>/wt/<phase>/<the repo's path in the project>
-            return "/".join(parts[1:]) or "."
-    root = common.parent if common.name == ".git" else common
+            return cfg.project_dir.resolve().joinpath(*parts[1:])
+    return common.parent if common.name == ".git" else common
+
+
+def name(cfg: Config, place: str | Path) -> str:
+    """This swarm's name for the repository at ``place``: its path inside the
+    project (``.`` for the project's own), its lane if ``[lanes].external``
+    declares it, else the path."""
+    root = Path(place)
     try:
         return root.relative_to(cfg.project_dir.resolve()).as_posix()
     except ValueError:
         pass
-    for name, where in cfg.lanes_external.items():  # a repo the project names as a lane
+    for lane, where in cfg.lanes_external.items():  # a repo the project names as a lane
         if Path(where).expanduser().resolve() == root:
-            return name
+            return lane
     return str(root)
+
+
+def repo_of(cfg: Config, path: str | Path) -> str | None:
+    """The repository ``path`` is in, by this swarm's :func:`name` for it;
+    ``None`` when it is in no git checkout."""
+    place = place_of(cfg, path)
+    return None if place is None else name(cfg, place)
 
 
 def repos(cfg: Config, cwd: str | Path, verdict: buildclass.Verdict | None = None
           ) -> list[str] | None:
-    """Every repo a build works in: its working directory's first, then those
-    the command names. ``None`` when the working directory has none."""
-    first = repo_of(cfg, cwd)
-    if first is None:
+    """Every repo a build works in, each as its place on the machine
+    (:func:`place_of`): its working directory's first, then those the command
+    names. ``None`` when the working directory has none."""
+    here = place_of(cfg, cwd)
+    if here is None:
         return None
-    out = [first]
+    out = [str(here)]
     places: list[Path] = []
     for req in verdict.reqs if verdict is not None else ():
         if req.kind == "script" or (req.kind == "exe" and "/" not in req.paths[0]):
@@ -144,9 +174,9 @@ def repos(cfg: Config, cwd: str | Path, verdict: buildclass.Verdict | None = Non
         if place not in places:
             places.append(place)
     for place in places[:_MAX_PLACES]:
-        name = repo_of(cfg, place)
-        if name is not None and name not in out:
-            out.append(name)
+        found = place_of(cfg, place)
+        if found is not None and str(found) not in out:
+            out.append(str(found))
     return out
 
 
@@ -312,8 +342,9 @@ def blocked(meta: dict, holders: list[dict], found: dict[str, str]) -> str | Non
         return f"waits to run alone ({meta['alone']})"
     for h in holders:
         shared = [r for r in meta.get("repos") or () if r in h["repos"]]
-        if shared:
-            return f"same repo as {_slot_text(h)} ({repo_text(shared[0])})"
+        if shared:  # told by the waiter's own name for the repo, where it gave one
+            known = (meta.get("names") or {}).get(shared[0], shared[0])
+            return f"same repo as {_slot_text(h)} ({repo_text(known)})"
     return None
 
 

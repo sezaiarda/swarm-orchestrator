@@ -3,6 +3,11 @@
 Everything here reads files the sampler wrote; nothing samples. The text view
 has four parts — now, the last day as sparklines, the worst builds, capacity —
 and ``--json`` returns the same data for scripts.
+
+The builds are the machine's: every swarm queues at one gate, and the sampler
+measures all of their builds. A build of another swarm is shown with that
+swarm's name in front of its phase (:func:`who`); the idle-holder lines of
+``swarm status`` and ``swarm doctor`` are about this swarm's builds only.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from .. import buildlog
 from ..config import Config
 from . import capacity, host, store
 
@@ -18,6 +24,8 @@ from . import capacity, host, store
 STALE_S = 120.0
 SPARK = "▁▂▃▄▅▆▇█"
 BUCKETS = 48
+#: The builds table's phase column: wide enough for ``[swarm name] phase``.
+PHASE_W = 24
 
 
 def fresh_now(state_dir: Path, now: float | None = None) -> tuple[dict | None, float | None]:
@@ -37,6 +45,13 @@ def _f(v, fmt: str = "{:.1f}", none: str = "?") -> str:
     return none if v is None else fmt.format(v)
 
 
+def who(row: dict) -> str:
+    """A build's phase, with its swarm's name in front when the build is another
+    swarm's: ``W3``, ``[glasheim] W3`` (the form of ``swarm build --status``).
+    ``row`` is a build of the snapshot or of ``builds.jsonl``."""
+    return buildlog.who(row, "?")
+
+
 def _ago(s: float | None) -> str:
     if s is None:
         return "never"
@@ -49,8 +64,9 @@ def _ago(s: float | None) -> str:
 
 # -- status and doctor ----------------------------------------------------------
 def status_lines(cfg: Config, now: float | None = None) -> list[str]:
-    """``swarm status``: one line, plus one per idle holder. The builds running
-    and queued are the build gate's line (``build gate: …``), not repeated here."""
+    """``swarm status``: one line, plus one per idle holder of this swarm (the
+    snapshot lists no other swarm's). The builds running and queued are the
+    build gate's line (``build gate: …``), not repeated here."""
     snap, age = fresh_now(cfg.state_dir, now)
     if snap is None:
         return ["resources: no samples yet" + ("" if cfg.resources_enabled else " (off)")]
@@ -81,7 +97,7 @@ def _released(b: dict) -> str:
 
 def doctor_checks(cfg: Config, supervisor_alive: bool, now: float | None = None) -> list[tuple[str, str, str, str | None]]:
     """``(name, status, detail, fix)`` rows for ``swarm doctor``: the sampler's
-    health, its files' sizes, and idle build holders."""
+    health, its files' sizes, and this swarm's idle build holders."""
     rows: list[tuple[str, str, str, str | None]] = []
     snap, age = fresh_now(cfg.state_dir, now)
     sizes = store.sizes(cfg.state_dir)
@@ -195,7 +211,9 @@ def collect(cfg: Config, hours: float = 24.0, days: float = 30.0, now: float | N
     return {
         "now": snap, "age_s": age, "stale": snap is None or (age or 0) > STALE_S,
         "series": day_series(day, now, hours), "hours": hours,
-        "builds": {"count": len(build_rows), "worst": worst,
+        "builds": {"count": len(build_rows),
+                   "others": sum(r.get("mine") is False for r in build_rows),
+                   "worst": worst,
                    "yielded": {"count": len(aside),
                                "total_s": round(sum(r["yielded_s"] for r in aside), 1),
                                "longest": aside[:5]}},
@@ -269,18 +287,24 @@ def _now_lines(snap: dict) -> list[str]:
                    f" · {one('cache', 'build caches')} · measured"
                    f" {_ago((snap.get('ts') or 0) - dirs.get('ts', 0))} in {dirs.get('du_s')}s")
     builds = snap.get("builds") or []
-    out.append(f"  builds {len(builds)} running, {snap.get('queued', 0)} queued"
-               f" (source: {snap.get('source')})")
+    others = sum(b.get("mine") is False for b in builds)
+    queued = snap.get("queued", 0)
+    ours = snap.get("queued_mine")
+    out.append(f"  builds {len(builds)} running on the machine's gate"
+               + (f" ({others} of other swarms)" if others else "")
+               + f", {queued} queued"
+               + (f" ({ours} this swarm's)" if queued and ours is not None else "")
+               + f" (source: {snap.get('source')})")
     for b in builds:
         flag = "  IDLE" if b.get("idle") else ""
         if b.get("yielded"):
             flag = f"  YIELDED {_dur(b.get('yielded_s'))} (slot released)"
-        out.append(f"    slot {b.get('slot')} pid {b['pid']} {b.get('phase') or '?'}"
+        out.append(f"    slot {b.get('slot')} pid {b['pid']} {who(b)}"
                    f" {b['age_s'] / 60:.1f} min · {b['cores']:.2f} cores · anon"
                    f" {_gb(b['anon_mb'])} (peak {_gb(b['peak_anon_mb'])}) · {b['procs']} procs"
                    f"{flag}  {b.get('argv', '')[:50]}")
     workers = snap.get("workers") or []
-    out.append(f"  sessions {len(workers)}")
+    out.append(f"  sessions {len(workers)} (this swarm's)")
     for w in workers:
         out.append(f"    {w['label']:<28} {w['cores']:.2f} cores · anon {_gb(w['anon_mb'])}"
                    f" · rss {_gb(w['rss_mb'])} · {w['procs']} procs")
@@ -299,12 +323,14 @@ def _now_lines(snap: dict) -> list[str]:
 
 
 def _builds_lines(b: dict) -> list[str]:
-    out = [f"BUILDS ({b['count']} finished in the window; worst peaks first)"]
+    out = [f"BUILDS ({b['count']} finished in the window on the machine's gate"
+           + (f", {b['others']} of other swarms" if b.get("others") else "")
+           + "; worst peaks first)"]
     if not b["worst"]:
         out.append("  none recorded yet")
         return out
-    head = (f"  {'ended':<11} {'phase':<12} {'run':>6} {'yielded':>7} {'cpu s':>7} {'avg':>5}"
-            f" {'peak':>5} {'anon pk':>8} {'min avail':>9} {'psi m/io':>9} {'exit':>4}  command")
+    head = (f"  {'ended':<11} {'phase':<{PHASE_W}} {'run':>6} {'yielded':>7} {'cpu s':>7}"
+            f" {'avg':>5} {'peak':>5} {'anon pk':>8} {'min avail':>9} {'psi m/io':>9} {'exit':>4}  command")
     out.append(head)
     out.extend(_build_row(r) for r in b["worst"])
     aside = b.get("yielded") or {}
@@ -323,7 +349,7 @@ def _build_row(r: dict) -> str:
     code = "?" if r.get("exit") is None else str(r["exit"])  # no ``end``: killed, unrecorded
     aside = _dur(r["yielded_s"]) if r.get("yielded_s") else "-"
     return (
-        f"  {ended:<11} {str(r.get('phase') or '?')[:12]:<12} {_dur(r.get('run_s')):>6}"
+        f"  {ended:<11} {who(r)[:PHASE_W]:<{PHASE_W}} {_dur(r.get('run_s')):>6}"
         f" {aside:>7}"
         f" {_num(r.get('cpu_s')):>7} {_num(r.get('avg_cores')):>5} {_num(r.get('peak_cores')):>5}"
         f" {_gb(r.get('peak_anon_mb')):>8} {_gb(r.get('min_avail_mb')):>9}"
@@ -343,15 +369,19 @@ def _capacity_lines(c: dict) -> list[str]:
     out = [
         "CAPACITY (p95 of history; memory is anon, page cache left out)",
         f"  host: {h.get('ncpu')} cores, {_gb(h.get('mem_total_mb'))} RAM,"
-        f" {_gb(h.get('swap_total_mb'))} swap · config: max_concurrent={cfg['max_concurrent']}"
-        f" jobs={cfg['jobs']} max_workers={cfg['max_workers']}",
-        f"  a heavy build ({b['n']} measured): peak anon p50 {_gb(b['peak_anon_mb']['p50'])}"
+        f" {_gb(h.get('swap_total_mb'))} swap · the machine's gate (machine.toml):"
+        f" max_concurrent={cfg['max_concurrent']} · this project: jobs={cfg['jobs']}"
+        f" max_workers={cfg['max_workers']}",
+        f"  a heavy build, any swarm's ({b['n']} measured on the machine's gate,"
+        f" {b['others']} of them other swarms'): peak anon p50 {_gb(b['peak_anon_mb']['p50'])}"
         f" p95 {_gb(b['peak_anon_mb']['p95'])} max {_gb(b['peak_anon_mb']['max'])};"
         f" avg cores p95 {_num(b['avg_cores']['p95'])}, peak cores p95 {_num(b['peak_cores']['p95'])};"
         f" run p50 {_dur(b['run_s']['p50'])}; lowest MemAvailable seen {_gb(b['min_avail_mb'])}",
-        f"  a worker ({s['worker_hours']} h of samples, its builds excluded): anon p95"
+        f"  a worker of this swarm ({s['worker_hours']} h of samples, its builds excluded):"
+        f" anon p95"
         f" {_gb(s['worker_anon_mb']['p95'])}, cores p95 {_num(s['worker_cores']['p95'])}",
-        f"  everything else on the host: anon p95 {_gb(s['other_anon_mb']['p95'])}",
+        f"  everything else on the host (the other swarms' sessions included, no swarm's"
+        f" builds): anon p95 {_gb(s['other_anon_mb']['p95'])}",
         f"  a scenario fits when anon needed <= {c['mem_budget']:.0%} of RAM and cores needed"
         " <= cores; build memory for more jobs scales linearly (an upper bound)",
     ]

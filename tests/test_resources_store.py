@@ -41,6 +41,17 @@ def test_a_minute_folds_into_min_avg_max():
     assert store.psi_val(first, "mem", "avg") == 2.5
 
 
+def test_a_minute_keeps_which_builds_were_another_swarms():
+    rows = [sample(60.0, nb=2, b={"x": [2.0, 900.0], "far": [1.0, 400.0]}, bo=["far"]),
+            sample(61.0, nb=2, b={"x": [2.0, 900.0], "far2": [1.0, 500.0]}, bo=["far2"]),
+            sample(62.0, nb=1, b={"x": [2.0, 900.0]}),
+            sample(125.0, nb=1, b={"x": [2.0, 900.0]})]
+    first, second = store.aggregate(rows)
+    assert first["bo"] == ["far", "far2"] and set(first["b"]) == {"x", "far", "far2"}
+    assert first["nb"] == [1, 1.67, 2]
+    assert "bo" not in second  # a minute of this swarm's builds only
+
+
 def test_compaction_ages_a_day_into_minutes_and_keeps_the_rest(tmp_path):
     full = store.meters_dir(tmp_path) / store.FULL
     old = [sample(NOW - 2 * DAY + i) for i in range(120)]  # two minutes, two days ago
@@ -169,6 +180,42 @@ def test_pressure_during_builds_is_called_out():
     assert any("IO pressure" in n for n in notes)
 
 
+def test_everything_else_holds_no_swarms_build():
+    """The gate is the machine's, so a row's builds are every swarm's. All of
+    them come out of "everything else": a neighbour's build is a build, not
+    host load this swarm's builds get blamed for."""
+    rows = worker_rows(2)
+    for r in rows[:60]:  # an hour with a build of ours and one of a neighbour's running
+        r["b"] = {"own": [4.0, 1000.0], "far": [4.0, 1500.0]}
+        r["bo"] = ["far"]
+    # host anon 5000 - (2 workers x 400 + infra 100) = 4100, less the builds while they ran
+    assert capacity.session_stats(rows[:60])["other_anon_mb"]["p95"] == 1600.0
+    assert capacity.session_stats(rows[60:])["other_anon_mb"]["p95"] == 4100.0
+
+
+def test_the_build_figure_is_the_machines_and_the_text_says_what_is_whose():
+    rows = [build_row(a, 5.0, mine=True, swarm="here", swarm_name="here")
+            for a in (3000, 3200, 3400, 3600)]
+    rows += [build_row(a, 5.0, mine=False, swarm="glas-1", swarm_name="glasheim")
+             for a in (3800, 9000)]
+    out = capacity.analyse(rows, worker_rows(2), HOST, 1, 6, 4)
+    assert (out["builds"]["n"], out["builds"]["others"]) == (6, 2)
+    assert out["builds"]["peak_anon_mb"]["p95"] == 9000  # a neighbour's build is a build
+    assert any("2 of the 6 measured build(s) were other swarms'" in n for n in out["notes"])
+    text = "\n".join(view._capacity_lines(out))
+    for needle in ("the machine's gate (machine.toml): max_concurrent=1",
+                   "this project: jobs=6 max_workers=4",
+                   "a heavy build, any swarm's (6 measured on the machine's gate,"
+                   " 2 of them other swarms')",
+                   "a worker of this swarm (",
+                   "everything else on the host (the other swarms' sessions included,"
+                   " no swarm's builds)"):
+        assert needle in text, needle
+    alone = capacity.analyse(rows[:4] + rows[:2], worker_rows(2), HOST, 1, 6, 4)
+    assert alone["builds"]["others"] == 0
+    assert not any("other swarms'" in n for n in alone["notes"])
+
+
 def test_unmeasured_and_light_builds_do_not_count():
     rows = [build_row(3000, 4.0), build_row(9000, 4.0, samples=0), build_row(9000, 4.0, cls="light")]
     assert capacity.build_stats(rows)["n"] == 1
@@ -278,3 +325,32 @@ def test_the_dashboard_box_shows_now_and_marks_an_idle_holder():
     assert "2 build(s) queued behind" in text
     assert "not running" in resourcebox.box_lines(snap, NOW + 3600)[0]
     assert "no samples yet" in resourcebox.box_lines(None, NOW)[0]
+
+
+def test_the_dashboard_box_names_a_neighbours_build_and_does_not_blame_this_swarm():
+    pytest.importorskip("textual")
+    from swarm_orchestrator.tui import resourcebox
+    from swarm_orchestrator.tui.theme import BAD, MUTED, paint
+
+    def build(**kw) -> dict:
+        return {"slot": 0, "phase": "P1", "age_s": 700.0, "cores": 0.0, "anon_mb": 300.0,
+                "idle": True, "mine": True, "swarm": "here-1", "swarm_name": "here", **kw}
+
+    far = {"mine": False, "swarm": "glas-1", "swarm_name": "glasheim", "phase": "W7"}
+    snap = {"ts": NOW, "static": HOST, "queued": 3, "queued_mine": 1, "host": sample(NOW),
+            "builds": [build(), build(slot=1, **far),
+                       build(slot=2, idle=False, **dict(far, phase="W8"))]}
+    lines = resourcebox.box_lines(snap, NOW + 1)
+    [own] = [x for x in lines if "slot 0" in x]
+    [idle] = [x for x in lines if "slot 1" in x]
+    [busy] = [x for x in lines if "slot 2" in x]
+    assert own == paint(own_text := "slot 0 P1 12m · 0.0 cores · 0.3G anon · IDLE holder", BAD)
+    assert "[" not in own_text  # this swarm's own build carries no name
+    assert "\\[glasheim] W7" in idle and "IDLE holder" not in idle
+    assert idle == paint("slot 1 \\[glasheim] W7 12m · 0.0 cores · 0.3G anon"
+                         " · idle (its swarm's to look at)", MUTED)
+    assert "\\[glasheim] W8" in busy
+    assert "3 build(s) queued behind (1 this swarm's)" in lines[-1]
+    snap["queued_mine"] = 0  # nothing of this swarm's waits: not its warning
+    assert resourcebox.box_lines(snap, NOW + 1)[-1] == paint(
+        "3 build(s) queued behind (0 this swarm's)", MUTED)

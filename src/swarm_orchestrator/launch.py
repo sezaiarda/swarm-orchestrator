@@ -422,11 +422,11 @@ def session_env(
         env["SWARM_WORKTREE"] = str(worktree)
         env["SWARM_MAIN"] = cfg.git_main_branch
         # Worktree mode only (the parallel-build OOM problem is worktree-specific):
-        # freeze the build-gate config for the session, and cap raw `cargo`
-        # fan-out as a backstop for any build not routed through `swarm build`.
-        # In-place (`isolation="none"`) workers keep their full build parallelism
-        # untouched.
-        env["SWARM_BUILD_MAX"] = str(cfg.build_max_concurrent)
+        # freeze the jobs cap for the session, and cap raw `cargo` fan-out as a
+        # backstop for any build not routed through `swarm build`. In-place
+        # (`isolation="none"`) workers keep their full build parallelism
+        # untouched. How many builds run at once is not a session's to carry:
+        # it is the machine's, and every `swarm build` reads it from there.
         env["SWARM_BUILD_JOBS"] = str(cfg.build_jobs)
         if cfg.build_jobs:
             env["CARGO_BUILD_JOBS"] = str(cfg.build_jobs)

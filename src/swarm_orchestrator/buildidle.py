@@ -8,9 +8,10 @@ holder; it ends when it ends. It is *set aside*: it no longer counts against
 
 **Who measures.** The waiters. Whoever is queued reads ``/proc`` for each
 holder's processes every :data:`SAMPLE_S` and keeps the running figures in
-``<state>/buildsem/idle.json``, under ``queue.lock`` like every other decision
-of the gate. So it needs no daemon and no particular supervisor: when nobody
-waits nobody needs the answer. A waiter that dies leaves its last sample for
+``<machine dir>/buildsem/idle.json``, under ``queue.lock`` like every other
+decision of the gate. So it needs no daemon and no particular supervisor: when
+nobody waits nobody needs the answer. The holders are the machine's, so a
+waiter of one swarm measures the builds of every other. A waiter that dies leaves its last sample for
 the next one, and the counters it compares are the kernel's cumulative ones,
 so a pause in sampling loses nothing. One more process measures, for the
 record's sake only: the ``swarm build`` of a holder that *is* set aside keeps
@@ -44,6 +45,15 @@ once; disk IO is ``read_bytes+write_bytes`` of ``/proc/<pid>/io``.
   it can be set aside again is a full window later. Between the two thresholds
   nothing changes, so a holder hovering at the edge does not flip.
 
+**A frozen build is an idle build at once.** A holder whose swarm stands
+frozen (``swarm freeze``) does nothing until that swarm is thawed, and nobody
+has to watch it for a window to know: the first quiet sample sets it aside, so
+a frozen swarm never keeps the machine's other builds waiting on a slot. It is
+set aside like any idle holder and no further: it keeps its seat (the lock is
+its own, and it will resume), it counts toward ``idle_yield_max``, and it
+counts again from the first sample after the thaw wakes it. A build that never
+yields (below, ``--hold``) keeps its slot frozen too.
+
 **Work that happens elsewhere is never idle.** ``docker build`` does its work
 in the docker daemon; its client waits at 0% CPU. A command the classifier
 reads as such (:func:`buildclass.daemon_side`) never yields, and neither does
@@ -73,7 +83,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import buildclass
+from . import buildclass, buildlog
 from . import state as state_mod
 from .config import Config
 from .resources import ptree
@@ -88,6 +98,8 @@ FRESH_S = 1.0
 IDLE_CORES = 0.05
 #: A set-aside holder using this much counts again.
 WAKE_CORES = 0.5
+#: ``why`` of the ``yield`` of a holder set aside because its swarm is frozen.
+FROZEN_WHY = "its swarm is frozen"
 #: Bytes read from or written to storage per second: quiet below, awake above.
 IDLE_IO_BPS = 256 * 1024
 WAKE_IO_BPS = 4 * 1024 * 1024
@@ -254,10 +266,13 @@ def _save(cfg: Config, st: dict) -> None:
 
 
 def shift(cfg: Config, delta: float, now: float) -> None:
-    """Move the samples ``delta`` seconds along for a thaw, under
-    ``queue.lock``: a holder that stood frozen was not quiet for that long, and
-    the stretch is not one nobody watched (:func:`freezer.rebase`). A sample a
-    woken waiter has taken since is newer than the freeze and stays where it is."""
+    """Move the samples of this swarm's holders ``delta`` seconds along for its
+    thaw, under ``queue.lock``: a holder that stood frozen was not quiet for
+    that long, and the stretch is not one nobody watched
+    (:func:`freezer.rebase`). A sample taken since (by a waiter the thaw had
+    already woken, or by another swarm's, which was awake all along) is newer
+    than the freeze and stays where it is. The other swarms' holders were never
+    frozen: theirs are not touched."""
     from . import buildsem
 
     if not _path(cfg).is_file():
@@ -266,8 +281,10 @@ def shift(cfg: Config, delta: float, now: float) -> None:
         if not got:
             return  # a stopped process holds it: the stretch reads as one nobody watched
         st = load(cfg)
-        st["ts"] = state_mod.moved(st["ts"], delta, now)
-        for entry in st["h"].values():
+        own = {h.get("id") for h in buildsem.live_holders(cfg) if buildlog.mine(cfg, h)}
+        for bid, entry in st["h"].items():
+            if bid not in own:
+                continue
             for key in ("t", "quiet", "yielded"):
                 if entry.get(key):
                     entry[key] = state_mod.moved(entry[key], delta, now)
@@ -362,10 +379,14 @@ def update(cfg: Config, holders: list[dict], now: float, force: bool = False,
         entry = old.get(bid)
         was = bool(entry and entry.get("yielded"))
         sample = measure(rec, rec.get("seat_path"), table, kids, root)
-        entry, change = advance(entry, rec, sample, now, float(cfg.build_idle_yield_s),
+        stands = buildlog.frozen(cfg, rec)  # no window to wait out: it cannot be working
+        entry, change = advance(entry, rec, sample, now,
+                                0.0 if stands else float(cfg.build_idle_yield_s),
                                 every, set_aside < cfg.build_idle_yield_max)
         set_aside += bool(entry.get("yielded")) - was
         if change is not None:
+            if stands and change.kind == "yield":
+                change.why = FROZEN_WHY
             changes.append(change)
         out[bid] = entry
     st = {"ts": round(now, 3), "h": out}

@@ -53,10 +53,13 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   hook, or the retired `needs-owner` status, is present, upgrade it to this form.
 - **Build gate**: when `SWARM_PHASE` is set, every heavy compile/test command
   (`cargo …`, `bun run build|test`, and the like) must run as `swarm build <cmd>`
-  (e.g. `swarm build cargo nextest run`). `swarm build` is a swarm-wide semaphore
-  that caps how many heavy builds run at once so parallel worktrees can't OOM the
-  host; it auto-releases even if a build is killed. If the gates already route
-  through it, skip. Give these builds a generous bash timeout — they may queue.
+  (e.g. `swarm build cargo nextest run`). `swarm build` is the machine's build
+  gate: one semaphore for every swarm on the machine, which caps how many heavy
+  builds run at once so parallel worktrees can't OOM the host; it auto-releases
+  even if a build is killed. Its limits are the machine's (`[build]` in
+  `machine.toml`), never keys to add to the project's `.swarm.toml`. If the gates
+  already route through it, skip. Give these builds a generous bash timeout —
+  they may queue, behind other swarms' builds too.
 - **Decide the obvious, ask the big (never guess a genuine question)**: when
   `SWARM_PHASE` is set, the worker decides anything the ledger row, ADRs/specs,
   lessons, CLAUDE.md or standard engineering practice already settles, and records

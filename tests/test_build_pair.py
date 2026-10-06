@@ -27,9 +27,9 @@ import pytest
 from test_build_idle import CARGO
 from test_build_queue import KEYS, Gate, _descendants, _finish, _max_overlap
 
-from swarm_orchestrator import buildclass, buildpair, buildsem, buildstatus
+from swarm_orchestrator import buildclass, buildpair, buildsem, buildstatus, machine
 
-ALONE = list(buildclass.ALONE_DEFAULT)
+ALONE = machine.Settings().build_alone
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -52,8 +52,8 @@ class PairGate(Gate):
     inside it, and a fake ``docker`` beside the fake ``cargo``."""
 
     def __init__(self, tmp: Path, max_concurrent: int = 2, overtake: int = 2,
-                 pair: str = "distinct-repo", yield_s: int = 0):
-        super().__init__(tmp, max_concurrent=max_concurrent, overtake=overtake)
+                 pair: str = "distinct-repo", yield_s: int = 0, **side):
+        super().__init__(tmp, max_concurrent=max_concurrent, overtake=overtake, **side)
         (self.proj / ".gitignore").write_text("/a\n/b\n/c\n")
         _repo(self.proj)
         self.a, self.b, self.c = (_repo(self.proj / n) for n in "abc")
@@ -63,8 +63,8 @@ class PairGate(Gate):
         if yield_s:  # a cargo that follows $PLAN (sleep:3 burn:2), for idle yield
             (self.bin / "cargo").write_text(CARGO.format(python=sys.executable,
                                                          log=str(self.log)))
-        self.env.update(SWARM_PROJECT=str(self.proj), SWARM_BUILD_PAIR=pair,
-                        SWARM_BUILD_IDLE_YIELD_S=str(yield_s))
+        self.env.update(SWARM_PROJECT=str(self.proj))
+        self.machine(pair=pair, idle_yield_s=yield_s)
 
     def at(self, where: Path, tag: str, *cmd: str, dur: float = 0.2, extra=(),
            env: dict | None = None) -> subprocess.Popen:
@@ -134,10 +134,16 @@ def test_a_repo_is_one_repo_from_every_worktree_mirror_and_clone(gate, tmp_path)
     # the repos a command names count too: the project root building inside `a`
     verdict = buildclass.classify(["cargo", "test", "--manifest-path", "a/Cargo.toml"],
                                   str(g.proj))
-    assert buildpair.repos(cfg, g.proj, verdict) == [".", "a"]
+    assert buildpair.repos(cfg, g.proj, verdict) == [str(g.proj), str(g.a)]
     script = buildclass.classify(["sh", "-c", "cd b && cargo build"], str(g.proj))
-    assert buildpair.repos(cfg, g.proj, script) == [".", "b"]
+    assert buildpair.repos(cfg, g.proj, script) == [str(g.proj), str(g.b)]
     assert buildpair.repos(cfg, plain, verdict) is None
+    # The rules know a repo by its place on the machine, which a mirror shares
+    # with the checkout it stands for; the swarm's name is only what is shown.
+    for path in (g.a, wt / "P1" / "a", tmp_path / "elsewhere", wt / "P2" / "a"):
+        assert buildpair.place_of(cfg, path) == g.a, path
+    assert buildpair.place_of(cfg, wt / "P1") == g.proj
+    assert buildpair.name(cfg, g.a) == "a" and buildpair.name(cfg, g.proj) == "."
 
 
 def test_two_builds_in_different_repos_run_together(gate):
@@ -323,22 +329,28 @@ def test_a_script_that_turns_out_to_build_an_image_is_alone_from_then_on(gate):
     assert g.ts("start", "b") >= g.ts("end", "img") - 0.05
     assert len([e for e in g.events() if e["event"] == "alone"]) == 1
     assert "this build runs alone from now on (`docker build` seen running in it)" in opaque.stderr.read()
-    marks = json.loads((g.state / "buildsem" / "pair.json").read_text())["alone"]
+    marks = json.loads((g.sem / "pair.json").read_text())["alone"]
     assert marks[start["id"]]["why"] == found["why"]
 
 
 def test_whoever_would_start_beside_a_build_looks_at_its_processes_first(gate):
-    """The holder's own ``swarm build`` is not what the rule rests on: with its
-    look switched off, the waiter's own look finds the docker client."""
+    """The holder's own ``swarm build`` is not what the rule rests on: with it
+    stopped before its first look, the waiter's own look finds the docker
+    client."""
     g = gate()
     script = g.a / "gate.sh"
     script.write_text('"$TOOL" build .\n')
-    opaque = g.at(g.a, "img", "bash", str(script), dur=2.0,
-                  env={"TOOL": "docker", "SWARM_BUILD_ALONE": ""})  # its own gate looks for none
+    opaque = g.at(g.a, "img", "bash", str(script), dur=2.0, env={"TOOL": "docker"})
     g.wait_event("start", "P-img")
-    time.sleep(0.3)
-    other = g.at(g.b, "b", dur=0.2)
-    found = g.wait_event("alone", "P-img")
+    opaque.send_signal(signal.SIGSTOP)  # its build runs on; its own gate looks at nothing
+    try:
+        other = g.at(g.b, "b", dur=0.2)
+        found = g.wait_event("alone", "P-img")
+        deadline = time.time() + 20
+        while "end img" not in g.lines() and time.time() < deadline:
+            time.sleep(0.05)
+    finally:
+        opaque.send_signal(signal.SIGCONT)
     _finish([opaque, other])
     assert g.lines() == ["start img", "end img", "start b", "end b"]
     assert found["why"] == "`docker build` seen running in it"
@@ -553,7 +565,7 @@ def test_a_killed_holder_and_a_killed_waiter_leave_the_rules_working(gate):
     assert g.ts("start", "b") < g.ts("end", "a2")  # ...and so does the pairing
     end = g.wait_event("end", "P-a1")  # written by the gate, with the repo it held
     assert (end["exit"], end["repo"]) == (None, "a")
-    assert list((g.state / "buildsem" / "queue").iterdir()) == []
+    assert list((g.sem / "queue").iterdir()) == []
 
 
 def test_a_build_whose_gate_was_killed_keeps_its_repo_until_its_processes_are_gone(gate):
@@ -636,7 +648,7 @@ def test_pair_any_is_the_gate_as_it_was(gate):
     assert {e["repo"] for e in starts} == {"a", "b", "c"}  # the repo is logged all the same
     assert snap["pair"] == "any" and all(q["blocked"] is None for q in snap["queue"])
     assert "pairing" not in text and "repo" not in text
-    assert not (g.state / "buildsem" / "pair.json").exists()
+    assert not (g.sem / "pair.json").exists()
     assert g.cfg().build_pair == "any" and buildpair.enabled(g.cfg()) is False
 
 
@@ -655,22 +667,26 @@ def test_one_slot_is_first_come_first_served_under_the_rules_too(gate):
     assert "passed" not in [e["event"] for e in g.events()]
 
 
-def test_an_unknown_pair_value_is_read_as_the_strict_one(gate):
-    g = gate(pair="distinct_repo")
-    assert g.cfg().build_pair == "distinct-repo"
-    g.env["SWARM_BUILD_PAIR"] = "distnct"
+def test_a_mistyped_pair_value_stops_the_build_and_names_the_key(gate):
+    """Read as ``any`` it would quietly drop rules the owner believes are in
+    force; the machine file refuses it, and so does every command."""
+    g = gate()
     assert g.cfg().build_pair == "distinct-repo" and buildpair.enabled(g.cfg())
-    g.env["SWARM_BUILD_PAIR"] = "any"
-    assert g.cfg().build_pair == "any"
-    g.env["SWARM_BUILD_ALONE"] = "scripts/release.sh, docker"
+    g.machine(pair="distnct")
+    with pytest.raises(machine.SettingsError, match=r"\[build\].pair must be one of"):
+        g.cfg()
+    p = g.at(g.a, "a")
+    _, err = p.communicate(timeout=20)
+    assert p.returncode == 2 and "[build].pair must be one of any, distinct-repo" in err
+    assert g.lines() == []  # nothing ran
+    g.machine(pair="any", alone=["scripts/release.sh", "docker"])
+    assert g.cfg().build_pair == "any" and not buildpair.enabled(g.cfg())
     assert g.cfg().build_alone == ["scripts/release.sh", "docker"]
-    g.env["SWARM_BUILD_ALONE"] = ""
-    assert g.cfg().build_alone == []
 
 
 def test_with_no_alone_patterns_an_image_build_pairs_like_any_other(gate):
     g = gate()
-    g.env["SWARM_BUILD_ALONE"] = ""
+    g.machine(alone=[])
     procs = [g.at(g.a, "img", "docker", "build", ".", dur=1.2), g.at(g.b, "b", dur=1.2)]
     _finish(procs)
     assert _max_overlap(g.lines()) == 2

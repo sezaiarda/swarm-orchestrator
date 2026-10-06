@@ -22,34 +22,48 @@ from pathlib import Path
 
 import pytest
 
+from conftest import machine_toml
+
 from swarm_orchestrator import buildlog, buildsem
 from swarm_orchestrator.config import load
 
-KEYS = {"ts", "event", "id", "phase", "pid", "slot", "cls", "argv", "cwd", "wait_s", "run_s",
-        "exit", "idle_s", "hold", "repo", "alone", "why", "by"}
+KEYS = {"ts", "swarm", "swarm_name", "event", "id", "phase", "pid", "slot", "cls", "argv", "cwd",
+        "wait_s", "run_s", "exit", "idle_s", "hold", "repo", "alone", "why", "by"}
 
 
 class Gate:
-    """A temp state dir, a project with a Cargo.toml, and a fake cargo."""
+    """A temp state dir, a project with a Cargo.toml and a fake cargo. The gate
+    is the machine's: its files are in the machine directory beside the state
+    dir (``sem``), and its limits in the test's machine file, which the builds
+    it starts and the configs it loads in this process both read.
 
-    def __init__(self, tmp: Path, max_concurrent: int = 1, overtake: int = 0):
+    ``name`` and ``state`` make a second swarm on the same machine: another
+    project, with its state dir beside the first one's (one state root)."""
+
+    def __init__(self, tmp: Path, max_concurrent: int = 1, overtake: int = 0,
+                 name: str = "proj", state: Path | None = None):
         self.tmp = tmp
-        self.state = tmp / "state"
-        self.proj = tmp / "proj"
+        self.state = state or tmp / "state"
+        self.sem = self.state.parent / "machine" / "buildsem"
+        self.proj = tmp / name
         self.proj.mkdir(parents=True)
         (self.proj / ".swarm.toml").touch()
         (self.proj / "Cargo.toml").write_text("[package]\n")
         self.bin = tmp / "bin"
-        self.bin.mkdir()
+        self.bin.mkdir(exist_ok=True)
         self.log = tmp / "builds.log"
         cargo = self.bin / "cargo"
         cargo.write_text(f'#!/bin/sh\necho "start $TAG" >> {self.log}\nsleep "${{DUR:-0.2}}"\n'
                          f'echo "end $TAG" >> {self.log}\nexit "${{RC:-0}}"\n')
         cargo.chmod(0o755)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("SWARM_")}
-        self.env.update(PATH=f"{self.bin}:{os.environ['PATH']}", SWARM_STATE_DIR=str(self.state),
-                        SWARM_BUILD_MAX=str(max_concurrent), SWARM_BUILD_OVERTAKE=str(overtake))
+        self.env.update(PATH=f"{self.bin}:{os.environ['PATH']}", SWARM_STATE_DIR=str(self.state))
+        self.machine(max_concurrent=max_concurrent, overtake=overtake)
         self.procs: list[subprocess.Popen] = []
+
+    def machine(self, **build) -> None:
+        """Set ``[build]`` keys of this gate's machine file."""
+        machine_toml(self.env, build=build)
 
     def cfg(self):
         old = dict(os.environ)
@@ -73,7 +87,7 @@ class Gate:
         return p
 
     def events(self) -> list[dict]:
-        path = self.state / "buildsem" / "events.jsonl"
+        path = self.sem / "events.jsonl"
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text().splitlines()]
@@ -196,7 +210,7 @@ def test_a_killed_waiter_is_skipped(gate):
     _finish([holder, after])
     assert after.returncode == 0
     assert _starts(g.lines()) == ["h", "after"]
-    assert list((g.state / "buildsem" / "queue").iterdir()) == []  # its ticket was pruned
+    assert list((g.sem / "queue").iterdir()) == []  # its ticket was pruned
 
 
 def test_a_killed_holder_frees_the_slot_and_gets_a_synthetic_end(gate):

@@ -23,9 +23,8 @@ The three classes:
 ``NEXT``
     Accepted, but it cannot reach anything already running — it takes effect for
     the next worker or master launched. This is a *structural* property, not
-    caution: :func:`launch._worker_env` freezes ``SWARM_BUILD_MAX`` /
-    ``SWARM_BUILD_JOBS`` / ``CARGO_BUILD_JOBS`` into a worker's environment at
-    spawn time and :func:`config._int_env` gives the environment strict precedence
+    caution: :func:`launch._worker_env` freezes ``SWARM_BUILD_JOBS`` /
+    ``CARGO_BUILD_JOBS`` into a worker's environment at spawn time and :func:`config._int_env` gives the environment strict precedence
     over the file, so a running worker holds a private copy no reload can reach.
     The same is true of everything delivered into a pane at launch.
 

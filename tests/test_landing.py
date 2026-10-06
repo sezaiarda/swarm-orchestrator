@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import machine_toml
 
 from swarm_orchestrator import buildsem
 from swarm_orchestrator import gitq
@@ -654,7 +655,9 @@ def test_a_commons_conflict_after_the_pass_holds_on_the_worktree_and_is_rechecke
 
 
 # -- 11. the check and the build gate ----------------------------------------------
-_ONE_SLOT = "[build]\nmax_concurrent = 1\n"
+def _one_slot() -> None:
+    """One build at a time on this machine (the gate's limit is not a project's)."""
+    machine_toml(build={"max_concurrent": 1})
 
 
 def _sibling_landed(ws) -> None:
@@ -666,7 +669,8 @@ def _sibling_landed(ws) -> None:
 
 
 def test_a_check_waits_for_the_build_slot_like_any_build(monkeypatch, tmp_path):
-    ws = Ws(monkeypatch, tmp_path, extra=_ONE_SLOT)
+    _one_slot()
+    ws = Ws(monkeypatch, tmp_path)
     try:
         _sibling_landed(ws)
         with buildsem.slot(ws.cfg, "a long build", ws.project, "other"):
@@ -681,7 +685,8 @@ def test_a_check_waits_for_the_build_slot_like_any_build(monkeypatch, tmp_path):
 
 
 def test_a_check_declared_light_runs_beside_a_build(monkeypatch, tmp_path):
-    ws = Ws(monkeypatch, tmp_path, extra=_ONE_SLOT + 'light = ["sh */check.sh"]\n')
+    _one_slot()
+    ws = Ws(monkeypatch, tmp_path, extra='[build]\nlight = ["sh */check.sh"]\n')
     try:
         _sibling_landed(ws)
         with buildsem.slot(ws.cfg, "a long build", ws.project, "other"):
@@ -697,7 +702,8 @@ def test_a_check_declared_light_runs_beside_a_build(monkeypatch, tmp_path):
 
 # -- 12. the log of the run before --------------------------------------------------
 def test_a_red_checks_log_is_kept_when_the_check_runs_again(monkeypatch, tmp_path):
-    ws = Ws(monkeypatch, tmp_path, extra=_ONE_SLOT)
+    _one_slot()
+    ws = Ws(monkeypatch, tmp_path)
     try:
         _sibling_landed(ws)
         check = ws.ctl / "check.sh"

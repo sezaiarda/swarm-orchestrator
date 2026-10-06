@@ -11,7 +11,7 @@ import pytest
 
 from swarm_orchestrator import doctor
 from swarm_orchestrator.config import load
-from swarm_orchestrator.resources import builds, ptree, sampler, store, view
+from swarm_orchestrator.resources import builds, capacity, ptree, sampler, store, view
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "proc"
 BTIME = 1790000000.0
@@ -92,6 +92,15 @@ def event(cfg, **ev) -> None:
 
 def summaries(cfg) -> list[dict]:
     return store.builds(cfg.state_dir)
+
+
+def ours(cfg) -> dict:
+    """The swarm fields the gate writes on an event of this swarm's build."""
+    return {"swarm": cfg.state_dir.name, "swarm_name": cfg.name}
+
+
+#: The same for a build of another swarm on the machine.
+THEIRS = {"swarm": "glasheim-1a2b", "swarm_name": "glasheim"}
 
 
 def worker_env(cfg, phase="P1") -> dict:
@@ -186,12 +195,14 @@ def test_light_builds_and_the_queue(env):
     fake.add(900)
     event(cfg, ts=T0 - 3, event="queued", id="q1", pid=901, cls="heavy")
     event(cfg, ts=T0 - 3, event="queued", id="q2", pid=902, cls="heavy")
+    event(cfg, ts=T0 - 3, event="queued", id="q3", pid=903, cls="heavy")
     event(cfg, ts=T0 - 2, event="bypass", id="q2", pid=902, cls="light")
+    event(cfg, ts=T0 - 2, event="left", id="q3", pid=903, cls="heavy", wait_s=1.0)
     event(cfg, ts=T0 - 1, event="start", id="l1", pid=900, cls="light")
     s = make_sampler(cfg, fake, pings)
     s.step(T0)
     assert not s.book.busy()
-    assert list(s.book.queued) == ["q1"]
+    assert list(s.book.queued) == ["q1"]  # the one that gave up waiting is gone too
     assert store.read_now(cfg.state_dir)["queued"] == 1
 
 
@@ -275,6 +286,8 @@ def test_without_an_event_log_the_slot_holder_is_the_build(env):
     assert s.book.source == "flock"
     [b] = s.book.active.values()
     assert (b.pid, b.slot, b.phase, b.argv, b.partial) == (700, 0, "P7", "cargo nextest run", True)
+    # a lock names no swarm: the build is nobody's by name, and counts as this swarm's
+    assert (b.swarm, b.swarm_name, b.mine) == (None, None, True)
     assert b.started == pytest.approx(T0 - 30, abs=0.1)  # already running: from its start
     fake.cpu(700, own=300)
     s.step(T0 + 1)
@@ -298,6 +311,123 @@ def test_a_holder_seen_starting_counts_from_first_sight(env):
     s.step(T0 + 1)
     [b] = s.book.active.values()
     assert b.started == T0 + 1 and not b.partial and b.slot == 1
+
+
+# -- whose build it is ----------------------------------------------------------------
+def test_a_neighbours_build_is_measured_and_marked_not_mine(env):
+    """The gate is the machine's: its log holds every swarm's builds. All are
+    measured, each says whose it is, and the views name the other swarm."""
+    cfg, fake, pings = env
+    fake.add(500, anon_pages=10_000, comm="claude", env=worker_env(cfg))
+    fake.add(900, ppid=500, started=T0 - 1, anon_pages=20_000, comm="cargo")
+    fake.add(950, started=T0 - 1, anon_pages=40_000, comm="cargo")  # another swarm's session
+    base = {"cls": "heavy", "cwd": "/w"}
+    event(cfg, ts=T0 - 1, event="start", id="own", phase="P1", pid=900, slot=0,
+          argv="cargo build", **base, **ours(cfg))
+    event(cfg, ts=T0 - 1, event="start", id="far", phase="W7", pid=950, slot=1,
+          argv="cargo test", **base, **THEIRS)
+    event(cfg, ts=T0 - 1, event="queued", id="q-own", pid=901, **base, **ours(cfg))
+    event(cfg, ts=T0 - 1, event="queued", id="q-far", pid=951, **base, **THEIRS)
+    event(cfg, ts=T0 - 1, event="queued", id="q-far2", pid=952, **base, **THEIRS)
+    s = make_sampler(cfg, fake, pings)
+    s.step(T0)
+    fake.cpu(950, own=300)
+    row = s.step(T0 + 1)
+
+    assert row["nb"] == 2 and set(row["b"]) == {"own", "far"} and row["bo"] == ["far"]
+    assert row["b"]["far"] == [pytest.approx(3.0), round(40_000 * ptree.PAGE / 2**20, 1)]
+    assert set(row["w"]) == {"worker:P1"}  # the sessions are this swarm's alone
+    # "everything else" holds no swarm's build: the neighbour's is taken out with ours
+    spent = sum(v[1] for v in row["b"].values()) + row["w"]["worker:P1"][1]
+    other = capacity.session_stats([row])["other_anon_mb"]["p95"]
+    assert other == pytest.approx(row["anon_mb"] - spent)
+    assert other <= row["anon_mb"] - row["b"]["far"][1]
+    [minute] = store.aggregate([row])
+    assert minute["bo"] == ["far"] and set(minute["b"]) == {"own", "far"}
+
+    snap = store.read_now(cfg.state_dir)
+    by = {b["id"]: b for b in snap["builds"]}
+    assert (by["own"]["swarm"], by["own"]["swarm_name"], by["own"]["mine"]) == (
+        cfg.state_dir.name, cfg.name, True)
+    assert (by["far"]["swarm"], by["far"]["swarm_name"], by["far"]["mine"]) == (
+        "glasheim-1a2b", "glasheim", False)
+    assert (snap["queued"], snap["queued_mine"]) == (3, 1)
+    text = view.render(view.collect(cfg, now=T0 + 2))
+    assert "builds 2 running on the machine's gate (1 of other swarms), 3 queued (1 this swarm's)" in text
+    assert "slot 1 pid 950 [glasheim] W7" in text and "slot 0 pid 900 P1" in text
+
+    for bid, pid in (("own", 900), ("far", 950)):
+        event(cfg, ts=T0 + 1.5, event="end", id=bid, pid=pid, run_s=2.5, exit=0)
+        fake.remove(pid)
+    s.step(T0 + 2)
+    rows = {r["id"]: r for r in summaries(cfg)}
+    assert (rows["own"]["swarm"], rows["own"]["swarm_name"], rows["own"]["mine"]) == (
+        cfg.state_dir.name, cfg.name, True)
+    assert (rows["far"]["swarm"], rows["far"]["swarm_name"], rows["far"]["mine"]) == (
+        "glasheim-1a2b", "glasheim", False)
+    assert rows["far"]["samples"] == 2 and rows["far"]["cpu_s"] == pytest.approx(3.0)
+    done = view.collect(cfg, now=T0 + 3)
+    assert done["builds"]["others"] == 1 and done["capacity"]["builds"]["others"] == 1
+    text = view.render(done)
+    assert "BUILDS (2 finished in the window on the machine's gate, 1 of other swarms" in text
+    listed = [line for line in text.splitlines() if line.endswith("cargo test")]
+    assert "[glasheim] W7" in listed[0]
+    assert "2 measured on the machine's gate, 1 of them other swarms'" in text
+    assert any("1 of the 2 measured build(s) were other swarms'" in n
+               for n in done["capacity"]["notes"])
+
+
+def test_an_event_that_names_no_swarm_counts_as_this_swarms(env):
+    cfg, fake, pings = env
+    fake.add(900, started=T0 - 1)
+    event(cfg, ts=T0 - 1, event="start", id="b", pid=900, slot=0, cls="heavy",
+          swarm=None, swarm_name=None)
+    s = make_sampler(cfg, fake, pings)
+    row = s.step(T0)
+    [b] = s.book.active.values()
+    assert (b.swarm, b.swarm_name, b.mine) == (None, None, True) and "bo" not in row
+
+
+def test_only_this_swarms_idle_build_is_reported(env):
+    """A neighbour's idle build is its own supervisor's to report: this one
+    measures it and shows it idle, and neither pings nor warns about it."""
+    cfg, fake, pings = env
+    fake.add(900, started=T0 - 1, own=100, argv="cargo test")
+    fake.add(950, started=T0 - 1, own=100, argv="bash wait.sh")
+    event(cfg, ts=T0 - 1, event="start", id="own", phase="P1", pid=900, slot=0, cls="heavy",
+          argv="cargo test", **ours(cfg))
+    event(cfg, ts=T0 - 1, event="start", id="far", phase="W7", pid=950, slot=1, cls="heavy",
+          argv="bash wait.sh", **THEIRS)
+    s = make_sampler(cfg, fake, pings)
+    for t in (0, 300, 610):
+        s.step(T0 + t)
+    assert [k for k, _ in pings] == ["idle-build:own"]
+    snap = store.read_now(cfg.state_dir)
+    assert [b["id"] for b in snap["idle_holders"]] == ["own"]
+    assert {b["id"]: (b["idle"], b["mine"]) for b in snap["builds"]} == {
+        "own": (True, True), "far": (True, False)}
+    lines = [x for x in view.status_lines(cfg, now=T0 + 611) if x.startswith("IDLE BUILD")]
+    assert len(lines) == 1 and "pid 900" in lines[0]
+    rows = {r[0]: r for r in view.doctor_checks(cfg, supervisor_alive=True, now=T0 + 611)}
+    assert "pid 900" in rows["resources.idle-build"][2]
+    assert "pid 950" not in rows["resources.idle-build"][2]
+    s.step(T0 + 620 + sampler.IDLE_REPING_S)
+    assert [k for k, _ in pings] == ["idle-build:own"] * 2
+
+
+def test_a_neighbours_idle_build_alone_warns_nobody_here(env):
+    cfg, fake, pings = env
+    fake.add(950, started=T0 - 1, own=100, argv="bash wait.sh")
+    event(cfg, ts=T0 - 1, event="start", id="far", phase="W7", pid=950, slot=0, cls="heavy",
+          argv="bash wait.sh", **THEIRS)
+    s = make_sampler(cfg, fake, pings)
+    for t in (0, 300, 610):
+        s.step(T0 + t)
+    assert pings == [] and store.read_now(cfg.state_dir)["idle_holders"] == []
+    assert not any(x.startswith("IDLE BUILD") for x in view.status_lines(cfg, now=T0 + 611))
+    rows = {r[0]: r for r in view.doctor_checks(cfg, supervisor_alive=True, now=T0 + 611)}
+    assert rows["resources.idle-build"][1] == doctor.OK
+    assert s.book.active["far"].idle_flagged  # the measurement still says it sat idle
 
 
 # -- idle holders -------------------------------------------------------------------

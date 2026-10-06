@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from conftest import machine_toml
+
 from swarm_orchestrator import buildsem, gitq, launch
 from swarm_orchestrator.config import load
 from swarm_orchestrator.logutil import Log
@@ -27,7 +29,8 @@ def _cfg(tmp_path: Path, monkeypatch, **overrides):
 
 # -- the semaphore --------------------------------------------------------
 def test_semaphore_caps_and_releases(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path, monkeypatch, SWARM_BUILD_MAX=2)
+    cfg = _cfg(tmp_path, monkeypatch)
+    machine_toml(build={"max_concurrent": 2})
     a = buildsem._try_once(cfg)
     b = buildsem._try_once(cfg)
     assert a is not None and b is not None  # both slots free
@@ -40,8 +43,20 @@ def test_semaphore_caps_and_releases(tmp_path, monkeypatch):
 
 
 def test_env_override_beats_config(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path, monkeypatch, SWARM_BUILD_MAX=3, SWARM_BUILD_JOBS=4, SWARM_BUILD_CACHE=0)
-    assert (cfg.build_max_concurrent, cfg.build_jobs, cfg.build_cache) == (3, 4, False)
+    cfg = _cfg(tmp_path, monkeypatch, SWARM_BUILD_JOBS=4, SWARM_BUILD_CACHE=0)
+    assert (cfg.build_jobs, cfg.build_cache) == (4, False)
+
+
+def test_the_gates_limits_are_the_machines_and_no_variable_overrides_them(tmp_path, monkeypatch):
+    """One limit for the machine: a process cannot raise it for itself."""
+    machine_toml(build={"max_concurrent": 1, "pair": "distinct-repo"})
+    cfg = _cfg(tmp_path, monkeypatch, SWARM_BUILD_MAX=3, SWARM_BUILD_PAIR="any",
+               SWARM_BUILD_OVERTAKE=9, SWARM_BUILD_IDLE_YIELD_MAX=9)
+    assert (cfg.build_max_concurrent, cfg.build_pair) == (1, "distinct-repo")
+    assert (cfg.build_overtake, cfg.build_idle_yield_max) == (2, 2)  # the defaults
+    # and a config that is already loaded follows an edit of the file
+    machine_toml(build={"max_concurrent": 2})
+    assert cfg.build_max_concurrent == 2
 
 
 def test_int_env_degrades_instead_of_crashing(monkeypatch):
@@ -98,18 +113,20 @@ def test_cargo_build_jobs_only_for_cargo(tmp_path):
 
 
 def test_gate_disabled_runs_through(tmp_path):
-    r = _build(tmp_path, "/bin/echo", "hi", extra_env={"SWARM_BUILD_MAX": "0"})
+    machine_toml(build={"max_concurrent": 0})
+    r = _build(tmp_path, "/bin/echo", "hi")
     assert r.returncode == 0 and "hi" in r.stdout
 
 
-# -- worker env carries the gate config only in worktree mode -------------
+# -- worker env carries the jobs cap only in worktree mode ----------------
 def test_worker_env_build_vars_worktree_only(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
     plain = launch._worker_env(cfg, "P1", worktree=None)
-    assert "CARGO_BUILD_JOBS" not in plain and "SWARM_BUILD_MAX" not in plain
+    assert "CARGO_BUILD_JOBS" not in plain and "SWARM_BUILD_JOBS" not in plain
     wt = launch._worker_env(cfg, "P1", worktree=tmp_path / "wt")
-    assert wt["CARGO_BUILD_JOBS"] == str(cfg.build_jobs)
-    assert wt["SWARM_BUILD_MAX"] == str(cfg.build_max_concurrent)
+    assert wt["CARGO_BUILD_JOBS"] == wt["SWARM_BUILD_JOBS"] == str(cfg.build_jobs)
+    # How many builds run at once is the machine's: no session carries a copy.
+    assert "SWARM_BUILD_MAX" not in wt
 
 
 def test_every_session_builds_without_debuginfo_or_incremental(tmp_path, monkeypatch):

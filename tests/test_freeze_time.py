@@ -24,6 +24,8 @@ import pytest
 
 from swarm_orchestrator import bigpic
 from swarm_orchestrator import blockedping
+from conftest import machine_toml
+
 from swarm_orchestrator import buildidle
 from swarm_orchestrator import buildsem
 from swarm_orchestrator import cli
@@ -236,19 +238,27 @@ def test_a_gathered_burst_of_blocked_pings_moves(cfg):
 
 
 def test_the_build_gates_idle_samples_move_and_a_newer_one_stays(cfg, monkeypatch):
+    """The samples of this swarm's own holders, that is: the gate is the
+    machine's, and a neighbour's build was never frozen."""
     now = time.time()
     t0 = now - FROZE - BEFORE
-    monkeypatch.setattr(cfg, "build_idle_yield_s", 600)
+    machine_toml(build={"idle_yield_s": 600})
     cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
+    theirs = {"t": t0, "cpu": 1.0, "io": 0, "quiet": t0 - 500, "yielded": t0 - 100}
     buildidle._save(cfg, {"ts": t0, "h": {
         "old": {"t": t0, "cpu": 1.0, "io": 0, "quiet": t0 - 500, "yielded": t0 - 100},
         "new": {"t": now - 2, "cpu": 1.0, "io": 0, "quiet": now - 2, "yielded": None},
+        "theirs": dict(theirs),
     }})
+    me, other = cfg.state_dir.name, "neighbour"
+    monkeypatch.setattr(buildsem, "live_holders", lambda _cfg: [
+        {"id": "old", "swarm": me}, {"id": "new", "swarm": me}, {"id": "theirs", "swarm": other}])
 
     buildidle.shift(cfg, FROZE, now)
 
     got = buildidle.load(cfg)
-    assert got["ts"] == pytest.approx(t0 + FROZE)
+    assert got["ts"] == pytest.approx(t0)  # when the gate was last measured: nobody's to move
+    assert got["h"]["theirs"] == theirs
     assert got["h"]["old"]["t"] == pytest.approx(t0 + FROZE)
     assert got["h"]["old"]["quiet"] == pytest.approx(t0 - 500 + FROZE)
     assert got["h"]["old"]["yielded"] == pytest.approx(t0 - 100 + FROZE)
@@ -488,14 +498,15 @@ def test_a_waiter_does_not_leave_the_build_queue_over_frozen_time(cfg, fake_cgro
 def test_a_frozen_waiters_ticket_still_counts_as_polling(cfg, fake_cgroups):
     now = time.time()
     refreshed = now - 3600  # last refreshed an hour ago, just before the freeze
-    assert not buildsem._polling(cfg, refreshed, now)
+    mine = {"swarm": cfg.state_dir.name}
+    assert not buildsem._polling(cfg, mine, refreshed, now)
     _record(cfg, refreshed + 2)  # frozen two seconds later, and still
-    assert buildsem._polling(cfg, refreshed, now)
+    assert buildsem._polling(cfg, mine, refreshed, now)
     with state_mod.transaction(cfg) as st:
         st.frozen = {}
     _close(cfg, refreshed + 2, now - 5)  # thawed five seconds ago
-    assert buildsem._polling(cfg, refreshed, now)
-    assert not buildsem._polling(cfg, refreshed, now + 60)  # awake a minute, never polled
+    assert buildsem._polling(cfg, mine, refreshed, now)
+    assert not buildsem._polling(cfg, mine, refreshed, now + 60)  # awake a minute, never polled
 
 
 # -- the first wake -----------------------------------------------------------------

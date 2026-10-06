@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from conftest import machine_toml
 
 from swarm_orchestrator.config import load
 from swarm_orchestrator.resources import capacity, store, view
@@ -52,7 +53,7 @@ def build(i: int, ended: float, **kw) -> dict:
 def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("SWARM_RESOURCES", "1")
-    monkeypatch.setenv("SWARM_BUILD_MAX", "0")  # no gate: nothing here reads /proc/locks
+    machine_toml(build={"max_concurrent": 0})  # no gate: nothing here reads /proc/locks
     project = tmp_path / "project"
     project.mkdir()
     return load(project_dir=str(project))
@@ -290,7 +291,7 @@ def test_an_old_snapshot_is_stale_and_none_is_said(cfg):
 
 
 def test_the_gate_view_turns_waits_into_times(cfg, monkeypatch):
-    cfg.build_max_concurrent = 1
+    machine_toml(build={"max_concurrent": 1})
     home = str(Path.home())
     monkeypatch.setattr(resview.time, "time", lambda: NOW)
     monkeypatch.setattr(resview.buildstatus, "snapshot", lambda cfg, n_recent=10: {
@@ -311,7 +312,7 @@ def test_the_gate_view_turns_waits_into_times(cfg, monkeypatch):
 
 
 def test_a_gate_that_cannot_be_read_is_said_not_raised(cfg, monkeypatch):
-    cfg.build_max_concurrent = 1
+    machine_toml(build={"max_concurrent": 1})
 
     def boom(cfg, n_recent=10):
         raise RuntimeError("no")
@@ -477,7 +478,7 @@ def test_views_are_rebuilt_only_when_something_moved(cfg):
 # -- over HTTP ---------------------------------------------------------------------
 @pytest.fixture
 def srv(tmp_path, monkeypatch):
-    monkeypatch.setenv("SWARM_BUILD_MAX", "0")
+    machine_toml(build={"max_concurrent": 0})
     cfg = make_run(tmp_path, monkeypatch)
     import time
     seed(cfg, time.time())

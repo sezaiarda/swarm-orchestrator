@@ -30,7 +30,9 @@ touched at all without an explicit ``--canonical``.
 target dir. A build holds a seat and shares one slot; GC needs the inverse — it
 holds *every* build slot exclusively while it works, which the kernel grants
 only while no build is alive on any of them (set aside as idle or not, started
-by an older ``swarm build`` or not). It never takes them one at a time: with
+by an older ``swarm build`` or not). The slots are the machine's, so that is no
+build of any swarm: this one's output is all a GC deletes, but the disk the
+builds strain is one. It never takes them one at a time: with
 two slots, a GC that took slot 0 and then waited ten minutes for a long build
 on slot 1 kept slot 0 from every build for those ten minutes, each interval,
 and still did not run. :func:`build_gate` instead waits in the build queue
@@ -270,9 +272,9 @@ def _blockers(cfg: Config, opts: GcOptions) -> list[str]:
     out: list[str] = []
     if cfg.build_max_concurrent < 1 and not opts.force:
         out.append(
-            "[build].max_concurrent is 0 — the build gate is disabled, so"
-            " acquiring it proves nothing about whether a build is running."
-            " Set it, stop the swarm, or pass --force."
+            "[build].max_concurrent is 0 in machine.toml — the build gate is"
+            " disabled, so acquiring it proves nothing about whether a build is"
+            " running. Set it, stop the swarms, or pass --force."
         )
     builders = live_builders(cfg, opts)
     if builders and not opts.force:
@@ -1227,7 +1229,8 @@ def auto(cfg: Config, log=None) -> AutoResult:
         estimate=False,
     )
     if cfg.build_max_concurrent < 1:
-        return AutoResult(AUTO_FAILED, detail="[build].max_concurrent is 0 — no gate to hold")
+        return AutoResult(AUTO_FAILED,
+                          detail="[build].max_concurrent is 0 in machine.toml — no gate to hold")
     try:
         with build_gate(cfg, opts):
             busy = live_builders(cfg, opts)
@@ -1288,19 +1291,20 @@ def read_record(cfg: Config) -> dict | None:
 # -- the build gate -------------------------------------------------------
 @contextmanager
 def build_gate(cfg: Config, opts: GcOptions):
-    """Hold EVERY ``swarm build`` slot for the duration of the block.
+    """Hold EVERY ``swarm build`` slot for the duration of the block: the
+    machine's, so no build of any swarm runs while this one's output is swept.
 
     The wait is a place in the build queue (:func:`buildsem.whole`), not a hold
     on the slots already free: builds keep using those until the gate is empty,
     and every slot is then taken in one step. For ``opts.gate_timeout_s`` in
     all, of which the last ``opts.gate_hold_s`` (``[gc].hold_s``) hold back the
     builds queued behind it; after that it leaves the queue rather than keep
-    the swarm's builds waiting on it.
+    the machine's builds waiting on it.
     """
     if cfg.build_max_concurrent < 1:
         if not opts.force:
             raise GcRefused(
-                "[build].max_concurrent is 0: there is no gate to acquire, so GC"
+                "[build].max_concurrent is 0 in machine.toml: there is no gate to acquire, so GC"
                 " cannot prove no build is running (pass --force)"
             )
         yield []

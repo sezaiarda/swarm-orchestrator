@@ -45,8 +45,10 @@ could have created it (a ``mkdir`` or a build step ends that stretch).
 
 The same reading answers one more question for the gate's pairing rules
 (:mod:`buildpair`): must this command **run alone**? ``[build].alone`` patterns
-(by default the container clients, :data:`ALONE_DEFAULT`) are matched against
-every simple command the walk meets, and count where that command is heavy
+(by default the container clients, the programs that build and run images:
+their work is done by a daemon the gate cannot see, straight onto the disk) are
+matched against every simple command the walk meets, and count where that
+command is heavy
 (``docker build`` yes, ``docker ps`` no). A script that is there but could not
 be read to the end (``$(…)``, a heredoc, a function, python that starts
 processes) is searched for those programs' names instead: naming one is enough.
@@ -107,11 +109,6 @@ DAEMON_CLIENTS = frozenset("""
     sccache bazel bazelisk buck buck2 pants gradle gradlew mvnd nix nix-build nix-shell
     distcc icecc dmypy systemd-run
 """.split())
-
-#: ``[build].alone`` by default: the programs that build and run images. Their
-#: work is done by a daemon the gate cannot see, straight onto the disk.
-ALONE_DEFAULT = ("docker", "docker-compose", "docker-buildx", "podman", "podman-compose",
-                 "buildah", "nerdctl", "buildctl")
 
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 # Once any other step has run, a later path may have been created by it.

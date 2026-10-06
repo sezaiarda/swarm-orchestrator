@@ -2,11 +2,12 @@
 
 Two sources, in order of preference:
 
-1. **The gate's event log**, ``<state>/buildsem/events.jsonl``: one JSON object
-   per line — ``queued``, ``start`` (with the pid that runs the build, its slot,
-   class, argv, cwd and how long it waited), ``end`` (run time and exit code),
-   ``bypass``, ``preflight_fail``, and ``yield``/``unyield`` (the gate set an
-   idle build aside, or counts it again). A build killed with SIGKILL never
+1. **The gate's event log**, ``<machine dir>/buildsem/events.jsonl``: one JSON
+   object per line — ``queued``, ``start`` (with the pid that runs the build,
+   its slot, class, argv, cwd and how long it waited), ``end`` (run time and
+   exit code), ``bypass``, ``preflight_fail``, ``left`` (a waiter gave up), and
+   ``yield``/``unyield`` (the gate set an idle build aside, or counts it
+   again). A build killed with SIGKILL never
    writes its ``end``, so a ``start`` whose process has been gone for
    :data:`END_GRACE_S` counts as ended; before that the ``end`` may simply not
    have been written yet (the gate writes it a moment after the process exits),
@@ -19,6 +20,16 @@ Two sources, in order of preference:
 logs that like a build's turn with ``cls`` ``"gc"``; those events are skipped.
 Without an event log, a slot held while ``buildsem/gc`` (gc's record) is
 locked is gc's, and nobody's build.
+
+**Whose build it is.** The gate is the machine's: every swarm on it queues
+there, so the log holds every swarm's builds and all of them are measured. Each
+event names its build's swarm (``swarm``, the slug, and ``swarm_name``), and a
+:class:`Build` keeps both plus ``mine``: is it the swarm this book works for
+(:class:`BuildBook` is told its slug). A build nobody names — one found by its
+``flock`` alone, or an event whose ``swarm`` is null — has ``swarm`` and
+``swarm_name`` ``None`` and counts as ``mine``: it is shown and reported like
+this swarm's own, because a holder no supervisor reports is worse than one
+that each of them reports.
 
 Either way the build is a pid; its *tree* (the pid and every descendant) is
 what is measured each sample (:mod:`.ptree`). A :class:`Build` keeps the running
@@ -161,6 +172,9 @@ class Build:
     started: float
     source: str  # "events" | "flock"
     phase: str | None = None
+    swarm: str | None = None  # the slug of the swarm it belongs to; None: unnamed
+    swarm_name: str | None = None
+    mine: bool = True  # this sampler's own swarm's, or nobody's by name
     slot: int | None = None
     cls: str = "heavy"
     argv: str = ""
@@ -247,7 +261,8 @@ class Build:
         end = self.ended if self.ended is not None else self.last_ts or self.started
         run = self.run_s if self.run_s is not None else max(0.0, end - self.started)
         return {
-            "id": self.id, "phase": self.phase, "argv": self.argv, "cwd": self.cwd,
+            "id": self.id, "swarm": self.swarm, "swarm_name": self.swarm_name,
+            "mine": self.mine, "phase": self.phase, "argv": self.argv, "cwd": self.cwd,
             "slot": self.slot, "cls": self.cls, "source": self.source, "pid": self.pid,
             "jobs": self.jobs, "started": round(self.started, 3), "ended": round(end, 3),
             "wait_s": _r(self.wait_s), "run_s": _r(run), "exit": self.exit,
@@ -263,7 +278,8 @@ class Build:
 
     def now_row(self, now: float, idle_s: float) -> dict:
         return {
-            "id": self.id, "phase": self.phase, "pid": self.pid, "slot": self.slot,
+            "id": self.id, "swarm": self.swarm, "swarm_name": self.swarm_name,
+            "mine": self.mine, "phase": self.phase, "pid": self.pid, "slot": self.slot,
             "argv": self.argv[:200], "age_s": round(now - self.started, 1),
             "cores": round(self.cores, 2), "anon_mb": round(self.anon_mb, 1),
             "peak_anon_mb": round(self.peak_anon_mb, 1), "cpu_s": round(self.cpu_s, 1),
@@ -278,11 +294,14 @@ def _r(v: float | None) -> float | None:
 
 
 class BuildBook:
-    """The builds in flight, fed by whichever source the gate provides."""
+    """The builds in flight on the machine's gate, every swarm's, fed by
+    whichever source the gate provides. ``swarm`` is the slug of the swarm this
+    book works for: what a build's ``mine`` is about."""
 
-    def __init__(self, buildsem: Path, env_marker: str = "SWARM_PHASE",
+    def __init__(self, buildsem: Path, swarm: str, env_marker: str = "SWARM_PHASE",
                  proc_root: Path = ptree.PROC, done_ids: set[str] | None = None) -> None:
         self.buildsem = buildsem
+        self.swarm = swarm
         self.env_marker = env_marker
         self.proc = proc_root
         self.tail = EventTail(buildsem / EVENTS)
@@ -296,6 +315,15 @@ class BuildBook:
     @property
     def source(self) -> str:
         return "events" if self.tail.exists() else "flock"
+
+    def is_mine(self, rec: dict) -> bool:
+        """Is this event's build this book's own swarm's? One that names no
+        swarm is (see the module doc)."""
+        return not rec.get("swarm") or rec["swarm"] == self.swarm
+
+    def queued_mine(self) -> int:
+        """How many of the waiting builds are this swarm's."""
+        return sum(self.is_mine(ev) for ev in self.queued.values())
 
     # -- discovery ----------------------------------------------------------
     def poll(self, now: float, table: dict[int, ptree.Proc] | None = None) -> bool:
@@ -331,7 +359,7 @@ class BuildBook:
             return
         if kind == "queued":
             self.queued[bid] = ev
-        elif kind in ("bypass", "preflight_fail"):
+        elif kind in ("bypass", "preflight_fail", "left"):
             self.queued.pop(bid, None)
         elif kind == "start":
             self.queued.pop(bid, None)
@@ -370,8 +398,10 @@ class BuildBook:
         if ticks is None or (began is not None and began > ts + 5):
             ticks = None  # gone already, or the pid now names another process
         b = Build(id=bid, pid=pid, started=ts, source="events", phase=ev.get("phase"),
-                  slot=ev.get("slot"), cls=ev.get("cls", "heavy"), argv=str(ev.get("argv") or ""),
-                  cwd=str(ev.get("cwd") or ""), wait_s=wait, start_ticks=ticks)
+                  swarm=ev.get("swarm") or None, swarm_name=ev.get("swarm_name") or None,
+                  mine=self.is_mine(ev), slot=ev.get("slot"), cls=ev.get("cls", "heavy"),
+                  argv=str(ev.get("argv") or ""), cwd=str(ev.get("cwd") or ""),
+                  wait_s=wait, start_ticks=ticks)
         self._environ(b)
         self.active[bid] = b
 

@@ -146,10 +146,17 @@ def test_a_file_that_does_not_read_as_settings_is_an_error_that_names_it(tmp_pat
     assert says in str(exc.value) and str(path) in str(exc.value)
 
 
-def test_the_machine_file_has_no_table_yet_and_says_so(tmp_path):
-    assert machine.keys() == []
-    with pytest.raises(SettingsError, match=r"it has: none yet"):
-        machine.settings(_file(tmp_path, "[build]\nmax_concurrent = 1\n"))
+def test_the_machine_file_holds_the_build_gates_limits_and_none_has_a_variable(tmp_path):
+    """One gate for the machine, so one set of limits: a variable would let a
+    process raise the limit for itself."""
+    build = {k.key: k for k in machine.keys() if k.table == "build"}
+    assert set(build) == {"max_concurrent", "short_s", "overtake", "idle_yield_s",
+                          "idle_yield_max", "pair", "alone"}
+    assert all(k.env is None for k in build.values())
+    got = machine.settings(_file(tmp_path, "[build]\nmax_concurrent = 1\n"))
+    assert got.build_max_concurrent == 1 and got.build_pair == "any"
+    with pytest.raises(SettingsError, match=r"\[build\].jobs is not a machine setting"):
+        machine.settings(_file(tmp_path, "[build]\njobs = 4\n"))  # that one is a project's
 
 
 def _doc_rows() -> dict[tuple[str, str], list[str]]:

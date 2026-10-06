@@ -514,10 +514,10 @@ _SESSION_KEYS = (
     "SWARM_TOUCHES", "SWARM_PROJECT", "SWARM_MASTER_KIND", "SWARM_OVERSEER_PASS",
     "SWARM_OVERSEER_DIGEST", "SWARM_OVERSEER_RECORD", "SWARM_OPERATOR_JOB", "TMUX_PANE",
 )
-#: The build caps a session in a mirror is launched with (``launch.session_env``
-#: freezes them beside ``SWARM_WORKTREE``). Anywhere else they are the owner's
-#: own override, typed before ``swarm up``, and the supervisor must keep it.
-_MIRROR_KEYS = ("SWARM_BUILD_MAX", "SWARM_BUILD_JOBS", "CARGO_BUILD_JOBS")
+#: The jobs cap a session in a mirror is launched with (``launch.session_env``
+#: freezes it beside ``SWARM_WORKTREE``). Anywhere else it is the owner's own
+#: override, typed before ``swarm up``, and the supervisor must keep it.
+_MIRROR_KEYS = ("SWARM_BUILD_JOBS", "CARGO_BUILD_JOBS")
 
 
 def clean_env(cfg: Config, env: dict[str, str] | None = None) -> dict[str, str]:

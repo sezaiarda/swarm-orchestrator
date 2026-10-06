@@ -1,9 +1,12 @@
 """The build gate's event log, holder records and run-time history.
 
-``<state>/buildsem/events.jsonl`` is append-only, one JSON object per line, and
-is a contract other tools read. Every line has exactly these keys::
+``<machine dir>/buildsem/events.jsonl`` is append-only, one JSON object per
+line, and is a contract other tools read. It is the machine's: every swarm's
+builds are in it, each line naming its swarm. Every line has exactly these
+keys::
 
     {"ts": <unix float>,
+     "swarm": "<the swarm's slug>" or null, "swarm_name": "<its name>" or null,
      "event": "queued"|"start"|"end"|"bypass"|"preflight_fail"|"yield"|"unyield"
               |"passed"|"alone"|"left",
      "id": "<one per swarm build call>", "phase": <$SWARM_PHASE or null>,
@@ -17,6 +20,12 @@ is a contract other tools read. Every line has exactly these keys::
      "repo": "<the build's repo>" or null,
      "alone": <true|false on queued and start, else null>,
      "why": "<a few words>" or null, "by": "<build id>" or null}
+
+``swarm`` is the slug of the swarm the build belongs to (its state dir's name,
+unique on the machine: ``swarm ls``) and ``swarm_name`` what its owner calls it,
+on every event of that build, whoever wrote the line: a ``yield`` is written by
+whichever waiter measured the holder, often another swarm's. Both are null only
+for a holder whose record could not be read.
 
 - ``queued``: a heavy command joined the queue. ``pid`` is the waiting
   ``swarm build`` process (the build does not exist yet).
@@ -61,8 +70,9 @@ queued), ``end`` when it lets go (``run_s`` is how long no build could run;
 - ``left``: its wait ran out and it left the queue, having held nothing;
   ``wait_s`` is how long it waited, ``why`` what was still in the way.
 
-``pid`` is the process gc runs in (the supervisor, for the automatic one) and
-``alone`` is true. A gc is not a build: readers that count or measure builds
+``pid`` is the process gc runs in (the supervisor, for the automatic one),
+``swarm`` the swarm whose build output it sweeps, and ``alone`` is true. A gc
+is not a build: readers that count or measure builds
 skip ``cls`` ``"gc"``.
 
 A ``left`` with ``cls`` ``"heavy"`` is a build the swarm runs itself and can
@@ -70,7 +80,8 @@ wait only so long for (:func:`buildsem.slot` with ``wait_s``): no slot came in
 that time, it left the queue and nothing ran.
 
 ``repo`` is the repository a queued build works in, by the swarm's name for it
-(its path in the project, ``.`` for the project's own; see :mod:`buildpair`),
+(its path in that swarm's project, ``.`` for the project's own; see
+:mod:`buildpair`),
 on every event of that build; null when it has none, and for a light command.
 ``alone`` says whether the pairing rules made it run with no build beside it
 (always false under ``[build].pair = "any"``), and ``why`` then says why.
@@ -94,6 +105,7 @@ import statistics
 import time
 from pathlib import Path
 
+from . import freezer
 from .config import Config
 
 EVENTS = "events.jsonl"
@@ -110,6 +122,61 @@ def events_path(cfg: Config) -> Path:
     return cfg.buildsem_dir / EVENTS
 
 
+def swarm_of(cfg: Config) -> dict:
+    """Whose build it is, as every ticket, record and event of the gate says it:
+    ``swarm`` is the slug (the state dir's name, as ``swarm ls`` lists it) and
+    ``swarm_name`` what the owner calls the swarm."""
+    return {"swarm": cfg.state_dir.name, "swarm_name": cfg.name}
+
+
+def whose(rec: dict) -> dict:
+    """:func:`swarm_of` as a ticket or a holder's record carries it: for an
+    event about a build that may be another swarm's."""
+    return {"swarm": rec.get("swarm"), "swarm_name": rec.get("swarm_name")}
+
+
+def mine(cfg: Config, rec: dict) -> bool:
+    """Is this ticket, record or event of ``cfg``'s own swarm?"""
+    return rec.get("swarm") == cfg.state_dir.name
+
+
+def run_of(cfg: Config, rec: dict) -> Config | freezer.Run | None:
+    """The run a ticket or record belongs to, for what the gate has to ask of
+    it (does it stand frozen, for how long did it): this one's config, or a
+    neighbour's state dir, which is beside this one's under the name the record
+    gives. None when the record names no swarm."""
+    slug = rec.get("swarm")
+    if not isinstance(slug, str) or not slug or "/" in slug or slug in (".", ".."):
+        return None
+    if slug == cfg.state_dir.name:
+        return cfg
+    return freezer.Run(cfg.state_dir.parent / slug)
+
+
+def frozen(cfg: Config, rec: dict) -> bool:
+    """Does the swarm this ticket or record belongs to stand frozen right now
+    (``swarm freeze``)? Its processes are alive and hold what they held, and
+    do nothing until its ``swarm thaw``."""
+    run = run_of(cfg, rec)
+    return run is not None and freezer.stands(run)
+
+
+def who(entry: dict, unnamed: str = "-") -> str:
+    """A build as every view of the gate names it: its phase, with its swarm's
+    name in front when the entry says it is another swarm's (``mine`` false):
+    ``W3``, ``[glasheim] W3``. ``unnamed`` stands for a build with no phase."""
+    phase = str(entry.get("phase") or unnamed)
+    if entry.get("mine", True) or not entry.get("swarm"):
+        return phase
+    return f"[{entry.get('swarm_name') or entry['swarm']}] {phase}"
+
+
+def who_text(cfg: Config, rec: dict) -> str:
+    """:func:`who` for a ticket, record or event, which says whose it is but
+    not whether that is the swarm reading it."""
+    return who({**rec, "mine": mine(cfg, rec)})
+
+
 def argv_text(argv: list[str] | str) -> str:
     text = argv if isinstance(argv, str) else shlex.join(argv)
     return text[:ARGV_MAX]
@@ -120,10 +187,14 @@ def event(cfg: Config, kind: str, *, id: str, phase: str | None, pid: int,
           wait_s: float | None = None, run_s: float | None = None,
           exit: int | None = None, idle_s: float | None = None,
           hold: bool | None = None, repo: str | None = None, alone: bool | None = None,
-          why: str | None = None, by: str | None = None, ts: float | None = None) -> None:
-    """Append one event line. Never raises: the log must not break a build."""
+          why: str | None = None, by: str | None = None, ts: float | None = None,
+          who: dict | None = None) -> None:
+    """Append one event line. Never raises: the log must not break a build.
+    ``who`` (:func:`whose`) names the build's swarm when the event is about a
+    build that is not the writer's own; without it the writer's is named."""
     rec = {
-        "ts": round(ts if ts is not None else time.time(), 3), "event": kind, "id": id,
+        "ts": round(ts if ts is not None else time.time(), 3),
+        **(swarm_of(cfg) if who is None else whose(who)), "event": kind, "id": id,
         "phase": phase, "pid": pid, "slot": slot, "cls": cls, "argv": argv_text(argv),
         "cwd": str(cwd),
         "wait_s": round(wait_s, 3) if wait_s is not None else None,
@@ -232,7 +303,10 @@ def family(text: str) -> str:
 
 
 class History:
-    """Past heavy run times, by exact command and by command shape."""
+    """Past heavy run times, by exact command and by command shape: this
+    swarm's own, since a command and where it ran only mean something inside
+    one project. What to assume for a command never seen (:attr:`default`) and
+    how long a gc holds the gate come from every build on the machine."""
 
     def __init__(self, cfg: Config, events: list[dict] | None = None):
         self.cfg = cfg
@@ -250,11 +324,13 @@ class History:
                 self.gc.append(float(run))
             if e.get("cls") != "heavy":
                 continue
+            self.all.append(float(run))
+            if not mine(cfg, e):
+                continue
             loc = where(cfg, str(e.get("cwd", "")))
             text = str(e.get("argv", ""))
             self.exact.setdefault((loc, text), []).append(float(run))
             self.shape.setdefault((loc, family(text)), []).append(float(run))
-            self.all.append(float(run))
 
     def predict(self, argv: list[str] | str, cwd: str) -> float | None:
         """The usual run time of this command here, or ``None`` if unknown: the

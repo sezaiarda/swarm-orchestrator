@@ -249,7 +249,8 @@ the group of whatever started it.
    (an interrupt, a kill), `swarm thaw` finds everything it has to wake.
 4. It takes the state lock and the build queue lock, writes `1` to every group
    and keeps both locks until each group says it is frozen: a process frozen
-   with either in its hand would stop everything still awake.
+   with either in its hand would stop everything still awake, and the build
+   queue lock is the machine's, so that would be every swarm's builds.
 5. A group that was told to freeze and has not said so within 10 seconds takes
    the whole freeze back: everything is woken, the record is dropped, exit 1
    (`FREEZE-ROLLBACK` in the log). A group this user may not write is not that
@@ -294,7 +295,8 @@ supervisor how long it lasted.
   start's back-off, how long a job and a question have waited), the Overseer's
   policy (gap, cadence, hold, owner wait, starvation), the big-picture memory
   (a running pass, the doc's age, the back-off), a gathered burst of blocked
-  pings, and the build gate's idle samples. In the supervisor's memory: the
+  pings, and the build gate's idle samples of this swarm's own builds (the
+  other swarms' builds were never frozen). In the supervisor's memory: the
   watchdog sweep, ping cooldowns, crash counts, launch back-offs, the gc and
   backup clocks and an adoption's recheck. Each file is named in the record's
   `shifted` once it is moved, so a thaw that was cut short and is run again
@@ -514,6 +516,10 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
   what the swarm held back for the summary since the last one, failures, questions waiting on you, the `owner-run` rows whose dependencies
   have landed and are holding rows up, a starvation map (which root
   blockers hold how much backlog), and a snapshot of RAM, swap, `/tmp` and disk.
+  Those figures are the whole machine's, so beside them the digest says whose
+  load it is: the machine's build gate now (its limit, each build on it as
+  `this swarm` or `another swarm [name]`, how many wait and how many of those
+  are this swarm's) and the other swarms on the machine with their status.
 - **Where it works:** under worktree isolation, in its own mirror `ovs-<id>`,
   which merges through the ordinary queue when the pass ends.
 - **What it decides, on its own:**
@@ -1210,20 +1216,58 @@ sentinels, never from branch shape:
 ## Build gate (`swarm build`)
 
 N workers in N worktrees means N independent builds. `swarm build <cmd…>` lets
-at most `[build].max_concurrent` heavy builds run at once, swarm-wide; the rest
-wait their turn. For `cargo` it also sets `CARGO_BUILD_JOBS` to `[build].jobs`.
+at most `max_concurrent` heavy builds run at once on the machine; the rest wait
+their turn. For `cargo` it also sets `CARGO_BUILD_JOBS` to the project's
+`[build].jobs`.
+
+**One gate for the machine.** The limit is the machine's, not a swarm's. With a
+gate per swarm, three swarms that each set `max_concurrent = 1` ran three heavy
+builds at once, which on a machine whose disk is what builds strain is exactly
+what the limit is there to prevent. So there is one gate, and every swarm on the
+machine queues at it.
+
+- *Where it lives.* Its files (seats, slots, the queue and its lock,
+  `idle.json`, `pair.json`, `gc`, `events.jsonl`) are in the machine directory,
+  `<state root>/machine/buildsem/`. The state root is
+  `$XDG_STATE_HOME/swarm-orchestrator`, where each swarm's own state dir also
+  sits (see [Several swarms on one machine](#several-swarms-on-one-machine-machinepy)).
+  Below, `buildsem/` is that directory.
+- *Whose limits.* `max_concurrent`, `short_s`, `overtake`, `idle_yield_s`,
+  `idle_yield_max`, `pair` and `alone` are `[build]` in `machine.toml`
+  ([config.md](config.md#the-machine-file-machinetoml)), and wherever this
+  section names one of them, that is the table meant. None has an environment
+  variable, and a worker's environment carries none of them (it still carries
+  `SWARM_BUILD_JOBS` and `CARGO_BUILD_JOBS`). The file is read through each
+  time a limit is looked at, so an edit applies to every swarm at once, with no
+  reload or restart. A mistyped key or value is an error that stops every
+  new command (a process that had read the sound file keeps what it read until
+  the file is fixed); nothing falls back to a default in silence.
+- *What stays a project's.* `[build]` in `.swarm.toml` keeps `jobs`, `cache`,
+  `heavy` and `light`. A `.swarm.toml` that still sets one of the machine's
+  keys does not load, and the error names the key and `machine.toml`.
+- *Whose build.* Every ticket, seat record and event names its swarm: `swarm`
+  (the slug: the state dir's name, as `swarm ls` lists it) and `swarm_name`.
+- *Coming from a gate per swarm.* A `swarm build` started by a version whose
+  gate was the swarm's own holds its locks in that swarm's
+  `<state>/buildsem/`, which nothing reads any more: the machine's gate does
+  not see it, and it does not see the machine's. Let such builds end, or stop
+  the swarm, before the first build on this version. The limits that were in
+  each `.swarm.toml` go into `machine.toml` once (a project file that still
+  has one does not load), and the old `<state>/buildsem/` directories can be
+  deleted: the run-time history in their logs is not carried over, so the
+  first builds are predicted from the defaults.
 
 **Slots and seats.** A build holds two `flock`s, both on descriptors it
 inherits, so its whole process tree holds them: however the build ends (exit,
 crash, SIGKILL, a tool timeout), they free when its last process is gone. There
 is no daemon and no counter to leak.
 
-- A **seat**, `<state>/buildsem/seat<K>`, held exclusively: one per build alive.
+- A **seat**, `buildsem/seat<K>`, held exclusively: one per build alive.
   There are `max_concurrent + idle_yield_max` of them, so the kernel caps the
   builds the gate can have alive at once. The seat file holds a small record of
-  its build (id, phase, pid, command, start), which is what `--status` and the
-  waiting line show.
-- A **slot**, `<state>/buildsem/slot<N>` (`N < max_concurrent`), held *shared*.
+  its build (id, swarm, phase, pid, command, start), which is what `--status`
+  and the waiting line show.
+- A **slot**, `buildsem/slot<N>` (`N < max_concurrent`), held *shared*.
   Whatever needs a slot to itself takes it exclusively and so waits for every
   build on it: gc, and a `swarm build` from before seats existed (which
   therefore never starts on a slot that has a build on it). The slot file
@@ -1242,20 +1286,32 @@ slots, the next free one goes to the next in line. A waiter that stops polling
 (a stopped process) is passed over until it polls again.
 
 **Short builds first, boundedly.** A command whose recent runs took at most
-`[build].short_s` (the median of its last runs in the same place, from the log
-below) may start ahead of older waiters predicted to be long. Each long waiter
-counts the times it is passed (`queue.json`), and once it has been passed
-`[build].overtake` times nothing more may go ahead of it. So a waiter starts
+`short_s` (the median of its last runs in the same place, from the log below)
+may start ahead of older waiters predicted to be long. Each long waiter counts
+the times it is passed (`queue.json`), and once it has been passed `overtake`
+times nothing more may go ahead of it. So a waiter starts
 after at most the waiters older than it plus `overtake` short ones: nobody
 starves, and a 30-second targeted test does not sit behind a 15-minute browser
 suite. Unknown commands are never "short". `overtake = 0` is plain FIFO.
 
+**Fairness between swarms.** The queue knows no swarm and gives none a
+priority. Arrivals are served first come, first served, whoever they belong
+to. A build predicted short may pass a long one, and each waiter is passed at
+most `overtake` times in all, whichever swarms the passing builds belong to.
+So one swarm with many builds queued cannot starve another: its builds stand
+in the same line, and no waiter of any swarm starts later than the waiters
+older than it plus `overtake` younger ones. The predictions are each swarm's
+own. Whether a command is short, and its ETA, come from that swarm's past
+builds in the shared log, because a command and the place it ran in mean
+something only inside one project. What to assume for a command never seen
+comes from every build on the machine.
+
 **Idle yield.** A command can hold a slot and do nothing: a script waiting out
 a 20-minute timeout, a test runner waiting on a server that never comes up.
 Such a holder is never stopped or signalled; it ends when it ends. Instead it is
-*set aside*: once its whole process tree has been quiet for
-`[build].idle_yield_s` (default 150) it stops counting against
-`max_concurrent`, and the next waiter starts beside it, on the same slot.
+*set aside*: once its whole process tree has been quiet for `idle_yield_s`
+(default 150) it stops counting against `max_concurrent`, and the next waiter
+starts beside it, on the same slot.
 
 - *Quiet* means, over one measurement (every 5 s), under 5% of one core and
   under 256 KiB/s of disk IO, summed over the build's process tree: its root and
@@ -1304,13 +1360,14 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
   whoever reads the output afterwards knows the run was not alone. (The
   landing's lane check, when it takes a slot, holds it inside the swarm's own
   process and prints nothing: its log is not a worker's.)
-- *The caps.* At most `[build].idle_yield_max` (default 2) holders are set aside
-  at once; a further idle holder keeps counting and the queue waits, as it does
+- *The caps.* At most `idle_yield_max` (default 2) holders are set aside at
+  once; a further idle holder keeps counting and the queue waits, as it does
   with `idle_yield_s = 0`. The seats bound the builds alive at
   `max_concurrent + idle_yield_max` whatever happens.
 - *Who measures.* The waiters, from `/proc`, under `queue.lock`, keeping the
   running figures in `buildsem/idle.json`. It needs no supervisor and no daemon:
-  when nobody waits, nobody needs the answer. The counters compared are the
+  when nobody waits, nobody needs the answer. The holders are the machine's, so
+  a waiter of one swarm measures the builds of every other. The counters compared are the
   kernel's cumulative ones, so a waiter that dies loses nothing: the next one
   carries on from its last sample, and a build's start is itself a sample (zero
   used). A stretch nobody measured counts as quiet only if next to nothing was
@@ -1326,29 +1383,66 @@ Such a holder is never stopped or signalled; it ends when it ends. Instead it is
   leaves a ticket that is pruned; a killed measurer leaves figures the next one
   checks again before using them.
 
+**A holder that is gone, and one that stands frozen.** The gate trusts a lock
+over a record. With every swarm on one gate, a holder that will never come
+back and one that will must not be taken for each other.
+
+- *Gone.* A seat is a kernel lock. A holder that died, with its whole swarm or
+  without, holds none: its seat is free the moment its last process is gone,
+  whichever swarm looks, and the first to notice writes the `end` it never
+  wrote.
+- *Frozen.* A build whose swarm is frozen (`swarm freeze`) is alive and keeps
+  its seat: it will resume, and nothing takes a seat from it. What it stops
+  doing is keeping the machine waiting. It is set aside as idle at the first
+  quiet sample instead of after `idle_yield_s` (a `yield` event whose `why` is
+  `its swarm is frozen`), so the next waiter starts beside it. It counts toward
+  `idle_yield_max`, and it counts again when `swarm thaw` wakes it. Under the
+  pairing rules it keeps its repo and, if it runs alone, the gate.
+- *Frozen and not set aside.* With `idle_yield_max = 0`, or for a build that
+  never yields (`--hold`, a daemon's client), a frozen build keeps its slot
+  until its swarm is thawed or stopped. `--status` marks it
+  `frozen with its swarm`.
+- *Frozen waiters.* A frozen swarm's waiters keep their tickets and their
+  places. The other swarms pass them over until they poll again. Inside the one
+  frozen swarm the order stands still: only the time its run was awake counts
+  toward a ticket going stale, so the first of its waiters to wake does not
+  pass the rest.
+- *The freeze itself.* `swarm freeze` takes the machine's queue lock while it
+  freezes and keeps it until every group says it is frozen, so no process is
+  frozen holding the lock that every swarm's builds need.
+
 **Pairing rules.** `max_concurrent = 2` on its own lets any two heavy builds
 run side by side. Where the disk is what builds strain (two builds can be fine,
 two builds in one tree or a build beside an image build are not), set
-`[build].pair = "distinct-repo"` and the gate also checks *which* builds are
-alive before it starts one. `"any"`, the default, checks nothing.
+`pair = "distinct-repo"` and the gate also checks *which* builds are alive
+before it starts one. `"any"`, the default, checks nothing.
 
 - *Never two builds in one repository.* A build starts only if it shares no
-  repo with any build alive. Its repo is the one its working directory is in,
-  under the name the swarm already uses for it: its path inside the project
-  (`lib`; `.` for the project's own repo), which is its lane and the directory
-  of its shared build cache (`[build].cache`). A phase's mirror has the
-  project's layout, so `<state>/wt/<phase>/lib` is `lib` for every phase; any
-  other checkout is traced through its git common directory, so every worktree
-  of a repo is that repo. A repo outside the project is named by its lane if
-  `[lanes].external` declares it, else by its path. The
+  repo with any build alive. Its repo is the one its working directory is in.
+  The rules know a repository by its place on the machine: a phase's mirror has
+  the project's layout, so `<state>/wt/<phase>/lib` stands for the project's
+  own checkout at `lib`, for every phase; any other checkout is traced through
+  its git common directory, so every worktree of a repo is that repo. What a
+  waiter is told, and what the log records, is the name its own swarm has for
+  the repo: its path inside the project (`lib`; `.` for the project's own
+  repo), which is its lane and the directory of its shared build cache
+  (`[build].cache`); the lane, for a repo outside the project that
+  `[lanes].external` declares; else its path. The
   repos the command itself names count too (a `cd` target, a
   `--manifest-path`, a `-C` directory, a script's own place: what pre-flight
   checks): `cargo test --manifest-path lib/Cargo.toml` from the project root
   builds in `.` and in `lib`. What a script does once it runs is not seen.
+- *Across swarms.* The rules hold between the builds of every swarm on the
+  machine, as the gate does. A repository's place is the one thing two swarms
+  agree on, so two swarms whose projects hold the same checkout (an umbrella
+  project and one of its components) never build in it side by side, and two
+  projects are not taken for one because each calls its own repo `.`. A build
+  that runs alone waits for every swarm's builds to end, and no swarm's build
+  starts while it runs.
 - *Some builds run alone*, both ways: such a build waits until no other build
   is alive, and nothing starts while it runs. They are:
-  - a command `[build].alone` names. A pattern is a command prefix whose words
-    are globs, like `heavy` and `light`, matched against every simple command
+  - a command `alone` names. A pattern is a command prefix whose words are
+    globs, like a project's `heavy` and `light`, matched against every simple command
     in what is run (through the same wrappers and scripts), and it counts where
     that command is heavy. The default is the container clients (`docker`,
     `docker-compose`, `docker-buildx`, `podman`, `podman-compose`, `buildah`,
@@ -1376,9 +1470,10 @@ alive before it starts one. `"any"`, the default, checks nothing.
      stderr, `buildsem/pair.json`. Nothing new starts beside it, also after
      that process has gone. **Not covered:** a build that was already running
      beside it keeps running; that one overlap is what a late discovery costs.
-     A script known to build images belongs in `[build].alone`
+     A script known to build images belongs in `alone`
      (`alone = ["docker", …, "bash ci/bake.sh"]`).
-- *Who counts.* Every build alive on a seat, including one set aside as idle.
+- *Who counts.* Every build alive on a seat, whichever swarm's, including one
+  set aside as idle (a build whose swarm is frozen among them).
   Idle yield frees a slot, not a repo: a set-aside holder may wake up, and then
   it works in its repo again. So beside an idle holder only a build in another
   repo starts, and a build that runs alone waits for it to end. When a
@@ -1393,8 +1488,8 @@ alive before it starts one. `"any"`, the default, checks nothing.
 - *The queue.* A waiter the rules hold back does not hold up the ones they
   allow: the turn goes to the oldest waiter that may start (or a short one
   behind it). That passing comes out of the same budget as *short builds
-  first*: each waiter is passed at most `[build].overtake` times in all,
-  whatever the reason, and once it has been, nothing starts before it. A
+  first*: each waiter is passed at most `overtake` times in all, whatever the
+  reason, and once it has been, nothing starts before it. A
   waiter that runs alone is never passed once it is the oldest in line, so a
   stream of builds that could each pair with the one running does not starve
   it: they wait, the running build ends, it runs. So a waiter starts after at
@@ -1435,8 +1530,12 @@ the queue. Only checks nothing earlier in the command could have made true (a
 
 **What it says** (stderr only; worker prompts are unchanged):
 
-- on joining, and every 45 s while queued: its place, who holds each slot
-  (phase, command, how long, how long it usually takes) and an estimated start;
+- on joining, and every 45 s while queued: its place among the waiters of
+  every swarm, who is ahead, who holds each slot (phase, command, how long, how
+  long it usually takes) and an estimated start, with the swarm's name in front
+  of a build that is another swarm's:
+  ``queued 12s — #3 of 4 for 2 slot(s) on this machine, behind [glasheim] W1
+  `cargo build`, W7 `cargo test`; slot 0: …``;
   on joining, also that queue time does not count toward `--timeout` and how to
   batch steps;
 - `queued 3m12s, starting on slot 0: cargo nextest run`, and when an idle holder
@@ -1459,10 +1558,12 @@ inside a build that already holds a slot runs straight through.
 
 **The event log**, `buildsem/events.jsonl`, is append-only, one JSON object per
 line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
-20 MB. Every line has exactly these keys:
+20 MB. It is the machine's: every swarm's builds are in it, and each line names
+its swarm. Every line has exactly these keys:
 
 ```json
-{"ts": 1790000000.123, "event": "start", "id": "3f2a9c01be44", "phase": "P-1",
+{"ts": 1790000000.123, "swarm": "app-3f9c2a1b", "swarm_name": "app",
+ "event": "start", "id": "3f2a9c01be44", "phase": "P-1",
  "pid": 4242, "slot": 0, "cls": "heavy", "argv": "cargo nextest run",
  "cwd": "/…/wt/P-1/lib", "wait_s": 12.5, "run_s": null, "exit": null,
  "idle_s": null, "hold": false, "repo": "lib", "alone": false, "why": null,
@@ -1476,7 +1577,7 @@ line, each written with one `O_APPEND` write, and rotated to `events.jsonl.1` at
 | `bypass` | a light command (or any, gate off) started unqueued | the command's process | `slot` null |
 | `end` | it finished | as in its `start`/`bypass` | `run_s`; `exit` (signal N → 128+N, `--timeout` → 124) |
 | `preflight_fail` | refused before queueing; nothing ran | `swarm build` | |
-| `yield` | a running build was set aside as idle; it keeps running | as in its `start` | `idle_s` = how long its tree was quiet; `run_s` = how long it had run |
+| `yield` | a running build was set aside as idle; it keeps running | as in its `start` | `idle_s` = how long its tree was quiet; `run_s` = how long it had run; `why` = `its swarm is frozen` when that, and not a full `idle_yield_s`, is why |
 | `unyield` | a set-aside build is working again and counts again | as in its `start` | `idle_s` = how long it was set aside; `why` = what the measurement saw (`it is using CPU again`) |
 | `passed` | a pairing rule held this waiter back and a younger one started ahead of it | the waiting `swarm build` | `why` = the rule (`same repo as slot 0 (lib)`); `by` = the `id` of the build that started |
 | `alone` | a running build was found to hold a command that runs alone; nothing starts beside it from now on | as in its `start` | `why` = what was seen; `run_s` = how long it had run |
@@ -1488,13 +1589,19 @@ gate, and `gc` for gc's own turn at the gate (see *gc and the gate* below):
 null, `wait_s` how long it queued), `end` when it lets go (`run_s` is how long
 no build could run; `exit` 0, or 1 if the sweep failed), or `left` instead of a
 `start`. `pid` is the process gc runs in (the supervisor, for the automatic
-one), `alone` is true. A gc is not a build: the run-time history and the
-resource sampler skip these lines.
+one), `swarm` the swarm whose build output it sweeps, `alone` is true. A gc is
+not a build: the run-time history and the resource sampler skip these lines.
+
+`swarm` is the slug of the swarm the build belongs to (its state dir's name,
+unique on the machine, as `swarm ls` lists it) and `swarm_name` what its owner
+calls it, on every event of that build, whoever wrote the line: a `yield` is
+written by whichever waiter measured the holder, often another swarm's. Both
+are null only for a holder whose record could not be read.
 
 `phase` is `$SWARM_PHASE` (null outside a worker); `argv` is at most 300
-characters. `repo` is the repository a queued build works in, by the swarm's
-name for it (see *Pairing rules*; logged under `pair = "any"` too), on every
-event of that build; it is null when the working directory is in no git
+characters. `repo` is the repository a queued build works in, by its own
+swarm's name for it (its path in that swarm's project; see *Pairing rules*;
+logged under `pair = "any"` too), on every event of that build; it is null when the working directory is in no git
 checkout, and for a light command. `yield` and `unyield` carry the `id`, `pid` and `slot` of the build
 they are about and are written by whoever measured it; a build that ends while
 set aside gets no `unyield` (its `end` closes the stretch), and a `yield` after
@@ -1507,7 +1614,9 @@ or when the slot is next taken).
 **gc and the gate.** gc deletes build output, so it holds every build slot
 exclusively while it works, and the kernel grants that only while no build is
 alive on any of them: set aside as idle or not, started by an older `swarm
-build` or not, a process a build left behind included. It gets there through
+build` or not, a process a build left behind included. The slots are the
+machine's, so that is no build of any swarm: a gc deletes only its own swarm's
+build output, but the disk the builds strain is one. It gets there through
 the queue, as a waiter that runs alone, and never by taking slots one at a
 time. (It used to: with two slots it took slot 0, waited its ten minutes for a
 long build on slot 1, gave up, and did the same at the next interval. A third
@@ -1524,8 +1633,9 @@ of one slot's time went to a gc that never ran.)
   more:** no build queued after it starts, the builds that are running end,
   and gc runs. That is what lets it run with two slots under constant load,
   where the gate is otherwise never empty and the disk fills. It holds builds
-  back only for builds at work: while a holder set aside as idle, a process a
-  build left behind, or a slot held from outside the queue is in the way,
+  back only for builds at work: while a holder set aside as idle, one whose
+  swarm is frozen, a process a build left behind, or a slot held from outside
+  the queue is in the way,
   nobody knows when the gate will be empty, and builds go on passing.
 - **When its wait is over** it leaves the queue (`left`), the supervisor logs
   `GC-AUTO-SKIP … busy` with what was still alive, and tries again ten
@@ -1546,7 +1656,15 @@ and one shared slot, and it too holds nothing while it queues.
 
 **`swarm build --status [--json]`** shows the holders, the queue in the order it
 would start with ETAs, and the last builds with their wait and run times;
-`swarm status` and `swarm doctor` carry a one-line summary. Holders that were
+`swarm status` and `swarm doctor` carry a one-line summary. All three show
+every swarm's builds, since the gate is the machine's
+(`build gate: 2 slot(s) on this machine, 1 busy, …`), and put the swarm's name
+in front of a build, a waiter or a gc that is another swarm's:
+``slot 0: [glasheim] W3 `cargo nextest run` running 4m``. A holder whose swarm
+is frozen reads `frozen with its swarm`. In `--json` every holder, waiter, gc
+and finished call carries `swarm`, `swarm_name` and `mine` (is it the swarm
+that asked), a holder also `frozen`, and the top level carries the `swarm` and
+`swarm_name` of the swarm that asked. Holders that were
 set aside are listed apart (`yielded: P-7 … yielded after 2m30s idle, still
 running 12m`; `yielded` in `--json`, and every build alive under `builds`), a
 build that ended while one of its processes still holds the slot is marked so,
@@ -1575,19 +1693,22 @@ should not wait ten behind a compile); its log starts with `# light command
 (...): not queued for a build slot`, and the build event log records it as a
 `bypass`.
 
-**Sizing.** `[build].jobs` and `max_concurrent` describe the host the swarm runs
-on. Derive them from that machine's cores and memory (one build's peak memory
-times `max_concurrent` must fit with room to spare; `jobs` times
-`max_concurrent` should not exceed the cores), never copy them from another
-machine's config.
+**Sizing.** `max_concurrent` describes the machine, and a project's
+`[build].jobs` is its share of the cores for one build. Derive them from the
+host's cores, memory and disk (one build's peak memory times `max_concurrent`
+must fit with room to spare; each project's `jobs` times `max_concurrent`
+should not exceed the cores, and the other swarms' `jobs` count toward the
+same total), never copy them from another machine's files.
 
 ## Resource tracking (`swarm resources`)
 
-Whether `[build].max_concurrent`, `[build].jobs` or `[swarm].max_workers` can go
-up is a question about what a build and a worker actually take on this host.
+Whether the machine's `max_concurrent` (`machine.toml`), or a project's
+`[build].jobs` or `[swarm].max_workers`, can go up is a question about what a
+build and a worker actually take on this host.
 The supervisor answers it with a sampler thread of its own
 (`resources/sampler.py`), started with the loop and stopped with it. It only
-reads `/proc` and the state dir, and writes under `<state>/meters/`.
+reads `/proc`, the state dir and the build gate's files in the machine
+directory, and writes under `<state>/meters/`.
 
 - **Cadence.** Every second it makes a cheap check: has the gate's event log
   grown, does anyone hold a build slot? While a build runs it takes a full sample
@@ -1608,7 +1729,8 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   the state dir, the worktrees and each shared build cache (`cache/target/*`,
   resolved), and the growth per hour between two measurements.
 - **Builds** (`resources/builds.py`): the build holding each slot comes from the
-  gate's event log, `buildsem/events.jsonl` (`queued`, `start` with the build's
+  gate's event log, `buildsem/events.jsonl` in the machine directory, which
+  holds every swarm's builds (`queued`, `start` with the build's
   pid, `end` with its run time and exit code, `yield`/`unyield` when the gate
   sets an idle build aside or counts it again; a `start` whose process has been
   gone for five seconds counts as ended, since a SIGKILLed build writes no
@@ -1617,7 +1739,14 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   the slot file's `flock` holder, read from `/proc/locks`, is the build. Each
   sample sums over the build's process tree: CPU seconds (live processes'
   `utime+stime+cutime+cstime`, which counts reaped compiler processes once),
-  anon and total RSS, and storage IO from `/proc/<pid>/io`.
+  anon and total RSS, and storage IO from `/proc/<pid>/io`. The gate is the
+  machine's, so every swarm's builds are in that log and every one is measured:
+  that is what takes a neighbour's build out of "everything else on the host".
+  Each build carries `swarm`, `swarm_name` and `mine` (is it this swarm's). A
+  sample row keeps `nb` (builds alive on the machine) and `b` (each one's
+  cores and anon memory, by id) and adds `bo`, the ids among them that are
+  another swarm's (absent when there is none). A build nobody names (found by
+  its lock alone) counts as this swarm's, so that some supervisor reports it.
 - **Sessions** (`resources/ptree.py`): each process is labelled once from its
   environment (`SWARM_STATE_DIR` of this run, `SWARM_SESSION_ID`), children
   inherit it. A worker's figures leave its builds out (they are the build's) and
@@ -1633,27 +1762,36 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   heavy build gets a row in `meters/builds.jsonl`: id, phase, argv, cwd, wait,
   run time, exit, CPU seconds, average and peak cores, peak anon and total RSS of
   the tree, the lowest `MemAvailable` and the highest pressure during it, IO,
-  and `yielded_s`: how long the gate had it set aside as idle.
+  `yielded_s` (how long the gate had it set aside as idle), and whose it was:
+  `swarm`, `swarm_name`, `mine`. The rows are every swarm's builds on this
+  machine, each swarm's sampler keeping its own copy.
   Byte caps (48, 32 and 8 MiB) win over the age limits. `<state>/resources-now.json`
-  holds the latest sample, what is running and the sampler's own cost.
-- **Idle holders.** A heavy build that holds a slot for `[resources].idle_s`
+  holds the latest sample, what is running and the sampler's own cost: the
+  builds on the machine's gate (each with `swarm`, `swarm_name`, `mine`), how
+  many wait (`queued`, of which `queued_mine` are this swarm's), and this
+  swarm's sessions and idle holders.
+- **Idle holders.** A heavy build of this swarm that holds a slot for `[resources].idle_s`
   (default 600) with its whole tree under 1% of a core shows in `swarm status`,
   as a `swarm doctor` WARN, in the dashboard's resources box, and is recorded
   for the Overseer's next summary (again hourly while it stays idle). The report says what the gate did about
   it: its slot was released (the gate set it aside, so builds start beside it),
   or it was kept and why (a command that never yields). This is a report only;
   setting a holder aside is the gate's own doing, by its own measurement, long
-  before this warning. The gate's own holder record (`buildsem/seatK`, or
-  `slotN` for a gate from before seats) confirms it first: a record saying the
-  build ended, or naming another build, means the sampler missed an `end` and
-  nothing is reported; a matching one supplies the phase and command. Nothing
-  is killed.
+  before this warning. The gate's own holder record (`seatK` in the machine's
+  `buildsem/`, or `slotN` for a gate from before seats) confirms it first: a
+  record saying the build ended, or naming another build, means the sampler
+  missed an `end` and nothing is reported; a matching one supplies the phase
+  and command. Nothing is killed. Another swarm's idle build is that swarm's
+  supervisor's to report: here it is only shown as idle, under its swarm's
+  name, or the owner would hear of one build once per swarm.
 - **Cost.** The thread's CPU time (`time.thread_time`) and `du`'s (from
   `wait4`) are published in the snapshot, with the bytes written per day. On a
   24-core host with a few hundred processes a full sample costs about 5 ms, so
   1 s sampling is about half a percent of one core while building.
-- **`swarm resources`** prints now (host, each build, each session; a build the
-  gate has set aside reads `YIELDED 12m`), the last day as sparklines, the
+- **`swarm resources`** prints now (host, each build on the machine's gate,
+  each session of this swarm; a build the gate has set aside reads
+  `YIELDED 12m`, and another swarm's build has that swarm's name in front of
+  its phase, `[glasheim] W3`), the last day as sparklines, the
   finished builds with the worst peaks (with a `yielded` column), the builds
   that sat idle longest and how long in all, and a capacity
   section: p95 per heavy build and per worker, and what 2 concurrent builds, 8
@@ -1661,6 +1799,15 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   the rest left to page cache and the kernel) and cores, with the arithmetic shown
   and the data called thin under 5 builds or an hour of worker samples. `--json`
   for scripts.
+- **Whose load.** The capacity arithmetic is about the machine's gate, so its
+  builds are builds of any swarm: the build figure comes from every measured
+  build, a neighbour's included (the section says how many were), and
+  `max_concurrent` is the machine's limit. The workers are this swarm's, and
+  `jobs` and `max_workers` this project's settings. "Everything else on the
+  host" holds no swarm's builds, since each sample's builds are taken out of
+  it whoever they belong to, and it does hold the other swarms' sessions. So
+  every swarm on the machine reaches the same answer to "would another build
+  fit", from the same builds.
 
 ## Stop hook, recaps, notes and the report
 
@@ -1831,10 +1978,11 @@ and exits 1 if any check FAILs. It checks:
   - `--transcripts`: orphan worker transcripts in `~/.claude/projects`;
   - `--branches`: merged `swarm/*` branches;
   - `--canonical`: paths inside the project's own repos.
-- **Safety:** it holds every build-gate slot while it deletes, which it gets by
-  waiting its turn in the build queue (see *gc and the gate*), refuses while a
-  compiler runs in a tree it would touch (unless `--force`), and re-checks every
-  path at delete time against a protected list.
+- **Safety:** it holds every slot of the machine's build gate while it deletes,
+  so no build of any swarm runs during the sweep. It gets them by waiting its
+  turn in the build queue (see *gc and the gate*), refuses while a compiler
+  runs in a tree it would touch (unless `--force`), and re-checks every path at
+  delete time against a protected list.
 - **Automatic runs:** the supervisor runs a conservative gc by itself (`[gc]`) at
   most every 15 minutes, plus once per idle stretch, and never during a build.
   It never keeps a build slot while it waits for another.
@@ -1926,8 +2074,10 @@ strip at the top lists them; the footer keeps the other keys, and `?` lists all)
      (the last day of 5-hour, the current week) with the caps drawn across it;
    - **resources:** the resource sampler's latest reading: CPU, memory
      (available, anon, page cache), swap, pressure, disk write rate and free
-     space, and each running build (an idle holder in red, or in yellow once
-     the gate has released its slot). History and capacity are `swarm resources`;
+     space, and each build running on the machine's gate (an idle holder of
+     this swarm in red, or in yellow once the gate has released its slot;
+     another swarm's build under that swarm's name, muted). History and
+     capacity are `swarm resources`;
    - **alerts & notifications:** what needs you (`◆`), what is wrong now (the
      footer's list, and any warning or failure from the last doctor run), then
      every ping newest first: `✓` delivered, `·` held, `✗` never arrived.
@@ -2280,15 +2430,16 @@ place.
 
 **The machine directory** is `machine/` in the state root
 (`machine.directory()`), beside the swarms' state dirs: the place for run
-state that every swarm on the machine shares. Nothing is kept in it yet. It
+state that every swarm on the machine shares. The build gate is kept in it,
+`machine/buildsem/` ([Build gate](#build-gate-swarm-build)). It
 moves with the state root, so a test that redirects a run's state redirects
 what the run shares too. No swarm can take its name: `[swarm].slug =
 "machine"` is refused.
 
 **The machine file** is `machine.toml` in the user's config folder, for
 settings that are true of the box whichever project asks
-([docs/config.md](config.md#the-machine-file-machinetoml)). `machine.settings()`
-reads it.
+([docs/config.md](config.md#the-machine-file-machinetoml)): the build gate's
+limits, `[build]`. `machine.settings()` reads it.
 
 **The registry** is the list of swarms, `machine.swarms()`, and `swarm ls`
 prints it. No file holds it: it is read from the state root each time, one

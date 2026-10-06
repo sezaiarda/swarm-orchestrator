@@ -150,6 +150,34 @@ def _kill_orphan_fakes(state_dir: Path) -> None:
             continue  # exited mid-scan, or not ours to read
 
 
+def machine_toml(env: dict | None = None, **tables: dict) -> Path:
+    """Write the machine file the swarms of a test read, and return its path:
+    ``machine_toml(build={"max_concurrent": 1})``. It goes to the config home of
+    ``env`` (this process's when none is given), which is where a ``swarm``
+    started with that environment looks. A table that is not named keeps what
+    the file had; a named one keeps its other keys."""
+    import tomllib
+
+    home = (os.environ if env is None else env)["XDG_CONFIG_HOME"]
+    path = Path(home) / "swarm-orchestrator" / "machine.toml"
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    for table, keys in tables.items():
+        data.setdefault(table, {}).update(keys)
+    lines = []
+    for table, keys in data.items():
+        lines.append(f"[{table}]")
+        # json writes a bool, a number, a string and a list of strings as TOML reads them
+        lines.extend(f"{key} = {json.dumps(value)}" for key, value in keys.items())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
 def pytest_configure(config) -> None:
     config.addinivalue_line(
         "markers",

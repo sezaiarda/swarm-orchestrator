@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import machine_toml
 
 from swarm_orchestrator import gc as gc_mod
 from swarm_orchestrator import gitq, launch, ovrecord, resolver
@@ -46,7 +47,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
     monkeypatch.setenv("SWARM_SLUG", "gctest")
     monkeypatch.setenv("SWARM_DRIVER", "bare")
-    monkeypatch.setenv("SWARM_BUILD_MAX", "1")
+    machine_toml(build={"max_concurrent": 1})
     for leak in ("SWARM_GIT_ISOLATION", "SWARM_WORKER_CMD", "SWARM_READY_MARKER"):
         monkeypatch.delenv(leak, raising=False)
     c = load(project_dir=str(project))

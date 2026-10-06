@@ -214,14 +214,14 @@ def test_up_gives_the_supervisor_its_state_dir_and_none_of_a_sessions_marks(two_
     a.env.update({"SWARM_SESSION_ID": "worker:P9", "SWARM_PHASE": "P9",
                   "SWARM_PROJECT": str(a.project), "SWARM_OWNER_CONSOLE": "1",
                   "SWARM_OPERATOR_JOB": "job", "TMPDIR": str(cfg_tmp),
-                  "SWARM_BUILD_MAX": "3"})
+                  "SWARM_BUILD_JOBS": "3"})
     env = _environ(_up(a))
     assert env["SWARM_STATE_DIR"] == str(a.state_dir)
     for key in ("SWARM_SESSION_ID", "SWARM_PHASE", "SWARM_PROJECT", "SWARM_OWNER_CONSOLE",
                 "SWARM_OPERATOR_JOB", "TMPDIR"):
         assert key not in env, key
     # The owner's own override, typed before `swarm up`, is not a session's mark.
-    assert env["SWARM_BUILD_MAX"] == "3"
+    assert env["SWARM_BUILD_JOBS"] == "3"
 
 
 def test_a_supervisor_started_by_restart_is_given_its_state_dir_too(two_swarms):
@@ -238,7 +238,7 @@ def test_a_supervisor_started_by_restart_is_given_its_state_dir_too(two_swarms):
 def test_the_build_caps_are_a_sessions_only_inside_a_mirror(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     cfg = load(project_dir=str(tmp_path))
-    caps = {"SWARM_BUILD_MAX": "1", "SWARM_BUILD_JOBS": "4", "CARGO_BUILD_JOBS": "4"}
+    caps = {"SWARM_BUILD_JOBS": "4", "CARGO_BUILD_JOBS": "4"}
     assert restart.clean_env(cfg, {**caps, "PATH": "/bin"}) == {**caps, "PATH": "/bin"}
     assert restart.clean_env(cfg, {**caps, "PATH": "/bin", "SWARM_WORKTREE": "/wt/P1"}) \
         == {"PATH": "/bin"}
@@ -375,8 +375,9 @@ def test_a_command_typed_inside_a_project_reaches_its_swarm_not_one_of_its_own(t
     assert _swarm(a.env, inside, "build", "--", "true").returncode == 0
     assert _swarm(a.env, inside, "pause").returncode == 0
     assert a.wait(lambda: a.state()["paused"], timeout=10)
-    assert [d.name for d in (_state_root(a) / "swarm-orchestrator").iterdir()] \
-        == [a.state_dir.name]
+    # Its own state dir, and the machine directory, where the build gate is.
+    assert sorted(d.name for d in (_state_root(a) / "swarm-orchestrator").iterdir()) \
+        == sorted([a.state_dir.name, "machine"])
 
 
 #: Commands that only read. None of them may leave a run behind for a project

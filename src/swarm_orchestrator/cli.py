@@ -1768,11 +1768,12 @@ def cmd_lesson(cfg: Config, phase: str, text: str, title: str) -> int:
 def cmd_build(cfg: Config, argv: list[str], *, status: bool = False, as_json: bool = False,
               timeout: str | None = None, script: str | None = None,
               hold: bool = False) -> int:
-    """Run a build command through the swarm-wide gate (see :mod:`buildsem`).
+    """Run a build command through the machine's build gate (see :mod:`buildsem`).
 
     A worker's cwd is a worktree, whose ``.swarm.toml`` may not be the project's:
     :func:`_load_config` reads the project's own file for it, so a ``[build]``
-    edit reaches the next call (frozen env overrides still win).
+    edit reaches the next call (frozen env overrides still win). The gate's
+    limits are not in that file: they are the machine's (``machine.toml``).
     """
     if status:
         from . import buildstatus
@@ -3047,27 +3048,31 @@ def _build_parser() -> argparse.ArgumentParser:
     rsm.set_defaults(func=lambda cfg, a: cmd_resume(cfg, a.override_cap))
 
     bp = sub.add_parser(
-        "build", help="run a build command through the concurrency gate",
+        "build", help="run a build command through the machine's build gate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Run COMMAND once it is its turn: at most [build].max_concurrent heavy builds\n"
-            "run at once, swarm-wide, and the rest wait in arrival order. A build that\n"
-            "usually finishes within [build].short_s may go ahead of a long one, but no\n"
-            "long one is passed more than [build].overtake times.\n\n"
+            "run at once on this machine, whichever swarm started them, and the rest wait\n"
+            "in arrival order. A build that usually finishes within [build].short_s may go\n"
+            "ahead of a long one, but no long one is passed more than [build].overtake\n"
+            "times. The gate's limits are the machine's: [build] in machine.toml, not in\n"
+            "a project's .swarm.toml.\n\n"
             "Light commands (no compile: git, ls, cargo update/metadata/fmt/tree,\n"
             "docker buildx bake --print, python scripts that start no processes...) run\n"
             "at once without queueing. Unknown commands count as heavy.\n\n"
             "Before queueing, a heavy command is checked: its program, a `cd` target, a\n"
             "-f/--file or --manifest-path, a Cargo.toml / Makefile / bake file must exist.\n\n"
-            "While queued it prints (stderr) its place, who holds each slot and for how\n"
-            "long, and an estimated start; then 'queued Xs, starting' and 'ran Ys, exit N'.\n"
+            "While queued it prints (stderr) its place, who holds each slot (with the\n"
+            "swarm's name, for another swarm's build) and for how long, who is ahead, and\n"
+            "an estimated start; then 'queued Xs, starting' and 'ran Ys, exit N'.\n"
             "The exit code is the command's (124 on --timeout).\n\n"
             "A build whose whole process tree does nothing for [build].idle_yield_s is set\n"
             "aside: it keeps running, but the next build starts beside it. It is told so\n"
             "on stderr, then and when it ends. --hold keeps the slot regardless.\n\n"
             "With [build].pair = \"distinct-repo\" two builds in one repository never run\n"
             "at once, and an image build ([build].alone), a --hold or a build outside any\n"
-            "git checkout runs with no build beside it. --status says why a build waits."),
+            "git checkout runs with no build beside it. --status says why a build waits,\n"
+            "and shows every swarm's builds: the gate is one for the machine."),
         epilog=(
             "several steps in one turn:\n"
             "  swarm build -- sh -c 'cargo clippy -- -D warnings && cargo nextest run'\n"
@@ -3081,7 +3086,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "any timeout of whatever runs `swarm build`: killing a queued call loses its place."),
     )
     bp.add_argument("--status", action="store_true",
-                    help="show holders, the queue and recent builds, then exit")
+                    help="show the machine's gate: holders, the queue and recent builds"
+                         " of every swarm, then exit")
     bp.add_argument("--json", action="store_true", help="with --status: machine-readable")
     bp.add_argument("--timeout", metavar="DURATION",
                     help="stop the build this long after it STARTS (600, 90s, 10m, 1h30m)")
@@ -3487,7 +3493,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if _refused_frozen(cfg, args.command):
         return 1
-    return args.func(cfg, args)
+    try:
+        return args.func(cfg, args)
+    except machine_mod.SettingsError as exc:
+        # A session's command got past a machine.toml that does not read, on the
+        # settings its swarm runs on, and then needed one of the machine's.
+        print(f"swarm: config error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

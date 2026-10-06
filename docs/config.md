@@ -11,7 +11,12 @@ command is typed in upward, and refuses every command where there is none (see
 [docs/cli.md](cli.md)).
 
 A key the loader does not read is ignored, so a file that still sets a retired
-key (`[worker].done_hook`, `[tasks].roadmap`) loads unchanged.
+key (`[worker].done_hook`, `[tasks].roadmap`) loads unchanged. The one exception
+is a limit of the build gate that has moved to [the machine file](#the-machine-file-machinetoml)
+(`[build]` `max_concurrent`, `short_s`, `overtake`, `idle_yield_s`,
+`idle_yield_max`, `pair`, `alone`): a `.swarm.toml` that still sets one does not
+load, and the error names the key and `machine.toml`. Ignoring it would leave
+the owner believing in a limit that is not in force.
 
 **Precedence:** an environment variable, when set, beats the file, which beats the
 default. An integer that does not parse falls back to the next source instead of
@@ -247,44 +252,21 @@ prepare_if = { "app" = "sh scripts/sync-deps.sh --check" }
 
 ## `[build]`
 
+What describes this project's builds. The gate they queue at is one for the
+whole machine, shared with every other swarm on it, so its limits (how many
+builds at once, the queue's rule, idle yield, the pairing rules) are not here:
+they are [`[build]` in `machine.toml`](#build-1).
+
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
-| `max_concurrent` | `2` | `SWARM_BUILD_MAX` | next | The most heavy `swarm build` commands that run at once; the rest queue. `0` turns the gate off; builds still get the jobs cap. |
 | `jobs` | `6` | `SWARM_BUILD_JOBS` | next | `CARGO_BUILD_JOBS` for a `cargo` run through `swarm build`, and for every worker under worktree isolation. `0` means no cap. |
 | `cache` | `true` | `SWARM_BUILD_CACHE` | next | Point each Rust worktree's `target/` at one shared per-repo cache, `<state>/cache/target/<repo>`. This happens only where the repo gitignores `target`. With it comes a cargo config for every build under the state dir, `<state>/.cargo/config.toml`, whose `build.rustc-wrapper` keeps a test built in one mirror able to start its binary after that mirror is removed; it takes the place of a `rustc-wrapper` from your own cargo config there ([components.md](components.md#worktree-isolation-and-mirrors)). |
 | `heavy` | `[]` | `SWARM_BUILD_HEAVY` | hot | Command patterns that always queue, over the built-in rules. A pattern is a command prefix whose words are globs (`"cargo check"`, `"scripts/*.sh"`). Heavy wins over light. |
 | `light` | `[]` | `SWARM_BUILD_LIGHT` | hot | Command patterns that never queue (`"bun run lint*"`). Only for commands that compile, bundle and build nothing, and that are small enough to run beside a build: measure one first (CPU, peak memory, bytes written). The landing's lane check reads it too, so a `[lanes].check` named here starts without a build slot. |
-| `short_s` | `60` | `SWARM_BUILD_SHORT_S` | hot | A command whose last runs took at most this long (median, from the gate's log) counts as short and may go ahead of long ones. |
-| `overtake` | `2` | `SWARM_BUILD_OVERTAKE` | hot | How many short builds may go ahead of one long build that is waiting. `0` is plain first-come, first-served. |
-| `idle_yield_s` | `150` | `SWARM_BUILD_IDLE_YIELD_S` | hot | A build that holds a slot while its whole process tree does nothing (under 5% of a core and next to no disk IO) for this long is set aside: it keeps running, but stops counting against `max_concurrent`, so the next waiting build starts beside it. If it starts working again it counts again. Commands whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield, nor does one started with `swarm build --hold`. `0` turns this off. |
-| `idle_yield_max` | `2` | `SWARM_BUILD_IDLE_YIELD_MAX` | hot | The most idle holders set aside at once; a further idle holder keeps its slot and the queue waits, as it would with `idle_yield_s = 0`. The builds alive at one time never exceed `max_concurrent` plus this. `0` also turns idle yield off. |
-| `pair` | `"any"` | `SWARM_BUILD_PAIR` | hot | Which builds may run side by side. `"any"`: whatever fits in `max_concurrent`. `"distinct-repo"`: a build starts only if no build alive is in the same repository, and a build that must run alone (`alone` below, `swarm build --hold`, a build in no git checkout) starts only when no build is alive and keeps the gate to itself. Any other value is read as `"distinct-repo"`. |
-| `alone` | `["docker", "docker-compose", "docker-buildx", "podman", "podman-compose", "buildah", "nerdctl", "buildctl"]` | `SWARM_BUILD_ALONE` | hot | Under `pair = "distinct-repo"`: command patterns (as for `heavy`) that run with no other build beside them, where the command is heavy. The default is the image-build family: `docker build`, `buildx bake`, `compose build`/`up`, `run`, but not `docker ps` or `bake --print`. A build that turns out to run one of them (a script that could not be read) is alone from that moment. `[]` leaves only the repo rule. |
 
-`jobs` and `max_concurrent` describe the machine the swarm runs on. Derive them
-from that host's cores and memory (roughly: one build's peak memory times
-`max_concurrent` must fit with room to spare, and `jobs` times `max_concurrent`
-should not exceed the cores); never copy them from another machine's file.
-
-`pair = "distinct-repo"` is for a machine where two builds are fine but not any
-two: the disk, not the cores, is what builds strain. It only ever makes a build
-wait. A waiter the rules hold back is passed by one they allow, out of the
-`overtake` budget (each waiter at most `overtake` times, for whatever reason),
-and a build that must run alone is never passed once it is the oldest waiter;
-`swarm build --status` says why each waiter waits. The rules count every build
-alive, also one set aside as idle: it keeps its repo, and a build that runs
-alone waits for it to end. A `swarm build` already queued keeps the value it
-queued with. How a repo is told, what "alone" covers and what a script can
-hide: [components.md](components.md#build-gate-swarm-build).
-
-`idle_yield_s` trades waiting for overlap. A set-aside build that wakes up runs
-beside whatever started in its place until one of them ends, so for that time
-more than `max_concurrent` builds work at once. Size memory for
-`max_concurrent + idle_yield_max` builds alive, or lower `idle_yield_max`. The
-default window is well above the pauses a working build has (between compile
-and test, behind a lock) and well below the holds worth freeing (a script
-waiting out a 20-minute timeout); a tool that sits silent for minutes before
-it starts real work will yield and then wake, which a longer window avoids.
+`jobs` is this project's share of the cores for one build. The machine allows
+`max_concurrent` builds at once, of any swarm, so `jobs` times that should not
+exceed the cores; the other swarms' `jobs` count toward the same total.
 
 ## `[operator]`
 
@@ -429,14 +411,77 @@ for the user who runs the swarms:
   ignores a key it does not know: this file holds the limits that protect the
   machine, and a mistyped key would otherwise leave the default in force with
   nothing to say so.
-- It is read each time a command asks for it, and nothing caches it.
+- It is read again whenever it changes. A swarm that is running follows an
+  edit without a reload or a restart: the next time it looks at a limit, it has
+  the new one. If the file stops reading as settings while a swarm runs, every
+  new command stops with the error, and a process that had read the sound file
+  keeps the values it read until the file is fixed.
 
-It has no tables yet: every key the tool has today describes a project. Each
-table is listed here when it is added, under a third-level heading with the
-table's name and one row per key (key, default, environment variable,
-meaning). The keys are declared once, on the `Settings` class in
-`src/swarm_orchestrator/machine.py`, and a test checks this section against
-that class.
+Each table is listed here under a third-level heading with the table's name and
+one row per key (key, default, environment variable, meaning). The keys are
+declared once, on the `Settings` class in `src/swarm_orchestrator/machine.py`,
+and a test checks this section against that class.
+
+### `[build]`
+
+The build gate: one for the machine. Every heavy `swarm build` of every swarm
+queues at it, first come first served, so these limits hold across swarms: with
+`max_concurrent = 2` two swarms run two builds between them, not two each. The
+gate's files are in the machine directory, `<state root>/machine/buildsem/`.
+How it works: [components.md](components.md#build-gate-swarm-build).
+
+None of these keys has an environment variable. A limit one process could
+raise for itself would not be the machine's. `SWARM_BUILD_MAX`,
+`SWARM_BUILD_SHORT_S`, `SWARM_BUILD_OVERTAKE`, `SWARM_BUILD_IDLE_YIELD_S`,
+`SWARM_BUILD_IDLE_YIELD_MAX`, `SWARM_BUILD_PAIR` and `SWARM_BUILD_ALONE` are no
+longer read; a session that still carries one is not affected by it.
+
+| key | default | env | meaning |
+|---|---|---|---|
+| `max_concurrent` | `2` | — | The most heavy `swarm build` commands that run at once on this machine, whichever swarms started them; the rest queue. `0` turns the gate off for every swarm; builds still get their project's jobs cap. |
+| `short_s` | `60` | — | A command whose last runs took at most this long (median, from the gate's log of that swarm's own builds) counts as short and may go ahead of long ones. |
+| `overtake` | `2` | — | How many short builds may go ahead of one long build that is waiting, whichever swarms they belong to. `0` is plain first-come, first-served. |
+| `idle_yield_s` | `150` | — | A build that holds a slot while its whole process tree does nothing (under 5% of a core and next to no disk IO) for this long is set aside: it keeps running, but stops counting against `max_concurrent`, so the next waiting build starts beside it. If it starts working again it counts again. Commands whose work runs in a daemon (`docker build`, `sccache`, `bazel`…) never yield, nor does one started with `swarm build --hold`. A build whose swarm is frozen (`swarm freeze`) does not wait this long: it is set aside at the first quiet sample. `0` turns this off. |
+| `idle_yield_max` | `2` | — | The most idle holders set aside at once; a further idle holder keeps its slot and the queue waits, as it would with `idle_yield_s = 0`. The builds alive at one time never exceed `max_concurrent` plus this. `0` also turns idle yield off. |
+| `pair` | `"any"` | — | Which builds may run side by side. `"any"`: whatever fits in `max_concurrent`. `"distinct-repo"`: a build starts only if no build alive, of any swarm, is in the same repository, and a build that must run alone (`alone` below, `swarm build --hold`, a build in no git checkout) starts only when no build is alive and keeps the gate to itself. Any other value is an error. |
+| `alone` | `["docker", "docker-compose", "docker-buildx", "podman", "podman-compose", "buildah", "nerdctl", "buildctl"]` | — | Under `pair = "distinct-repo"`: command patterns (as for a project's `heavy`) that run with no other build beside them, where the command is heavy. The default is the image-build family: `docker build`, `buildx bake`, `compose build`/`up`, `run`, but not `docker ps` or `bake --print`. A build that turns out to run one of them (a script that could not be read) is alone from that moment. `[]` leaves only the repo rule. |
+
+`max_concurrent` describes the machine. Derive it from the host's cores, memory
+and disk (roughly: one build's peak memory times `max_concurrent` must fit with
+room to spare, and each project's `jobs` times `max_concurrent` should not
+exceed the cores); never copy it from another machine's file.
+
+`pair = "distinct-repo"` is for a machine where two builds are fine but not any
+two: the disk, not the cores, is what builds strain. It only ever makes a build
+wait. A repository is known by its place on the machine, so the rule holds
+between swarms: two swarms whose projects hold the same checkout never build
+in it at once, and two projects are never taken for one because each calls its
+own repo `.`. A waiter the rules hold back is passed by one they allow, out of
+the `overtake` budget (each waiter at most `overtake` times, for whatever
+reason), and a build that must run alone is never passed once it is the oldest
+waiter; `swarm build --status` says why each waiter waits. The rules count
+every build alive, also one set aside as idle: it keeps its repo, and a build
+that runs alone waits for it to end. How a repo is told, what "alone" covers
+and what a script can hide:
+[components.md](components.md#build-gate-swarm-build).
+
+`idle_yield_s` trades waiting for overlap. A set-aside build that wakes up runs
+beside whatever started in its place until one of them ends, so for that time
+more than `max_concurrent` builds work at once. Size memory for
+`max_concurrent + idle_yield_max` builds alive, or lower `idle_yield_max`. The
+default window is well above the pauses a working build has (between compile
+and test, behind a lock) and well below the holds worth freeing (a script
+waiting out a 20-minute timeout); a tool that sits silent for minutes before
+it starts real work will yield and then wake, which a longer window avoids.
+
+A swarm that is frozen (`swarm freeze`) keeps its builds' seats: they are alive
+and will resume, so nothing takes a seat from them. They are set aside as idle
+at once, up to `idle_yield_max` of them, so the other swarms' builds do not
+wait on a swarm that stands still; at the thaw they count again, beside
+whatever started meanwhile. With `idle_yield_max = 0`, or for a build that
+never yields (`--hold`, a daemon's client), a frozen build keeps its slot until
+its swarm is thawed or stopped, and `swarm build --status` names it. Its
+waiters keep their places in the queue and are passed over until they wake.
 
 ## Environment-only variables
 

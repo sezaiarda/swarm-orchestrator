@@ -9,11 +9,13 @@ demo fixture with ``fake-master.sh`` playing the Overseer.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import time
 
 import pytest
+from conftest import machine_toml
 
 from swarm_orchestrator import ovdigest, ovrecord
 from swarm_orchestrator import notes as notes_mod
@@ -163,6 +165,89 @@ def test_the_digest_writes_a_markdown_and_a_json_twin(cfg):
     assert md.name == "digest-20260923T100000Z.md" and md.is_file()
     twin = json.loads(md.with_suffix(".json").read_text())
     assert twin["context"]["free_slots"] == [0, 1]
+
+
+def _hold_seat(cfg, seat: int, **rec):
+    """A build alive on the machine's gate: its seat record, and the lock a
+    build keeps on it. Returns the descriptor that holds the lock."""
+    cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
+    path = cfg.buildsem_dir / f"seat{seat}"
+    path.write_text(json.dumps({"v": 1, "seat": seat, "slot": seat, "ended": None,
+                                "pid": os.getpid(), "start_ts": time.time() - 600, **rec}))
+    fd = os.open(path, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def test_the_digest_says_whose_builds_hold_the_gate_and_who_else_is_on_the_box(cfg, tmp_path):
+    """The box and its build gate are shared. The digest names the other swarms
+    on the machine and says, for each build on the gate, whose it is."""
+    machine_toml(build={"max_concurrent": 2})
+    far = cfg.state_dir.parent / "glasheim-1a2b"  # another swarm's state dir, beside this one
+    far.mkdir()
+    (tmp_path / "glasheim").mkdir()
+    (far / "config.json").write_text(json.dumps(
+        {"name": "glasheim", "project_dir": str(tmp_path / "glasheim")}))
+    held = [
+        _hold_seat(cfg, 0, id="own", swarm=cfg.state_dir.name, swarm_name=cfg.name,
+                   phase="P1", argv="cargo build"),
+        _hold_seat(cfg, 1, id="far", swarm=far.name, swarm_name="glasheim", phase="W7",
+                   argv="cargo nextest run"),
+    ]
+    try:
+        data = ovdigest.build(cfg, state_mod.read(cfg), [], since=0.0)
+    finally:
+        for fd in held:
+            os.close(fd)
+    r = data["resources"]
+    assert r["swarms"] == [{"slug": far.name, "name": "glasheim", "status": "stopped"}]
+    assert r["gate"]["max_concurrent"] == 2
+    assert {(h["phase"], h["swarm_name"], h["mine"]) for h in r["gate"]["holders"]} == {
+        ("P1", cfg.name, True), ("W7", "glasheim", False)}
+    md = ovdigest.render(data)
+    section = md.split("## Resources")[1]
+    assert ("- build gate (the machine's, shared by every swarm on it): 2 build(s) on it,"
+            " 1 of them another swarm's; limit 2 at once; 0 waiting, 0 of them this swarm's"
+            ) in section
+    assert "  - this swarm, P1, 10m: cargo build" in section
+    assert "  - another swarm [glasheim], W7, 10m: cargo nextest run" in section
+    assert "theirs included): glasheim (stopped)" in section
+
+
+def test_the_digest_counts_the_waiting_builds_that_are_this_swarms(cfg, monkeypatch):
+    waiting = [{"id": i, "mine": mine} for i, mine in enumerate((True, False, False))]
+    holder = {"swarm": "glas-1", "swarm_name": "glasheim", "mine": False, "phase": "W7",
+              "state": "yielded", "frozen": True, "running_s": 7200.0, "argv": "bash wait.sh"}
+    nameless = dict(holder, swarm=None, swarm_name=None, state="active", frozen=False)
+    monkeypatch.setattr(ovdigest.buildstatus, "snapshot", lambda _cfg, n_recent=1: {
+        "max_concurrent": 1, "builds": [holder, nameless], "queue": waiting})
+    r = ovdigest.build(cfg, state_mod.read(cfg), [], since=0.0)["resources"]
+    assert (r["gate"]["queued"], r["gate"]["queued_mine"]) == (3, 1)
+    lines = ovdigest._gate_lines(r["gate"])
+    assert "1 of them another swarm's" in lines[0]
+    assert lines[0].endswith("3 waiting, 1 of them this swarm's")
+    assert lines[1] == ("  - another swarm [glasheim], W7, 2.0h: bash wait.sh; set aside as idle,"
+                        " does not count against the limit; frozen with its swarm")
+    assert lines[2].startswith("  - a swarm its record does not name, W7")
+    assert r["swarms"] == [] and "theirs included): none" in ovdigest.render(
+        ovdigest.build(cfg, state_mod.read(cfg), [], since=0.0))
+
+
+def test_a_gate_that_cannot_be_read_never_fails_the_digest(cfg, monkeypatch):
+    def broken(_cfg, n_recent=1):
+        raise OSError("the gate's files are gone")
+    monkeypatch.setattr(ovdigest.buildstatus, "snapshot", broken)
+    data = ovdigest.build(cfg, state_mod.read(cfg), [], since=0.0)
+    assert data["resources"]["gate"] is None
+    assert ("- build gate (the machine's, shared by every swarm on it): could not be read"
+            in ovdigest.render(data))
+    assert data["resources"]["mem_total"]  # the rest of the section is still there
+
+
+def test_a_gate_that_is_off_is_said_to_be_off(cfg):
+    machine_toml(build={"max_concurrent": 0})
+    md = ovdigest.render(ovdigest.build(cfg, state_mod.read(cfg), [], since=0.0))
+    assert "shared by every swarm on it): off, builds do not queue" in md
 
 
 def test_resources_flag_what_is_dangerous(cfg, tmp_path):

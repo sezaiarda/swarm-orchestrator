@@ -9,6 +9,18 @@ processes, and appends one row to ``meters/resources.jsonl``. One second while
 building because a peak sampled every few seconds reads low (a 2 s sampler
 missed a quarter of a 4 s ramp); fifteen idle because nothing is moving.
 
+**The gate is the machine's** (``<machine dir>/buildsem``), so the builds are
+those of every swarm on it, and every one is measured: that is what takes a
+neighbour's build load out of "everything else on the host". The sessions are
+this swarm's alone. A sample row says so in three keys: ``nb`` is the builds
+alive on the machine, ``b`` the cores and anon memory of each
+(``{id: [cores, anon MiB]}``), and ``bo`` the ids among them that are another
+swarm's (left out when there is none). The snapshot's ``queued`` counts every
+swarm's waiting builds and ``queued_mine`` this swarm's. Each supervisor
+reports its own: the idle-holder warning, and the snapshot's ``idle_holders``,
+are about this swarm's builds only, or the owner would hear of one idle build
+once per swarm.
+
 Rarer work rides the same loop: the disk headroom every minute, directory
 sizes every ten on a thread of their own (a ``du`` of a large build cache must
 never hold up a sample), compaction every hour. The thread's own CPU time is
@@ -47,7 +59,8 @@ _ERROR_LOG_S = 600.0
 
 
 class Sampler:
-    """Samples the host, the builds and the swarm's sessions (see module doc)."""
+    """Samples the host, the machine's builds and this swarm's sessions (see
+    module doc)."""
 
     def __init__(
         self,
@@ -66,7 +79,7 @@ class Sampler:
         self.host = host.HostReader(proc_root)
         self.attr = ptree.Attributor(cfg.state_dir, proc_root)
         self.book = builds_mod.BuildBook(
-            cfg.buildsem_dir, cfg.env_marker, proc_root,
+            cfg.buildsem_dir, cfg.state_dir.name, cfg.env_marker, proc_root,
             done_ids=store.recent_build_ids(cfg.state_dir))
         self.headroom = disk.Headroom(cfg.state_dir, cfg.resources_vhdx, wsl=wsl)
         self.boot = ptree.boot_time(proc_root)
@@ -166,6 +179,9 @@ class Sampler:
         if self.book.active:
             row["b"] = {bid: [round(b.cores, 2), round(b.anon_mb, 1)]
                         for bid, b in self.book.active.items()}
+            others = [bid for bid, b in self.book.active.items() if not b.mine]
+            if others:
+                row["bo"] = others
         workers = {k: v for k, v in groups.items() if k not in (ptree.INFRA, ptree.CONSOLE)}
         if workers:
             row["w"] = {k: [v["cores"], v["anon_mb"]] for k, v in workers.items()}
@@ -196,11 +212,11 @@ class Sampler:
 
     def _sessions(self, table: dict[int, ptree.Proc], labels: dict[int, str],
                   exclude: set[int], now: float) -> dict[str, dict]:
-        """Per swarm session: cores (own CPU of its live processes since the last
-        sample), anon and total RSS. Build trees are left out — they are counted
-        as builds — and a session's CPU is its processes' own time, not their
-        reaped children's, or a finished build would land on the worker whose
-        shell reaped it."""
+        """Per session of this swarm: cores (own CPU of its live processes since
+        the last sample), anon and total RSS. Build trees are left out — they are
+        counted as builds — and a session's CPU is its processes' own time, not
+        their reaped children's, or a finished build would land on the worker
+        whose shell reaped it."""
         by: dict[str, set[int]] = {}
         for pid, lab in labels.items():
             if pid not in exclude:
@@ -233,10 +249,14 @@ class Sampler:
             self._idle_pinged.pop(b.id, None)
 
     def _idle_holders(self, now: float, idle_s: float, cfg: Config) -> None:
+        """Mark every build that sits idle on the gate, and warn about this
+        swarm's own: a neighbour's is its own supervisor's to report."""
         for b in self.book.active.values():
             if not b.idle_for(now, idle_s) or not gate_holds(cfg, b):
                 continue
             b.idle_flagged = True
+            if not b.mine:
+                continue
             last = self._idle_pinged.get(b.id)
             if last is not None and now - last < IDLE_REPING_S:
                 continue
@@ -316,9 +336,10 @@ class Sampler:
             "source": self.book.source, "static": self.static,
             "host": self.last_row, "disk": self._disk, "dirs": self._dirs,
             "builds": builds, "queued": len(self.book.queued),
+            "queued_mine": self.book.queued_mine(),
             "workers": self.last_workers, "infra": self.last_infra,
             "console": self.last_console,
-            "idle_holders": [b for b in builds if b["idle"]],
+            "idle_holders": [b for b in builds if b["idle"] and b["mine"]],
             "idle_s": idle_s, "sampler": self.overhead(now),
             "files": store.sizes(self.state_dir),
         }

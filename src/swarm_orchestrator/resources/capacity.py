@@ -10,6 +10,16 @@ where *build* is a heavy build's peak anon memory (its whole process tree) and
 its average cores, *worker* is one swarm session's own processes (its builds
 excluded; they are the *build* term), and *other* is everything on the host that
 is neither (the owner's own programs, the swarm's supervisor and dashboards).
+
+The gate is the machine's, shared by every swarm on it, and the workers are
+this swarm's. So the N builds are builds of any swarm: the *build* figure comes
+from every build measured on the machine, a neighbour's included, and
+``max_concurrent`` is the machine's limit (``machine.toml``). The M workers are
+this swarm's sessions, and ``jobs`` and ``max_workers`` this project's
+settings. *Other* holds no swarm's builds (each sample's builds, whoever's,
+are taken out of it) and does hold the other swarms' sessions: they are load
+this swarm does not start and cannot count as workers.
+
 A scenario **fits** when memory needed stays under :data:`MEM_BUDGET` of RAM —
 the rest is left to page cache (build IO lives in it) and the kernel — and cores
 needed stay under the core count. Raising ``[build].jobs`` is estimated by
@@ -49,6 +59,8 @@ def _is_worker(label: str) -> bool:
 
 
 def build_stats(rows: list[dict]) -> dict:
+    """What a heavy build takes, from every measured build on the machine's
+    gate; ``others`` is how many of them were another swarm's."""
     measured = [r for r in rows if (r.get("samples") or 0) > 0 and r.get("cls", "heavy") == "heavy"]
     def col(key: str) -> list[float]:
         return [r[key] for r in measured if isinstance(r.get(key), (int, float))]
@@ -56,6 +68,7 @@ def build_stats(rows: list[dict]) -> dict:
     jobs = [r["jobs"] for r in measured if isinstance(r.get("jobs"), int) and r["jobs"] > 0]
     return {
         "n": len(measured),
+        "others": sum(r.get("mine") is False for r in measured),
         "peak_anon_mb": {"p50": pct(col("peak_anon_mb"), 50), "p95": pct(col("peak_anon_mb"), 95),
                          "max": max(col("peak_anon_mb"), default=None)},
         "avg_cores": {"p50": pct(col("avg_cores"), 50), "p95": pct(col("avg_cores"), 95)},
@@ -84,9 +97,13 @@ def wpct(pairs: list[tuple[float, float]], q: float) -> float | None:
 
 
 def session_stats(rows: list[dict]) -> dict:
-    """Per worker (one session's own processes), and everything that is not the
-    swarm, as time-weighted percentiles: a sample weighs the seconds since the
-    one before it (at most a minute), a minute row a minute."""
+    """Per worker (one session of this swarm, its own processes), and everything
+    else on the host, as time-weighted percentiles: a sample weighs the seconds
+    since the one before it (at most a minute), a minute row a minute.
+
+    "Everything else" is the host's anon memory less this swarm's sessions and
+    less every build on the machine's gate (a row's ``b`` holds all of them, a
+    neighbour's too). The other swarms' sessions stay in it."""
     anon: list[tuple[float, float]] = []
     cores: list[tuple[float, float]] = []
     other: list[tuple[float, float]] = []
@@ -183,6 +200,10 @@ def analyse(build_rows: list[dict], history: list[dict], host: dict, max_concurr
         notes.append(f"IO pressure during builds is high (p95 of per-build max:"
                      f" {b['psi_io_full_p95']:.1f}% full): a second concurrent build would"
                      " queue on the disk, not the CPU")
+    if b["others"]:
+        notes.append(f"{b['others']} of the {b['n']} measured build(s) were other swarms':"
+                     " the gate is the machine's, so a build here is any swarm's, and"
+                     " raising this project's [build].jobs changes this swarm's builds only")
     if pair != "any":
         notes.append(f"[build].pair = {pair}: two builds run at once only in different"
                      " repos, and an image build runs alone, so \"2 builds\" is the most"

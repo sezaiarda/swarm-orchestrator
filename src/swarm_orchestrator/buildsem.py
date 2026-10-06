@@ -6,17 +6,28 @@ core. On a memory-capped host that is how a box thrashes (or worse). ``swarm
 build <cmd...>`` lets at most ``[build].max_concurrent`` heavy builds run at
 once; the rest wait their turn.
 
+**One gate for the machine.** The limit is the machine's, not a swarm's: three
+swarms that each allowed one build would run three. So the gate lives in the
+machine directory (``<state root>/machine/buildsem``, :attr:`Config.buildsem_dir`),
+every swarm on the machine queues at it, and its limits come from the machine's
+own file (``machine.toml``, ``[build]``), read through to the file each time so
+that every process of every swarm follows the same ones. Every ticket, record
+and event names the swarm it belongs to (:func:`buildlog.swarm_of`). The queue
+knows no swarm: arrivals are served in order whoever they are, with the bounded
+passing described below, so one swarm with many builds queued cannot keep
+another's waiting. Below, ``buildsem/`` is that directory.
+
 **Slots and seats.** A build holds two ``flock``s, both on file descriptors
 the build process *inherits*, so its whole process tree holds them: however the
 build ends -- exit, crash, SIGKILL -- they free when the last process holding
 them is gone. No daemon, no counter to leak.
 
-- A **seat**, ``<state>/buildsem/seatK``, exclusively: one per build alive.
+- A **seat**, ``buildsem/seatK``, exclusively: one per build alive.
   There are ``max_concurrent + idle_yield_max`` of them, so the kernel itself
   caps the builds the gate can have alive. The seat file holds the build's
-  record (id, phase, pid, command, start), which ``--status`` and the waiting
-  line show; whether the lock is held is whether the build is alive.
-- A **slot**, ``<state>/buildsem/slotN`` (``N < max_concurrent``), *shared*.
+  record (id, swarm, phase, pid, command, start), which ``--status`` and the
+  waiting line show; whether the lock is held is whether the build is alive.
+- A **slot**, ``buildsem/slotN`` (``N < max_concurrent``), *shared*.
   Anything that wants a slot to itself takes it exclusively, which works only
   while no build is on it: ``swarm gc`` (which holds every slot while it
   deletes build output, see *gc takes its turn*) and a ``swarm build`` from
@@ -36,7 +47,18 @@ when it ends. ``swarm build --hold`` is the opt-out: such a build takes a slot
 even if its command is light, and keeps it for as long as it runs (a
 measurement that sleeps while something outside its process tree is measured).
 
-**The queue.** Waiters take a ticket: ``<state>/buildsem/queue/<seq>-<id>.json``,
+**A holder that is gone, and one that stands frozen.** Nothing here trusts a
+record over a lock. A build that died, with its whole swarm or without, holds no
+lock: its seat is free the moment its last process is gone, whoever looks, and
+the first to notice writes the ``end`` it never wrote. A build whose swarm
+stands frozen (``swarm freeze``) is alive and holds its locks: its seat is
+never taken from it, because it will resume. What it stops doing is keeping the
+machine waiting: it is set aside as idle at once (:mod:`buildidle`), so the
+next waiter starts beside it, and it counts again when its swarm is thawed. A
+frozen swarm's *waiters* keep their tickets and their places, and are passed
+over by the other swarms until they poll again.
+
+**The queue.** Waiters take a ticket: ``buildsem/queue/<seq>-<id>.json``,
 numbered under ``queue.lock`` and flocked by its waiter for as long as it waits.
 A ticket whose lock can be taken belongs to a dead waiter and is deleted, so a
 killed waiter never blocks the queue. Only the waiter whose turn it is tries
@@ -52,7 +74,8 @@ after at most the waiters older than it plus ``overtake`` short ones: nobody
 starves. ``overtake = 0`` is plain FIFO.
 
 **Pairing rules.** With ``[build].pair = "distinct-repo"`` a build starts
-beside the builds alive only if it shares no repository with any of them, and
+beside the builds alive, any swarm's, only if it shares no repository with any
+of them, and
 a build that must run alone (an image build, ``--hold``, a build whose repo is
 unknown: ``[build].alone``) starts only when no other build is alive, and
 nothing starts while it runs (see :mod:`buildpair`). The queue then lets a
@@ -62,8 +85,9 @@ times in all, and once it has been, or once a build that must run alone is the
 oldest waiter, nothing starts until it has. ``"any"`` (the default) is the gate
 without these rules.
 
-**gc takes its turn.** gc must have the gate to itself, and it gets that
-through the queue, never by taking slots one at a time: a gc that held one
+**gc takes its turn.** gc must have the gate to itself: it deletes build
+output while no build runs, and on a disk that builds strain that means no
+build of any swarm. It gets that through the queue, never by taking slots one at a time: a gc that held one
 slot while it waited for a build on another kept that slot from every build
 for as long as it waited. :func:`whole` queues a ticket like any waiter and
 holds nothing until, under ``queue.lock``, it finds no build alive and nobody
@@ -83,12 +107,13 @@ ticket waits:
   tries again later. It never held a lock.
 
 So the most a gc costs a waiting build is ``hold_s`` plus the sweep itself.
-Its hold is recorded like a build's: ``<state>/buildsem/gc`` holds its record
+Its hold is recorded like a build's: ``buildsem/gc`` holds its record
 and is locked for as long as it holds the gate, and its events carry
 ``cls`` ``"gc"``.
 
-**What it says.** On stderr: the queue position, who holds each slot and for how
-long, and an ETA from past run times, on joining and every 45 s; "queued Xs,
+**What it says.** On stderr: the queue position, who holds each slot (which
+swarm's build, when it is another's) and for how long, who is ahead, and an ETA
+from past run times, on joining and every 45 s; "queued Xs,
 starting" when it starts (and beside which idle holder, if one made room);
 "ran Ys, exit N" when done. Every call is logged to
 ``events.jsonl`` (see :mod:`buildlog`), and ``swarm build --status`` shows the
@@ -287,19 +312,22 @@ def _holder_alive(rec: dict) -> bool:
 
 def _synthetic_end(cfg: Config, rec: dict, slot: int | None, now: float) -> None:
     start = rec.get("start_ts") or now
+    run = buildlog.run_of(cfg, rec)  # the holder's own run: its frozen time, not ours
     buildlog.event(cfg, "end", id=rec.get("id", "?"), phase=rec.get("phase"),
                    pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=slot,
                    cls=rec.get("cls") or "heavy", argv=rec.get("argv", ""),
-                   cwd=rec.get("cwd", ""), run_s=freezer.awake_elapsed(cfg, start, now),
-                   exit=None,
-                   repo=rec.get("repo"), ts=now)
+                   cwd=rec.get("cwd", ""),
+                   run_s=freezer.awake_elapsed(run, start, now) if run else now - start,
+                   exit=None, repo=rec.get("repo"), ts=now, who=rec)
 
 
 def reap_records(cfg: Config, only: int | None = None, force: bool = False,
                  seat: int | None = None) -> None:
-    """Write the ``end`` a dead holder never wrote (``exit`` null). Call under
-    ``queue.lock`` so two noticers cannot both write it. A seat's holder is dead
-    when its lock is free or both its processes are gone. ``seat`` is one the
+    """Write the ``end`` a dead holder never wrote (``exit`` null), whichever
+    swarm's build it was: the lock is the kernel's word, and it is the same for
+    every swarm. Call under ``queue.lock`` so two noticers cannot both write it.
+    A seat's holder is dead when its lock is free or both its processes are
+    gone; one that stands frozen is neither. ``seat`` is one the
     caller has just taken: it was free, so whatever its record says is over.
     ``only``/``force`` name a slot just found free, for a record a build from
     before seats left there."""
@@ -420,13 +448,20 @@ def _drop(t: Ticket) -> None:
         pass
 
 
-def _polling(cfg: Config, refreshed: float, now: float) -> bool:
-    """Is a ticket last refreshed at ``refreshed`` still polled? A waiter that
-    stands frozen (``swarm freeze``) cannot refresh its ticket and has not left:
-    only the time the run was awake counts toward :data:`_STALE_S`."""
+def _polling(cfg: Config, meta: dict, refreshed: float, now: float) -> bool:
+    """Is the ticket ``meta``, last refreshed at ``refreshed``, still polled? A
+    waiter that stands frozen (``swarm freeze``) cannot refresh its ticket and
+    has not left: only the time its own run was awake counts toward
+    :data:`_STALE_S`, so it is not passed by the waiters that wake before it.
+    That is the order inside one swarm, which stands still as a whole. Another
+    swarm does not wait for it: to its waiters a ticket of a swarm that stands
+    frozen now is one nobody polls, passed over until it is polled again."""
     if now - refreshed < _STALE_S:
         return True
-    return freezer.awake_elapsed(cfg, refreshed, now) < _STALE_S
+    run = buildlog.run_of(cfg, meta)
+    if run is None or (run is not cfg and freezer.stands(run)):
+        return False
+    return freezer.awake_elapsed(run, refreshed, now) < _STALE_S
 
 
 def live_tickets(cfg: Config, mine: Ticket | None = None,
@@ -470,7 +505,7 @@ def live_tickets(cfg: Config, mine: Ticket | None = None,
                 meta = json.loads(os.read(fd, 1 << 16) or b"{}")
             except ValueError:
                 continue
-            meta["fresh"] = _polling(cfg, os.fstat(fd).st_mtime, now)
+            meta["fresh"] = _polling(cfg, meta, os.fstat(fd).st_mtime, now)
             out.append(meta)
         finally:
             os.close(fd)
@@ -590,14 +625,15 @@ def live_holders(cfg: Config) -> list[dict]:
 def _gate_state(cfg: Config, holders: list[dict], now: float) -> tuple[bool, bool]:
     """``(busy, working)`` for :func:`gc_view`. Busy: something is on the gate,
     so a gc cannot start. Working: all of it is builds at work, which end; not
-    a holder set aside as idle, a process a build left behind, or someone who
-    holds a slot from outside the queue. Under ``queue.lock``."""
+    a holder set aside as idle, one whose swarm stands frozen, a process a
+    build left behind, or someone who holds a slot from outside the queue.
+    Under ``queue.lock``."""
     foreign = any(_locked(_slot_path(cfg, i)) for i in _slot_indices(cfg))
     if not holders and not foreign:
         return False, False
     aside = {h.get("id") for h in buildidle.set_aside(cfg, buildidle.load(cfg), holders, now)}
     working = not foreign and all(not h.get("over") and h.get("id") not in aside
-                                  for h in holders)
+                                  and not buildlog.frozen(cfg, h) for h in holders)
     return True, working
 
 
@@ -645,7 +681,7 @@ def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False
                        pid=rec.get("pid") or rec.get("gate_pid") or 0, slot=rec.get("slot"),
                        cls="heavy", argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
                        run_s=now - (rec.get("start_ts") or now), idle_s=c.idle_s,
-                       repo=rec.get("repo"), why=c.why or None, ts=now)
+                       repo=rec.get("repo"), why=c.why or None, ts=now, who=rec)
     return st
 
 
@@ -775,7 +811,8 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
                     buildlog.event(cfg, "passed", id=m["id"], phase=m.get("phase"),
                                    pid=m.get("pid") or 0, slot=None, cls="heavy",
                                    argv=m.get("argv", ""), cwd=m.get("cwd", ""),
-                                   repo=m.get("repo"), why=blocked[m["id"]], by=t.meta["id"])
+                                   repo=m.get("repo"), why=blocked[m["id"]], by=t.meta["id"],
+                                   who=m)
         q["overtaken"] = counts
         _write_q(cfg, q)
         reap_records(cfg, seat=got.seat)  # its last holder is gone: the end it never wrote
@@ -799,7 +836,7 @@ def _note_alone(cfg: Config, seen: dict[str, str], now: float) -> None:
                            pid=h.get("pid") or h.get("gate_pid") or 0, slot=h.get("slot"),
                            cls="heavy", argv=h.get("argv", ""), cwd=h.get("cwd", ""),
                            run_s=now - (h.get("start_ts") or now), repo=h.get("repo"),
-                           why=seen[h["id"]], ts=now)
+                           why=seen[h["id"]], ts=now, who=h)
 
 
 def _spot_alone(cfg: Config, holders: list[dict], found: dict[str, str]) -> dict[str, str] | None:
@@ -819,8 +856,8 @@ def _spot_alone(cfg: Config, holders: list[dict], found: dict[str, str]) -> dict
 def _record(meta: dict, pid: int | None, start_ts: float | None,
             claim: Claim | None = None) -> dict:
     return {
-        "v": 1, "id": meta["id"], "phase": meta.get("phase"), "argv": meta.get("argv", ""),
-        "cwd": meta.get("cwd", ""), "pred_s": meta.get("pred_s"),
+        "v": 1, "id": meta["id"], **buildlog.whose(meta), "phase": meta.get("phase"),
+        "argv": meta.get("argv", ""), "cwd": meta.get("cwd", ""), "pred_s": meta.get("pred_s"),
         "queued_ts": meta.get("queued_ts"), "start_ts": start_ts or time.time(),
         "gate_pid": os.getpid(), "gate_start": procs.start_ticks(os.getpid()),
         "pid": pid, "pid_start": procs.start_ticks(pid) if pid else None, "ended": None,
@@ -836,11 +873,10 @@ def _wait_turn(cfg: Config, t: Ticket, hist: buildlog.History | None,
     With ``leave_ts`` the wait ends there: None, and the ticket is still ``t``'s.
     Time the run stood frozen is not time waited: the builds ahead stood still
     too, so the wait goes on for as long as it was cut short."""
-    overtake, short_s = cfg.build_overtake, cfg.build_short_s
     next_report = 0.0
     began = time.time()
     while True:
-        got, view = _try_turn(cfg, t, overtake, short_s)
+        got, view = _try_turn(cfg, t, cfg.build_overtake, cfg.build_short_s)
         if got is not None:
             return got
         now = time.time()
@@ -1098,12 +1134,13 @@ def _finish(cfg: Config, claim: Claim, rec: dict, now: float) -> None:
         _end_slot_copy(cfg, rec, now)
 
 
-def _beside_text(beside: list[dict]) -> str:
+def _beside_text(cfg: Config, beside: list[dict]) -> str:
     if not beside:
         return ""
     h = beside[0]
     more = f" and {len(beside) - 1} more" if len(beside) > 1 else ""
-    return (f" — beside {h.get('phase') or '-'} `{buildlog.short_cmd(h.get('argv', ''), 40)}`"
+    return (f" — beside {buildlog.who_text(cfg, h)}"
+            f" `{buildlog.short_cmd(h.get('argv', ''), 40)}`"
             f"{more}, idle {buildlog.fmt_s(h.get('idle_s'))}: its slot was yielded")
 
 
@@ -1136,7 +1173,7 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
         waited = "no wait" if wait_s < 1 else f"queued {buildlog.fmt_s(wait_s)}"
         alone = f" — alone ({rec['alone']})" if rec.get("alone") else ""
         _say(f"{waited}, starting on slot {slot}: {buildlog.short_cmd(call.text)}"
-             f"{_beside_text(held.beside)}{alone}")
+             f"{_beside_text(cfg, held.beside)}{alone}")
     call.log(cfg, "start" if held else "bypass", pid=proc.pid, slot=slot, wait_s=wait_s,
              **_start_kw(rec, held))
     watch = _OwnYield(cfg, call.id) if held and buildidle.enabled(cfg) else None
@@ -1158,14 +1195,18 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
 
 
 def _pairing(cfg: Config, cwd: str, verdict: buildclass.Verdict | None,
-             hold: bool = False) -> tuple[list[str] | None, str | None]:
-    """The repos a build works in (``None``: unknown) and why it runs alone
-    under the pairing rules (``None``: it need not)."""
+             hold: bool = False) -> dict:
+    """What a ticket says of its build for the pairing rules: ``repos``, the
+    repositories it works in as their places on the machine (``None``:
+    unknown); ``names``, this swarm's name for each; ``repo``, the first one's;
+    and ``alone``, why it runs alone under the rules (``None``: it need not)."""
     try:
-        names = buildpair.repos(cfg, cwd, verdict)
+        places = buildpair.repos(cfg, cwd, verdict)
+        names = {p: buildpair.name(cfg, p) for p in places or ()}
     except Exception:  # noqa: BLE001 -- unknown is safe: such a build runs alone
-        names = None
-    return names, buildpair.alone_why(cfg, verdict, names, hold)
+        places, names = None, {}
+    return {"repos": places, "names": names, "repo": names[places[0]] if places else None,
+            "alone": buildpair.alone_why(cfg, verdict, places, hold)}
 
 
 def _phase(cfg: Config) -> str | None:
@@ -1221,13 +1262,13 @@ def run(cfg: Config, argv: list[str], timeout: float | None = None,
             call.log(cfg, "preflight_fail", pid=os.getpid(), slot=None)
             return 127 if problem.startswith("cannot run") else 2
         hist = buildlog.History(cfg)
-        names, alone = _pairing(cfg, cwd, verdict, hold)
-        call.repo = names[0] if names else None
+        pairing = _pairing(cfg, cwd, verdict, hold)
+        call.repo, alone = pairing["repo"], pairing["alone"]
         queued = time.time()
-        meta = {"id": call.id, "phase": call.phase, "pid": os.getpid(), "argv": call.text,
-                "cwd": cwd, "queued_ts": queued, "pred_s": hist.predict(argv, cwd),
-                "noyield": noyield, "hold": hold, "repo": call.repo, "repos": names,
-                "alone": alone}
+        meta = {"id": call.id, **buildlog.swarm_of(cfg), "phase": call.phase,
+                "pid": os.getpid(), "argv": call.text, "cwd": cwd, "queued_ts": queued,
+                "pred_s": hist.predict(argv, cwd), "noyield": noyield, "hold": hold,
+                **pairing}
         ticket = _enqueue(cfg, meta)
         call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued, alone=bool(alone),
                  why=alone)
@@ -1273,11 +1314,11 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
         noyield = None
         verdict = buildclass.Verdict(buildclass.HEAVY, "could not classify",
                                      alone="its command could not be read" if rules else None)
-    names, alone = _pairing(cfg, str(cwd), verdict)
-    meta = {"id": uuid.uuid4().hex[:12], "phase": phase, "pid": os.getpid(), "argv": text,
-            "cwd": str(cwd), "queued_ts": queued, "pred_s": hist.predict(text, str(cwd)),
-            "noyield": noyield, "repo": names[0] if names else None, "repos": names,
-            "alone": alone}
+    pairing = _pairing(cfg, str(cwd), verdict)
+    alone = pairing["alone"]
+    meta = {"id": uuid.uuid4().hex[:12], **buildlog.swarm_of(cfg), "phase": phase,
+            "pid": os.getpid(), "argv": text, "cwd": str(cwd), "queued_ts": queued,
+            "pred_s": hist.predict(text, str(cwd)), "noyield": noyield, **pairing}
     call = _Call(meta["id"], phase, text, str(cwd), buildclass.HEAVY, meta["repo"])
     ticket = _enqueue(cfg, meta)
     call.log(cfg, "queued", pid=os.getpid(), slot=None, ts=queued, alone=bool(alone),
@@ -1288,7 +1329,7 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
         _drop(ticket)
         now = time.time()
         holders = live_holders(cfg)
-        why = _alive_text(holders, now) if holders else "older waiters come first"
+        why = _alive_text(cfg, holders, now) if holders else "older waiters come first"
         call.log(cfg, "left", pid=os.getpid(), slot=None, wait_s=now - queued,
                  alone=bool(alone), why=why)
         raise Busy(f"no build slot within {buildlog.fmt_s(wait_s)} ({why})")
@@ -1314,12 +1355,12 @@ class Busy(RuntimeError):
     within it (:func:`slot` with ``wait_s``)."""
 
 
-def _alive_text(holders: list[dict], now: float) -> str:
+def _alive_text(cfg: Config, holders: list[dict], now: float) -> str:
     h = min(holders, key=lambda r: r.get("start_ts") or now)
     more = f" and {len(holders) - 1} more" if len(holders) > 1 else ""
     slot = f"slot {h['slot']}" if isinstance(h.get("slot"), int) else "a seat"
-    return (f"{h.get('phase') or '-'} `{buildlog.short_cmd(h.get('argv', ''), 40)}` on {slot},"
-            f" running {buildlog.fmt_s(now - (h.get('start_ts') or now))}{more}")
+    return (f"{buildlog.who_text(cfg, h)} `{buildlog.short_cmd(h.get('argv', ''), 40)}`"
+            f" on {slot}, running {buildlog.fmt_s(now - (h.get('start_ts') or now))}{more}")
 
 
 def _take_whole(cfg: Config, t: Ticket) -> tuple[list[int] | None, str]:
@@ -1336,7 +1377,7 @@ def _take_whole(cfg: Config, t: Ticket) -> tuple[list[int] | None, str]:
         now = time.time()
         holders = live_holders(cfg)
         if holders:
-            return None, _alive_text(holders, now)
+            return None, _alive_text(cfg, holders, now)
         ahead = [m for m in tickets if m.get("fresh", True) and m["seq"] < t.meta["seq"]]
         if ahead:
             return None, f"{len(ahead)} older waiter(s) in the build queue"
@@ -1359,7 +1400,7 @@ def _take_whole(cfg: Config, t: Ticket) -> tuple[list[int] | None, str]:
             fcntl.flock(seat, fcntl.LOCK_EX)  # only a momentary probe can be on it
             tick = procs.start_ticks(os.getpid())
             _write_record(seat, {
-                "v": 1, "id": t.meta["id"], "cls": GC, "phase": None,
+                "v": 1, "id": t.meta["id"], **buildlog.whose(t.meta), "cls": GC, "phase": None,
                 "argv": t.meta.get("argv", GC_ARGV), "cwd": t.meta.get("cwd", ""),
                 "queued_ts": t.meta.get("queued_ts"), "start_ts": now, "pid": os.getpid(),
                 "pid_start": tick, "gate_pid": os.getpid(), "gate_start": tick, "ended": None,
@@ -1375,8 +1416,8 @@ def _take_whole(cfg: Config, t: Ticket) -> tuple[list[int] | None, str]:
 @contextmanager
 def whole(cfg: Config, wait_s: float, hold_s: float = 0.0,
           argv: str = GC_ARGV) -> Iterator[list[int]]:
-    """Hold the whole gate for the body, in this process: no build is alive
-    when it starts and none starts until it ends. For gc.
+    """Hold the whole gate for the body, in this process: no build of any swarm
+    is alive when it starts and none starts until it ends. For gc.
 
     It queues like a build and holds nothing while it waits (see *gc takes its
     turn* in the module docstring): for ``wait_s`` in all, of which the last
@@ -1384,7 +1425,8 @@ def whole(cfg: Config, wait_s: float, hold_s: float = 0.0,
     the gate did not empty in that time. Yields the slots' locked fds."""
     queued = time.time()
     wait_s = max(0.0, wait_s)
-    meta = {"id": uuid.uuid4().hex[:12], "phase": None, "pid": os.getpid(), "argv": argv,
+    meta = {"id": uuid.uuid4().hex[:12], **buildlog.swarm_of(cfg), "phase": None,
+            "pid": os.getpid(), "argv": argv,
             "cwd": str(cfg.project_dir), "queued_ts": queued, "gc": True, "alone": GC_WHY,
             "firm_ts": queued + max(0.0, wait_s - max(0.0, hold_s)),
             "leave_ts": queued + wait_s}

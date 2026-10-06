@@ -30,14 +30,18 @@ notify = "/path/to/swarm-orchestrator/scripts/notify.sh"
 session = "swarm"
 
 [build]
-# `swarm build <cmd>` is a swarm-wide semaphore for heavy compiles/tests, so N
-# parallel worktrees can't OOM the host (each worktree otherwise recompiles the
-# whole dep graph, and cargo fans out across every core). Workers run their gates
-# as e.g. `swarm build cargo nextest run` (see the prime command / init master).
-max_concurrent = 2    # at most this many heavy builds run at once; the rest wait (FIFO-ish)
+# `swarm build <cmd>` is a semaphore for heavy compiles/tests, so N parallel
+# worktrees can't OOM the host (each worktree otherwise recompiles the whole dep
+# graph, and cargo fans out across every core). Workers run their gates as e.g.
+# `swarm build cargo nextest run` (see the prime command / init master).
+#
+# The gate is one for the whole machine: every swarm on it queues at the same
+# gate. So its limits are not set here. How many heavy builds run at once
+# (`max_concurrent`), the queue's rule (`short_s`, `overtake`), idle yield
+# (`idle_yield_s`, `idle_yield_max`) and the pairing rules (`pair`, `alone`) are
+# `[build]` in ~/.config/swarm-orchestrator/machine.toml (docs/config.md, "The
+# machine file"). A `.swarm.toml` that sets one of them does not load.
 jobs           = 6    # CARGO_BUILD_JOBS cap so ONE build can't grab every core
-# pair         = "distinct-repo"  # two builds at once only in different repos, and an
-#                                 # image build (`alone`) with no build beside it
 cache          = true # symlink each worktree's cargo `target/` to a shared per-repo
                       # cache so only *changed* crates recompile across worktrees
 

@@ -138,7 +138,7 @@ def _two_chains(g: Gate) -> list[subprocess.Popen]:
 
 
 def _queue_files(g: Gate) -> list[str]:
-    qdir = g.state / "buildsem" / "queue"
+    qdir = g.sem / "queue"
     return sorted(p.name for p in qdir.iterdir()) if qdir.is_dir() else []
 
 
@@ -323,10 +323,11 @@ def test_a_gc_killed_while_it_holds_the_gate_frees_it(gate):
     snap, text = _status(g)
     assert [h.get("gc") for h in snap["slots"]] == [True, True]
     assert all(h["pid"] == proc.pid and not h.get("unknown") for h in snap["slots"])
-    assert snap["gc"] == [{"state": "running", "id": snap["slots"][0]["id"], "pid": proc.pid,
+    assert snap["gc"] == [{"state": "running", "id": snap["slots"][0]["id"], "swarm": "state",
+                           "swarm_name": "proj", "mine": True, "pid": proc.pid,
                            "running_s": snap["slots"][0]["running_s"]}]
     assert text.count("gc running") == 2 and "no current record" not in text
-    assert buildstatus.summary_line(g.cfg()).startswith("build gate: 2/2 busy (gc ")
+    assert buildstatus.summary_line(g.cfg()).startswith("build gate: 2/2 busy on this machine (gc ")
     b = g.start("b", dur=0.2)
     g.wait_event("queued", "P-b")
     time.sleep(1.0)

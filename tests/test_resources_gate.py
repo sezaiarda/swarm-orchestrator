@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import machine_toml
 
 from swarm_orchestrator import buildclass
 from swarm_orchestrator.config import load
@@ -55,7 +56,7 @@ LIGHT = "import time\nt = time.time()\nwhile time.time() - t < 2.0:\n    pass\n"
 
 
 def _events(state: Path) -> list[dict]:
-    path = state / "buildsem" / "events.jsonl"
+    path = state.parent / "machine" / "buildsem" / "events.jsonl"  # the machine's gate
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
@@ -91,8 +92,8 @@ def test_the_sampler_measures_real_gated_builds(tmp_path, monkeypatch):
     log = tmp_path / "burn.log"
     heavy_pat = "python* */burn.py"
     env = {k: v for k, v in os.environ.items() if not k.startswith("SWARM_")}
-    env.update(SWARM_STATE_DIR=str(state), SWARM_BUILD_MAX=str(MAX),
-               SWARM_BUILD_HEAVY=heavy_pat, SWARM_BUILD_OVERTAKE="0")
+    env.update(SWARM_STATE_DIR=str(state), SWARM_BUILD_HEAVY=heavy_pat)
+    machine_toml(build={"max_concurrent": MAX, "overtake": 0})
     for k in [k for k in os.environ if k.startswith("SWARM_")]:
         monkeypatch.delenv(k)
     for k, v in env.items():
@@ -159,6 +160,7 @@ def test_the_sampler_measures_real_gated_builds(tmp_path, monkeypatch):
     for tag in "ABCD":
         r = by_phase[f"P-{tag}"]
         assert r["source"] == "events" and r["ended_by"] == "end" and r["exit"] == 0, r
+        assert (r["swarm"], r["swarm_name"], r["mine"]) == (state.name, cfg.name, True), r
         assert RUN_S - 0.5 <= r["run_s"] <= RUN_S + 10, r
         assert r["wait_s"] is not None and r["wait_s"] >= 0, r
         assert 0.5 <= r["cpu_s"] <= r["run_s"] + 1, r  # one core, at most
@@ -188,3 +190,84 @@ def test_the_sampler_measures_real_gated_builds(tmp_path, monkeypatch):
     samples = store.history(state, 0)
     assert samples and max(r.get("nb", 0) for r in samples if r.get("k") == "s") <= MAX
     assert max(r.get("nb", 0) for r in samples if r.get("k") == "s") == MAX
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc")
+def test_the_sampler_measures_a_neighbour_swarms_build_and_says_whose_it_is(tmp_path, monkeypatch):
+    """Two swarms, one machine, one gate. This swarm's sampler follows the
+    machine's event log, so it measures the neighbour's build too, and marks it
+    as not its own in the sample rows, the snapshot and ``builds.jsonl``."""
+    state, far_state = tmp_path / "state", tmp_path / "far"  # one state root: one machine
+    log = tmp_path / "burn.log"
+    heavy_pat = "python* */burn.py"
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("SWARM_")}
+    envs, burns = {}, {}
+    for name, where in (("proj", state), ("neighbour", far_state)):
+        proj = tmp_path / name
+        proj.mkdir()
+        (proj / ".swarm.toml").touch()
+        burns[name] = proj / "burn.py"
+        burns[name].write_text(BURN)
+        envs[name] = dict(clean, SWARM_STATE_DIR=str(where), SWARM_BUILD_HEAVY=heavy_pat)
+    machine_toml(build={"max_concurrent": MAX, "overtake": 0})
+    for k in [k for k in os.environ if k.startswith("SWARM_")]:
+        monkeypatch.delenv(k)
+    for k, v in envs["proj"].items():
+        if k.startswith("SWARM_"):
+            monkeypatch.setenv(k, v)
+    cfg = load(project_dir=str(tmp_path / "proj"))
+    cfg.ensure_dirs()
+
+    s = sampler_mod.Sampler(lambda: cfg, wsl=False)
+    s._last_dirs = float("inf")
+    procs = []
+    s.start()
+    try:
+        for name, tag in (("proj", "OWN"), ("neighbour", "FAR")):
+            procs.append(subprocess.Popen(
+                [sys.executable, "-m", "swarm_orchestrator", "build", sys.executable,
+                 str(burns[name]), tag, str(2 * RUN_S), str(MB), str(log)],
+                cwd=tmp_path / name, env=dict(envs[name], SWARM_PHASE=f"P-{tag}"),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+        def both_running() -> dict | None:
+            snap = store.read_now(state)
+            return snap if snap and len(snap.get("builds") or []) == 2 else None
+        snap = _wait(both_running, 30, "both builds in the snapshot")
+        for p in procs:
+            p.wait(timeout=120)
+
+        def rows() -> list[dict]:
+            got = store.builds(state)
+            return got if len(got) >= 2 else []
+        rows = _wait(rows, 30, "two build summaries")
+    finally:
+        s.stop()
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+
+    assert all(p.returncode == 0 for p in procs)
+    whose = {e["phase"]: (e["swarm"], e["id"]) for e in _events(state) if e["event"] == "start"}
+    assert whose["P-OWN"][0] == state.name and whose["P-FAR"][0] == far_state.name
+    far_id = whose["P-FAR"][1]
+
+    now = {b["phase"]: b for b in snap["builds"]}
+    assert (now["P-OWN"]["swarm"], now["P-OWN"]["mine"]) == (state.name, True)
+    assert (now["P-FAR"]["swarm"], now["P-FAR"]["mine"]) == (far_state.name, False)
+    assert now["P-FAR"]["swarm_name"]
+
+    by_phase = {r["phase"]: r for r in rows}
+    assert set(by_phase) == {"P-OWN", "P-FAR"}
+    assert (by_phase["P-OWN"]["swarm"], by_phase["P-OWN"]["mine"]) == (state.name, True)
+    far = by_phase["P-FAR"]
+    assert (far["swarm"], far["mine"], far["exit"]) == (far_state.name, False, 0), far
+    assert far["samples"] >= 2 and far["peak_anon_mb"] >= MB * 0.8, far  # measured, not just listed
+    assert 0.5 <= far["cpu_s"] <= far["run_s"] + 1, far
+
+    samples = [r for r in store.history(state, 0) if r.get("k") == "s"]
+    both = [r for r in samples if r.get("nb") == 2]
+    assert both and all(r["bo"] == [far_id] and far_id in r["b"] for r in both)
+    assert not any("bo" in r for r in samples if far_id not in (r.get("b") or {}))
+    assert not store.builds(far_state)  # the neighbour's own sampler is not running here

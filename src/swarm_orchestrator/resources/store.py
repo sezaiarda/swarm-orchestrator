@@ -6,13 +6,20 @@ All under ``<state>/meters/``:
   build runs, one every :data:`sampler.SLOW_S` otherwise), for
   :data:`FULL_KEEP_S` (a day). Rows are ``{"ts", "k": "s", ...}`` (a sample),
   ``"k": "dirs"`` (directory sizes) and ``"k": "host"`` (cores, RAM, swap;
-  written when the sampler starts).
+  written when the sampler starts). A sample's builds are the machine's, every
+  swarm's: ``nb`` how many, ``b`` each one's ``[cores, anon MiB]`` by id, and
+  ``bo`` the ids among them that are another swarm's (absent when none is).
+  Its sessions (``w``, ``x``, ``o``) are this swarm's alone.
 - ``resources-1m.jsonl`` — what ages out of the first file, folded into one row
   a minute: every figure as ``[min, avg, max]``, per build and per worker the
-  average cores and the peak anon memory. Kept :data:`AGG_KEEP_S` (30 days).
-- ``builds.jsonl`` — one summary per finished heavy build.
+  average cores and the peak anon memory, and ``bo`` as every other swarm's
+  build of that minute. Kept :data:`AGG_KEEP_S` (30 days).
+- ``builds.jsonl`` — one summary per finished heavy build on the machine's
+  gate, with ``swarm``, ``swarm_name`` and ``mine`` saying whose it was.
 - ``<state>/resources-now.json`` (beside ``state.json``) — the latest sample,
-  the builds and workers running, idle holders and the sampler's own cost:
+  the builds running on the machine (each with ``swarm``, ``swarm_name`` and
+  ``mine``), how many wait (``queued``, and ``queued_mine`` of them this
+  swarm's), this swarm's workers and idle holders and the sampler's own cost:
   what ``swarm status``, ``swarm doctor`` and the dashboards read.
 
 Every file is bounded twice: by age, and by a byte cap (:data:`MAX_FULL_BYTES`,
@@ -120,7 +127,8 @@ def aggregate(rows: list[dict]) -> list[dict]:
 
     A minute row keeps, for each scalar, ``[min, avg, max]``; for pressure the
     same per resource; for each build and worker ``[avg cores, max anon MiB]``
-    (the figures a capacity estimate uses)."""
+    (the figures a capacity estimate uses); and ``bo``, the builds of the
+    minute that were another swarm's."""
     minutes: dict[int, list[dict]] = {}
     out: list[dict] = []
     for row in rows:
@@ -152,6 +160,9 @@ def aggregate(rows: list[dict]) -> list[dict]:
                            round(max(p[1] for p in pairs), 1)]
                     for name, pairs in per.items()
                 }
+        others = list(dict.fromkeys(bid for r in group for bid in r.get("bo") or []))
+        if others:
+            agg["bo"] = others
         for key in ("x", "o"):
             xs = [r[key] for r in group if isinstance(r.get(key), list)]
             if xs:

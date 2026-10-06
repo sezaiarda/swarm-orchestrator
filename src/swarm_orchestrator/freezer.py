@@ -23,7 +23,8 @@ gives the thaw its order.
 
 **The freeze** (:func:`freeze`) is made with the state lock and the build queue
 lock in hand, and they are kept until every group says it is frozen: a process
-frozen while it holds either would stop everything still awake. A group that
+frozen while it holds either would stop everything still awake, and the build
+queue's lock is the machine's, so that would be every swarm's builds. A group that
 was told to freeze and does not settle takes the whole freeze back. A group
 this user may not write (a scope root started) is no error: it is *left*, named
 in the record and in ``--json``, for a caller that can to freeze and wake.
@@ -211,6 +212,20 @@ def in_scope(argv: list[str]) -> bool:
 
 
 # -- the record -------------------------------------------------------------
+@dataclass(frozen=True)
+class Run:
+    """Another swarm's run, known by its state dir alone: all that :func:`look`,
+    :func:`spans` and :func:`awake_elapsed` read of a config. For whoever shares
+    something with every swarm on the machine (the build gate) and has to ask
+    whether a neighbour stands frozen."""
+
+    state_dir: Path
+
+    @property
+    def state_path(self) -> Path:
+        return self.state_dir / "state.json"
+
+
 def peek_state(cfg: Config) -> dict:
     """``state.json`` as it is on disk, read without the lock: the file is
     swapped in whole, and a frozen process may be holding the lock."""
@@ -221,7 +236,7 @@ def peek_state(cfg: Config) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def look(cfg: Config) -> dict | None:
+def look(cfg: Config | Run) -> dict | None:
     """The frozen record, read without the lock: ``{}`` when there is none, and
     None when the state could not be read, which says nothing either way. For
     whoever would do harm by taking "could not tell" for "not frozen"."""
@@ -237,10 +252,17 @@ def look(cfg: Config) -> dict | None:
     return dict(record) if isinstance(record, dict) else {}
 
 
-def peek(cfg: Config) -> dict:
+def peek(cfg: Config | Run) -> dict:
     """The frozen record, read without the lock; ``{}`` when there is none, or
     the state could not be read (:func:`look` tells the two apart)."""
     return look(cfg) or {}
+
+
+def stands(cfg: Config | Run) -> bool:
+    """Does this run stand frozen right now: a freeze asked for and not yet
+    being woken? False when the state could not be read."""
+    record = peek(cfg)
+    return bool(record.get("since")) and not record.get("until")
 
 
 @contextmanager
@@ -331,7 +353,7 @@ def merged(stretches) -> list[tuple[float, float]]:
     return out
 
 
-def spans(cfg: Config, now: float | None = None,
+def spans(cfg: Config | Run, now: float | None = None,
           record: dict | None = None) -> list[tuple[float, float]]:
     """Every stretch this run stood frozen, oldest first, as ``(since, until)``:
     the closed ones from the history, then the open one, which runs to the end
@@ -363,7 +385,7 @@ def frozen_in(frozen: list[tuple[float, float]], start: float, end: float) -> fl
     return sum(max(0.0, min(end, until) - max(start, since)) for since, until in frozen)
 
 
-def awake_elapsed(cfg: Config, start: float, now: float | None = None) -> float:
+def awake_elapsed(cfg: Config | Run, start: float, now: float | None = None) -> float:
     """The time since ``start`` that the run was awake for: the wall clock's,
     less every frozen stretch in it. What a timeout, a grace or an idle limit
     counts, so that none of them runs out on the first look after a thaw."""

@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import machine_toml
 from test_build_queue import KEYS, Gate, _descendants, _finish, _max_overlap
 
 from swarm_orchestrator import buildclass, buildidle, buildsem, buildstatus, gc
@@ -60,8 +61,7 @@ class IdleGate(Gate):
         docker = self.bin / "docker"  # a client that waits while "the daemon" works
         docker.write_text('#!/bin/sh\nsleep "${DUR:-3}"\n')
         docker.chmod(0o755)
-        self.env.update(SWARM_BUILD_IDLE_YIELD_S=str(yield_s),
-                        SWARM_BUILD_IDLE_YIELD_MAX=str(yield_max))
+        self.machine(idle_yield_s=yield_s, idle_yield_max=yield_max)
 
     def run(self, tag: str, plan: str, *cmd: str, env: dict | None = None):
         return self.start(tag, *cmd, env={"PLAN": plan, **(env or {})})
@@ -339,7 +339,7 @@ def test_at_most_idle_yield_max_holders_are_set_aside(gate):
     assert g.wait_event("start", "P-w")["ts"] >= end_first["ts"]
     assert second.poll() is None
     assert _max_overlap(g.lines()) == 2  # never more than max_concurrent + idle_yield_max
-    seats = sorted(p.name for p in (g.state / "buildsem").iterdir()
+    seats = sorted(p.name for p in (g.sem).iterdir()
                    if p.name.startswith("seat"))
     assert seats == ["seat0", "seat1"]
 
@@ -383,7 +383,7 @@ def test_a_killed_measuring_waiter_does_not_stop_the_yield(gate):
     assert g.kinds("P-dead") == ["queued"]
     _finish([h])
     assert g.lines() == ["start h", "start w", "end w", "end h"]
-    assert list((g.state / "buildsem" / "queue").iterdir()) == []
+    assert list((g.sem / "queue").iterdir()) == []
 
 
 def test_a_stale_yield_mark_on_a_working_holder_is_measured_again_first(gate):
@@ -463,7 +463,7 @@ def test_status_shows_yielded_holders_apart(gate):
     assert (y["phase"], y["state"], y["slot"]) == ("P-h", "yielded", 0)
     assert WINDOW <= y["idle_s"] < WINDOW + 3 and y["running_s"] > y["idle_s"]
     assert snap["idle_yield_s"] == WINDOW and snap["idle_yield_max"] == 2
-    assert "1 slot(s), 1 busy, 1 yielded, 1 waiting" in text
+    assert "1 slot(s) on this machine, 1 busy, 1 yielded, 1 waiting" in text
     assert "slot 0: P-w `cargo build` running" in text
     assert re.search(r"yielded: P-h `cargo build` yielded after \ds idle, still running", text)
     assert "nothing was stopped" in text
@@ -584,19 +584,18 @@ def test_the_rule_is_not_fooled_by_the_clock_or_a_starved_build():
     assert change is None and entry["yielded"]
 
 
-def _cfg_for(tmp_path, monkeypatch, **env):
+def _cfg_for(tmp_path, monkeypatch, **build):
     from swarm_orchestrator.config import load
 
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
-    for key, val in {"SWARM_BUILD_MAX": 1, "SWARM_BUILD_IDLE_YIELD_S": 10, **env}.items():
-        monkeypatch.setenv(key, str(val))
+    machine_toml(build={"max_concurrent": 1, "idle_yield_s": 10, **build})
     cfg = load(project_dir=str(tmp_path))
     cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
     return cfg
 
 
 def test_a_yield_mark_is_only_trusted_fresh_alive_and_within_the_cap(tmp_path, monkeypatch):
-    cfg = _cfg_for(tmp_path, monkeypatch, SWARM_BUILD_IDLE_YIELD_MAX=2)
+    cfg = _cfg_for(tmp_path, monkeypatch, idle_yield_max=2)
     every = buildidle.sample_every(cfg)
     now = 5000.0
     st = {"ts": now, "h": {
@@ -617,7 +616,7 @@ def test_a_yield_mark_is_only_trusted_fresh_alive_and_within_the_cap(tmp_path, m
     fresh = buildidle.fresh_s(cfg)
     assert [h["id"] for h in buildidle.set_aside(cfg, st, holders, now, fine=True)] == ["a"]
     assert buildidle.set_aside(cfg, st, holders, now + fresh + 0.1, fine=True) == []
-    off = _cfg_for(tmp_path, monkeypatch, SWARM_BUILD_IDLE_YIELD_S=0)
+    off = _cfg_for(tmp_path, monkeypatch, idle_yield_s=0)
     assert buildidle.set_aside(off, st, holders, now) == []
 
 

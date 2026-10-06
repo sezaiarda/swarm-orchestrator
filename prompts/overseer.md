@@ -48,7 +48,9 @@ Go through the digest and ask, in this order:
   decision that needs a follow-up row, a verification nobody scheduled, a
   deploy that still has to happen.
 - **Is the box healthy?** The resource section flags low RAM, heavy swap, a full
-  `/tmp` or a low disk.
+  `/tmp` or a low disk. The box may be shared: the figures are the whole
+  machine's, and the section names the other swarms on it and whose builds
+  hold the machine's build gate. Read whose load it is before you act on it.
 
 ## 3. Act — what you may do on your own
 
@@ -106,7 +108,11 @@ Go through the digest and ask, in this order:
 - **Protect the box:** if RAM, swap, `/tmp` or the disk is at a dangerous level
   (a pass is started for it when it stays so for five minutes),
   `swarm pause` (running workers finish, nothing new starts) and say why in your
-  record. Resume with `swarm resume` only a pause an earlier Overseer pass made
+  record. A pause stops this swarm only: another swarm's builds and sessions
+  keep running. When the digest shows the load is a neighbour's (its builds on
+  the gate, none of yours), a pause here frees little; say whose it is in your
+  record, and ask the owner if the box stays short.
+  Resume with `swarm resume` only a pause an earlier Overseer pass made
   — a pause the owner made is theirs to lift. If the box will not recover
   without the owner (a disk only they can clear), ask them.
   Never lift a usage-cap hold (`swarm resume --override-cap`); it is the owner's.

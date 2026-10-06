@@ -150,8 +150,33 @@ class Settings:
     loader, the default, the type check and the error message all follow from
     the declaration; nothing else lists the keys.
 
-    None yet: every key the tool has today describes a project.
     """
+
+    # -- [build]: the one build gate every swarm on the machine queues at ----
+    build_max_concurrent: int = setting(
+        "build", "max_concurrent", 2,
+        "heavy `swarm build` runs at once on this machine, whichever swarm"
+        " started them; 0 = no gate", minimum=0)
+    build_short_s: int = setting(
+        "build", "short_s", 60,
+        "a build that usually runs at most this long (s) is short", minimum=0)
+    build_overtake: int = setting(
+        "build", "overtake", 2,
+        "short builds that may pass a long one; 0 = first come, first served", minimum=0)
+    build_idle_yield_s: int = setting(
+        "build", "idle_yield_s", 150,
+        "a holder idle this long (s) stops counting; 0 = off", minimum=0)
+    build_idle_yield_max: int = setting(
+        "build", "idle_yield_max", 2,
+        "most idle holders set aside at once", minimum=0)
+    build_pair: str = setting(
+        "build", "pair", "any",
+        "which builds may run side by side", choices=("any", "distinct-repo"))
+    build_alone: list[str] = setting(
+        "build", "alone",
+        ["docker", "docker-compose", "docker-buildx", "podman", "podman-compose",
+         "buildah", "nerdctl", "buildctl"],
+        "commands no build runs beside, under pair = \"distinct-repo\"")
 
 
 def keys(schema: type = Settings) -> list[Key]:

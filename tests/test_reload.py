@@ -28,7 +28,7 @@ def _cfg(tmp_path: Path, monkeypatch, text: str = _MIN, **env):
     """A Config loaded from ``text`` written into a throwaway project dir."""
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     for leak in ("SWARM_SLUG", "SWARM_SESSION", "SWARM_LAYOUT", "SWARM_PARK_AFTER",
-                 "SWARM_DRIVER", "SWARM_BUILD_MAX", "SWARM_BUILD_JOBS",
+                 "SWARM_DRIVER", "SWARM_BUILD_JOBS",
                  "SWARM_GIT_MAIN", "SWARM_GIT_REPOS", "SWARM_DONE_GRACE"):
         monkeypatch.delenv(leak, raising=False)
     for key, val in env.items():
@@ -64,13 +64,21 @@ def test_a_file_that_still_sets_retired_keys_loads_and_reloads(tmp_path, monkeyp
 
 # -- the classes that matter most -----------------------------------------
 @pytest.mark.parametrize(
-    "name", ["build_max_concurrent", "build_jobs", "build_cache"]
+    "name", ["build_jobs", "build_cache"]
 )
 def test_build_fields_are_next_because_the_env_is_frozen_at_launch(name):
-    # launch._worker_env writes SWARM_BUILD_* into each worker's environment and
+    # launch._worker_env writes SWARM_BUILD_JOBS into each worker's environment and
     # config._int_env gives the environment strict precedence: a running worker
     # holds a copy no reload can reach.
     assert SETTINGS[name].klass == NEXT
+
+
+def test_the_gates_limits_are_not_a_projects_settings_and_no_reload_is_about_them():
+    """They are the machine's (``machine.toml``): every process reads them
+    there, so there is nothing for a reload of ``.swarm.toml`` to apply."""
+    assert not {name for name in SETTINGS if name in (
+        "build_max_concurrent", "build_short_s", "build_overtake", "build_idle_yield_s",
+        "build_idle_yield_max", "build_pair", "build_alone")}
 
 
 @pytest.mark.parametrize(
@@ -225,14 +233,14 @@ def test_parked_and_waiting_phases_count_as_in_flight():
 def test_a_pinned_field_reports_an_env_line_instead_of_silence(tmp_path, monkeypatch):
     # Both sides of the diff went through load(), which applied the same override,
     # so the field CANNOT differ -- reporting nothing would hide the fact that
-    # editing [build].max_concurrent is inert until the variable is unset.
-    cfg = _cfg(tmp_path, monkeypatch, _MIN, SWARM_BUILD_MAX=3)
-    changes = reload_mod.diff(cfg, cfg, _facts(env={"SWARM_BUILD_MAX": "3"}))
+    # editing [build].jobs is inert until the variable is unset.
+    cfg = _cfg(tmp_path, monkeypatch, _MIN, SWARM_BUILD_JOBS=3)
+    changes = reload_mod.diff(cfg, cfg, _facts(env={"SWARM_BUILD_JOBS": "3"}))
 
-    pinned = _by_name(changes, "build_max_concurrent")
+    pinned = _by_name(changes, "build_jobs")
     assert pinned.effective == ENV
-    assert pinned.env == "SWARM_BUILD_MAX"
-    assert "SWARM_BUILD_MAX" in reload_mod.render(
+    assert pinned.env == "SWARM_BUILD_JOBS"
+    assert "SWARM_BUILD_JOBS" in reload_mod.render(
         reload_mod.ReloadPlan(changes=changes, cfg=cfg)
     )
 
@@ -252,8 +260,8 @@ def test_an_unparseable_numeric_override_is_not_a_shadow(tmp_path, monkeypatch):
 
 def test_fields_with_no_env_var_never_report_env(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
-    changes = reload_mod.diff(cfg, cfg, _facts(env={"SWARM_BUILD_MAX": "3"}))
-    assert all(c.name == "build_max_concurrent" for c in changes)
+    changes = reload_mod.diff(cfg, cfg, _facts(env={"SWARM_BUILD_JOBS": "3"}))
+    assert all(c.name == "build_jobs" for c in changes)
 
 
 def test_watchdog_change_says_to_refresh_the_supervisors_cached_copy(

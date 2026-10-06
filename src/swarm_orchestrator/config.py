@@ -22,7 +22,6 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from .buildclass import ALONE_DEFAULT
 from . import machine, tmux
 from .tmux import AUTO_LAYOUT, LAYOUTS, normalize_layout
 
@@ -70,21 +69,6 @@ def session_default(name: str) -> str:
 
 #: What ``claude --effort`` accepts (CLI 2.1.276). "" means pass nothing.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-
-#: ``[build].pair``: which heavy builds may run side by side (see ``buildpair``).
-BUILD_PAIR_ANY = "any"
-BUILD_PAIR_DISTINCT = "distinct-repo"
-BUILD_PAIR = (BUILD_PAIR_ANY, BUILD_PAIR_DISTINCT)
-
-
-def _build_pair(value: object) -> str:
-    """``[build].pair``. Anything that is not ``any`` is ``distinct-repo``: a
-    typo read as ``any`` would quietly drop rules the owner believes are in
-    force, and a load error would do the same in a worker, whose ``swarm build``
-    then reads its own directory's file instead. The strict side only waits."""
-    mode = str(value or "").strip().lower().replace("_", "-")
-    return BUILD_PAIR_ANY if mode in (BUILD_PAIR_ANY, "") else BUILD_PAIR_DISTINCT
-
 
 #: ``[usage].rules``: which window, at what percentage, does what.
 USAGE_WINDOWS = ("week", "five_hour")
@@ -419,11 +403,8 @@ class Config:
             " would follow a different page size than the panes already there")
 
     # -- [build] ----------------------------------------------------------
-    build_max_concurrent: int = _k(
-        "build", "max_concurrent", 2, NEXT, env="SWARM_BUILD_MAX", minimum=0,
-        doc="concurrent heavy `swarm build` runs; rest queue",
-        why="launch._worker_env freezes SWARM_BUILD_MAX into each worker's"
-            " environment, and _int_env gives the environment strict precedence")
+    # What describes this project's builds. The gate they queue at is the
+    # machine's, and so are its limits: `machine.toml` (see MACHINE_BUILD).
     build_jobs: int = _k(
         "build", "jobs", 6, NEXT, env="SWARM_BUILD_JOBS", minimum=0,
         doc="CARGO_BUILD_JOBS handed to each build",
@@ -440,38 +421,6 @@ class Config:
     build_light: list[str] = _k(
         "build", "light", [], HOT, env="SWARM_BUILD_LIGHT",
         doc="extra command patterns that skip the queue",
-        why="every `swarm build` call reads it before classifying its command")
-    build_short_s: int = _k(
-        "build", "short_s", 60, HOT, env="SWARM_BUILD_SHORT_S", minimum=0,
-        doc="a build that usually runs this long (s) is short",
-        why="every `swarm build` call reads it when it joins the queue")
-    build_overtake: int = _k(
-        "build", "overtake", 2, HOT, env="SWARM_BUILD_OVERTAKE", minimum=0,
-        doc="short builds that may pass a long one; 0 = FIFO",
-        why="each waiter reads it when it joins the queue; the queue follows the"
-            " value its current waiters were started with")
-    # 150 s: in measured runs the quiet stretches inside builds that went on to
-    # do real work ended within about a minute (between compile and test, behind
-    # a lock); holds that never worked again ran for many minutes.
-    build_idle_yield_s: int = _k(
-        "build", "idle_yield_s", 150, HOT, env="SWARM_BUILD_IDLE_YIELD_S", minimum=0,
-        doc="holder idle this long (s) frees its slot; 0 = off",
-        why="every waiting `swarm build` reads it when it measures the holders")
-    build_idle_yield_max: int = _k(
-        "build", "idle_yield_max", 2, HOT, env="SWARM_BUILD_IDLE_YIELD_MAX", minimum=0,
-        doc="most idle holders set aside at once",
-        why="every waiting `swarm build` reads it when it measures the holders")
-    # "any" by default: a pairing rule only ever makes a build wait, and a
-    # project that never asked for one keeps the gate it has.
-    build_pair: str = _k(
-        "build", "pair", BUILD_PAIR_ANY, HOT, env="SWARM_BUILD_PAIR", choices=BUILD_PAIR,
-        parse=_build_pair,
-        doc="which builds may run side by side",
-        why="every `swarm build` call reads it when it joins the queue; a waiter"
-            " keeps the value it queued with")
-    build_alone: list[str] = _k(
-        "build", "alone", list(ALONE_DEFAULT), HOT, env="SWARM_BUILD_ALONE",
-        doc="commands no build runs beside (pair on)",
         why="every `swarm build` call reads it before classifying its command")
 
     # -- [gc] -------------------------------------------------------------
@@ -858,8 +807,48 @@ class Config:
 
     @property
     def buildsem_dir(self) -> Path:
-        """Where the ``swarm build`` semaphore slot files live (one flock each)."""
-        return self.state_dir / "buildsem"
+        """Where the build gate lives: seats, slots, queue, lock and event log.
+        In the machine directory, so every swarm on the machine queues at the
+        one gate; it follows this run's state dir, as that directory does."""
+        return machine.directory(self.state_dir) / "buildsem"
+
+    # -- the machine's build limits (machine.toml [build]) -----------------
+    # Read through to the file each time, never copied: one limit for the
+    # machine means every process of every swarm sees the same one, and an edit
+    # reaches a supervisor that has been up for a week as it reaches the next
+    # `swarm build`.
+    @property
+    def machine(self) -> machine.Settings:
+        """The machine's settings as ``machine.toml`` has them now."""
+        return machine_settings()
+
+    @property
+    def build_max_concurrent(self) -> int:
+        return self.machine.build_max_concurrent
+
+    @property
+    def build_short_s(self) -> int:
+        return self.machine.build_short_s
+
+    @property
+    def build_overtake(self) -> int:
+        return self.machine.build_overtake
+
+    @property
+    def build_idle_yield_s(self) -> int:
+        return self.machine.build_idle_yield_s
+
+    @property
+    def build_idle_yield_max(self) -> int:
+        return self.machine.build_idle_yield_max
+
+    @property
+    def build_pair(self) -> str:
+        return self.machine.build_pair
+
+    @property
+    def build_alone(self) -> list[str]:
+        return self.machine.build_alone
 
     @property
     def operator_dir(self) -> Path:
@@ -900,6 +889,61 @@ SETTINGS: dict[str, Setting] = {
 }
 
 
+#: ``[build]`` keys that were a project's and are the machine's: the gate is one
+#: for every swarm on the machine, so its limits are in ``machine.toml``.
+MACHINE_BUILD = tuple(k.key for k in machine.keys() if k.table == "build")
+
+# The last reading of machine.toml: what the file was (path, mtime, size), and
+# what it said, or the error it gave.
+_machine_read: tuple[tuple, machine.Settings | None, machine.SettingsError | None] | None = None
+
+
+def machine_settings(sound: bool = False) -> machine.Settings:
+    """The machine's settings as ``machine.toml`` has them now. The file is
+    read again whenever it has changed, so a process that stays up follows an
+    edit without a reload.
+
+    A file that does not read as settings raises :class:`machine.SettingsError`.
+    :func:`load` asks for a ``sound`` file, so every command, and a reload, says
+    so before it does anything. Otherwise a process that had read the file while
+    it was sound keeps what it read then: a supervisor must not fall over, or
+    drop to the defaults, because of a typo made while it runs."""
+    global _machine_read
+    path = machine.settings_path()
+    try:
+        st = path.stat()
+        stamp = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = (str(path), 0, -1)
+    seen = _machine_read
+    if seen is None or seen[0] != stamp:
+        try:
+            seen = (stamp, machine.settings(path), None)
+        except machine.SettingsError as exc:
+            kept = seen[1] if seen is not None and seen[0][0] == stamp[0] else None
+            seen = (stamp, kept, exc)
+        _machine_read = seen
+    if seen[2] is not None and (sound or seen[1] is None):
+        raise seen[2]
+    return seen[1]
+
+
+def _refuse_machine_keys(cfg_file: Path, data: dict) -> None:
+    """A project file that still sets one of the machine's build limits is an
+    error, never a key read from the wrong place or passed over in silence: the
+    owner who wrote ``max_concurrent = 1`` there believes it is in force."""
+    table = data.get("build")
+    found = [k for k in MACHINE_BUILD if k in table] if isinstance(table, dict) else []
+    if not found:
+        return
+    keys = ", ".join(f"[build].{k}" for k in found)
+    raise ValueError(
+        f"{cfg_file}: {keys} {'is' if len(found) == 1 else 'are'} not a project's to set."
+        " Every swarm on this machine queues at one build gate, and its limits are the"
+        f" machine's: move {'it' if len(found) == 1 else 'them'} to [build] in"
+        f" {machine.settings_path()} and delete {'it' if len(found) == 1 else 'them'} here")
+
+
 def _find_config_file(explicit: str | None, project_dir: Path) -> Path | None:
     if explicit:
         p = Path(explicit).expanduser()
@@ -920,6 +964,8 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     if cfg_file is not None:
         with cfg_file.open("rb") as fh:
             data = tomllib.load(fh)
+        _refuse_machine_keys(cfg_file, data)
+    machine_settings(sound=True)  # a machine.toml that does not read stops every command
     values = {name: s.read(data.get(s.table, {}), pdir)
               for name, s in SETTINGS.items() if s.table != CLI}
     values["name"] = values["name"].strip() or pdir.name

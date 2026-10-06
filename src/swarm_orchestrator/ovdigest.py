@@ -20,10 +20,12 @@ import shutil
 import time
 from pathlib import Path
 
+from . import buildstatus
 from . import doctor as doctor_mod
 from . import landing as landing_mod
 from . import ledger as ledger_mod
 from . import ledgerw
+from . import machine
 from . import notes as notes_mod
 from . import opqueue
 from . import owner as owner_mod
@@ -69,8 +71,37 @@ def _usage(path: Path) -> dict[str, int] | None:
     return {"total": u.total, "used": u.used, "free": u.free}
 
 
+def gate(cfg: Config) -> dict | None:
+    """The machine's build gate right now: its limit, every build alive on it
+    with its swarm, and how many wait. The gate is shared by every swarm on the
+    machine, so each holder says whether it is this swarm's (``mine``). ``None``
+    when the gate cannot be read: that must never fail the digest."""
+    try:
+        snap = buildstatus.snapshot(cfg, n_recent=1)
+    except Exception:  # noqa: BLE001 - the digest reports; it does not depend on the gate
+        return None
+    keys = ("swarm", "swarm_name", "mine", "phase", "state", "frozen", "running_s")
+    queue = snap["queue"]
+    return {
+        "max_concurrent": snap["max_concurrent"],
+        "holders": [{**{k: b.get(k) for k in keys}, "argv": str(b.get("argv") or "")[:80]}
+                    for b in snap["builds"]],
+        "queued": len(queue),
+        "queued_mine": sum(bool(t.get("mine")) for t in queue),
+    }
+
+
+def neighbours(cfg: Config) -> list[dict]:
+    """The other swarms on this machine, by name, each with its status
+    (:attr:`machine.Swarm.status`): whoever else loads the box."""
+    return [{"slug": s.slug, "name": s.name, "status": s.status}
+            for s in machine.swarms(cfg.state_dir.parent) if s.slug != cfg.state_dir.name]
+
+
 def resources(cfg: Config, meminfo: Path = Path("/proc/meminfo")) -> dict:
     """Free RAM, swap, ``/tmp`` and the state dir's filesystem, plus plain flags.
+    The figures are the whole box's, whichever swarm is using it; whose load it
+    is, the digest says beside them (:func:`gate`, :func:`neighbours`).
 
     Deliberately no ``du``: a walk of a large build cache can take longer than
     the whole pass is allowed, and the free space of the filesystem is what
@@ -396,7 +427,7 @@ def build(
         "starvation": starve,
         # Lanes: phases that landed with files outside their lane.
         "undeclared": landing_mod.undeclared_since(cfg, since),
-        "resources": resources(cfg),
+        "resources": {**resources(cfg), "gate": gate(cfg), "swarms": neighbours(cfg)},
         "last_pass": last_pass,
     }
 
@@ -550,6 +581,10 @@ def render(d: dict) -> str:
             f"- /tmp {_gib(tmp.get('used'))} used of {_gib(tmp.get('total'))};"
             f" state disk {_gib(fs.get('free'))} free"]
     out += [f"- WARNING: {flag}" for flag in r["flags"]]
+    out += _gate_lines(r["gate"])
+    out.append("- other swarms on this machine (the figures above are the whole box's,"
+               " theirs included): "
+               + (", ".join(f"{s['name']} ({s['status']})" for s in r["swarms"]) or "none"))
 
     lp = d.get("last_pass")
     if lp:
@@ -558,6 +593,30 @@ def render(d: dict) -> str:
         if lp.get("left"):
             out.append(f"- it left for the owner: {lp['left'][:400]}")
     return "\n".join(out) + "\n"
+
+
+def _gate_lines(g: dict | None) -> list[str]:
+    """The machine's build gate, one line plus one per build on it: whose each
+    is, so a neighbour's build is not taken for this swarm's."""
+    head = "- build gate (the machine's, shared by every swarm on it):"
+    if g is None:
+        return [f"{head} could not be read"]
+    if g["max_concurrent"] < 1:
+        return [f"{head} off, builds do not queue"]
+    held = g["holders"]
+    theirs = sum(bool(h["swarm"]) and not h["mine"] for h in held)
+    out = [f"{head} {len(held)} build(s) on it, {theirs} of them another swarm's;"
+           f" limit {g['max_concurrent']} at once;"
+           f" {g['queued']} waiting, {g['queued_mine']} of them this swarm's"]
+    for h in held:
+        owner = ("this swarm" if h["mine"] else "a swarm its record does not name"
+                 if not h["swarm"] else f"another swarm [{h['swarm_name'] or h['swarm']}]")
+        notes = [{"yielded": "set aside as idle, does not count against the limit",
+                  "left": "ended, a process it left still holds the seat"}.get(h["state"]),
+                 "frozen with its swarm" if h["frozen"] else None]
+        tail = "".join(f"; {n}" for n in notes if n)
+        out.append(f"  - {owner}, {h['phase'] or '-'}, {_age(h['running_s'])}: {h['argv']}{tail}")
+    return out
 
 
 def write(cfg: Config, pass_id: str, data: dict) -> Path:

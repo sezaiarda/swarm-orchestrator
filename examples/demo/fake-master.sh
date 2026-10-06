@@ -11,6 +11,7 @@
 # overseer (SWARM_MASTER_KIND=overseer): read the digest, fill in the pass record
 # the supervisor created, and sign off with `swarm overseer-done` -- or, with
 # FAKE_OVERSEER_HANG=1, never sign off, so the supervisor's timeout must kill it.
+# With FAKE_OVERSEER_SUMMARY set it first sends that as the owner's summary.
 #
 # Either way it never self-terminates, exactly like the real master.
 #
@@ -19,6 +20,7 @@
 #   FAKE_MASTER_WAIT    seconds the bootstrap pass takes         (default 1)
 #   FAKE_OVERSEER_WAIT  seconds an Overseer pass takes           (default 0)
 #   FAKE_OVERSEER_HANG  1 => the pass never calls overseer-done  (default 0)
+#   FAKE_OVERSEER_SUMMARY  the summary the pass sends the owner  (default none)
 set -u
 
 BIN="${SWARM_BIN:-swarm}"
@@ -40,6 +42,9 @@ if [ "${SWARM_MASTER_KIND:-init}" = "overseer" ]; then
         $0 == "## Did" { print "nothing to do (fake overseer)" }
         $0 == "## Left for the owner" { print "nothing" }
     ' "$record" > "$tmp" && mv "$tmp" "$record"
+    if [ -n "${FAKE_OVERSEER_SUMMARY:-}" ]; then
+        $BIN overseer-summary "$FAKE_OVERSEER_SUMMARY"
+    fi
     $BIN overseer-done "fake overseer pass: $saw"
     exec sleep infinity
 fi

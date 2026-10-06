@@ -7,8 +7,9 @@
 `swarm` builds the phases of a project's phase ledger in parallel. It runs several
 full Claude Code sessions ("workers") side by side in tmux, one phase each. A small
 supervisor process launches every phase the moment its dependencies have landed.
-It merges each finished phase back into the project, and pings you on Telegram
-only when something needs you. Nothing in it is specific to a language or a
+It merges each finished phase back into the project. On Telegram it sends you
+two things only: a short ask when something is stopped on you, and a two-sentence
+summary every few hours. Nothing in it is specific to a language or a
 repository layout: it drives one repo or an umbrella of many, configured by one
 `.swarm.toml`.
 
@@ -45,14 +46,15 @@ repository layout: it drives one repo or an umbrella of many, configured by one
 - Merge finished phases back one at a time. Common conflicts (ledger ticks,
   append-only journals) are settled mechanically. A Claude resolver session is
   opened only for a real conflict. A failed push does not stop later merges.
-- Stop a worker only for a genuine question. The worker pings you, asks in its
-  own pane, and if you are away, moves to its own window so its slot keeps
+- Stop a worker only for a genuine question. The worker sends you a short ask,
+  asks in full in its own pane, and if you are away, moves to its own window so its slot keeps
   building something else.
 - Hand leftover work (deploys, post-deploy checks, cross-repo chores) to an
   **operator** session that carries it out on your behalf.
 - Review the whole run every so often with an **Overseer** session. It retries
-  failures, clears stuck state, reshapes the ledger when slots starve, and sends
-  you a short digest.
+  failures, clears stuck state, reshapes the ledger when slots starve, asks you
+  for what only you can do, and writes you a two-sentence summary every four
+  hours.
 - Cap concurrent heavy builds swarm-wide, so parallel workers cannot run the host
   out of memory.
 - Show everything live: a terminal dashboard in window 0, a read-only web board
@@ -137,8 +139,8 @@ part.
   A launch that fails waits 60 s before the next try. After three failures in a
   row the phase is given up and you are told once.
 - **May not:** build anything, retry a phase that finished `fail`, or kill or
-  restart a live worker. An error in one handler is logged, telegrammed and stepped over; it
-  never ends the run silently.
+  restart a live worker. An error in one handler is logged, stepped over and
+  handed to the Overseer; it never ends the run silently.
 
 ### Watchdog
 
@@ -168,8 +170,9 @@ part.
   `swarm done <phase> ok|operator|fail "<recap>"`:
   - `ok` merges silently;
   - `operator` merges the same way and hands the recap to an operator job;
-  - `fail` pings you, discards the phase's branch under worktree isolation,
-    and keeps its dependents blocked.
+  - `fail` discards the phase's branch under worktree isolation and keeps its
+    dependents blocked. The Overseer retries it once; you are asked when it
+    fails again (at once with the Overseer off).
 - **May not:** push (under worktree isolation the integrator does). Nothing else
   is clamped: tools, permissions and scope are the session's own.
 
@@ -206,7 +209,8 @@ by the supervisor.
   - queues operator jobs;
   - runs gc;
   - pauses the swarm when the box is in danger;
-  - sends you a digest of six lines at most.
+  - asks you for what only you can do;
+  - writes your summary every `every_s`: two short sentences.
 
   It works in its own mirror (`ovs-<id>`) under worktree isolation, merged when
   the pass ends, and leaves a record (*Saw / Did / Left for the owner*).
@@ -237,8 +241,8 @@ flowchart TD
 - **Is:** one Claude session in the `operator` window that carries out work a phase
   could not wait on: deploys, post-deploy checks, provisioning, cross-repo chores
   (`prompts/operator.md`). It holds your authority, so it is **off until
-  `[operator].enabled = true`**. While it is off, each hand-off is telegrammed to
-  you as a to-do instead.
+  `[operator].enabled = true`**. While it is off, each hand-off asks you to do
+  it instead (`swarm todo` shows the recap).
 - **Its queue:** one JSON file per job in `<state>/operator/`. Jobs come from:
   - `swarm done … operator "<recap>"`, where the recap is the whole brief (a
     recap under 20 characters or 4 words queues nothing);
@@ -255,10 +259,11 @@ flowchart TD
   one job runs at a time, under a lease: 1 h, or 7 days while it waits on you. A
   job gets 3 attempts 5 minutes apart. After that it is `abandoned` and you are
   told once. Under worktree isolation it works in its own mirror (`op-<job>`),
-  merged on `operator-done`. `--attention` simply sends the outcome to your
-  phone; a decision only you can make is asked first with
-  `swarm waiting <job> "<question>"`, before the job finishes. The rest reach
-  you folded into the Overseer's summary (`[operator].notify`).
+  merged on `operator-done`. An outcome that leaves something only you can do
+  carries `--ask "<what, then why>"`, and that short ask goes to your phone; a
+  decision only you can make is asked first with
+  `swarm waiting <job> "<ask>"`, before the job finishes. The rest are folded
+  into the Overseer's summary.
   `swarm operator-done <job> "<why>" --not-before <when>` means the job's
   moment has not come yet: it goes back in the queue until `<when>` instead of
   finishing, and the attempt is not counted.
@@ -287,17 +292,17 @@ stateDiagram-v2
   direction TB
   [*] --> Queued: swarm done operator (recap is the brief)<br/>or swarm operator-add
   Queued --> Running: dispatched (lease 1 h, attempt +1)
-  Running --> Waiting: swarm waiting (owner pinged, lease 7 days)
+  Running --> Waiting: swarm waiting (owner asked, lease 7 days)
   Waiting --> Running: swarm resumed
   Waiting --> Parked: park_after runs out<br/>own window (wait:op-&lt;job&gt;), operator window freed
   Parked --> Running: swarm resumed
-  Running --> Done: operator-done (--attention pings; a decision is asked first)
+  Running --> Done: operator-done (--ask asks the owner; a decision is asked first)
   Running --> Running: operator-hold (declared long work, lease up to 4 h)
   Running --> Queued: operator-done --not-before (attempt not counted)
   Running --> Queued: lease expired or session would not start<br/>(eligible again after 5 min; a declared hold that ran out is not an attempt)
   Running --> Queued: swarm up (the old run is gone)
   Waiting --> Queued: swarm up
-  Queued --> Abandoned: 3 attempts used (owner pinged once)
+  Queued --> Abandoned: 3 attempts used (owner asked once)
   Running --> Abandoned: 3rd attempt fails
   Done --> [*]: worktree mode: its mirror is merged
   Abandoned --> [*]
@@ -308,8 +313,9 @@ stateDiagram-v2
 - **Is:** under `isolation = "worktree"`, the supervisor's merge queue. It lands one
   phase at a time, repo by repo (components first, umbrella last), under a
   per-repo `flock`. Untouched repos are pruned with no network. A push that fails
-  never holds the queue: the repo **owes a push**, you are pinged once, and it is
-  retried after each integration and on the watchdog.
+  never holds the queue: the repo **owes a push**, it is retried after each
+  integration and on the watchdog, and the Overseer is given a pass to fix it or
+  ask you.
 - **Before a push:** `[git].post_merge` can name a command per repo that the
   integrator runs in the main checkout between the merge and the push, through
   the build gate: for what the repo's pre-push check needs and a merge does not
@@ -352,7 +358,7 @@ flowchart TD
   a -- "yes" --> push
   m -- "clean" --> push["push main"]
   push -- "ok" --> p
-  push -- "refused / unreachable" --> owed["push owed: retried later,<br/>pinged if still owed after 1 h"] --> p
+  push -- "refused / unreachable" --> owed["push owed: retried later,<br/>the Overseer looks at it"] --> p
   p -- "more repos" --> r
   p -- "all repos landed" --> fin["record done, drop mirror,<br/>launch into the free slot"]
   hd --> sr["swarm resolved &lt;phase&gt;"]
@@ -441,8 +447,8 @@ flowchart TD
   starts one in the background, and `swarm recap` makes one on demand. There is
   no timer. A short completion note is used as is; otherwise
   `claude -p --model haiku` writes it.
-- **Notes:** `swarm note` records a decision, assumption or risk without pinging
-  anyone. Your own answers, relayed by `swarm resumed`, are kept as owner
+- **Notes:** `swarm note` records a decision, assumption or risk without
+  messaging anyone. Your own answers, relayed by `swarm resumed`, are kept as owner
   decisions.
 - **`swarm report`:** every phase with status, timings and recap, plus warnings
   where the records disagree. `--decisions` shows only what carries a judgement
@@ -472,8 +478,9 @@ flowchart TD
   supervisor asks Claude Code's usage endpoint, at most every 30 minutes. Workers
   are never told.
 - **On your phone (Telegram):** usage only when you ask: `/usage` to the swarm bot answers
-  with both limits, how old the reading is, and the caps' state. A cap pausing or
-  stopping the swarm pings once, and so does a pause lifting.
+  with both limits, how old the reading is, and the caps' state. A cap that
+  stops the swarm asks you to start it again; a pause that lifts by itself is
+  only in the Overseer's summary.
 
 ### Doctor, why, gc
 
@@ -565,32 +572,29 @@ terminal.
   Once you have seen the pings that never arrived, `swarm notify --ack` (or `x`
   on home or the alerts tab) clears the warning: the footer and `swarm doctor` count
   only drops after that. The log itself is kept as it is.
-- **What pings you** (`[telegram].pings = "necessary"`, the default): only what
-  needs you.
-  - a question from a worker, the operator or the Overseer;
-  - a merge hold you must clear: a dirty tree, or a conflict no resolver could
-    start (a resolver that cannot fix one messages you itself);
-  - an operator outcome flagged `--attention`, an abandoned job, or a to-do
-    while the operator is off;
-  - a `fail` after the Overseer's retry, or any `fail` while the Overseer is off;
-  - a push still owed after `push_owed_grace_s` (1 h), and then its clearing;
-  - a phase that would not start (once per phase), a launch given up, a worker
-    that died without `swarm done`;
-  - a supervisor crash or error; a master that would not start, or an Overseer
-    pass that failed or ran long, three times in a row;
-  - the Overseer's summary every `every_s` (4 hours by default), or any
-    summary it flags `--attention`;
-  - a note from the init pass or a resolver (`swarm notify`);
-  - the finish summary;
-  - a usage cap pausing or stopping the swarm, and a usage pause lifting.
-- **Logged, not sent:** routine operator outcomes, parks, a first `fail` (the
-  Overseer retries it), a push owed for less than the grace, a conflict a
-  resolver is working on, a web board that did not start, a single master or
-  Overseer failure, a repeat failed start, and the summary of any other Overseer
-  pass. Each is still in `notifications.jsonl` (marked `suppressed`), on the
-  dashboard's alerts tab (as `·`), and in the Overseer's digest where it applies.
-  `[telegram].pings = "all"` sends every one of them again. `ok` finishes are
-  silent either way.
+- **What reaches your phone:** two kinds of message, each starting with the
+  swarm's name, each at most 280 characters so it reads in a notification.
+  - **`[<swarm>] Asks you: …`** when the swarm, a phase or the operator cannot
+    move forward until you do or decide something: a question from a session,
+    a merge hold you must clear, a failure a retry did not fix, a follow-up
+    only you can do, a row that is yours and holds others up, a supervisor that
+    crashed, a usage cap that stopped the swarm. The first sentence is what to
+    do; the second says why.
+  - **`[<swarm>] Overseer: …`** every `[overseer].every_s` (4 hours by default),
+    and once more when the run ends: what landed and what is running, then
+    whether anything waits on you. Never per number of finished phases, and not
+    at all for a stretch in which the swarm stood still.
+- **Held back, not sent:** everything else. Routine operator outcomes, parks,
+  a first `fail` (the Overseer retries it), an owed push, a usage pause that
+  lifts by itself, a conflict a resolver is working on, a worker that died and
+  was started again, a web board that did not start. Each is in
+  `notifications.jsonl`, on the dashboard's alerts tab (as `·`), and, where it
+  matters, in the Overseer's digest so its summary can account for it. `ok`
+  finishes say nothing at all. The whole table is in
+  [components.md](docs/components.md#telegram-and-asking-the-owner).
+- **Short by construction:** a session's ask (`swarm waiting`, `swarm notify`,
+  `swarm operator-done --ask`) and the Overseer's summary are refused when too
+  long, with the limit, and the session rewrites them. Nothing is cut to fit.
 - **Commands:** the bot also listens. Send it `/usage` for usage and the caps or
   `/help` for the list. `swarm up` starts the listener (`[telegram].commands`, on
   by default), `swarm down` stops it, and `swarm telegram-bot` runs it in the
@@ -598,8 +602,9 @@ terminal.
   else. Only one program may poll a bot token: while it runs,
   `scripts/resolve-chat-id.sh` gets a 409, so run that before `swarm up`.
 - **Asking:** a worker, an operator job or the Overseer all run
-  `swarm waiting <who> "<question>"` then `swarm resumed <who> "<answer>"`.
-  Each pings you once, asks in its own pane, and records your answer (see
+  `swarm waiting <who> "<ask>"` then `swarm resumed <who> "<answer>"`.
+  Each sends you its ask once, asks in full in its own pane, and records your
+  answer (see
   [Answering the swarm](#answering-the-swarm)).
 
 ### Reload, layout, check
@@ -627,10 +632,10 @@ stateDiagram-v2
   Launching --> Building: pane ready, prompt submitted
   Launching --> BackingOff: launch failed
   BackingOff --> Ready: after 60 s
-  BackingOff --> GivenUp: 3rd failure in a row<br/>(owner pinged once)
+  BackingOff --> GivenUp: 3rd failure in a row<br/>(owner asked once)
   GivenUp --> Ready: swarm launch or swarm resume
 
-  Building --> Waiting: swarm waiting (owner pinged)
+  Building --> Waiting: swarm waiting (owner asked)
   Waiting --> Building: swarm resumed
   Waiting --> Parked: park_after runs out<br/>own window, slot refilled
   Parked --> Finishing: swarm done, once answered
@@ -641,7 +646,7 @@ stateDiagram-v2
   state Finishing <<choice>>
   Finishing --> Merging: ok / operator (worktree)
   Finishing --> Done: ok / operator (in place)
-  Finishing --> Failed: fail (owner pinged)
+  Finishing --> Failed: fail (owner asked once a retry fails too)
   Merging --> Held: conflict or dirty tree
   Held --> Merging: swarm resolved
   Merging --> Done: merged
@@ -817,7 +822,7 @@ installed code), and to pick a swarm up again after its supervisor died.
 `--at 03:00` or `--in 2h` plans it for later; `--cancel` drops it. `swarm restart
 --full` drains, stops and starts again in a new tmux session, and refuses while
 a session waits on you unless you pass `--wait-questions`, `--keep-questions` or
-`--force`. A restart that does not come back telegrams you.
+`--force`. A restart that does not come back asks you to bring it back.
 
 **Freezing:** `swarm freeze` stops every session in place, to hand the machine
 to something else for a while without ending anything: workers, the operator, a
@@ -834,9 +839,10 @@ genuinely yours, or when it is in doubt about something that matters. Small,
 cheap-to-change calls it makes itself and records with `swarm note`. Whichever
 one it is, there is one door in and out:
 
-1. It runs `swarm waiting <who> "<question>"`, which telegrams you the
-   question (a worker's leads with its cost line) and says which tmux window
-   to open. `<who>` is a worker's phase, an operator job's id, or `overseer`.
+1. It runs `swarm waiting <who> "<ask>"`, which sends that ask to your phone:
+   what it needs from you and why, in one or two sentences (longer is refused).
+   `swarm status` and the dashboard say which tmux window to open. `<who>` is a
+   worker's phase, an operator job's id, or `overseer`.
 2. It asks the same question in its own pane with AskUserQuestion.
 3. You switch to its window and answer there.
 4. It runs `swarm resumed <who> "<your answer>"`. Your answer is saved as an
@@ -1042,8 +1048,8 @@ The code follows these rules.
   tools, permissions and scope are never clamped. The swarm shapes the ledger,
   the prompt and the environment, never the worker.
 - **Decide the small, ask the big.** Sessions make cheap, reversible calls
-  themselves and record them with `swarm note`. They ask the owner (a Telegram
-  ping, then AskUserQuestion in their pane) for money, taste, scope, irreversible
+  themselves and record them with `swarm note`. They ask the owner (a short ask
+  on Telegram, then AskUserQuestion in their pane) for money, taste, scope, irreversible
   changes, contradicting a written decision, or whenever they are in doubt about
   something that matters. They never guess an answer that is the owner's, and
   never answer a question for the owner.

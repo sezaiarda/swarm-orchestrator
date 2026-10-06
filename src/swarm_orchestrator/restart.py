@@ -1036,18 +1036,21 @@ def fail(cfg: Config, plan: dict, detail: str, log: Log, *, left: str = UNCHANGE
     update(cfg, plan.get("id", ""), stage=FAILED, detail=detail, ended_at=time.time())
     log.line(f"RESTART-FAILED id={plan.get('id')} by={plan.get('by')!r} left={left} {detail}")
     by = plan.get("by") or "owner terminal"
-    tail = {
-        UNSUPERVISED: (" The swarm is NOT supervised now: workers and questions are still in"
-                       " their windows, but nothing is started or merged. Run `swarm restart`"
-                       " to bring the supervisor back (it keeps them); `swarm doctor` shows"
-                       " the state."),
-        DOWN: " The swarm is DOWN. Run `swarm up` to start it.",
-    }.get(left, " Nothing was changed: the swarm runs on as it was.")
-    telegram.notify(
-        cfg.telegram_notify,
-        f"swarm: {cfg.name} did not restart (asked by {by}): {detail}.{tail}",
-        kind="restart", source="restart.fail", state_dir=cfg.state_dir,
-    )
+    said = {"kind": "restart", "source": "restart.fail"}
+    if left == UNSUPERVISED:
+        telegram.ask(cfg, telegram.fitted(
+            cfg,
+            f"Run `swarm restart` to bring the supervisor back: the restart {by} asked"
+            " for failed (", detail, "), so nothing is started or merged. Workers and"
+            " questions are still in their windows."), **said)
+    elif left == DOWN:
+        telegram.ask(cfg, telegram.fitted(
+            cfg,
+            f"Run `swarm up` to start the swarm: the restart {by} asked for failed (",
+            detail, ") and left it down."), **said)
+    else:
+        telegram.fold(cfg, f"the swarm did not restart (asked by {by}): {detail}. Nothing"
+                           " was changed: it runs on as it was.", **said)
 
 
 def _sleep_until(cfg: Config, plan_id: str, at: float) -> bool:

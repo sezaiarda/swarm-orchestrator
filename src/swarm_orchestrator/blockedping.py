@@ -1,16 +1,16 @@
-"""One ping for a burst of ``blocked`` outcomes, grouped by reason.
+"""One ask for a burst of ``blocked`` outcomes.
 
 A ``blocked`` phase stopped on something outside it, and one outside cause tends
 to stop many phases at once: when a remote box refuses this host's ssh key, every
-phase that deploys hits it within the hour. A ping each told the owner the same
-thing over and over. So under ``[telegram].pings = "necessary"`` a ``blocked``
-outcome that would ping is gathered here instead (logged as held, never lost),
-and the supervisor sends one ping :data:`GATHER_S` after the first one of the
-burst, listing the phases under each distinct reason. ``"all"`` pings each one,
-as before.
+phase that deploys hits it within the hour. An ask each would tell the owner the
+same thing over and over. So a ``blocked`` outcome that would ask (one past the
+Overseer's retry, or any with the Overseer off) is gathered here instead (logged,
+never lost), and the supervisor sends one ask :data:`GATHER_S` after the first
+one of the burst, naming the phases.
 
-A reason is the recap's first sentence with the phase's own id taken out, so two
-workers that hit the same wall and say so the same way share a line.
+Each gathered row keeps its reason — the recap's first sentence with the phase's
+own id taken out — in the log beside the ask; the ask itself is too short to
+carry them, and ``swarm report`` has every recap in full.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from .logutil import Log
 GATHER_S = 900.0
 PENDING = "blocked-pings.jsonl"
 REASON_CHARS = 200
-HELD = "gathered into one ping for the phases blocked with it"
+HELD = "gathered into one ask for the phases blocked with it"
 
 _SENTENCE = re.compile(r"(?<=[.!?;])\s")
 
@@ -117,25 +117,33 @@ def shift(cfg: Config, delta: float, now: float | None = None) -> None:
         pass
 
 
-def message(rows: list[dict]) -> str:
-    """Plain English: how many phases are blocked, and on what, each reason once."""
+def reasons(rows: list[dict]) -> str:
+    """Each distinct reason once, with the phases it stopped: the long form the
+    log keeps beside the ask."""
     groups: dict[str, list[str]] = {}
     for r in rows:
         phases = groups.setdefault(r.get("reason") or "no reason given", [])
         if r["phase"] not in phases:
             phases.append(r["phase"])
-    count = len({r["phase"] for r in rows})
-    head = (f"swarm: {rows[0]['phase']} is blocked and needs you" if count == 1
-            else f"swarm: {count} phases are blocked and need you")
-    lines = [head + f", on something outside {'its' if count == 1 else 'their'} own work:"]
-    for reason, phases in groups.items():
-        lines.append(f"- {reason} ({', '.join(phases)})")
-    lines.append("Once the cause is fixed, `swarm retry <phase>` puts each one back in play.")
-    return "\n".join(lines)
+    return "; ".join(f"{reason} ({', '.join(phases)})" for reason, phases in groups.items())
+
+
+def message(cfg: Config, rows: list[dict]) -> str:
+    """The ask: what to clear and for which phases, then why it is the owner's."""
+    phases = list(dict.fromkeys(r["phase"] for r in rows))
+    if len(phases) == 1:
+        (phase,) = phases
+        return (f"Clear what blocks {phase}, then run `swarm retry {phase}`: it stopped"
+                " on something outside its own work that the swarm cannot fix."
+                " `swarm report` has its recap.")
+    return telegram.fitted(
+        cfg, f"Clear what blocks {len(phases)} phases (", telegram.names(phases),
+        "), then `swarm retry` each: they stopped on something outside their own work"
+        " that the swarm cannot fix. `swarm report` has their recaps.")
 
 
 def flush(cfg: Config, log: Log, now: float | None = None) -> bool:
-    """Send the gathered burst once it is due. True when a ping went out."""
+    """Send the gathered burst once it is due. True when the ask went out."""
     now = now or time.time()
     with _locked(cfg):
         rows = _read(cfg)
@@ -146,13 +154,13 @@ def flush(cfg: Config, log: Log, now: float | None = None) -> bool:
         except OSError:
             pass
     phases = sorted({r["phase"] for r in rows})
-    sent = telegram.notify(
-        cfg.telegram_notify,
-        message(rows),
+    sent = telegram.ask(
+        cfg,
+        message(cfg, rows),
         kind="blocked",
         phase=phases[0] if len(phases) == 1 else None,
         source="blockedping.flush",
-        state_dir=cfg.state_dir,
-    )
+        detail=reasons(rows),
+    ).delivered
     log.line(f"BLOCKED-PING {'sent' if sent else 'failed'} {' '.join(phases)}")
     return sent

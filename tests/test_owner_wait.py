@@ -89,22 +89,20 @@ def park_now(sup, key: str) -> None:
     sup._check_park_deadlines()
 
 
-# -- the ping says where to answer -----------------------------------------
-def test_the_ping_names_the_window_and_where_it_will_move(cfg, monkeypatch):
+# -- where to answer ---------------------------------------------------------
+def test_the_window_to_answer_in_is_known_before_and_after_the_park(cfg, monkeypatch):
+    """The ask on the phone is the session's own two sentences; the window to
+    answer in is what status, the drawer and the board show."""
     cfg.driver = "tmux"
     monkeypatch.setattr(owner.tmux, "window_name_of", lambda pane: "workers")
     with state_mod.transaction(cfg) as st:
         st.claim_slot("P0").pane_id = "%7"
     st = state_mod.read(cfg)
-    assert owner.answer_line(cfg, "P0", st) == (
-        f"Answer in tmux window workers (tmux attach -t {cfg.session});"
-        " after 1 min it moves to its own window wait:P0.")
-    assert owner.answer_line(cfg, KEY, st).startswith("Answer in tmux window operator ")
-    assert "wait:op-S1" in owner.answer_line(cfg, KEY, st)
+    assert owner.where(cfg, "P0", st) == "workers"
+    assert owner.where(cfg, KEY, st) == "operator"
     with state_mod.transaction(cfg) as s:
         s.parked.append(KEY)
-    assert owner.answer_line(cfg, KEY, state_mod.read(cfg)) == (
-        f"Answer in tmux window wait:op-S1 (tmux attach -t {cfg.session}).")
+    assert owner.where(cfg, KEY, state_mod.read(cfg)) == "wait:op-S1"
 
 
 def test_who_resolves_from_the_sessions_own_environment(cfg, monkeypatch):
@@ -231,14 +229,16 @@ def test_an_owner_row_pings_once_when_it_starts_holding_rows_up(cfg, sup):
         st.done["P0"] = "ok"
     sup._fill_slots("P0 landed")
     sup._fill_slots("again")
-    text = tg(cfg)
-    assert text.count("only you can do OWN, and it is holding up 2 rows") == 1
-    assert "swarm skip OWN" in text
+    asks = [ln for ln in tg(cfg).splitlines() if "OWN" in ln]
+    assert len(asks) == 1 and len(asks[0]) <= telegram.PHONE_MAX
+    assert asks[0].startswith(f"[{cfg.name}] Asks you: Do OWN")
+    assert asks[0].endswith(", then tick it in the ledger or run `swarm skip OWN`: only you can"
+                            " do it, and 2 rows wait on it.")
     rows = [json.loads(ln) for ln in (cfg.state_dir / telegram.LEDGER_NAME).read_text().splitlines()]
-    assert [r["kind"] for r in rows if "OWN" in r["text"]] == ["owner-row"]
+    assert [(r["kind"], r["class"]) for r in rows if "OWN" in r["text"]] == [("owner-row", "ask")]
     # Across a restart too.
     Supervisor(cfg)._fill_slots("up")
-    assert tg(cfg).count("only you can do OWN") == 1
+    assert tg(cfg).count("Do OWN") == 1
 
 
 def test_an_owner_row_is_in_needs_you_with_what_it_holds_up(cfg):

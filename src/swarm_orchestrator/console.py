@@ -80,7 +80,7 @@ CONSOLE_ENV = "SWARM_OWNER_CONSOLE"
 NOT_YOURS = frozenset({
     "up", "tui", "web", "telegram-bot", "done", "waiting", "resumed", "widen",
     "resolved", "master-idle", "bootstrap", "operator-triage", "operator-done",
-    "overseer-done", "big-picture-done",
+    "overseer-done", "overseer-summary", "big-picture-done",
 })
 
 

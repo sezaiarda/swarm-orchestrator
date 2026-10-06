@@ -8,7 +8,8 @@ What is load-bearing here:
   limit — a lagging or stale reading can neither lift nor create one;
 * a limit reset inside its window is such a reset, read from the endpoint only:
   the hold lifts, and an override or a fired ``down`` from before it ends;
-* a ``down`` rule runs ``swarm down`` once per window, with one ping;
+* a ``down`` rule runs ``swarm down`` once per window, and asks the owner once to
+  start the swarm again; a pause that lifts by itself is only folded into the summary;
 * the usage endpoint is asked only when the tap has nothing fresh, at most once
   per half hour, and its token is never sent once expired and never logged.
 
@@ -376,7 +377,15 @@ def _tg(tmp_path) -> list[str]:
     return path.read_text().splitlines() if path.is_file() else []
 
 
-def test_a_usage_hold_stops_launches_and_pings_once(sup, cfg, tmp_path, api):
+def _folded(cfg) -> list[str]:
+    """What the usage caps had to say and held back for the Overseer's summary."""
+    path = cfg.state_dir / "notifications.jsonl"
+    rows = [json.loads(ln) for ln in path.read_text().splitlines()] if path.is_file() else []
+    assert all(r["class"] == "folded" for r in rows if r["kind"] == "usage-cap" and not r["delivered"])
+    return [r["text"] for r in rows if r["kind"] == "usage-cap" and not r["delivered"]]
+
+
+def test_a_usage_hold_stops_launches_and_is_noted_once_for_the_summary(sup, cfg, tmp_path, api):
     _tap(cfg, week=61, five=20)
     sup._usage_tick()
     st = state_mod.read(cfg)
@@ -386,10 +395,12 @@ def test_a_usage_hold_stops_launches_and_pings_once(sup, cfg, tmp_path, api):
     assert launch_mod.launch_outcome(cfg, "P0", log) == launch_mod.DENIED
     log.close()
     assert "LAUNCH-DENIED P0 usage-cap" in cfg.supervisor_log.read_text()
-    pings = _tg(tmp_path)
-    assert len(pings) == 1 and pings[0].startswith("Swarm paused: weekly usage reached 61%")
-    sup._usage_check(time.time())  # the next check: still held, no new ping
-    assert len(_tg(tmp_path)) == 1
+    notes = _folded(cfg)
+    assert len(notes) == 1 and notes[0].startswith("paused: weekly usage reached 61%")
+    assert "It resumes by itself after the reset" in notes[0]
+    sup._usage_check(time.time())  # the next check: still held, nothing new to say
+    assert len(_folded(cfg)) == 1
+    assert _tg(tmp_path) == []  # it lifts by itself: the owner is not asked
     assert api.calls == []  # the tap was fresh
 
 
@@ -404,7 +415,8 @@ def test_the_lift_never_undoes_the_owners_pause(sup, cfg, tmp_path):
     sup._usage_check(time.time())
     st = state_mod.read(cfg)
     assert st.usage_hold == {} and st.paused
-    assert _tg(tmp_path)[-1].startswith("Swarm resumed: the weekly usage window reset")
+    assert _folded(cfg)[-1].startswith("resumed: the weekly usage window reset")
+    assert _tg(tmp_path) == []
     assert getattr(sup, "stub_launches", []) == []
 
 
@@ -418,14 +430,16 @@ def test_a_lift_launches_again(sup, cfg):
     assert sup.stub_launches == ["P0", "P1"]
 
 
-def test_down_runs_once_with_one_ping(sup, cfg, tmp_path):
+def test_down_runs_once_and_asks_the_owner_once_to_start_it_again(sup, cfg, tmp_path):
     _tap(cfg, week=71, five=20)
     sup._usage_check(time.time())
     assert len(sup.downs) == 1
-    pings = _tg(tmp_path)
-    assert len(pings) == 1
-    assert pings[0].startswith("Swarm stopped: weekly usage reached 71% (your limit 70%).")
-    assert "Start it again with swarm up when you want." in pings[0]
+    [ask] = _tg(tmp_path)
+    assert ask.startswith(
+        f"[{cfg.name}] Asks you: Run `swarm up` when you want the swarm back: it stopped"
+        " itself at 71% weekly usage (your limit 70%), which resets ")
+    assert "`swarm resume --override-cap` lifts it." in ask  # the 60% pause holds too
+    assert len(ask) <= 280 and _folded(cfg) == []  # the stop's own ask says it all
     sup._usage_check(time.time())
     assert len(sup.downs) == 1 and len(_tg(tmp_path)) == 1
     # A restart keeps the record: the same crossing does not stop it again.
@@ -508,8 +522,8 @@ def test_a_login_switch_lifts_the_hold_at_once(sup, cfg, tmp_path, api, monkeypa
     assert len(api.calls) == 1
     assert state_mod.read(cfg).usage_hold == {}
     assert f"USAGE-LIFT week account switched to {b}" in cfg.supervisor_log.read_text()
-    assert _tg(tmp_path)[-1].startswith(
-        f"Swarm resumed: the weekly cap held another account; Claude is now logged in as "
+    assert _folded(cfg)[-1].startswith(
+        f"resumed: the weekly cap held another account; Claude is now logged in as "
         f"account {b}, whose weekly usage is 1%.")
     assert sup.stub_launches[:2] == ["P0", "P1"]
     sup._usage_tick()  # same login, inside the interval: no further check
@@ -535,8 +549,8 @@ def test_a_limit_reset_inside_its_window_lifts_the_hold(sup, cfg, tmp_path, api)
     sup._usage_check(time.time())
     assert state_mod.read(cfg).usage_hold == {}
     assert "USAGE-LIFT week window reset" in cfg.supervisor_log.read_text()
-    assert _tg(tmp_path)[-1].startswith(
-        "Swarm resumed: the weekly usage window reset and usage is now 0%.")
+    assert _folded(cfg)[-1].startswith(
+        "resumed: the weekly usage window reset and usage is now 0%.")
     assert sup.stub_launches[:2] == ["P0", "P1"]
 
 
@@ -673,6 +687,7 @@ def test_up_over_a_cap_launches_nothing_and_a_down_crossing_stops_the_swarm(swar
 
     assert swarm.wait(gone, timeout=40), swarm.log_text()
     assert swarm.wait(lambda: "swarm down" in (swarm.state_dir / "logs" / "usage-down.log").read_text())
-    stops = [line for line in swarm.tg_lines() if line.startswith("Swarm stopped:")]
-    assert len(stops) == 1 and "weekly usage reached 71% (your limit 70%)" in stops[0]
+    stops = [line for line in swarm.tg_lines() if "it stopped itself" in line]
+    assert len(stops) == 1 and "at 71% weekly usage (your limit 70%)" in stops[0]
+    assert stops[0].startswith(f"[{swarm.project.name}] Asks you: Run `swarm up`")
     assert state_mod.State.from_dict(swarm.state()).usage_fired

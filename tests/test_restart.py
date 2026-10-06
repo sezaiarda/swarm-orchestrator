@@ -311,10 +311,13 @@ def test_a_restart_that_does_not_come_back_tells_the_owner(swarm, monkeypatch):
     assert not _alive(old)
     plan = _plan(swarm)
     assert plan["stage"] == restart_mod.FAILED and "did not start" in plan["detail"]
-    told = [ln for ln in swarm.tg_lines() if "did not restart" in ln]
-    assert len(told) == 1
-    assert "asked by the worker on W1" in told[0] and "NOT supervised" in told[0]
-    assert "`swarm restart`" in told[0]
+    told = [ln for ln in swarm.tg_lines() if "the restart" in ln]
+    assert len(told) == 1 and len(told[0]) <= 280
+    assert told[0].startswith(
+        f"[{swarm.project.name}] Asks you: Run `swarm restart` to bring the supervisor back:"
+        " the restart the worker on W1 asked for failed (")
+    assert told[0].endswith("so nothing is started or merged. Workers and questions are still"
+                            " in their windows.")
     assert "RESTART-FAILED" in swarm.log_text() and "left=unsupervised" in swarm.log_text()
     assert "the last restart FAILED" in swarm.cli("status").stdout
     # Nothing else was lost, and what the message says to do brings it back.
@@ -600,8 +603,10 @@ def test_a_scheduled_restart_is_started_once_when_due_and_not_when_cancelled(cfg
     helper.returncode = 2
     sup._restart_tick()
     assert restart_mod.load(cfg)["stage"] == restart_mod.FAILED
-    told = (cfg.state_dir.parent / "tg.log").read_text()
-    assert "did not restart" in told and "Nothing was changed" in told
+    # Nothing was changed, so nobody is asked: it is held for the Overseer's summary.
+    assert not (cfg.state_dir.parent / "tg.log").exists()
+    told = (cfg.state_dir / "notifications.jsonl").read_text()
+    assert "did not restart" in told and "Nothing was changed" in told and '"folded"' in told
 
     later = restart_mod.new_plan(cfg, restart_mod.SUPERVISOR, time.time() + 3600, "owner terminal")
     later["timer"] = "supervisor"

@@ -67,10 +67,10 @@ def job(cfg, phase, note, state=opqueue.QUEUED, queued_at=100.0, **kw):
     opqueue.item_path(cfg, phase).write_text(json.dumps(item.to_dict()), encoding="utf-8")
 
 
-def ping(cfg, kind, phase, text, ts=100.0):
+def ping(cfg, kind, phase, text, ts=100.0, **more):
     with (cfg.state_dir / "notifications.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"ts": ts, "kind": kind, "phase": phase, "text": text,
-                             "delivered": True}) + "\n")
+                             "delivered": True, **more}) + "\n")
 
 
 def overseer(cfg, name, left):
@@ -151,10 +151,28 @@ def test_a_job_the_queue_gave_up_on_is_yours_until_it_is_handed_on(cfg):
     assert got["F4"].kind == todo.GIVEN_UP and "F3" not in got
 
 
+def test_a_job_that_finished_with_an_ask_is_yours_until_it_is_handed_on(cfg):
+    """The phone showed the ask; the outcome it could not carry is here."""
+    job(cfg, "F2", "roll it", state=opqueue.DONE, done_at=100.0, attention=True,
+        outcome="api NOT rolled: the script refuses this host. Tried three times.",
+        ask="Roll the api by hand: the roll script refuses this host.")
+    job(cfg, "F1", "roll it", state=opqueue.DONE, done_at=100.0, outcome="rolled; green")
+    got = by_id(todo.collect(cfg))
+    assert "F1" not in got  # nothing was asked of the owner
+    assert got["F2"].kind == todo.OPERATOR_ASK
+    assert got["F2"].title == "Roll the api by hand: the roll script refuses this host."
+    assert got["F2"].spec.startswith("api NOT rolled: the script refuses this host.")
+    notes_mod.add(cfg, "F2", "owner did it: rolled by hand", "decision")
+    assert "F2" not in by_id(todo.collect(cfg))
+
+
 # -- to-dos a finish sent -------------------------------------------------------------
 def test_a_worker_todo_stays_until_a_later_job_or_note_handles_it(cfg):
-    ping(cfg, "operator-todo", "F9", "swarm: a to-do for you from F9: LEFT: deploy it.", ts=100.0)
-    ping(cfg, "operator-todo", "F10", "swarm: a to-do for you from F10: deploy it.", ts=100.0)
+    # The to-do is the recap kept beside the ask, not the ask that points at it.
+    ping(cfg, "operator-todo", "F9", "[x] Asks you: Do the follow-up that F9 left behind.",
+         ts=100.0, detail="built the page. LEFT: deploy it.")
+    ping(cfg, "operator-todo", "F10", "[x] Asks you: Do the follow-up that F10 left behind.",
+         ts=100.0, detail="deploy it.")
     notes_mod.add(cfg, "F10", "owner did it: deployed", "decision")
     got = by_id(todo.collect(cfg))
     assert got["F9"].kind == todo.WORKER_TODO and got["F9"].title == "deploy it."

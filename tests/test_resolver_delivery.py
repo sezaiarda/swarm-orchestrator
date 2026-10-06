@@ -56,7 +56,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
     monkeypatch.setenv("SWARM_DRIVER", "bare")
     monkeypatch.setenv("SWARM_OVERSEER", "1")
-    for leak in ("SWARM_RESOLVER_CMD", "SWARM_TG_PINGS", "SWARM_GIT_ISOLATION"):
+    for leak in ("SWARM_RESOLVER_CMD", "SWARM_GIT_ISOLATION"):
         monkeypatch.delenv(leak, raising=False)
     cfg = config_mod.load(project_dir=str(project))
     cfg.ensure_dirs()

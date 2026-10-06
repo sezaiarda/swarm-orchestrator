@@ -4,9 +4,10 @@ A prompt is the one input every worker trusts without checking, so a single
 false sentence in it is paid for in every session that reads it. Two such
 sentences are typical: "Run it synchronously" (an ``Agent`` spawn returns in
 a second, so workers invent hand-rolled waiting to fill the gap)
-and "none of the statuses sends a Telegram" (some do, and the owner is told
-there is nothing waiting on them while holding the ping). Which statuses ping
-is read from :data:`statuses.PINGS`, so the rule moves when the code does.
+and "none of the statuses sends a Telegram" (a ``fail`` nothing will retry
+asks the owner, so a worker told otherwise believes nobody hears of it). Which
+statuses can is read from :data:`statuses.PINGS`, so the rule moves when the
+code does.
 
 Two severities, and only one of them fails ``swarm check``:
 
@@ -125,7 +126,7 @@ def lint(text: str, known_commands: set[str] | frozenset[str] | None = None) -> 
         pinging = sorted({c.strip() for c in code if _PINGING.match(c.strip())})
         if pinging and _SILENT.search(line):
             add(n, CONTRADICTED, "telegram-silent",
-                f"`swarm done … {pinging[0]}` telegrams the owner", line)
+                f"`swarm done … {pinging[0]}` can ask the owner on Telegram", line)
 
         if negated:
             continue

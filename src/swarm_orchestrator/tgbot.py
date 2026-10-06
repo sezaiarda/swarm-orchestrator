@@ -245,8 +245,7 @@ class Listener:
                     {"state": state, "detail": detail, "ts": self.clock(), "pid": os.getpid()})
 
     def _send(self, text: str) -> object:
-        return telegram.notify(self.cfg.telegram_notify, text, kind="bot-reply",
-                               source="tgbot", state_dir=self.cfg.state_dir)
+        return telegram.reply(self.cfg, text, source="tgbot").delivered
 
     # -- one update
     def answer(self, update: dict) -> str | None:

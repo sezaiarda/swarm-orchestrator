@@ -1711,8 +1711,8 @@ def blocked_repo(cfg: Config, phase: str) -> Path | None:
 
 
 def off_main_reason(cfg: Config, repo: Path | None, phase: str) -> str | None:
-    """Plain words for a hold caused by the owner's checkout sitting on another
-    branch, or None when that is not why ``repo`` is held."""
+    """The ask for a hold caused by the owner's checkout sitting on another
+    branch (what to do, then why), or None when that is not why ``repo`` is held."""
     if repo is None:
         return None
     main = _repo_main(cfg, repo)
@@ -1720,9 +1720,9 @@ def off_main_reason(cfg: Config, repo: Path | None, phase: str) -> str | None:
     if other is None:
         return None
     return (
-        f"swarm: {phase} is finished but not merged -- the {repo.name} checkout is on"
-        f" {other}, not {main}, and the swarm will not switch it for you. Switch it"
-        f" back to {main} when you are ready, then run `swarm resolved {phase}`."
+        f"Switch the {repo.name} checkout back to {main}, then run `swarm resolved"
+        f" {phase}`: it is on {other}, and the swarm will not switch it for you, so"
+        f" {phase} is finished but not merged and all merging waits on it."
     )
 
 

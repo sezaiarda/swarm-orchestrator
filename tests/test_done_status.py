@@ -1,4 +1,4 @@
-"""Self-classified completion: a finishing worker's status decides the ping.
+"""Self-classified completion: a finishing worker's status decides what the owner hears.
 
 Bare driver (no tmux/claude), real supervisor + FIFO + sentinels. Workers park
 (hold their slot, emit no `done`) so the test drives `swarm done <phase> <status>`
@@ -6,8 +6,10 @@ itself and inspects the telegram sink:
 
   - `ok`          -> integrate/advance, NO telegram (silent success).
   - `needs-owner` -> retired: recorded as `operator`, which integrates like
-                     `ok` and hands off to an operator session, NO telegram.
-  - `fail`        -> ping the recap (rollback path).
+                     `ok` and hands off to an operator session; with the operator
+                     off the owner is asked to do it.
+  - `fail`        -> rolled back; with no Overseer to retry it, the owner is asked
+                     (the suite runs with the Overseer off).
 """
 
 from __future__ import annotations
@@ -38,8 +40,8 @@ def test_done_ok_is_silent(swarm):
 def test_done_needs_owner_is_recorded_as_operator_and_still_advances(swarm):
     """The retired spelling still works: it lands as `operator`, like `ok`.
 
-    With the operator off (the demo's default) the hand-off reaches the owner as
-    one to-do — never as a FAILED ping, and never not at all.
+    With the operator off (the demo's default) the owner is asked, once, to do
+    the hand-off — never told it failed, and never not at all.
     """
     _up_with_parked_p0(swarm)
 
@@ -49,18 +51,27 @@ def test_done_needs_owner_is_recorded_as_operator_and_still_advances(swarm):
         lambda: set(swarm.busy_phases()) == {"P1", "P2", "P3"}, timeout=20
     ), swarm.log_text()
     assert swarm.state()["done"].get("P0") == "operator"
-    pings = [ln for ln in swarm.tg_lines() if "check the auth change" in ln]
-    assert len(pings) == 1 and "to-do" in pings[0], swarm.tg_lines()
-    assert "FAILED" not in pings[0]
+    asks = [ln for ln in swarm.tg_lines() if "P0" in ln]
+    assert asks == [
+        f"[{swarm.project.name}] Asks you: Do the follow-up that P0 left behind: the operator"
+        " is switched off, so nobody else will. `swarm todo` shows what is left to do."
+    ], swarm.tg_lines()
+    assert "check the auth change" in swarm.cli("todo").stdout  # the recap is the to-do
 
 
-def test_done_fail_pings_recap(swarm):
-    """`fail` telegrams the owner the recap."""
+def test_done_fail_asks_the_owner_and_keeps_the_recap(swarm):
+    """A `fail` nothing will retry asks the owner what to do; the recap stays in the log."""
+    import json
+
     _up_with_parked_p0(swarm)
 
     swarm.cli("done", "P0", "fail", "build", "broke")
 
-    tg = swarm.tg_lines()
-    ping = [ln for ln in tg if "build broke" in ln]
-    assert ping, tg
-    assert "P0" in ping[0] and "FAILED" in ping[0]
+    asks = [ln for ln in swarm.tg_lines() if "Asks you:" in ln]
+    assert len(asks) == 1, swarm.tg_lines()
+    assert asks[0].startswith(f"[{swarm.project.name}] Asks you: Fix what stopped P0")
+    assert "then run `swarm retry P0`: it failed, and 4 phases wait on it" in asks[0]
+    rows = [json.loads(ln) for ln in
+            (swarm.state_dir / "notifications.jsonl").read_text().splitlines()]
+    [row] = [r for r in rows if r["kind"] == "worker-done"]
+    assert row["class"] == "ask" and row["detail"] == "build broke"

@@ -122,20 +122,25 @@ def test_a_disabled_operator_queues_nothing_at_all(off):
     assert not off.operator_dir.exists()
 
 
-def test_a_disabled_operator_telegrams_the_hand_off_as_an_owner_to_do(off):
+def test_a_disabled_operator_asks_the_owner_to_do_the_hand_off(off):
     """Hand-offs used to vanish silently this way: never silent again.
 
-    With nobody to run it the owner is the only one left who can, so the note
-    goes to their phone — and `swarm done` stops promising a session.
+    With nobody to run it the owner is the only one left who can, so they are
+    asked to — in the swarm's own two sentences, with the recap kept whole
+    beside the ask for `swarm todo` — and `swarm done` stops promising a session.
     """
+    from swarm_orchestrator import todo
+
     result = launch_mod.done(off, PHASE, "operator", NOTE)
 
-    lines = tg_lines(off)
-    assert len(lines) == 1
-    assert PHASE in lines[0] and NOTE in lines[0] and "to-do" in lines[0]
+    assert tg_lines(off) == [
+        f"[{off.name}] Asks you: Do the follow-up that {PHASE} left behind: the operator is"
+        " switched off, so nobody else will. `swarm todo` shows what is left to do."]
     rendered = result.render()
     assert "operator job queued" not in rendered
-    assert "operator is off" in rendered and "to-do" in rendered
+    assert "operator is off" in rendered and "`swarm todo` shows your recap" in rendered
+    [item] = [t for t in todo.collect(off).items if t.id == PHASE]
+    assert item.spec == NOTE  # the to-do is the recap, not the ask that points at it
 
 
 def test_a_re_run_swarm_done_does_not_send_the_to_do_twice(off):
@@ -261,7 +266,7 @@ def test_a_backed_off_item_is_not_leasable_until_run_after(cfg):
     assert opqueue.lease(cfg, PHASE, now=9_000.0) is not None
 
 
-def test_the_cap_abandons_the_item_and_telegrams_the_owner_once(cfg):
+def test_the_cap_abandons_the_item_and_asks_the_owner_once(cfg):
     """The guarantee this replaces: an `operator` note always reached a human."""
     opqueue.add(cfg, PHASE, status="operator", note=NOTE)
     for tick in (1_000.0, 2_000.0, 3_000.0):
@@ -271,8 +276,10 @@ def test_the_cap_abandons_the_item_and_telegrams_the_owner_once(cfg):
     item = opqueue.load(cfg, PHASE)
     assert item.state == opqueue.ABANDONED
     assert item.attempts == opqueue.MAX_ATTEMPTS
-    assert len(tg_lines(cfg)) == 1
-    assert PHASE in tg_lines(cfg)[0] and "ABANDONED" in tg_lines(cfg)[0]
+    assert tg_lines(cfg) == [
+        f"[{cfg.name}] Asks you: Do the follow-up job {PHASE} yourself, or run `swarm"
+        f" operator {PHASE}` to try it again: the operator gave up on it after 3 attempt(s),"
+        " so it is not done. `swarm todo` shows the job."]
 
     # Terminal means terminal: nothing blocks on it and nobody is told twice.
     assert opqueue.abandon(cfg, PHASE, "again") is None

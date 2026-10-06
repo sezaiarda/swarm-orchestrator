@@ -119,6 +119,13 @@ class Prep(Ws):
         sink = Path(os.environ["SWARM_TG_SINK"])
         return sink.read_text() if sink.exists() else ""
 
+    def said(self) -> list[tuple[str, str]]:
+        """(class, text) of everything the swarm had to say about a landing's
+        preparation: recorded, and never sent."""
+        path = self.cfg.state_dir / "notifications.jsonl"
+        rows = [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
+        return [(r["class"], r["text"]) for r in rows if r["kind"] == "lane-unprepared"]
+
     def supervisor(self, monkeypatch, *queue: str):
         """A supervisor with ``queue`` to land, and every resolver it opens."""
         opened: list[str] = []
@@ -213,10 +220,13 @@ def test_a_failing_prepare_is_reported_as_one_holds_nothing_and_opens_no_resolve
         assert st.landing["P"][str(repo)]["stage"] == landing.UNPREPARED
         assert landing.blocked(ws.cfg, "P") is None
         assert ws.runs() == []  # no check ran on a tree that was not ready
-        # The command's own last lines: in the log, and to the owner.
+        # The command's own last lines: in the log, and held for the Overseer's
+        # summary. Other work keeps merging, so nobody is asked.
         reason = FAILED.removeprefix("unprepared ")
         assert f"LANE-UNPREPARED P pricing {reason}" in ws.cfg.supervisor_log.read_text()
-        assert f"the landing check failed — {reason}." in ws.told()
+        [(cls, text)] = ws.said()
+        assert cls == "folded" and f"the landing check failed — {reason}." in text
+        assert text.startswith("P cannot land in pricing yet") and ws.told() == ""
         assert "# result: unprepared" in ws.check_text("P")
 
         # P holds nothing meanwhile: the other phase in the same repo has landed.
@@ -232,7 +242,8 @@ def test_a_failing_prepare_is_reported_as_one_holds_nothing_and_opens_no_resolve
         sup._pump_integrations()
         assert ws.wait_result("P", "pricing") == FAILED
         sup._handle("lane-checked P pricing unprepared")
-        assert len(ws.prepares()) == 2 and ws.told().count("swarm: P cannot land") == 1
+        assert len(ws.prepares()) == 2 and ws.told() == ""
+        assert [cls for cls, _ in ws.said()] == ["folded", "logged"]  # the summary hears once
 
         # What it needed is there now: the next try prepares, checks and lands.
         (ws.ctl / "fail").unlink()

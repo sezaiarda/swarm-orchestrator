@@ -611,15 +611,9 @@ def _ledger_text(cfg: Config) -> str:
         return ""
 
 
-#: A failed start: the owner hears about it once per phase, not on every retry.
-_LAUNCH_FAIL_KINDS = ("worktree-fail", "spawn-fail")
-
-
-def _launch_fail_hold(cfg: Config, phase: str) -> str | None:
-    """Why a failed start of ``phase`` is not pinged again, or ``None`` to ping."""
-    if not telegram.already_sent(cfg.state_dir, _LAUNCH_FAIL_KINDS, phase):
-        return None
-    return telegram.hold(cfg, "a start of this phase already failed and you were told")
+#: Why a failed start asks nobody: the supervisor retries it, and asks the
+#: owner itself once it gives up.
+_LAUNCH_FAIL_WHY = "the swarm tries again; an ask follows if it gives up"
 
 
 def launch(cfg: Config, phase: str, log: Log) -> bool:
@@ -707,16 +701,14 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
                 st.free_slot_for(phase)
                 st.release_lane(phase)
             logutil.run_ended(log, phase, "launch-failed")
-            telegram.notify(
-                cfg.telegram_notify,
-                f"swarm: could not set up a workspace for {phase}, so its worker did not"
-                f" start ({exc}). The swarm tries again shortly and tells you if it"
-                " keeps failing.",
+            telegram.log(
+                cfg,
+                f"could not set up a workspace for {phase}, so its worker did not"
+                f" start ({exc}).",
+                why=_LAUNCH_FAIL_WHY,
                 kind="worktree-fail",
                 phase=phase,
                 source="launch.launch",
-                state_dir=cfg.state_dir,
-                suppressed=_launch_fail_hold(cfg, phase),
             )
             log.line(f"WORKTREE-FAIL {phase} {exc}")
             return FAILED
@@ -755,15 +747,13 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         if caught:
             log.line(f"LAUNCH-FROZEN {phase} slot={sid}")
             return FROZEN
-        telegram.notify(
-            cfg.telegram_notify,
-            f"swarm: the worker for {phase} failed to start. The swarm tries again"
-            " shortly and tells you if it keeps failing.",
+        telegram.log(
+            cfg,
+            f"the worker for {phase} failed to start.",
+            why=_LAUNCH_FAIL_WHY,
             kind="spawn-fail",
             phase=phase,
             source="launch.launch",
-            state_dir=cfg.state_dir,
-            suppressed=_launch_fail_hold(cfg, phase),
         )
         log.line(f"LAUNCH-FAIL {phase} slot={sid}")
         return FAILED
@@ -1090,23 +1080,50 @@ def _poke_fifo(cfg: Config, line: str) -> bool:
         os.close(fd)
 
 
-def _completion_ping(phase: str, status: str, note: str) -> str | None:
-    """The owner telegram for a finishing worker, or ``None`` for no ping.
+def _fail_note(phase: str, note: str) -> str:
+    """What the log keeps of a failed finish: the phase and the worker's recap.
 
-    Exactly one status reaches the owner's phone now (:data:`statuses.PINGS`):
-    ``fail``, which rolled its work back and blocks every dependent. ``ok`` was
-    always a silent success, and ``operator`` — the finish that leaves a concrete
-    action behind — opens a session for it instead, which is the whole point of
-    replacing ``needs-owner``: a phone ping is easy to miss, a session is not. The
-    ping carries the worker's one-line ``note`` recap so the owner sees *why*
-    without opening the pane; an empty/whitespace recap just drops the dash.
+    Exactly one status says anything at all (:data:`statuses.PINGS`): ``fail``,
+    which rolled its work back and blocks every dependent. ``ok`` was always a
+    silent success, and ``operator`` — the finish that leaves a concrete action
+    behind — opens a session for it instead. Whether the failure *asks* the
+    owner is decided in :func:`done`; when it does, :func:`_fail_ask` words it.
     """
-    if status not in statuses.PINGS:
-        return None
     recap = _collapse(note)
     tail = f" — {recap.rstrip('.')}" if recap else ""
-    return (f"swarm: {phase} FAILED{tail}. The phases that depend on it wait; once the"
-            f" cause is fixed, `swarm retry {phase}` puts it back in play.")
+    return f"{phase} FAILED{tail}. The phases that depend on it wait."
+
+
+def row_title(cfg: Config, row: str) -> str:
+    """A ledger row's title, for a message that names the row ("" if unknown)."""
+    from .web import rows as rows_mod  # pure, and nothing else of the web package
+
+    try:
+        parsed, _ = rows_mod.parse((cfg.project_dir / cfg.ledger).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return parsed[row].title if row in parsed else ""
+
+
+def _named(cfg: Config, head: str, row: str, tail: str) -> str:
+    """``head + " (<the row's title>)" + tail``, the title cut to what fits
+    (:func:`telegram.fitted`) and left out when the row has none."""
+    title = row_title(cfg, row)
+    if not title or title == row:
+        return head + tail
+    return telegram.fitted(cfg, head + " (", title, ")" + tail)
+
+
+def _fail_ask(cfg: Config, phase: str, episode: int) -> str:
+    """The ask for a failure nothing will retry: what to do, then why."""
+    behind = _blocked_behind(cfg, phase)
+    why = "it failed again after a retry" if episode > 1 else "it failed"
+    if behind:
+        why += f", and {behind} phase{'' if behind == 1 else 's'} wait{'s' if behind == 1 else ''} on it"
+    if not cfg.overseer_enabled:
+        why += "; with the Overseer off nothing retries it"
+    return _named(cfg, f"Fix what stopped {phase}", phase,
+                  f", then run `swarm retry {phase}`: {why}. `swarm report` has its recap.")
 
 
 def _thin_recap(note: str) -> bool:
@@ -1135,18 +1152,19 @@ class Outcome:
 def _ping_decision(
     phase: str, status: str, note: str, recorded: str | None, verdict: str, force: bool
 ) -> tuple[str, str]:
-    """Whether the owner's phone rings, as ``(plan, detail)``.
+    """Whether this finish has anything to say to the owner, as ``(plan, detail)``.
 
     ``plan`` is ``send``/``skipped``/``deduped``; ``detail`` explains a non-send
-    in the words the CLI prints.
+    in the words the CLI prints. ``send`` is not yet "the phone rings":
+    :func:`done` decides whether it asks the owner or is held back.
 
     This has to happen here, worker-side. The supervisor's DONE-DUPLICATE guard
     runs *after* the FIFO poke — downstream of the send — so it is architecturally
-    incapable of suppressing a duplicate ping, and a phase that ran ``swarm done``
-    three times would telegram the owner three times. ``recorded`` is
+    incapable of suppressing a duplicate, and a phase that ran ``swarm done``
+    three times would ask the owner three times. ``recorded`` is
     the recap on disk *before* this call rewrote it.
     """
-    if _completion_ping(phase, status, note) is None:
+    if status not in statuses.PINGS:
         why = (
             "hands off to a session, not the owner's phone"
             if status in statuses.ROUTES else "is a silent success"
@@ -1214,11 +1232,12 @@ def _outcome_plan(
     return Outcome(ping, ping_detail, route, route_detail)
 
 
-def _todo_ping(phase: str, note: str) -> str:
-    """The owner's to-do for a hand-off no operator will run. Plain words: which
-    phase, and the action — the recap is already written as one."""
-    return (f"swarm: a to-do for you from {phase} (the operator is switched off, so"
-            f" nobody else will do it): {_collapse(note)}")
+def _todo_ask(cfg: Config, phase: str) -> str:
+    """The ask for a hand-off no operator will run: which row left it, and why
+    it is the owner's. The recap is the to-do itself; ``swarm todo`` shows it."""
+    return _named(cfg, f"Do the follow-up that {phase} left behind", phase,
+                  ": the operator is switched off, so nobody else will. `swarm todo`"
+                  " shows what is left to do.")
 
 
 def _send_todo(
@@ -1233,18 +1252,18 @@ def _send_todo(
     if verdict == "refused" or (
         recorded is not None and _collapse(recorded) == _collapse(note)
     ):
-        return "owner", "already telegrammed to the owner as a to-do"
-    sent = telegram.notify_detail(
-        cfg.telegram_notify,
-        _todo_ping(phase, note),
+        return "owner", "the owner was already asked to do it"
+    sent = telegram.ask(
+        cfg,
+        _todo_ask(cfg, phase),
         kind="operator-todo",
         phase=phase,
         source="launch.done",
-        state_dir=cfg.state_dir,
+        detail=_collapse(note),
     )
     if not sent.delivered:
-        return "owner", f"the to-do telegram FAILED: {sent.error or 'unknown error'}"
-    return "owner", "telegrammed to the owner as a to-do"
+        return "owner", f"the ask to the owner FAILED: {sent.error or 'unknown error'}"
+    return "owner", "the owner was asked to do it (`swarm todo` shows your recap)"
 
 
 @dataclass
@@ -1284,7 +1303,7 @@ class DoneResult:
             ),
         }[self.verdict]
         ping = {
-            "sent": "owner telegrammed",
+            "sent": "owner asked on telegram",
             "failed": f"telegram FAILED: {self.ping_detail}",
             "skipped": f"no telegram: {self.ping_detail}",
             "deduped": f"no telegram: {self.ping_detail}",
@@ -1457,8 +1476,10 @@ def done(
 
     Order matters: (1) write the durable sentinel — refusing to overwrite a fuller
     recap unless ``force`` — and append the attempt to the per-phase history;
-    (2) telegram the owner *from the worker itself*, but ONLY for a ``fail``, and
-    only when that ping is not a duplicate of one already sent; (3) hold the slot
+    (2) for a ``fail`` that is not a duplicate of one already recorded, ask the
+    owner *from the worker itself* when nothing will retry it (it failed again
+    after a retry, or no Overseer runs), and fold it for the summary otherwise;
+    (3) hold the slot
     for ``done_grace_s`` so the worker has a buffer to flush any last work before
     the supervisor reclaims it; (4) best-effort poke. The grace does NOT sleep in
     the worker's process: ``swarm done`` runs inside the worker's bash tool call,
@@ -1490,28 +1511,21 @@ def done(
         plan.ping, plan.ping_detail = "skipped", "`later` waits for its date; nobody is paged"
     ping, detail = plan.ping, plan.ping_detail
     if ping == "send":
-        # The Overseer retries a failed phase once, so a first failure is its to
-        # handle; the owner hears when the retry fails too, or when no Overseer runs.
-        held = None
+        said = {"kind": "worker-done", "phase": phase, "source": "launch.done"}
         if status == statuses.FAIL and episode <= 1 and cfg.overseer_enabled:
-            held = telegram.hold(cfg, "a first fail: the Overseer retries it once")
+            # The Overseer retries a failed phase once, so a first failure is its
+            # to handle; the owner is asked when the retry fails too, or when no
+            # Overseer runs.
+            telegram.fold(cfg, _fail_note(phase, note), **said)
+            ping, detail = "held", "a first failure: the Overseer looks at it and retries it once"
         elif spelling == statuses.BLOCKED:
-            # One outside cause blocks many phases at once: one ping for the burst.
-            held = telegram.hold(cfg, blockedping.HELD)
-            if held:
-                blockedping.gather(cfg, phase, note)
-        sent = telegram.notify_detail(
-            cfg.telegram_notify,
-            _completion_ping(phase, status, note) or "",
-            kind="worker-done",
-            phase=phase,
-            source="launch.done",
-            state_dir=cfg.state_dir,
-            suppressed=held,
-        )
-        if held:
-            ping, detail = "held", held
+            # One outside cause blocks many phases at once: one ask for the burst.
+            blockedping.gather(cfg, phase, note)
+            telegram.log(cfg, _fail_note(phase, note), why=blockedping.HELD, **said)
+            ping, detail = "held", blockedping.HELD
         else:
+            sent = telegram.ask(cfg, _fail_ask(cfg, phase, episode), detail=_collapse(note),
+                                **said)
             ping, detail = ("sent", "") if sent.delivered else ("failed", sent.error or "")
 
     if plan.route == "owner":
@@ -1570,37 +1584,6 @@ def _work_line(cfg: Config, phase: str, status: str) -> str:
     return (f"work: nothing lands now. What you committed (uncommitted edits too) is kept"
             f" until {after}, and is in the tree again, merged onto that day's"
             f" {cfg.git_main_branch}, when the row is relaunched")
-
-
-#: How much of a question an owner ping carries. The owner answers from a phone;
-#: a 140-word dump quoting source lines is not answerable there, and the full
-#: text is on screen in the asker's own window anyway.
-PING_QUESTION_CHARS = 600
-_CUT_MARK = " … (full question in its window)"
-
-
-def ping_question(question: str, limit: int = PING_QUESTION_CHARS) -> str:
-    """The question as a phone ping carries it: collapsed, cut to one screen."""
-    text = _collapse(question)
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + _CUT_MARK
-
-
-def cost_line(blocked: int | None, held: str, asked_at: float) -> str:
-    """What this question costs while it waits, as the ping's first line.
-
-    No ping used to say it, so the owner could not tell a question holding up a
-    chain of phases from one holding up nothing. ``blocked`` is ``None`` when the
-    ledger could not be read — the line then says what it does know rather than
-    guessing a number.
-    """
-    parts = []
-    if blocked is not None:
-        parts.append(f"holding up {blocked} phase{'' if blocked == 1 else 's'}")
-    parts.append(held)
-    parts.append("asked " + time.strftime("%H:%M", time.localtime(asked_at)))
-    return " · ".join(parts)
 
 
 def _blocked_behind(cfg: Config, phase: str) -> int | None:

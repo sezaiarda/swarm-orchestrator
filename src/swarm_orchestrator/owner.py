@@ -1,9 +1,11 @@
 """Everything that waits on the owner, and the one way a session says so.
 
 A worker, an operator job or an Overseer pass that needs the owner runs
-``swarm waiting <who> "<question>"`` before it asks. One ping says what is asked
-and which tmux window to open; the supervisor arms a park deadline. The session
-asks in its own window with AskUserQuestion and waits. Past
+``swarm waiting <who> "<ask>"`` before it asks. The ask is what the owner reads on
+their phone (:func:`telegram.ask`): what the session needs from them and why,
+short enough for a notification, and refused when it is not. The supervisor arms
+a park deadline. The session asks in full in its own window with AskUserQuestion
+and waits. Past
 ``[worker].park_after`` the supervisor moves it, alive, to a window of its own
 (:func:`state.wait_window`) and frees what it held — a worker slot, the operator
 window, the master pane — so the swarm goes on; the session carries on there
@@ -84,46 +86,17 @@ def where(cfg: Config, key: str, st: state_mod.State) -> str:
         return ""
 
 
-def answer_line(cfg: Config, key: str, st: state_mod.State) -> str:
-    """The ping's last line: which window to open, and where it will be later."""
-    window = where(cfg, key, st)
-    if not window:
-        return ""
-    line = f"Answer in tmux window {window} (tmux attach -t {cfg.session})"
-    if key not in st.parked and cfg.park_after > 0:
-        minutes = max(1, round(cfg.park_after / 60))
-        line += f"; after {minutes} min it moves to its own window {state_mod.wait_window(key)}"
-    return line + "."
-
-
-def _ping(cfg: Config, key: str, who: str, question: str, cost: str) -> None:
-    st = state_mod.read(cfg)
-    tail = launch_mod.ping_question(question)
-    if state_mod.waiter(key)[0] == state_mod.WORKER:
-        who = f"the worker on {who}"
-    lines = [cost, f"swarm: {who} is waiting on you" + (f" — {tail}" if tail else "")]
-    answer = answer_line(cfg, key, st)
-    if answer:
-        lines.append(answer)
-    telegram.notify(
-        cfg.telegram_notify,
-        "\n".join(lines),
-        kind="waiting",
-        phase=key,
-        source="cli.waiting",
-        state_dir=cfg.state_dir,
-    )
-
-
 def waiting(cfg: Config, key: str, question: str) -> str:
-    """Record that ``key``'s session waits on the owner and ping them.
+    """Record that ``key``'s session waits on the owner and ask them.
 
-    Returns who it is, in words. Raises :class:`WaitError` when an operator job or
-    Overseer pass of that name is not running. A worker's ping goes every time
+    ``question`` is the ask as the owner's phone shows it. Raises
+    :class:`telegram.TooLong` before anything is recorded when it does not fit,
+    and :class:`WaitError` when an operator job or Overseer pass of that name is
+    not running. Returns who it is, in words. A worker's ask goes every time
     (as it always did); an operator job's or a pass's only when the question is
     new, so a re-run cannot ring the owner twice.
     """
-    question = " ".join((question or "").split())
+    question = telegram.short(cfg, question)
     kind, ident = state_mod.waiter(key)
     now = time.time()
     if kind == state_mod.OPERATOR:
@@ -132,9 +105,6 @@ def waiting(cfg: Config, key: str, question: str) -> str:
             raise WaitError(f"no running operator job {ident}")
         operator_mod.hold_lease(cfg, ident, item.lease_until)
         who = f"operator job {ident}"
-        held = ("the operator takes no other job meanwhile" if key not in state_mod.read(cfg).parked
-                else "nothing else waits on it")
-        cost = launch_mod.cost_line(None, held, item.asked_at or now)
     elif kind == state_mod.OVERSEER:
         rec = ovrecord.load_json(cfg, ident)
         st = state_mod.read(cfg)
@@ -146,13 +116,11 @@ def waiting(cfg: Config, key: str, question: str) -> str:
             if s.overseer_pass == ident:  # a pass waiting on a person is not hung
                 s.overseer_deadline = now + opqueue.WAIT_LEASE_S
         who = "the Overseer"
-        cost = launch_mod.cost_line(None, "the Overseer waits on it", now)
     else:
         fresh = True
         who = ident
-        cost = launch_mod.cost_line(launch_mod._blocked_behind(cfg, ident), "a worker place is tied up", now)
     if fresh:
-        _ping(cfg, key, who, question, cost)
+        telegram.ask(cfg, question, kind="waiting", phase=key, source="cli.waiting")
     launch_mod._poke_fifo(cfg, f"waiting {key}\n")
     return who
 
@@ -202,26 +170,34 @@ def current_owner_rows(cfg: Config, st: state_mod.State) -> list[tuple[str, int]
     return ledger_mod.owner_rows(graph, done, set(cfg.exclude), flying)
 
 
+def waits(cfg: Config, st: state_mod.State) -> list[str]:
+    """What is stopped on the owner right now, in a few words each: sessions
+    asking, a merge held with no resolver on it, rows only they can do."""
+    out = []
+    asking = len(st.on_owner())
+    if asking:
+        out.append(f"{asking} question{'' if asking == 1 else 's'}")
+    if st.integ_blocked and f"resolve:{st.integ_blocked}" not in st.windows:
+        out.append(f"a held merge ({st.integ_blocked})")
+    try:
+        mine = len(current_owner_rows(cfg, st))
+    except (OSError, ValueError):
+        mine = 0
+    if mine:
+        out.append(f"{mine} row{'' if mine == 1 else 's'} only you can do")
+    return out
+
+
 def _record_path(cfg: Config) -> Path:
     return Path(cfg.state_dir) / "owner_rows.json"
 
 
-def _titles(cfg: Config, rows: list[str]) -> dict[str, str]:
-    from .web import rows as rows_mod  # pure, and nothing else of the web package
-
-    try:
-        parsed, _ = rows_mod.parse((cfg.project_dir / cfg.ledger).read_text(encoding="utf-8"))
-    except OSError:
-        return {}
-    return {r: parsed[r].title for r in rows if r in parsed}
-
-
 def ping_owner_rows(cfg: Config, st: state_mod.State) -> list[str]:
-    """Ping the owner once for each owner-run row that has started holding rows up.
+    """Ask the owner once for each owner-run row that has started holding rows up.
 
     Once per row for the life of the state dir (``owner_rows.json``), however
     often it is checked and across restarts; the rows found together share one
-    message. Returns the rows just pinged.
+    ask. Returns the rows just asked about.
     """
     rows = current_owner_rows(cfg, st)
     path = _record_path(cfg)
@@ -234,26 +210,25 @@ def ping_owner_rows(cfg: Config, st: state_mod.State) -> list[str]:
     new = [(r, n) for r, n in rows if r not in told]
     if not new:
         return []
-    titles = _titles(cfg, [r for r, _ in new])
     if len(new) == 1:
         (row, n), = new
-        what = titles.get(row, "")
-        head = (f"swarm: only you can do {row}, and it is holding up {n} row"
-                f"{'' if n == 1 else 's'}" + (f": {what}" if what else "")
-                + f"\nOnce it is done, tick it in the ledger or run `swarm skip {row}`.")
+        title = launch_mod.row_title(cfg, row)
+        tail = (f", then tick it in the ledger or run `swarm skip {row}`: only you can do"
+                f" it, and {n} row{'' if n == 1 else 's'} wait{'s' if n == 1 else ''} on it.")
+        text = (telegram.fitted(cfg, f"Do {row} (", title, ")" + tail)
+                if title and title != row else f"Do {row}{tail}")
     else:
-        head = "\n".join(
-            [f"swarm: {len(new)} rows only you can do are holding other rows up:"]
-            + [f"- {r} (holds up {n}): {titles.get(r, '')}".rstrip(": ") for r, n in new]
-            + ["Once one is done, tick it in the ledger or run `swarm skip <row>`."]
-        )
-    telegram.notify(
-        cfg.telegram_notify,
-        head,
+        text = telegram.fitted(
+            cfg, f"Do the {len(new)} rows only you can do (",
+            telegram.names([r for r, _ in new]),
+            "), then tick each in the ledger or `swarm skip` it: other rows wait on"
+            " them. `swarm todo` lists them.")
+    telegram.ask(
+        cfg,
+        text,
         kind="owner-row",
         phase=new[0][0],
         source="owner.ping_owner_rows",
-        state_dir=cfg.state_dir,
     )
     now = time.time()
     told.update({r: now for r, _ in new})

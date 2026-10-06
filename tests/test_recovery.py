@@ -56,6 +56,15 @@ def _tg(tmp_path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
 
 
+def _folded(cfg) -> list[str]:
+    """What the swarm had to say and held back for the Overseer's summary."""
+    import json
+
+    path = cfg.state_dir / "notifications.jsonl"
+    rows = [json.loads(ln) for ln in path.read_text().splitlines()] if path.is_file() else []
+    return [r["text"] for r in rows if r["class"] == "folded"]
+
+
 # -- C1: a failed dependency must not release its dependents --------------
 def test_failed_dependency_does_not_release_its_dependent():
     """A `fail` is *attempted*, not *landed*.
@@ -97,7 +106,9 @@ def test_dispatch_absorbs_a_raising_handler(tmp_path, monkeypatch):
 
     log = cfg.supervisor_log.read_text(encoding="utf-8")
     assert "HANDLER-ERROR" in log and "pane %999 vanished" in log
-    assert any("an internal error while handling" in ln for ln in _tg(tmp_path))
+    # Stepped over, and held for the summary: the run goes on, so nobody is asked.
+    assert any("an internal error while handling" in ln for ln in _folded(cfg))
+    assert _tg(tmp_path) == []
 
 
 def test_a_handler_exception_does_not_kill_the_loop(tmp_path, monkeypatch):
@@ -189,7 +200,8 @@ def test_watchdog_frees_a_slot_whose_pane_died(tmp_path, monkeypatch):
     finally:
         sup.log.close()
 
-    assert any("stopped without finishing" in ln for ln in _tg(tmp_path))
+    assert any("stopped without finishing" in ln for ln in _folded(cfg))
+    assert _tg(tmp_path) == []  # it is started again: nothing for the owner to do
     assert "WATCHDOG-REAP P0" in cfg.supervisor_log.read_text(encoding="utf-8")
 
 
@@ -287,7 +299,7 @@ def test_watchdog_frees_a_claim_whose_launch_died_and_left_the_pane_parked(tmp_p
     assert _tg(tmp_path) == []  # retried by itself: nothing for the owner to do
 
 
-def test_a_launch_that_keeps_dying_is_given_up_on_and_the_owner_told_once(tmp_path, monkeypatch):
+def test_a_launch_that_keeps_dying_is_given_up_on_and_the_owner_asked_once(tmp_path, monkeypatch):
     cfg, sup, _aside, _calls = _claimed(
         tmp_path, monkeypatch, "sleep", (PAST_THE_BOUND, "CLAIM P0 slot=0"))
     try:
@@ -298,7 +310,8 @@ def test_a_launch_that_keeps_dying_is_given_up_on_and_the_owner_told_once(tmp_pa
         assert state_mod.read(cfg).launch_fail("P0")[0] == sup_mod.LAUNCH_GIVE_UP
     finally:
         sup.log.close()
-    assert sum("failed to start 3 times" in ln for ln in _tg(tmp_path)) == 1
+    assert sum("Asks you: Fix why P0 will not start" in ln and "failed to start 3 times" in ln
+               for ln in _tg(tmp_path)) == 1
 
 
 def test_watchdog_leaves_a_claim_inside_the_start_bound_alone(tmp_path, monkeypatch):
@@ -340,7 +353,7 @@ def test_watchdog_reaps_a_launched_worker_that_left_a_shell_and_no_process(tmp_p
         sup.log.close()
     assert aside == ["P0"]
     assert "WATCHDOG-REAP P0 no-worker" in cfg.supervisor_log.read_text(encoding="utf-8")
-    assert any("stopped without finishing" in ln for ln in _tg(tmp_path))
+    assert any("stopped without finishing" in ln for ln in _folded(cfg))
 
 
 def _session_process(cfg, phase: str) -> subprocess.Popen:
@@ -475,7 +488,7 @@ def test_watchdog_finishes_a_settled_run(tmp_path, monkeypatch):
     finally:
         sup.log.close()
     assert "WATCHDOG-FINISH settled" in cfg.supervisor_log.read_text(encoding="utf-8")
-    assert any("swarm finished: 3 phase(s) done" in ln for ln in _tg(tmp_path))
+    assert any("The run has finished: 3 phase(s) landed" in ln for ln in _tg(tmp_path))
 
 
 def test_watchdog_does_not_finish_a_run_still_holding_a_worker(tmp_path, monkeypatch):
@@ -598,8 +611,8 @@ def test_finish_count_excludes_skipped_and_failed(tmp_path, monkeypatch):
     finally:
         sup.log.close()
     line = _tg(tmp_path)[0]
-    assert "2 phase(s) done" in line  # ok + needs-owner only
-    assert "3 skipped" in line and "2 failed: P8, P9" in line
+    assert "2 phase(s) landed" in line  # ok + needs-owner only
+    assert "3 skipped" in line and "2 failed (P8, P9)" in line
 
 
 def test_master_idle_finish_counts_only_built_phases(tmp_path, monkeypatch):
@@ -615,7 +628,7 @@ def test_master_idle_finish_counts_only_built_phases(tmp_path, monkeypatch):
     finally:
         sup.log.close()
     line = _tg(tmp_path)[0]
-    assert "2 phase(s) done" in line and "1 skipped" in line and "1 failed: P8" in line
+    assert "2 phase(s) landed" in line and "1 skipped" in line and "1 failed (P8)" in line
 
 
 # -- `swarm skip` / `swarm free` must be able to clear a pending phase ----
@@ -826,7 +839,10 @@ def test_a_worker_that_keeps_dying_is_held_and_the_owner_told(tmp_path, monkeypa
     finally:
         sup.log.close()
     tg = _tg(tmp_path)
-    assert any("stopped unexpectedly 3 times in the last hour" in ln for ln in tg)
+    assert [ln for ln in tg if "Asks you:" in ln] == [
+        f"[{cfg.name}] Asks you: Look at P0, then run `swarm launch P0` to start it again: its"
+        " worker stopped unexpectedly 3 times in the last hour, so the swarm no longer"
+        " restarts it and the phases after it wait. Its work so far is kept."]
     assert "WATCHDOG-CRASH-HOLD P0" in cfg.supervisor_log.read_text(encoding="utf-8")
 
 

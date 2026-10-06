@@ -115,7 +115,7 @@ def _ledger(cfg) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def test_the_overseers_summary_carries_no_usage_footer(cfg, tmp_path, monkeypatch):
+def test_what_the_overseer_sends_carries_no_usage_footer(cfg, tmp_path, monkeypatch):
     """Usage reaches the phone only when the owner asks the bot for it."""
     meters = cfg.state_dir / usage_mod.METERS_DIR
     meters.mkdir(parents=True, exist_ok=True)
@@ -123,17 +123,18 @@ def test_the_overseers_summary_carries_no_usage_footer(cfg, tmp_path, monkeypatc
                                {"pct": 41, "resets_at": time.time() + 86400})
     (meters / usage_mod.LIMITS_LOG).write_text(json.dumps(row) + "\n")
     monkeypatch.setenv("SWARM_MASTER_KIND", "overseer")
-    assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "3 done\n1 stuck",
-                     "--attention"]) == 0
-    assert (tmp_path / "tg.log").read_text() == "3 done\n1 stuck\n"
-    assert _ledger(cfg)[-1]["kind"] == "overseer-digest"
+    assert cli_main(["--project-dir", str(cfg.project_dir), "notify",
+                     "Renew the staging certificate:\ndeploys fail on it."]) == 0
+    assert (tmp_path / "tg.log").read_text() == (
+        f"[{cfg.name}] Asks you: Renew the staging certificate: deploys fail on it.\n")
+    assert _ledger(cfg)[-1]["kind"] == "session-ask"
 
 
-def test_a_notify_from_anyone_else_has_no_footer(cfg, tmp_path, monkeypatch):
+def test_an_ask_from_anyone_else_has_no_footer(cfg, tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_MASTER_KIND", "init")
     assert cli_main(["--project-dir", str(cfg.project_dir), "notify", "hello"]) == 0
-    assert (tmp_path / "tg.log").read_text() == "hello\n"
-    assert _ledger(cfg)[-1]["kind"] == "master-note"
+    assert (tmp_path / "tg.log").read_text() == f"[{cfg.name}] Asks you: hello\n"
+    assert _ledger(cfg)[-1]["kind"] == "session-ask"
 
 
 # -- the listener ----------------------------------------------------------------
@@ -327,9 +328,10 @@ def test_up_starts_the_listener_and_down_stops_it(swarm, tmp_path):
         assert _wait(pidfile.exists), "the listener never wrote its pid file"
         pid = int(pidfile.read_text())
         # Answered once, to the owner only; the stranger got nothing.
-        assert _wait(lambda: any(line.startswith("No usage reading yet") for line in swarm.tg_lines()))
+        answer = f"[{swarm.project.name}] No usage reading yet"  # a reply names its swarm too
+        assert _wait(lambda: any(line.startswith(answer) for line in swarm.tg_lines()))
         time.sleep(1.0)
-        assert sum(line.startswith("No usage reading yet") for line in swarm.tg_lines()) == 1
+        assert sum(line.startswith(answer) for line in swarm.tg_lines()) == 1
         doctor = json.loads(swarm.cli("doctor", "--json", check=False).stdout)
         bot = next(c for c in doctor if c["name"] == "telegram.bot")
         assert bot["status"] == "ok" and f"pid {pid}" in bot["detail"]

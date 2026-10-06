@@ -398,7 +398,13 @@ def test_nothing_is_requested_while_disabled(cfg):
     pol.observe(_st(), T0)
     pol.observe(_st({"B": "fail"}, integ_blocked="B", integ_blocked_kind="dirty"), T0 + 1)
     assert pol.pending == [] and not pol.due(T0 + 2)
-    assert pol.next_deadline(T0) is None
+    # The owner's summary keeps its clock: the supervisor writes it itself.
+    assert pol.next_deadline(T0) == T0 + cfg.overseer_every_s
+    assert not pol.summary_due(T0 + cfg.overseer_every_s - 1)
+    assert pol.summary_due(T0 + cfg.overseer_every_s)
+    pol.summarised(T0 + cfg.overseer_every_s)
+    assert not pol.summary_due(T0 + cfg.overseer_every_s + 1)
+    assert pol.pending == []
 
 
 def test_the_memory_survives_a_restart(cfg):

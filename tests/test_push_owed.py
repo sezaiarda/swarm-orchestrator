@@ -309,7 +309,6 @@ def _seed_slots(cfg, *phases: str) -> None:
 def test_a_refused_push_is_owed_and_the_queue_keeps_moving(monkeypatch, tmp_path):
     from swarm_orchestrator.supervisor import Supervisor
 
-    monkeypatch.setenv("SWARM_TG_PINGS", "all")  # the immediate ping, as before the grace
     project, origin = _make_project(tmp_path)
     cfg = _cfg(monkeypatch, tmp_path, project)
     runs = tmp_path / "runs"
@@ -335,19 +334,19 @@ def test_a_refused_push_is_owed_and_the_queue_keeps_moving(monkeypatch, tmp_path
         assert rec["phase"] == "P1" and rec["refused"] and REASON in rec["reason"]
         assert _runs(runs) == 1
 
-        # The next phase integrates straight through; still one ping.
+        # The next phase integrates straight through; still one record of the debt.
         sup._on_done("P2", "ok")
         st = state_mod.read(cfg)
         assert st.done.get("P2") == "ok" and st.integ_blocked is None
         assert st.push_owed[str(project)]["phase"] == "P1"  # first phase kept
         assert _runs(runs) == 2  # one hook run per integration, no extra retry
-        owed = [m for m in _sent(tmp_path) if "pre-push check" in m]
-        assert owed == [
-            f"swarm: project push refused by its pre-push check after merging P1 — "
-            f"{rec['reason']}. Nothing is lost: work keeps merging on this machine and"
-            " the push is retried after each merge. Fix the check, or push by hand."
-        ]
-        assert not any("unreachable" in m for m in _sent(tmp_path))
+        owed = [r for r in _ledger_rows(tmp_path) if "pre-push check" in r["text"]]
+        assert [(r["class"], r["text"]) for r in owed] == [(
+            "folded",
+            f"project push refused by its pre-push check after merging P1 — "
+            f"{' '.join(rec['reason'].split())}. Nothing is lost: work keeps merging on this"
+            " machine and the push is retried after each merge.")]
+        assert _sent(tmp_path) == []  # nothing waits on it: nobody is asked
 
         # The owner fixes the check; the next integration's push carries all three.
         _drop_hook(project)
@@ -356,15 +355,16 @@ def test_a_refused_push_is_owed_and_the_queue_keeps_moving(monkeypatch, tmp_path
         assert st.push_owed == {} and st.done.get("P3") == "ok"
         names = _git(origin, "ls-tree", "-r", "--name-only", "master")
         assert {"p1.txt", "p2.txt", "p3.txt"} <= set(names.split())
-        cleared = [m for m in _sent(tmp_path) if "is pushed" in m]
-        assert len(cleared) == 1 and "P1" in cleared[0]
+        cleared = [r for r in _ledger_rows(tmp_path) if "is pushed" in r["text"]]
+        assert len(cleared) == 1 and "P1" in cleared[0]["text"]
+        assert cleared[0]["class"] == "logged"
+        assert not any("push" in m for m in _sent(tmp_path))  # only the run's last summary
         assert "PUSH-OWED-CLEARED project" in cfg.supervisor_log.read_text()
     finally:
         sup.log.close()
 
 
 def test_an_owed_push_is_retried_and_cleared_without_an_integration(monkeypatch, tmp_path):
-    monkeypatch.setenv("SWARM_TG_PINGS", "all")  # the immediate ping, as before the grace
     project, origin = _make_project(tmp_path)
     cfg = _cfg(monkeypatch, tmp_path, project)
     runs = tmp_path / "runs"
@@ -377,17 +377,18 @@ def test_an_owed_push_is_retried_and_cleared_without_an_integration(monkeypatch,
     try:
         pushowed.settle(cfg, "P1", {project: gitq.retry_push(cfg, project, log)}, log)
         assert str(project) in state_mod.read(cfg).push_owed
-        pushowed.retry(cfg, log)  # still refused: refreshed, not re-pinged
+        pushowed.retry(cfg, log)  # still refused: refreshed, not recorded again
         assert str(project) in state_mod.read(cfg).push_owed
         pushowed.retry(cfg, log, min_gap=3600)  # spaced out: not even attempted
         assert _runs(runs) == 2
-        assert len([m for m in _sent(tmp_path) if "pre-push check" in m]) == 1
+        assert len([r for r in _ledger_rows(tmp_path) if "pre-push check" in r["text"]]) == 1
 
         _drop_hook(project)
         pushowed.retry(cfg, log)
         assert state_mod.read(cfg).push_owed == {}
         assert "local.txt" in _git(origin, "ls-tree", "-r", "--name-only", "master")
-        assert len([m for m in _sent(tmp_path) if "is pushed" in m]) == 1
+        assert len([r for r in _ledger_rows(tmp_path) if "is pushed" in r["text"]]) == 1
+        assert _sent(tmp_path) == []
     finally:
         log.close()
 
@@ -409,13 +410,17 @@ def _ledger_rows(tmp_path) -> list[dict]:
     return [json.loads(ln) for ln in path.read_text().splitlines() if ln] if path.exists() else []
 
 
-def test_a_push_owed_briefly_never_reaches_the_phone(monkeypatch, tmp_path):
-    """Most debts clear on the next integration; the owner needs neither ping."""
+def test_an_owed_push_never_reaches_the_phone_however_long_it_is_owed(monkeypatch, tmp_path):
+    """Nothing is lost and nothing waits while a push is owed, so nobody is asked:
+    the debt is folded into the next summary, and the Overseer gets a pass for it."""
     project, cfg = _owe(monkeypatch, tmp_path)
     log = Log(cfg.supervisor_log)
     try:
         pushowed.settle(cfg, "P1", {project: gitq.retry_push(cfg, project, log)}, log)
-        pushowed.retry(cfg, log)  # inside the grace: still quiet
+        with state_mod.transaction(cfg) as st:
+            st.push_owed[str(project)]["since"] -= 6 * 3600
+        pushowed.retry(cfg, log)
+        pushowed.retry(cfg, log)
         _drop_hook(project)
         pushowed.retry(cfg, log)
         assert state_mod.read(cfg).push_owed == {}
@@ -423,27 +428,10 @@ def test_a_push_owed_briefly_never_reaches_the_phone(monkeypatch, tmp_path):
         log.close()
     assert _sent(tmp_path) == []
     rows = _ledger_rows(tmp_path)
-    assert [r["kind"] for r in rows] == ["push-owed", "push-owed"]
+    assert [(r["kind"], r["class"]) for r in rows] == [
+        ("push-owed", "folded"), ("push-owed", "logged")]
     assert all(r["suppressed"] and not r["delivered"] for r in rows)
-
-
-def test_a_push_still_owed_after_the_grace_pings_once_then_its_clearing(monkeypatch, tmp_path):
-    project, cfg = _owe(monkeypatch, tmp_path)
-    log = Log(cfg.supervisor_log)
-    try:
-        pushowed.settle(cfg, "P1", {project: gitq.retry_push(cfg, project, log)}, log)
-        assert _sent(tmp_path) == []
-        with state_mod.transaction(cfg) as st:
-            st.push_owed[str(project)]["since"] -= cfg.telegram_push_owed_grace_s + 60
-        pushowed.retry(cfg, log)
-        pushowed.retry(cfg, log)  # already told: once is enough
-        owed = [m for m in _sent(tmp_path) if "pre-push check" in m]
-        assert len(owed) == 1 and "after merging P1 (owed 6" in owed[0]
-        _drop_hook(project)
-        pushowed.retry(cfg, log)
-    finally:
-        log.close()
-    assert len([m for m in _sent(tmp_path) if "is pushed" in m]) == 1
+    assert "(owed 6.0h)" in rows[1]["text"]
 
 
 def test_a_push_made_by_hand_clears_the_debt(monkeypatch, tmp_path):

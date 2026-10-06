@@ -119,8 +119,6 @@ worker_settings = '{"teammateMode":"in-process","hooks":{"Stop":[{"hooks":[{"typ
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `notify` | `<this repo>/scripts/notify.sh` | | hot | The sender. It is called with the message as `$1`. The bundled script reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from this repo's `.env`, or from the file named by `SWARM_TG_ENV`. |
-| `pings` | `"necessary"` | `SWARM_TG_PINGS` | hot | `"necessary"` sends only what needs you: questions, holds you must clear, flagged operator outcomes, a `fail` after the Overseer's retry, a push owed past the grace, errors, the cadence summary and the finish. Everything else is logged to `notifications.jsonl` marked `suppressed` and not sent. `"all"` sends every ping, as the swarm did before this setting existed (it also makes `[operator].notify = "attention"` send every outcome). Any other value counts as `"necessary"`. A worker's own `done`/`waiting` reads this file too. The full list is in [components.md](components.md#telegram-and-asking-the-owner). |
-| `push_owed_grace_s` | `3600` | `SWARM_PUSH_OWED_GRACE` | hot | Under `"necessary"`, a repo owing a push pings once it has owed one this long (checked after every integration and on the watchdog tick). The "pushed" ping follows only if that one went out. |
 | `commands` | `true` | `SWARM_TG_COMMANDS` | restart | Start the bot's command listener at `swarm up`, so `/usage` and `/help` sent to the bot are answered. It reads the token and chat id from the file the sender reads, answers only that chat, and is not started when the file lacks them. |
 
 ## `[tmux]`
@@ -297,7 +295,6 @@ it starts real work will yield and then wake, which a longer window avoids.
 | `model` | `""` | | next | `--model` for operator sessions. `""` inherits the user's setting. |
 | `triage_model` | `"haiku"` | | hot | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
 | `later_wait_s` | `10800` | | hot | The longest a job triaged `later` waits. It normally opens when a worker slot is free that no ready phase wants; with a deep backlog that never happens, so once it has been queued this long it opens anyway, oldest first, one session at a time, never before its phase has merged. The session takes no worker slot. `0` means no cap. |
-| `notify` | `"attention"` | `SWARM_OPERATOR_NOTIFY` | hot | Which `operator-done` outcomes ping you. `"attention"` pings only an outcome the session flagged with `--attention` (you must act, something is still owed, or a check failed); a decision only you can make is asked separately, with `swarm waiting <job> "<question>"`, before the job finishes. `"all"` pings every outcome. `"none"` pings none. Every outcome is still recorded on the job, in `notifications.jsonl` (held-back ones marked `suppressed`) and in the Overseer's next digest, which folds them into its summary. Questions and abandoned jobs always ping. Any other value counts as `"attention"`. |
 
 ## `[overseer]`
 
@@ -307,7 +304,7 @@ it starts real work will yield and then wake, which a longer window avoids.
 | `cmd` | `""` | `SWARM_OVERSEER_CMD` | next | Replaces the built-in session command. Falls back to `[swarm].master_cmd`. |
 | `model` | `""` | | next | `""` uses `[swarm].master_model`. |
 | `min_gap_s` | `600` | `SWARM_OVERSEER_MIN_GAP` | hot | The minimum time between the starts of two non-urgent passes. |
-| `every_s` | `14400` | `SWARM_OVERSEER_EVERY` | hot | How often you get the Overseer's summary: a pass that writes it starts this long after the last one did (after the swarm started, for the first). Passes for anything else do not move this clock. `0` means no summary pass ever starts. |
+| `every_s` | `14400` | `SWARM_OVERSEER_EVERY` | hot | How often you get the Overseer's summary on your phone, in seconds. A pass that writes it (`swarm overseer-summary`) starts this long after the last one did (after the swarm started, for the first); passes for anything else do not move this clock. If that pass sends none, or the Overseer is off, the supervisor sends a summary of its own with the bare counts. A stretch in which nothing landed, failed, was held back or is building sends none. `0` means no summary on the clock: you still get asks, and the one at the end of the run. |
 | `owner_wait_s` | `3600` | `SWARM_OVERSEER_OWNER_WAIT` | hot | A session asking you this long triggers a pass, once per unanswered question (one parked and answered is working, and does not count). |
 | `starve_s` | `600` | `SWARM_OVERSEER_STARVE` | hot | Free slots, nothing launchable and backlog still open for this long triggers a pass, once per episode. |
 | `hold_wait_s` | `600` | `SWARM_OVERSEER_HOLD_WAIT` | hot | A merge conflict the resolver is working on triggers a pass only once it has been held this long. A hold with no resolver, or one the resolver gave up on, triggers at once. |

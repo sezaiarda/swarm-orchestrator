@@ -67,7 +67,6 @@ from .config import Config, NoProject, WrongSwarm, find_project, load
 from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
-from . import master as master_mod
 from . import models as models_mod
 from .master import build_context
 
@@ -205,15 +204,17 @@ def _reconcile_orphans(cfg: Config) -> None:
             print("  these phases are NOT marked done — their branches never merged.")
             print("  resolve, then `swarm resolved <phase>`; `swarm doctor` for detail.")
             log.line(f"RECONCILE-HELD-BOOT {names}")
-            telegram.notify(
-                cfg.telegram_notify,
-                f"swarm: {cfg.name} started, but finished work could not be merged:"
-                f" {names}. All merging waits on it. `swarm doctor` shows what is in"
-                " the way; fix it, then run `swarm resolved <phase>`.",
+            telegram.ask(
+                cfg,
+                telegram.fitted(
+                    cfg,
+                    "Clear what stops finished work from merging, then run `swarm"
+                    " resolved <phase>`: the swarm started, but could not merge ",
+                    telegram.names([h.phase for h in result.held]),
+                    ", and all merging waits on it. `swarm doctor` shows what is in the way."),
                 kind="integrate-hold",
                 phase=first.phase,
                 source="cli._reconcile_orphans",
-                state_dir=cfg.state_dir,
             )
     finally:
         log.close()
@@ -282,16 +283,14 @@ def _report_web_board(cfg: Config, hosted: bool = False) -> None:
     hint = "set [web].port in .swarm.toml to a free port and restart"
     print(f"web board: FAILED to start — {reason}", file=sys.stderr)
     print(f"  fix: {hint}", file=sys.stderr)
-    telegram.notify(
-        cfg.telegram_notify,
-        f"swarm: {cfg.name} is running, but the web board did not start ({reason})."
-        " The TUI still works. To fix it, give the board a free port in .swarm.toml"
-        " and restart the swarm.",
+    telegram.log(
+        cfg,
+        f"the swarm is running, but the web board did not start ({reason}). The TUI"
+        " still works. To fix it, give the board a free port in .swarm.toml and"
+        " restart the swarm.",
+        why="printed by `swarm up`; the board is not the run",
         kind="web-board",
         source="cli._report_web_board",
-        state_dir=cfg.state_dir,
-        # `swarm up` has just printed it; the Overseer's summary carries it too.
-        suppressed=telegram.hold(cfg, "printed by `swarm up`; the board is not the run"),
     )
 
 
@@ -1099,35 +1098,31 @@ def cmd_operator(cfg: Config, phase: str) -> int:
     return 0
 
 
-def _operator_done_hold(mode: str, attention: bool) -> str | None:
-    """Why an ``operator-done`` outcome is not sent to the phone, or ``None``.
-
-    ``[operator].notify``: ``attention`` (the default) sends only an outcome the
-    session flagged, ``all`` sends every one, ``none`` sends none.
-    """
-    if mode == "all" or (mode == "attention" and attention):
-        return None
-    if mode == "none":
-        return "[operator].notify = none"
-    return "routine outcome (no --attention); it goes in the Overseer's summary"
-
-
 def cmd_operator_done(
-    cfg: Config, phase: str, outcome: str = "", attention: bool = False,
+    cfg: Config, phase: str, outcome: str = "", ask: str = "",
     not_before: str = "",
 ) -> int:
     """The session signals its job is finished, with a one-line outcome.
 
-    The outcome is recorded on the item, in the notification ledger, in the
-    phase's history (through the ledger writer) and in the next Overseer digest. Routine outcomes arrive folded into the Overseer's
-    summary, unless ``[operator].notify`` says otherwise; ``--attention`` sends
-    it. A decision the owner has to make is never an outcome: the session asks
-    it with ``swarm waiting`` while it is still there to act on the answer.
+    The outcome is recorded on the item, in the notification log, in the
+    phase's history (through the ledger writer) and in the next Overseer digest,
+    and the Overseer's summary accounts for it. ``--ask "<what the owner must do,
+    and why>"`` is for an outcome that leaves something only the owner can do:
+    the ask goes to their phone, short enough for a notification, and one that
+    is not is refused before anything is recorded. A decision the owner has to
+    make is never an outcome: the session asks it with ``swarm waiting`` while
+    it is still there to act on the answer.
 
     ``--not-before`` is "not yet": the job goes back in the queue until then
     (:func:`opqueue.later`) instead of being finished, for work whose moment has
     not come — a date the owner set, data that lands tomorrow.
     """
+    if ask:
+        try:
+            ask = telegram.short(cfg, ask)
+        except telegram.TooLong as exc:
+            print(f"swarm operator-done: nothing was recorded — {exc}", file=sys.stderr)
+            return 2
     if not_before:
         try:
             when = opqueue.parse_not_before(not_before)
@@ -1142,7 +1137,7 @@ def cmd_operator_done(
         print(f"operator-done {phase}: queued again, not before {_clock(when)}")
         print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
         return 0
-    item = opqueue.complete(cfg, phase, outcome, attention)
+    item = opqueue.complete(cfg, phase, outcome, ask)
     if item is None:
         print(f"swarm operator-done: no live operator job {phase}", file=sys.stderr)
         return 1
@@ -1153,26 +1148,19 @@ def cmd_operator_done(
                                          "note": item.outcome, "by": f"operator job {phase}"})
         _poke(cfg, "ledger")
     tail = f" — {item.outcome}" if item.outcome else " (no outcome given)"
-    mode = cfg.operator_notify
-    if mode == "attention" and telegram.sends_all(cfg):
-        mode = "all"  # `[telegram].pings = "all"` restores every ping, this one too
-    hold = _operator_done_hold(mode, attention)
-    head = f"swarm: operator job {phase} {'needs your attention' if attention else 'is done'}"
-    telegram.notify(
-        cfg.telegram_notify,
-        f"{head}{tail}",
-        kind="operator-done",
-        phase=phase,
-        source="cli.operator-done",
-        state_dir=cfg.state_dir,
-        suppressed=hold,
-    )
+    said = {"kind": "operator-done", "phase": phase, "source": "cli.operator-done"}
+    if item.ask:
+        told = "asked" if telegram.ask(
+            cfg, item.ask, detail=item.outcome, **said).delivered else "NOT asked: the send failed"
+    else:
+        telegram.fold(cfg, f"operator job {phase} is done{tail}", **said)
+        told = "not asked — the outcome goes in the Overseer's next summary"
     # The item is settled whatever happens next; only the session's own lease
     # (and, under worktree isolation, the merge of its mirror) rides on the
     # poke, and a lost one holds the lease until it expires. Say so.
     heard = _poke(cfg, f"operator-done {phase}")
     print(f"operator-done {phase}")
-    print(f"  owner: {'pinged' if hold is None else 'not pinged — ' + hold}")
+    print(f"  owner: {told}")
     print(f"  supervisor: {'poked' if heard else 'not running — lease clears on expiry'}")
     return 0
 
@@ -1919,12 +1907,16 @@ def cmd_widen(cfg: Config, phase: str, texts: list[str]) -> int:
 
 
 def cmd_waiting(cfg: Config, who: str, note: str) -> int:
-    """Self-report that this session is blocked on the owner: one ping saying
-    what is asked and which window to open, then a park deadline
-    (:mod:`owner`). Workers, operator jobs and the Overseer alike."""
+    """Self-report that this session is blocked on the owner: the ask goes to
+    their phone, then a park deadline (:mod:`owner`). Workers, operator jobs and
+    the Overseer alike. ``note`` is the ask itself, written for a notification;
+    one that does not fit is refused before anything is recorded."""
     try:
         key = owner_mod.resolve(cfg, who)
         what = owner_mod.waiting(cfg, key, note)
+    except telegram.TooLong as exc:
+        print(f"swarm waiting: the owner was NOT told — {exc}", file=sys.stderr)
+        return 2
     except owner_mod.WaitError as exc:
         print(f"swarm waiting: {exc}", file=sys.stderr)
         return 1
@@ -2059,25 +2051,6 @@ def cmd_free(cfg: Config, target: str) -> int:
     return 0
 
 
-def _summary_hold(cfg: Config, attention: bool) -> str | None:
-    """Why an Overseer pass's summary stays off the phone, or ``None`` to send it.
-
-    It goes out on the pass the summary clock starts (``[overseer].every_s``),
-    or with ``--attention`` when something needs the owner. Every other pass —
-    a failure, starvation, a hold, a doctor FAIL, an owner wait, the box, one the
-    owner asked for — records it and sends nothing, so pings stay quiet unless
-    something needs the owner.
-    """
-    if attention:
-        return None
-    pid, _ = _live_pass(cfg)
-    rec = ovrecord.load_json(cfg, pid) if pid else None
-    keys = {str(r.get("key", "")) for r in (rec.reasons if rec else [])}
-    if keys & overseer_mod.SUMMARY_TRIGGERS:
-        return None
-    return telegram.hold(cfg, "the summary is not due and nothing flagged --attention")
-
-
 def _notify_entry(cfg: Config, a) -> int:
     if a.ack:
         if a.message is not None:
@@ -2087,7 +2060,7 @@ def _notify_entry(cfg: Config, a) -> int:
     if a.message is None:
         print("swarm notify: a message is required (or --ack)", file=sys.stderr)
         return 2
-    return cmd_notify(cfg, a.message, a.attention)
+    return cmd_notify(cfg, a.message)
 
 
 def cmd_notify_ack(cfg: Config) -> int:
@@ -2120,40 +2093,62 @@ def cmd_notify_ack(cfg: Config) -> int:
     return 0
 
 
-def cmd_notify(cfg: Config, message: str, attention: bool = False) -> int:
-    """Send ``message`` to the owner through the swarm's own sender.
+def cmd_notify(cfg: Config, message: str) -> int:
+    """Ask the owner for something only they can do, through the swarm's own sender.
 
-    The master prompts say "telegram the owner" and, until this existed, gave the
-    master no swarm-side way to do it - so an LLM master reached for whatever it
-    had, and run events then arrived from another sender and never reached
-    ``notifications.jsonl``. This is the
-    one door: the configured ``[telegram] notify`` script, logged like every other
-    swarm ping. Best-effort, like all of them: a failed send is exit 1, never an
-    exception.
-
-    Sent from an Overseer pass, it is the pass's summary to the owner.
+    The one door a session has to the owner's phone when it is not waiting on
+    an answer in its own window (that is ``swarm waiting``): an init pass that
+    found the swarm cannot run, a resolver that cannot fix a conflict, the
+    Overseer raising a failure it will not retry. ``message`` is the ask as the
+    phone shows it — what the owner must do or decide, then why — and one too
+    long for a notification is refused, not cut. Best-effort, like every send:
+    a failed one is exit 1, never an exception.
     """
-    kind = "master-note"
-    held = None
-    if os.environ.get("SWARM_MASTER_KIND") == master_mod.OVERSEER:
-        kind = "overseer-digest"
-        held = _summary_hold(cfg, attention)
+    try:
+        message = telegram.short(cfg, message)
+    except telegram.TooLong as exc:
+        print(f"swarm notify: nothing was sent — {exc}", file=sys.stderr)
+        return 2
     session = os.environ.get(SESSION_ENV, "")
     if session.startswith("resolver:"):
-        # A resolver only messages the owner when it gives up on the conflict.
+        # A resolver only asks the owner when it gives up on the conflict.
         _poke(cfg, f"resolver-escalated {session.split(':', 1)[1]}")
-    ok = telegram.notify(
-        cfg.telegram_notify,
-        message,
-        kind=kind,
-        source="cli.notify",
-        state_dir=cfg.state_dir,
-        suppressed=held,
-    )
-    if held:
-        # Not a failure: the summary is recorded, just not sent to the phone.
-        print(f"recorded, not sent — {held} (pass --attention if it needs the owner)")
+    ok = telegram.ask(cfg, message, kind="session-ask", source="cli.notify").delivered
+    print("sent" if ok else "not sent")
+    return 0 if ok else 1
+
+
+def cmd_overseer_summary(cfg: Config, text: str) -> int:
+    """The Overseer writes the owner their summary, on the pass the clock started.
+
+    Two short sentences — what landed and what is running since the last
+    summary, then whether anything waits on the owner — that fit a phone
+    notification; one that does not is refused, not cut. On any other pass it
+    is recorded and not sent: the summary goes out on its clock only.
+    """
+    pid, _ = _live_pass(cfg)
+    rec = ovrecord.load_json(cfg, pid) if pid else None
+    if rec is None:
+        print("swarm overseer-summary: no Overseer pass is running", file=sys.stderr)
+        return 1
+    try:
+        text = telegram.short(cfg, text, telegram.SUMMARY_LEAD)
+    except telegram.TooLong as exc:
+        print(f"swarm overseer-summary: nothing was sent — {exc}", file=sys.stderr)
+        return 2
+    source = "cli.overseer-summary"
+    if not any(r.get("key") == overseer_mod.SUMMARY for r in rec.reasons):
+        telegram.log(cfg, text, why="no summary was due on this pass",
+                     kind="summary", source=source)
+        print("recorded, not sent — the owner's summary is not due on this pass. If"
+              ' something needs them, ask: swarm notify "<what they must do, and why>"')
         return 0
+    if rec.owner_summary:
+        print("swarm overseer-summary: this pass has already sent its summary",
+              file=sys.stderr)
+        return 1
+    ovrecord.update(cfg, pid, owner_summary=text)
+    ok = telegram.summary(cfg, text, source=source).delivered
     print("sent" if ok else "not sent")
     return 0 if ok else 1
 
@@ -2984,11 +2979,13 @@ def _build_parser() -> argparse.ArgumentParser:
     wdp.set_defaults(func=lambda cfg, a: cmd_widen(cfg, a.phase, a.touches))
 
     wp = sub.add_parser(
-        "waiting", help="report this session is blocked on the owner (pings; may park it)"
+        "waiting", help="report this session is blocked on the owner (asks them; may park it)"
     )
     wp.add_argument("phase", metavar="who",
                     help="a worker's phase, an operator job id, or `overseer`")
-    wp.add_argument("note", nargs="*", default=[], help="the question, for the owner ping")
+    wp.add_argument("note", nargs="*", default=[],
+                    help="the ask as the owner's phone shows it: what you need from them,"
+                         " then why, in one or two short sentences")
     wp.set_defaults(func=lambda cfg, a: cmd_waiting(cfg, a.phase, " ".join(a.note)))
 
     rsp = sub.add_parser(
@@ -3200,11 +3197,11 @@ def _build_parser() -> argparse.ArgumentParser:
     fp.add_argument("target")
     fp.set_defaults(func=lambda cfg, a: cmd_free(cfg, a.target))
 
-    np_ = sub.add_parser("notify", help="message the owner through the swarm's own telegram sender")
-    np_.add_argument("message", nargs="?")
+    np_ = sub.add_parser(
+        "notify", help="ask the owner for something only they can do (their phone)")
     np_.add_argument(
-        "--attention", action="store_true",
-        help="an Overseer summary that needs the owner: send it whatever triggered the pass")
+        "message", nargs="?",
+        help="what they must do or decide, then why: one or two short sentences")
     np_.add_argument(
         "--ack", action="store_true",
         help="acknowledge the pings that never reached your phone: the dashboard and"
@@ -3329,14 +3326,15 @@ def _build_parser() -> argparse.ArgumentParser:
     odp.add_argument("phase", help="the operator job id")
     odp.add_argument("outcome", nargs="*", help="one line: what was done or skipped")
     odp.add_argument(
-        "--attention", action="store_true",
-        help="ping the owner: they must act, something is still owed, or a check failed")
+        "--ask", default="", metavar="ASK",
+        help="the outcome leaves something only the owner can do: what, then why, in"
+             " one or two short sentences for their phone")
     odp.add_argument(
         "--not-before", default="", metavar="WHEN",
         help="not yet: queue the job again until WHEN (6h, 3d, 2026-09-30, '2026-09-30 08:00')")
     odp.set_defaults(
         func=lambda cfg, a: cmd_operator_done(
-            cfg, a.phase, " ".join(a.outcome), a.attention, a.not_before),
+            cfg, a.phase, " ".join(a.outcome), a.ask, a.not_before),
         tolerant=True)
 
     ohp = sub.add_parser(
@@ -3367,6 +3365,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "overseer-done", help="(Overseer) signal the pass is over, with a one-line summary")
     ovd.add_argument("summary", nargs="*", help="what the pass did, in one line")
     ovd.set_defaults(func=lambda cfg, a: cmd_overseer_done(cfg, " ".join(a.summary)))
+
+    ovs = sub.add_parser(
+        "overseer-summary",
+        help="(Overseer) send the owner their summary, on the pass the clock started")
+    ovs.add_argument("text", nargs="*",
+                     help="what landed and what is running, then whether anything waits"
+                          " on them: two short sentences")
+    ovs.set_defaults(func=lambda cfg, a: cmd_overseer_summary(cfg, " ".join(a.text)))
 
     bpp = sub.add_parser("big-picture", help="the big-picture doc's last refresh; --now asks for one")
     bpp.add_argument("--now", action="store_true", help="request a pass straight away")

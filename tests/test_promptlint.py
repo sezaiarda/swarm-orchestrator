@@ -176,10 +176,31 @@ def test_every_session_is_told_its_processes_die_with_it(name):
     assert "swarm keep --stop" in flat
 
 
-def test_an_operator_url_for_the_owner_is_an_attention_outcome():
+def test_an_operator_url_for_the_owner_is_an_outcome_with_an_ask():
     flat = " ".join((REPO / "prompts" / "operator.md").read_text(encoding="utf-8").split())
     assert "look at something — a URL" in flat
-    assert "--attention" in flat
+    assert '--ask "<what the owner must do, then why>"' in flat
+
+
+@pytest.mark.parametrize("name", ["init_master.md", "resolver.md", "operator.md", "overseer.md"])
+def test_every_session_is_taught_to_write_its_ask_for_a_phone(name):
+    """What a session sends the owner is read in a notification: the ask first,
+    then the reason, short, and rewritten (not trimmed) when the command refuses it."""
+    flat = " ".join((REPO / "prompts" / name).read_text(encoding="utf-8").split())
+    assert "Asks you:" in flat
+    assert re.search(r"[Ff]irst what (you need from them|they must do|the owner must do)", flat)
+    assert "then why" in flat
+    assert re.search(r"refuse[sd]", flat) and re.search(r"rewrit", flat)
+    assert "--attention" not in flat  # the flag that sent a free-form message is gone
+
+
+def test_the_overseer_writes_its_summary_with_its_own_command_on_its_own_pass():
+    flat = " ".join((REPO / "prompts" / "overseer.md").read_text(encoding="utf-8").split())
+    assert 'swarm overseer-summary "<two short sentences>"' in flat
+    assert "on the summary pass only" in flat
+    assert "first what landed and what is running since the last summary, then whether anything waits on the owner" in flat
+    assert 'swarm notify "<what they must do, then why>"' in flat  # how it escalates
+    assert "six short lines" not in flat
 
 
 def test_the_resolver_escalates_with_swarm_notify():

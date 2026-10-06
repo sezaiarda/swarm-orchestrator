@@ -979,22 +979,22 @@ def test_a_run_that_never_logged_a_send_warns(cfg):
 
 
 def test_delivered_sends_are_ok(cfg):
-    telegram.notify(cfg.telegram_notify, "one", state_dir=cfg.state_dir)
-    telegram.notify(cfg.telegram_notify, "two", state_dir=cfg.state_dir)
+    telegram.ask(cfg, "one")
+    telegram.summary(cfg, "two")
     sends = doctor._check_telegram(cfg)[1]
     assert sends.status == OK and "2 send(s) logged, all delivered" in sends.detail
 
 
 def test_a_message_held_back_on_purpose_is_not_a_dropped_send(cfg):
-    telegram.notify(cfg.telegram_notify, "one", state_dir=cfg.state_dir)
-    telegram.notify(cfg.telegram_notify, "two", state_dir=cfg.state_dir, suppressed="routine")
+    telegram.ask(cfg, "one")
+    telegram.fold(cfg, "two")
     sends = doctor._check_telegram(cfg)[1]
     assert sends.status == OK
     assert "1 send(s) logged, all delivered" in sends.detail and "+1 held back" in sends.detail
 
 
 def test_one_dropped_send_fails_with_its_error(cfg):
-    telegram.notify(cfg.telegram_notify, "one", state_dir=cfg.state_dir)
+    telegram.ask(cfg, "one")
     with (cfg.state_dir / telegram.LEDGER_NAME).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"ts": time.time(), "delivered": False, "error": "429 Too Many"}) + "\n")
         fh.write("{torn line\n")

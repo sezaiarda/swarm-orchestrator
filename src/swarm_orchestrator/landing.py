@@ -470,22 +470,21 @@ def _make_ready(cfg: Config, phase: str, repo: Path, wt: Path, fh) -> str:
 
 
 def _tell_unprepared(cfg: Config, phase: str, repo: Path, why: str) -> None:
-    """Tell the owner a landing waits on a prepare command that failed: once per
-    phase, not on every retry."""
-    told = telegram.already_sent(cfg.state_dir, ("lane-unprepared",), phase)
-    telegram.notify(
-        cfg.telegram_notify,
-        f"swarm: {phase} cannot land in {repo.name} yet: the command that makes its"
-        f" copy ready for the landing check failed — {why}. No check ran and there is"
+    """Record that a landing waits on a prepare command that failed. Other work
+    keeps merging and it is tried again, so nobody is asked: the first failure
+    of a phase goes in the Overseer's next summary, a repeat only in the log."""
+    text = (
+        f"{phase} cannot land in {repo.name} yet: the command that makes its copy"
+        f" ready for the landing check failed — {why}. No check ran and there is"
         f" nothing for a resolver: other work keeps merging, and this is tried again"
-        f" about every {RETRY_S / 60:.0f} minutes. Fix what it reports if it keeps failing;"
-        f" its output is in {check_log(cfg, phase, repo)}",
-        kind="lane-unprepared",
-        phase=phase,
-        source="landing._collect",
-        state_dir=cfg.state_dir,
-        suppressed=telegram.hold(cfg, "you were told when it first failed") if told else None,
+        f" about every {RETRY_S / 60:.0f} minutes. Its output is in"
+        f" {check_log(cfg, phase, repo)}"
     )
+    said = {"kind": "lane-unprepared", "phase": phase, "source": "landing._collect"}
+    if telegram.recorded(cfg.state_dir, ("lane-unprepared",), phase):
+        telegram.log(cfg, text, why="recorded when it first failed", **said)
+    else:
+        telegram.fold(cfg, text, **said)
 
 
 # -- resolving -------------------------------------------------------------

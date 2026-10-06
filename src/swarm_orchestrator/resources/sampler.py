@@ -372,7 +372,7 @@ def idle_message(b: builds_mod.Build, now: float, idle_s: float) -> str:
     else:
         effect = " Other builds queue behind it."
     return (
-        f"swarm: a build has held a build slot for {int((now - b.started) // 60)} min"
+        f"a build has held a build slot for {int((now - b.started) // 60)} min"
         f" and used under 1% of a core for the last {int(idle_s // 60)} min"
         f" ({short}, phase {b.phase or '?'}, pid {b.pid}).{effect}"
         " Nothing was stopped; `swarm build --status` and `swarm resources` show it."

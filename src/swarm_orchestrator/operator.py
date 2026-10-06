@@ -192,14 +192,16 @@ def brief(cfg: Config, item: opqueue.Item, cwd: Path | None = None) -> str:
         f" {origin}, in the project at {cfg.project_dir}, on the owner's behalf."
         f" {where} The brief, in full: {note}{earlier} When the job is"
         f' finished run `swarm operator-done {job} "<one-line outcome>"`, adding'
-        f" `--attention` only if the owner must act, something is still owed or a"
-        f" check came back bad (see the prompt). If what the job waits on has not"
+        f' `--ask "<what the owner must do, then why>"` only if the owner must act,'
+        f" something is still owed or a check came back bad: that ask is all their"
+        f" phone shows, so keep it to one or two short sentences (see the prompt)."
+        f" If what the job waits on has not"
         f" happened yet, or will run on without you for longer than this session's"
         f' hour, run `swarm operator-done {job} "<where you stopped>" --not-before'
         f" <when>` instead; if you must stay through long work yourself, run"
         f' `swarm operator-hold {job} <how long> "<why>"` (see the prompt).'
         f" If you hit a genuine decision, run"
-        f' `swarm waiting {job} "<the question, one line>"`, ask it with'
+        f' `swarm waiting {job} "<what you need from the owner, then why>"`, ask it with'
         f' AskUserQuestion, then `swarm resumed {job} "<answer>"`.'
         " Anything for the owner is plain English about the system, not the code."
     )

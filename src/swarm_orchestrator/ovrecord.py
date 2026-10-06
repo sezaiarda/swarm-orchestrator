@@ -62,6 +62,9 @@ class PassRecord:
     record: str = ""
     mirror: str = ""
     summary: str = ""
+    #: The summary this pass sent the owner (``swarm overseer-summary``), or the
+    #: one the swarm wrote in its place; "" on a pass that owed none.
+    owner_summary: str = ""
     question: str = ""
     asked_at: float = 0.0
     answer: str = ""

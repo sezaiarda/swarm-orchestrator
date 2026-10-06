@@ -98,6 +98,8 @@ CRASH_WINDOW_S = 3600.0
 #: The cheap doctor checks behind the Overseer's ``doctor`` trigger are probed at
 #: most this often: they parse the ledger, and a FAIL that matters lasts minutes.
 DOCTOR_PROBE_S = 600.0
+#: Why a held merge with a resolver on it asks nobody.
+RESOLVER_ON_IT = "a resolver is on it; it asks the owner if it cannot fix it"
 #: How often the Overseer's policy is told what the box is short of.
 BOX_PROBE_S = 60.0
 #: While a hand-over waits for a safe point, and while a restart it started is
@@ -336,11 +338,14 @@ class Supervisor:
                     self.log.line(f"HANDOVER-UNREAD-LOST {len(buf)} bytes {exc}")
         except Exception as exc:  # noqa: BLE001 - announce, then re-raise
             self.log.line(f"SUPERVISOR-CRASH {exc!r}")
-            self._ping(
+            self._ask(
                 "crash",
-                f"swarm: {self.cfg.name} has stopped: the swarm hit an internal error"
-                f" ({exc}). No new work starts and finished work is not merged until"
-                " you restart it with `swarm up`.",
+                telegram.fitted(
+                    self.cfg,
+                    "Restart the swarm with `swarm up`: it stopped on an internal error (",
+                    str(exc),
+                    "). Nothing starts and finished work is not merged until you do.",
+                ),
                 cooldown=0.0,
             )
             raise
@@ -460,43 +465,47 @@ class Supervisor:
             return True
         except Exception as exc:  # noqa: BLE001 - a handler must never end the run
             self.log.line(f"HANDLER-ERROR {what!r} {exc!r}")
-            self._ping(
-                f"handler:{what.split(' ')[0]}",
-                f"swarm: an internal error while handling {what!r} ({exc}). The swarm"
-                " skipped that step and keeps running; nothing to do unless it repeats.",
+            verb = what.split(" ")[0]
+            self._fold(
+                f"handler:{verb}",
+                f"an internal error while handling {what!r} ({exc}). The swarm"
+                " skipped that step and keeps running.",
             )
+            if self.cfg.overseer_enabled:
+                # A skipped step can leave something stuck; a pass looks, and
+                # asks the owner if it is theirs.
+                self.overseer.request(
+                    f"error:{verb}",
+                    f"the supervisor hit an internal error handling {what!r} ({exc})"
+                    " and skipped that step",
+                )
             return False
 
-    def _ping(
-        self,
-        key: str,
-        msg: str,
-        cooldown: float | None = None,
-        *,
-        kind: str = "other",
-        source: str = "",
-        suppressed: str | None = None,
-    ) -> None:
-        """Telegram ``msg``, at most once per ``cooldown`` seconds for this ``key``.
+    def _once(self, key: str, cooldown: float | None) -> bool:
+        """Whether ``key`` may speak now: at most once per ``cooldown`` seconds.
 
-        Every ping the supervisor sends outside the normal lifecycle reports a
+        What the supervisor says outside the normal lifecycle reports a
         *condition*, not an event — a dead pane, a stalled queue, a handler that
         keeps raising. Without a per-key cooldown a condition that reasserts on
-        every wake would ping-storm the owner's phone.
-
-        ``kind``/``source`` are ledger metadata, forwarded to
-        :func:`telegram.notify`. They are parameters because a caller was already
-        passing them: :meth:`_on_reload` handed them to *this* method, which had
-        no such arguments, so every failed reload raised ``TypeError`` inside
-        :meth:`_dispatch` and reported ``HANDLER-ERROR`` — a config parse error
-        told the owner the supervisor had broken instead."""
+        every wake would be said on every wake."""
         gap = self.watchdog_s * 4 if cooldown is None else cooldown
         now = time.time()
         if gap and now - self._pinged.get(key, 0.0) < gap:
-            return
+            return False
         self._pinged[key] = now
-        telegram.notify(self.cfg.telegram_notify, msg, kind=kind, source=source,
-                        suppressed=suppressed)
+        return True
+
+    def _ask(self, key: str, text: str, cooldown: float | None = None, *,
+             kind: str = "other", source: str = "", phase: str | None = None) -> None:
+        """Ask the owner (:func:`telegram.ask`), rate-limited per ``key``."""
+        if self._once(key, cooldown):
+            telegram.ask(self.cfg, text, kind=kind, phase=phase, source=source)
+
+    def _fold(self, key: str, text: str, cooldown: float | None = None, *,
+              kind: str = "other", source: str = "", phase: str | None = None) -> None:
+        """Record it for the Overseer's next summary (:func:`telegram.fold`)."""
+        if self._once(key, cooldown):
+            telegram.fold(self.cfg, text, kind=kind, phase=phase, source=source)
 
     # -- event dispatch ---------------------------------------------------
     def _handle(self, line: str) -> None:
@@ -651,12 +660,11 @@ class Supervisor:
             )
         except (ValueError, OSError) as exc:
             self.log.line(f"RELOAD-ERROR {exc}")
-            self._ping(
+            self._fold(
                 "reload-error",
-                f"swarm: your settings change for {self.cfg.name} was not applied: the"
-                f" config file has an error ({exc}). The swarm keeps running on the old"
-                " settings. Fix the file, then run `swarm reload`.",
-                kind="other",
+                f"a settings change was not applied: the config file has an error ({exc})."
+                " The swarm keeps running on the old settings until the file is fixed"
+                " and `swarm reload` is run.",
                 source="supervisor._on_reload",
             )
             return
@@ -761,11 +769,11 @@ class Supervisor:
                 st.reap_retired()
         self.log.line(f"RELOAD-PANES added={panes} failed={failed}")
         if failed:
-            self._ping(
+            self._fold(
                 "reload-panes",
-                f"swarm: {self.cfg.name} could open only {len(panes)} of the"
-                f" {len(slot_ids)} extra worker place(s) you asked for, so it runs with"
-                " fewer workers than set. Nothing is lost.",
+                f"only {len(panes)} of the {len(slot_ids)} extra worker place(s) asked"
+                " for could be opened, so the swarm runs with fewer workers than set."
+                " Nothing is lost.",
                 cooldown=0.0,
             )
 
@@ -834,19 +842,29 @@ class Supervisor:
             return
         started = drain_mod.spawn_down(self.cfg)
         self.log.line(f"DRAIN-COMPLETE stopping={started} then={then!r} restart={restarting}")
+        source = "supervisor._drain_tick"
         if started and restarting:
-            msg = (f"swarm: {self.cfg.name} finished the work that was running and is"
-                   " restarting, as asked; you hear again only if it does not come back")
+            telegram.log(
+                self.cfg,
+                "the work that was running is finished and the swarm is restarting, as asked",
+                why="a restart: an ask follows only if it does not come back",
+                kind="drain", source=source)
         elif started:
-            msg = (f"swarm: {self.cfg.name} finished the work that was running and is"
-                   " shutting down, as you asked")
-            msg += f"; afterwards it runs: {then}" if then else ""
+            # The run is over for the owner who drained it: the last summary.
+            telegram.summary(
+                self.cfg,
+                telegram.fitted(
+                    self.cfg,
+                    "The work that was running is finished and the swarm is shutting"
+                    " down, as you asked." + (" Afterwards it runs: " if then else ""),
+                    then, lead=telegram.SUMMARY_LEAD),
+                kind="drain", source=source)
         else:
-            msg = (f"swarm: {self.cfg.name} finished the work that was running but could"
-                   " not shut itself down; run `swarm down` yourself")
-        self._ping("drain", msg, cooldown=0.0, kind="drain", source="supervisor._drain_tick",
-                   suppressed=(telegram.hold(self.cfg, "a restart: you hear if it fails")
-                               if started and restarting else None))
+            telegram.ask(
+                self.cfg,
+                "Run `swarm down` yourself: the work that was running is finished, but"
+                " the swarm could not shut itself down.",
+                kind="drain", source=source)
 
     def _park_all_waiting(self, st: state_mod.State) -> None:
         """Park every session that waits on the owner and is still in its home
@@ -1566,7 +1584,7 @@ class Supervisor:
                 # queue for the owner instead of unwinding the loop.
                 self.log.line(f"INTEGRATE-ERROR {phase} {exc}")
                 pushowed.settle(self.cfg, phase, pushes, self.log)
-                self._hold(phase, gitq.DIRTY, None, f"git error integrating {phase}: {exc}")
+                self._hold(phase, gitq.DIRTY, None, str(exc))
                 return
             # Before the hold/advance: a repo that merged and failed to push owes
             # it even when a later repo of the same phase then conflicts.
@@ -1655,74 +1673,73 @@ class Supervisor:
             st.integ_blocked = phase
             st.integ_blocked_kind = kind
             st.integ_blocked_repo = str(repo) if repo is not None else None
-        held = None
+        on_it = None  # why nobody is asked: a resolver has it
         if kind in gitq.LANE_HOLDS:
-            msg, held = self._hold_lane(phase, kind)
+            msg, on_it = self._hold_lane(phase, kind)
         elif kind == gitq.CONFLICT and repo is not None:
             pane = resolver_mod.spawn(self.cfg, phase, repo, self.log)
             if pane is not None:
                 with state_mod.transaction(self.cfg) as st:
                     st.windows[f"resolve:{phase}"] = pane
-                # The resolver is on it, and it messages the owner itself
+                # The resolver is on it, and it asks the owner itself
                 # (`swarm notify`) if it cannot fix the conflict.
-                held = telegram.hold(self.cfg, "a resolver is on it; it tells you if it cannot fix it")
+                on_it = RESOLVER_ON_IT
                 msg = (
-                    f"swarm: {phase}'s work clashes with work already merged in"
-                    f" {repo.name}, so all merging is paused. A resolver is fixing it in"
-                    f" tmux window resolve-{phase} and restarts merging when done; it"
-                    " tells you if it cannot. Nothing to do yet"
+                    f"{phase}'s work clashes with work already merged in {repo.name},"
+                    " so all merging is paused. A resolver is fixing it in tmux window"
+                    f" resolve-{phase} and restarts merging when done."
                 )
             else:
                 msg = (
-                    f"swarm: {phase}'s work clashes with work already merged in"
-                    f" {repo.name}, so all merging is paused, and the resolver would not"
-                    f" start. Fix the clash in {repo.name}, then run `swarm resolved {phase}`"
+                    f"Fix the merge clash in {repo.name}, then run `swarm resolved"
+                    f" {phase}`: {phase}'s work clashes with work already merged, the"
+                    " resolver would not start, and all merging waits on it."
                 )
         elif kind == gitq.DIRTY:
             where = f" in {repo.name}" if repo is not None else ""
-            msg = detail or gitq.off_main_reason(self.cfg, repo, phase) or (
-                f"swarm: {phase} is finished but cannot be merged: the checkout{where}"
-                f" has uncommitted changes or stray files in the way, and all merging"
-                f" waits on it. Commit, stash or move them, then run"
-                f" `swarm resolved {phase}`"
+            msg = (
+                telegram.fitted(
+                    self.cfg,
+                    f"Look at the merge of {phase}, then run `swarm resolved {phase}`:"
+                    " git stopped it (", detail, "), and all merging waits on it.")
+                if detail else gitq.off_main_reason(self.cfg, repo, phase) or (
+                    f"Commit, stash or move the uncommitted changes{where}, then run"
+                    f" `swarm resolved {phase}`: {phase} is finished but cannot be merged"
+                    " over them, and all merging waits on it."
+                )
             )
         else:  # PUSH_FAILED
             msg = (
-                f"swarm: {phase} merged on this machine but could not be pushed; fix"
-                f" the push, then run `swarm resolved {phase}` to retry"
+                f"Fix the push, then run `swarm resolved {phase}`: {phase} merged on"
+                " this machine but could not be pushed, and all merging waits on it."
             )
         self.log.line(f"INTEGRATE-BLOCKED {phase} {kind}")
-        telegram.notify(
-            self.cfg.telegram_notify,
-            msg,
-            kind="integrate-hold",
-            phase=phase,
-            source="supervisor._hold",
-            suppressed=held,
-        )
+        if on_it:
+            telegram.log(self.cfg, msg, why=on_it, kind="integrate-hold", phase=phase,
+                         source="supervisor._hold")
+        else:
+            telegram.ask(self.cfg, msg, kind="integrate-hold", phase=phase,
+                         source="supervisor._hold")
 
     def _hold_lane(self, phase: str, kind: str) -> tuple[str, str | None]:
         """Open the resolver on the phase's own worktree for a lane hold, and
         say so. The owner's checkout was never touched: it is clean on main."""
         brief = landing_mod.resolver_brief(self.cfg, phase)
-        what = ("its catch-up merge conflicts with work that landed beside it"
+        what = ("its catch-up merge conflicts with newer work"
                 if kind == gitq.LANE_CONFLICT else
-                "its re-test against work that landed beside it failed")
+                "its re-test against newer work failed")
         pane = None
         if brief is not None:
             pane = resolver_mod.spawn(self.cfg, phase, brief[0], self.log, line=brief[1])
         if pane is not None:
             with state_mod.transaction(self.cfg) as st:
                 st.windows[f"resolve:{phase}"] = pane
-            held = telegram.hold(self.cfg, "a resolver is on it; it tells you if it cannot fix it")
-            return (f"swarm: {phase} cannot land yet: {what}, so all merging is paused."
-                    f" A resolver is fixing it on the phase's own copy in tmux window"
-                    f" resolve-{phase} and restarts merging when done; it tells you if it"
-                    " cannot. Nothing to do yet"), held
-        where = f" in {brief[0]}" if brief is not None else ""
-        return (f"swarm: {phase} cannot land yet: {what}, so all merging is paused, and"
-                f" the resolver would not start. Fix it on the phase's own copy{where},"
-                f" commit there, then run `swarm resolved {phase}`"), None
+            return (f"{phase} cannot land yet: {what}, so all merging is paused. A"
+                    " resolver is fixing it on the phase's own copy in tmux window"
+                    f" resolve-{phase} and restarts merging when done."), RESOLVER_ON_IT
+        return (f"Fix {phase} on its own copy (`swarm doctor` shows where), commit there,"
+                f" then run `swarm resolved {phase}`: {what}, and no resolver would start."
+                " All merging waits on it."), None
 
     # -- resolved: finish a blocked integration, resume the queue ---------
     def _on_resolved(self, phase: str) -> None:
@@ -1742,11 +1759,11 @@ class Supervisor:
             what = gitq.unfinished(repo)
             self.log.line(f"RESOLVED-INCOMPLETE {phase} still-blocked {repo.name}: {what}")
             self.overseer.resolver_escalated(phase)
-            telegram.notify(
-                self.cfg.telegram_notify,
-                f"swarm: {phase} still cannot be merged: {repo.name} has {what}, so"
-                f" merging stays paused. Finish and commit it, then run"
-                f" `swarm resolved {phase}` again",
+            telegram.fold(
+                self.cfg,
+                f"{phase} still cannot be merged: {repo.name} has {what}, so merging"
+                " stays paused until that is finished and committed and"
+                f" `swarm resolved {phase}` is run again.",
                 kind="integrate-hold",
                 phase=phase,
                 source="supervisor._on_resolved",
@@ -2071,10 +2088,10 @@ class Supervisor:
             self._finish_if_settled(st, tag="WATCHDOG-FINISH")
             return
         if st.finished:
-            self._ping(
+            self._ask(
                 "finished-with-ready",
-                f"swarm: the run has ended, but {len(ready)} phase(s) are ready and never"
-                f" started: {', '.join(ready[:8])}. Run `swarm up` to carry on.",
+                f"Run `swarm up` to carry on: the run has ended, but {len(ready)}"
+                f" phase(s) were ready and never started ({telegram.names(ready)}).",
             )
             return
         if st.on_hold or st.integ_blocked is not None or not st.free_slots():
@@ -2304,20 +2321,21 @@ class Supervisor:
             st.last_event_at = now
         logutil.run_ended(self.log, phase, "reaped")
         if crash_looping:
-            self._ping(
+            self._ask(
                 f"crash-hold:{phase}",
-                f"swarm: the worker for {phase} has stopped unexpectedly {len(recent)}"
-                " times in the last hour, so the swarm has stopped restarting it and the"
-                " phases after it wait. Its work so far is kept. Once you have looked,"
-                f" `swarm launch {phase}` starts it again from there.",
+                f"Look at {phase}, then run `swarm launch {phase}` to start it again:"
+                f" its worker stopped unexpectedly {len(recent)} times in the last hour,"
+                " so the swarm no longer restarts it and the phases after it wait. Its"
+                " work so far is kept.",
                 cooldown=0.0,
+                phase=phase,
             )
         else:
-            self._ping(
+            self._fold(
                 f"reap:{phase}",
-                f"swarm: the worker for {phase} stopped without finishing. Its work so"
-                " far is kept, and the phase will be started again from there. Nothing"
-                " to do.",
+                f"the worker for {phase} stopped without finishing. Its work so far is"
+                " kept, and the phase is started again from there.",
+                phase=phase,
             )
         if self.cfg.git_isolation == "worktree":
             try:
@@ -2369,18 +2387,17 @@ class Supervisor:
                 st.windows[name] = wait_win
         return replacement or None
 
-    def _parked_ping(self, key: str, who: str) -> None:
+    def _note_park(self, key: str, who: str) -> None:
         name = state_mod.wait_window(key)
         self.log.line(f"PARK {key} window={name}")
-        telegram.notify(
-            self.cfg.telegram_notify,
-            f"swarm: {who} is still waiting for your answer, now in its own tmux window"
+        telegram.log(
+            self.cfg,
+            f"{who} is still waiting for the owner's answer, now in its own tmux window"
             f" {name} so the rest of the swarm can carry on",
+            why="the owner was asked when it started waiting; a park only moves windows",
             kind="park",
             phase=key,
             source="supervisor._park",
-            # You were asked when it started waiting; a park only moves windows.
-            suppressed=telegram.hold(self.cfg, "you were already asked; a park only moves windows"),
         )
 
     def _park_worker(self, phase: str) -> None:
@@ -2406,7 +2423,7 @@ class Supervisor:
                     s.pane_id = replacement
             st.park(phase, self.cfg.park_after)
             paused = st.on_hold
-        self._parked_ping(phase, f"the worker on {phase}")
+        self._note_park(phase, f"the worker on {phase}")
         if paused:
             self.log.line("PARK-PAUSED holding — no launch")
             return
@@ -2428,7 +2445,7 @@ class Supervisor:
                 st.operator_pane = replacement
             st.release_operator()
             st.park(key, self.cfg.park_after)
-        self._parked_ping(key, f"operator job {job}")
+        self._note_park(key, f"operator job {job}")
         self._check_operator_queue()
 
     def _park_overseer(self, key: str, pid: str) -> None:
@@ -2451,7 +2468,8 @@ class Supervisor:
             st.overseer_deadline = 0.0
             st.park(key, self.cfg.park_after)
         self.overseer.end(time.time())
-        self._parked_ping(key, "the Overseer")
+        self._summary_owed(pid)  # it may wait on the owner for days
+        self._note_park(key, "the Overseer")
 
     def _end_parked(self, key: str) -> bool:
         """End a parked operator job or Overseer pass: close its window and every
@@ -2549,13 +2567,13 @@ class Supervisor:
         return fails
 
     def _ping_gave_up(self, phase: str, fails: int) -> None:
-        self._ping(
+        self._ask(
             f"launch-gave-up:{phase}",
-            f"swarm: the worker for {phase} failed to start {fails} times in a row,"
-            " so the swarm stopped trying and the phases after it wait. Fix the"
-            f" cause, then run `swarm launch {phase}` (or `swarm resume` to retry"
-            " every phase it gave up on).",
+            f"Fix why {phase} will not start, then run `swarm launch {phase}`: its"
+            f" worker failed to start {fails} times in a row, so the swarm stopped"
+            " trying and the phases after it wait.",
             cooldown=0.0,
+            phase=phase,
         )
 
     def _fill_slots(self, reason: str, *, force: bool = False) -> list[str]:
@@ -2772,11 +2790,22 @@ class Supervisor:
             st = state_mod.read(self.cfg)
         if st.finished:
             return
+        if self.overseer.summary_due(now) and ovdigest.nothing_to_report(
+                self.cfg, st, self._summary_since()):
+            # A swarm that stood still (paused, idle, waiting on an answer) has
+            # no summary to send: the clock starts again, and the phone stays quiet.
+            self.overseer.summarised(now)
+            self.log.line("SUMMARY-SKIPPED nothing landed, failed or was held back since the"
+                          " last one, and nothing is building")
         if not self.cfg.overseer_enabled:
             # Nothing is watched while it is off, so nothing seen now is news
             # later: a reload that turns it on re-baselines instead of reporting
             # every phase that finished in the meantime.
             self.overseer.mem.seen_done = None
+            # The owner's summary keeps its clock; the swarm writes it itself.
+            if self.overseer.summary_due(now):
+                self.overseer.summarised(now)
+                self._own_summary(st, now, "supervisor._overseer_tick")
             return
         self.overseer.observe(
             st, now, starving=self._starving(st), doctor_fails=self._doctor_probe(st, now),
@@ -2842,6 +2871,32 @@ class Supervisor:
             doctor_mod._check_nudge(st, startable, ctx["free_slots"], held=held, now=now),
         ]
         return {c.name: c.detail for c in checks if c.status == doctor_mod.FAIL}
+
+    def _own_summary(self, st: state_mod.State, now: float, source: str) -> str:
+        """Send the summary the swarm writes itself, when no Overseer pass
+        wrote one: the counts, and whether anything waits on the owner."""
+        text = ovdigest.own_summary(self.cfg, st, self._summary_since(), now)
+        telegram.summary(self.cfg, text, source=source)
+        self.log.line(f"SUMMARY-OWN {source}")
+        return text
+
+    def _summary_since(self) -> float:
+        """The moment a summary reports from: when the last one went out, or
+        when the swarm started if none has."""
+        return telegram.last_summary_at(self.cfg.state_dir) or self.overseer.mem.anchor
+
+    def _summary_owed(self, pid: str) -> None:
+        """A pass the summary clock started has ended, parked or never ran: if
+        it did not write the owner their summary, the swarm does, so the summary
+        goes out on the clock whatever became of the session."""
+        rec = ovrecord.load_json(self.cfg, pid)
+        if rec is None or rec.owner_summary:
+            return
+        if not any(r.get("key") == overseer_mod.SUMMARY for r in rec.reasons):
+            return
+        text = self._own_summary(state_mod.read(self.cfg), time.time(),
+                                 "supervisor._summary_owed")
+        ovrecord.update(self.cfg, pid, owner_summary=text)
 
     def _box_probe(self, now: float) -> list[str] | None:
         """What the box is short of (RAM, swap, ``/tmp``, the state disk), at
@@ -2961,7 +3016,9 @@ class Supervisor:
             st.overseer_pass = None
             st.overseer_deadline = 0.0
         ovrecord.update(self.cfg, pid, status=ovrecord.FAILED, ended_at=time.time())
-        self.overseer.requeue(self._overseer_reasons)
+        self._summary_owed(pid)
+        self.overseer.requeue(
+            [r for r in self._overseer_reasons if r.key != overseer_mod.SUMMARY])
         self.overseer.end()
         if self.cfg.git_isolation == "worktree":
             try:
@@ -2969,29 +3026,20 @@ class Supervisor:
             except gitq.GitError as exc:
                 self.log.line(f"OVERSEER-DISCARD-ERROR {pid} {exc}")
         self.log.line(f"OVERSEER-SPAWN-FAILED {pid}")
-        self._ping(
-            "overseer-spawn",
-            "swarm: the Overseer (the session that looks after the run) would not"
-            f" start ({pid}). Workers carry on; what it was due to look at waits for"
-            " its next pass. If this keeps happening, check the overseer window.",
-            kind="overseer",
-            source="supervisor._on_overseer_spawned",
-            suppressed=self._overseer_streak(),
+        self._overseer_bad_pass(
+            f"the Overseer would not start ({pid}). Workers carry on; what it was due"
+            " to look at waits for its next pass.",
+            "supervisor._on_overseer_spawned",
         )
         self._finish_if_settled()
 
     def _overseer_timeout(self, pid: str) -> None:
         minutes = self.cfg.overseer_timeout_s // 60
         self.log.line(f"OVERSEER-TIMEOUT {pid} after {self.cfg.overseer_timeout_s}s")
-        self._ping(
-            f"overseer-timeout:{pid}",
-            f"swarm: an Overseer pass ({pid}) ran past its {minutes}-minute limit and"
-            " was stopped; what it had finished is kept. Workers carry on; nothing to"
-            " do unless this keeps happening.",
-            cooldown=0.0,
-            kind="overseer",
-            source="supervisor._overseer_timeout",
-            suppressed=self._overseer_streak(),
+        self._overseer_bad_pass(
+            f"an Overseer pass ({pid}) ran past its {minutes}-minute limit and was"
+            " stopped; what it had finished is kept. Workers carry on.",
+            "supervisor._overseer_timeout",
         )
         self._end_overseer_pass(pid, ovrecord.TIMEOUT)
 
@@ -3017,6 +3065,7 @@ class Supervisor:
             return
         launch_mod.drop_session_tmp(self.cfg, ovrecord.mirror_name(pid))  # session gone
         rec = ovrecord.update(self.cfg, pid, status=status, ended_at=now)
+        self._summary_owed(pid)
         if status == ovrecord.DONE:
             self._overseer_bad = 0
         self.log.line(f"OVERSEER-PASS-END {pid} {rec.status if rec else status}")
@@ -3029,17 +3078,27 @@ class Supervisor:
         self._fill_slots(f"overseer pass {pid} over")
         self._finish_if_settled()
 
-    def _overseer_streak(self) -> str | None:
-        """Count one more bad pass; the hold reason unless it makes a streak.
+    def _overseer_bad_pass(self, what: str, source: str) -> None:
+        """Count one more bad pass, and ask the owner when it makes a streak.
 
         One pass that would not start or ran long costs nothing the next pass does
-        not pick up. :data:`telegram.STREAK` in a row is a broken Overseer, and the owner
-        hears about it (and again at every further one)."""
+        not pick up, so it is only logged. :data:`telegram.STREAK` in a row is a
+        broken Overseer: nothing reviews the run or raises what needs the owner,
+        and only the owner can look at why (asked again at every further streak)."""
         self._overseer_bad += 1
-        if self._overseer_bad % telegram.STREAK == 0:
-            return None
-        return telegram.hold(
-            self.cfg, f"bad pass {self._overseer_bad} in a row; you hear at {telegram.STREAK}")
+        if self._overseer_bad % telegram.STREAK:
+            telegram.log(
+                self.cfg, what,
+                why=f"bad pass {self._overseer_bad} in a row; an ask follows at"
+                    f" {telegram.STREAK}",
+                kind="overseer", source=source)
+            return
+        telegram.ask(
+            self.cfg,
+            "Check the overseer window: the Overseer has failed"
+            f" {self._overseer_bad} times in a row (it would not start, or ran past"
+            " its time limit), so nothing is reviewing the run. Workers carry on.",
+            kind="overseer", source=source)
 
     def _overseer_holds_finish(self, st: state_mod.State) -> bool:
         """A live pass, or one owed, holds the finish.
@@ -3206,14 +3265,14 @@ class Supervisor:
         for window in out.held:
             h = out.hold[window]
             self.log.line(f"USAGE-HOLD {window} {h['pct']:g}% limit={h['at']:g}%")
-            if out.down is None:  # the stop's own ping says it all
-                self._usage_ping(caps.pause_ping(window, h, now))
+            if out.down is None:  # the stop's own ask says it all
+                self._usage_note(caps.pause_note(window, h, now))
         for window in out.lifted:
             self.log.line(f"USAGE-LIFT {window} window reset")
-            self._usage_ping(caps.lift_ping(window, reads.get(window)))
+            self._usage_note(caps.lift_note(window, reads.get(window)))
         for window in out.switched:
             self.log.line(f"USAGE-LIFT {window} account switched to {account}")
-            self._usage_ping(caps.switch_ping(window, reads.get(window), account))
+            self._usage_note(caps.switch_note(window, reads.get(window), account))
         for window in out.released:
             self.log.line(f"USAGE-RELEASE {window} no rule holds it now")
         for window in out.ended:
@@ -3221,16 +3280,18 @@ class Supervisor:
         if out.down is not None:
             d = out.down
             self.log.line(f"USAGE-DOWN {d['window']} {d['pct']:g}% limit={d['at']:g}%")
-            self._usage_ping(caps.down_ping(d, now, bool(out.hold)))
+            # Stopped until the owner starts it again: theirs to do.
+            telegram.ask(self.cfg, caps.down_ask(d, now, bool(out.hold)), kind="usage-cap",
+                         source="supervisor._usage_check")
             self._usage_down()
             return True
         if (out.lifted or out.switched or out.released) and not on_hold:
             self._fill_slots("usage cap lifted")
         return False
 
-    def _usage_ping(self, msg: str) -> None:
-        self._ping("usage-cap", msg, cooldown=0.0, kind="usage-cap",
-                   source="supervisor._usage_check")
+    def _usage_note(self, msg: str) -> None:
+        """A pause that lifts by itself, or its lifting: for the summary."""
+        telegram.fold(self.cfg, msg, kind="usage-cap", source="supervisor._usage_check")
 
     def _usage_down(self) -> None:
         """Stop the swarm the way ``swarm down`` does, by running it.
@@ -3276,16 +3337,15 @@ class Supervisor:
         left out: measuring must never stop the swarm."""
         try:
             self._resources = resources_mod.Sampler(
-                lambda: self.cfg, notify=self._resources_ping, log=self.log.line)
+                lambda: self.cfg, notify=self._resources_note, log=self.log.line)
             self._resources.start()
         except Exception as exc:  # noqa: BLE001 - optional instrument, never fatal
             self._resources = None
             self.log.line(f"RESOURCES-ERROR not started: {exc!r}")
 
-    def _resources_ping(self, key: str, msg: str) -> None:
+    def _resources_note(self, key: str, msg: str) -> None:
         """An idle build holder: the sampler rate-limits per build itself."""
-        self._ping(key, msg, cooldown=0.0, kind="idle-build",
-                   source="resources.sampler")
+        self._fold(key, msg, cooldown=0.0, kind="idle-build", source="resources.sampler")
 
     # -- finish -----------------------------------------------------------
     def _finish(
@@ -3296,7 +3356,7 @@ class Supervisor:
         failed: list[str] | None = None,
         operator: list[str] | None = None,
     ) -> None:
-        """Announce the run exactly once.
+        """Announce the run exactly once: the last summary the owner gets.
 
         ``done_count`` counts phases that actually BUILT (``ok``/``needs-owner``).
         It used to be ``len(done)``, which counts the whole map — so a run that
@@ -3307,35 +3367,38 @@ class Supervisor:
             if st.finished:
                 return
             st.finished = True
-        msg = f"swarm finished: {done_count} phase(s) done"
-        if skipped:
-            msg += f", {skipped} skipped"
-        if failed:
-            msg += f", {len(failed)} failed: {', '.join(failed[:8])}"
-        if leftover:
-            # Ready phases the launcher gave up on after repeated failed
-            # launches: real work nothing will retry. Say how to resume.
-            msg += (
-                f"; {len(leftover)} ready but unlaunched (their worker kept failing to"
-                f" start): {', '.join(leftover)}. Run `swarm launch <phase>` to carry on"
-            )
-        if operator:
-            # Only reachable past the blocking check, so every one of these is an
-            # item that burned its attempt cap: real work nothing will retry. They
-            # are the notes the whole feature exists to stop losing — name them.
-            msg += (
-                f"; {len(operator)} follow-up job(s) the operator never got done"
-                f" (undrained): {', '.join(operator[:8])}. Run `swarm operator <phase>`"
-                " to try again, or do them yourself"
-            )
-        telegram.notify(
-            self.cfg.telegram_notify,
-            msg,
+        telegram.summary(
+            self.cfg,
+            _finish_summary(done_count, leftover or [], skipped, failed or [], operator or []),
             kind="finish",
             source="supervisor._finish",
         )
         self.log.line("ACTION finish")
         self._stop = True
+
+
+def _finish_summary(
+    done_count: int, leftover: list[str], skipped: int, failed: list[str], operator: list[str]
+) -> str:
+    """The run's last summary: what landed, then what is left for the owner."""
+    msg = f"The run has finished: {done_count} phase(s) landed"
+    if skipped:
+        msg += f", {skipped} skipped"
+    if failed:
+        msg += f", {len(failed)} failed ({telegram.names(failed, 2)})"
+    left = []
+    if failed:
+        left.append("`swarm retry` the failed")
+    if leftover:
+        # Ready phases the launcher gave up on after repeated failed launches:
+        # real work nothing will retry. Say how to resume.
+        left.append(f"`swarm launch` the {len(leftover)} that never started")
+    if operator:
+        # Only reachable past the blocking check, so every one of these is an
+        # item that burned its attempt cap: real work nothing will retry.
+        left.append(f"`swarm operator` the {len(operator)} follow-up job(s) not done")
+    return msg + (". Left for you: " + "; ".join(left) + "." if left
+                  else ". Nothing waits on you.")
 
 
 def main(cfg: Config, adopt: bool = False) -> None:

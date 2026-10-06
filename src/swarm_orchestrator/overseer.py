@@ -23,10 +23,14 @@ cheap doctor check turning FAIL; a session asking the owner for longer than
 nothing launchable while non-excluded backlog remains, sustained for
 ``[overseer] starve_s`` (once per episode); the box running short of RAM, swap,
 ``/tmp`` or disk for :data:`BOX_S` (once per episode). *The clock* — every
-``[overseer] every_s`` a pass that writes the owner their summary. It is the
-only pass whose summary goes to the phone, and it counts from the last such
-pass, not from the last pass of any kind: a busy run's event passes never put
-the summary off.
+``[overseer] every_s`` a pass that writes the owner their summary
+(``swarm overseer-summary``). It is the only pass whose summary goes to the
+phone, and it counts from the last such pass, not from the last pass of any
+kind: a busy run's event passes never put the summary off. The clock runs with
+the Overseer off too; the supervisor then writes the summary itself
+(:meth:`Policy.summary_due`). A swarm that stood still since the last summary
+gets none: the supervisor starts the clock again instead
+(:func:`ovdigest.nothing_to_report`).
 
 No pass is started for a number of finished phases. What a pass does for them
 (reads their recaps, files rows for the risks they noted) it does on whichever
@@ -93,9 +97,6 @@ PUSH_GRACE_S = 120.0
 #: triggers a pass: one sample taken in the middle of a link step is not danger.
 BOX_S = 300.0
 
-#: A pass triggered by one of these sends its summary to the owner's phone; any
-#: other pass sends it only with ``swarm notify --attention`` (``cli._summary_hold``).
-SUMMARY_TRIGGERS = frozenset({SUMMARY})
 
 
 def overseer_dir(cfg: Config) -> Path:
@@ -530,13 +531,26 @@ class Policy:
 
     def _observe_clock(self, now: float) -> list[str]:
         """The owner's summary, every ``[overseer] every_s`` since the last one."""
-        every = self.cfg.overseer_every_s
+        if not self.summary_due(now):
+            return []
         start = self.mem.last_summary_at or self.mem.anchor
-        if every and start and now - start >= every:
-            return self._want(
-                SUMMARY, f"the owner's summary is due: none for {_age(now - start)}", False, now
-            )
-        return []
+        return self._want(
+            SUMMARY, f"the owner's summary is due: none for {_age(now - start)}", False, now
+        )
+
+    def summary_due(self, now: float) -> bool:
+        """Has ``[overseer] every_s`` passed since the last summary (since the
+        policy first looked, for the first)? Answers with the Overseer off too."""
+        if not self.mem.anchor:
+            self.mem.anchor = now
+            self.save()
+        every = self.cfg.overseer_every_s
+        return bool(every) and now - (self.mem.last_summary_at or self.mem.anchor) >= every
+
+    def summarised(self, now: float) -> None:
+        """A summary went out with no pass to write it: the clock starts again."""
+        self.mem.last_summary_at = now
+        self.save()
 
     # -- timing -----------------------------------------------------------
     def next_deadline(self, now: float | None = None) -> float | None:
@@ -545,15 +559,15 @@ class Policy:
         Only future moments: a past one would clamp the supervisor's ``select``
         timeout to zero and spin it while, say, the init master holds the pane.
         """
-        if not self.cfg.overseer_enabled:
-            return None
         now = time.time() if now is None else now
         stamps: list[float] = []
-        if self.mem.pending:
-            stamps.append(self.mem.last_pass_at + self.cfg.overseer_min_gap_s)
         start = self.mem.last_summary_at or self.mem.anchor
         if self.cfg.overseer_every_s and start:
             stamps.append(start + self.cfg.overseer_every_s)
+        if not self.cfg.overseer_enabled:
+            return min((s for s in stamps if s > now), default=None)
+        if self.mem.pending:
+            stamps.append(self.mem.last_pass_at + self.cfg.overseer_min_gap_s)
         if self.mem.starving_since and not self.mem.starve_fired:
             stamps.append(self.mem.starving_since + self.cfg.overseer_starve_s)
         if self.mem.box_since and not self.mem.box_fired:

@@ -31,8 +31,9 @@ The line that started you gives the exact `swarm` command form to use. Run every
 - **Worker questions are not yours.** If he asks about a question a worker or
   the operator is waiting on, tell him where it is (the needs-you drawer, `n` in
   the dashboard, or the tmux window its ping named) and leave it to that session.
-- **Messaging: `swarm notify` is the only door**, and you should not need it: he
-  is right here. Never use another script to reach him.
+- **Messaging: `swarm notify` is the only door** (it sends a short ask to his
+  phone), and you should not need it: he is right here. Never use another
+  script to reach him.
 - **Nothing you start outlives you**, and you should start nothing. If something
   must be served for him to look at, that is operator work: hand it on with
   `swarm operator-add`, which can keep a page up for him with

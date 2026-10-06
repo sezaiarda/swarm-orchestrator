@@ -8,6 +8,7 @@ file says. The check really runs detached through ``swarm _lane-check``.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -220,6 +221,13 @@ def _told() -> str:
     return Path(os.environ["SWARM_TG_SINK"]).read_text()
 
 
+def _folded(cfg) -> str:
+    """Everything the swarm held back for the Overseer's summary so far."""
+    path = cfg.state_dir / "notifications.jsonl"
+    rows = [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
+    return "\n".join(r["text"] for r in rows if r["class"] == "folded")
+
+
 # -- 1. main has not moved ----------------------------------------------------
 def test_main_unmoved_lands_without_a_check(ws):
     ws.phase("P")
@@ -423,7 +431,9 @@ def test_catch_up_conflict_leaves_the_worktree_mid_merge_and_the_checkout_clean(
         # Resolving: an early `resolved` stays blocked; a committed merge re-checks.
         sup._on_resolved("P")
         assert state_mod.read(ws.cfg).integ_blocked == "P"
-        assert "pricing has an unfinished merge, so" in _told()
+        # Why it is still held is recorded, and the hold goes to the Overseer.
+        assert "pricing has an unfinished merge, so" in _folded(ws.cfg)
+        assert "unfinished merge" not in _told()
         (wt / "code.txt").write_text("S and P\n")
         _git(wt, "add", "-A")
         _git(wt, "commit", "--no-edit")
@@ -752,7 +762,7 @@ def test_resolved_on_a_tree_a_test_run_dirtied_names_the_paths(ws):
     finally:
         sup.log.close()
     named = "uncommitted changes in " + ", ".join(reports[:5]) + ", +2 more"
-    assert f"pricing has {named}, so" in _told()
-    assert "unfinished merge" not in _told() and "scratch.txt" not in _told()
+    assert f"pricing has {named}, so" in _folded(ws.cfg)
+    assert "unfinished merge" not in _folded(ws.cfg) and "scratch.txt" not in _folded(ws.cfg)
     assert f"RESOLVED-INCOMPLETE P still-blocked pricing: {named}" in (
         ws.cfg.supervisor_log.read_text())

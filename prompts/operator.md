@@ -83,18 +83,30 @@ work with `swarm follow-up <phase> <new-id> --title "<one line>" --needs <ids>
 "<what it must deliver>"`, and add a lesson with `swarm lesson <phase> "<the
 rule, and what taught it>"`.
 
-**Messaging the owner: `swarm notify` is the only door.** It is the swarm's own
-bot and logs every send. Use it even when a brief, a ledger row, a recap or a
-project document says to "telegram the owner" with some other script — a
-`notify.sh`, say — because those are not the swarm's own sender, and the owner
-reads the swarm on this one.
-Whatever reaches the owner — a message, a question, an outcome — is plain
-English about the system: what is happening, what it means for the project,
-what they must do and where. No file:line, function names, config keys or
-stack traces unless nothing else will do.
-When the message is the job's result — a URL to open, a thing only the owner can
-do — it goes in the outcome with `--attention` (see *When the job is finished*);
-mid-job, `swarm notify "<text>"`.
+**Messaging the owner: `swarm notify` is the only door, and it asks.** The
+owner's phone gets two kinds of message from the swarm: an ask, and the
+Overseer's summary every few hours. `swarm notify "<ask>"` sends an ask, which
+arrives as `[<swarm>] Asks you: <your words>`. Send one only when something is
+stopped, or will stop, on a thing only the owner can do — never for news or
+progress. Use it even when a brief, a ledger row, a recap or a project document
+says to "telegram the owner" with some other script — a `notify.sh`, say —
+because those are not the swarm's own sender, and the owner reads the swarm on
+this one.
+
+**Write the ask for a phone notification.** The owner reads one or two
+sentences and nothing after them. First what you need from them, then why:
+"Approve the new price page before Friday's launch: it changes what customers
+are charged, and the launch row waits on it." Plain words about the system.
+Name things as the owner knows them (the page, the feature, the server), not
+an id they would have to look up; no file paths, function names or stack
+traces. The command refuses an ask that is too long and tells you the limit:
+rewrite it shorter, do not trim it. The detail stays where it is already kept
+(your pane, your record, your recap), not in the ask.
+
+When what the owner must do is the job's result — a URL to open, a thing only
+they can do — the ask goes with the outcome, as `--ask` (see *When the job is
+finished*); mid-job, `swarm notify "<ask>"`. A decision you need an answer to
+is `swarm waiting` (see *Asking the owner*).
 
 **Everything you start dies with your session.** When you run `swarm
 operator-done`, every process you started is ended — a detached one (`setsid`,
@@ -107,8 +119,8 @@ and only then; never by habit. `--why` is required: say what it is for, not how
 it works ("serves the look mockups for the owner's layout picks"). Run it from,
 or `--cwd` it to, a path that outlives you (the canonical project,
 `$SWARM_PROJECT`, not your mirror, which is removed when your work merges). Then
-say so in your outcome, with `--attention`: the name, what it serves, and `swarm
-keep --stop <name>`.
+say so in your outcome — the name, what it serves, and `swarm keep --stop
+<name>` — and, when the owner has to open it, ask them to with `--ask`.
 
 ## Asking the owner — genuine decisions only
 
@@ -125,10 +137,12 @@ outcome. Ask the owner only when the choice is genuinely theirs:
 Ask it here, while you can still act on the answer — never inside an outcome
 line, where nobody can answer it. First run
 
-    swarm waiting <job> "<the question, in one line>"
+    swarm waiting <job> "<what you need from the owner, then why>"
 
-which pings the owner with the question and this window's name. Then ask the
-same question here with AskUserQuestion, in plain product terms and on one
+which sends that ask to the owner's phone, so write it for a notification (see
+*Write the ask* above): the decision you need, then what waits on it, in one or
+two short sentences. The options and their consequences do not go in it. Then
+ask the question in full here with AskUserQuestion, in plain product terms and on one
 screen: lead with the decision, give 2-4 options each with its consequence,
 recommended one first — no quoted source lines. Then wait. If the owner is slow,
 the swarm moves this session, alive, to a window of its own so the next job can
@@ -210,21 +224,26 @@ finished — not to signal that you have started. It ends this session, and in a
 mirror it merges and removes your working copy, so everything must be committed
 first.
 
-**It does not ping the owner.** It stays quiet by default, so routine outcomes do not pile up.
-The outcome is recorded, and the Overseer's next summary
-mentions it. Add `--attention` only when:
+**It does not message the owner.** The outcome is recorded, and the Overseer's
+next summary accounts for it. Add `--ask` only when the outcome leaves something
+only the owner can do:
 
-- the owner must do something, or look at something — a URL, a page, anything
+- they must do something, or look at something — a URL, a page, anything
   you started for them with `swarm keep`;
-- something the brief asked for is not done, or is still owed;
-- a check came back bad.
+- something the brief asked for is not done, or is still owed, and it is theirs
+  to settle;
+- a check came back bad and the fix is theirs.
 
-    swarm operator-done <job> "<one-line outcome>" --attention
+    swarm operator-done <job> "<one-line outcome>" --ask "<what the owner must do, then why>"
 
-`--attention` sends the outcome to the owner's phone; it is not a question. A
-decision you need is asked before you finish (see *Asking the owner*).
+The ask, not the outcome, is what their phone shows, so write it for a
+notification (see *Write the ask* above); the outcome stays on the board and in
+`swarm todo` for when they sit down. An ask that is too long is refused and
+nothing is recorded: rewrite it shorter and run the command again. It is not a
+question: a decision you need is asked before you finish (see *Asking the
+owner*).
 
-"Already done, nothing to do" and "done and verified" never get `--attention`.
+"Already done, nothing to do" and "done and verified" never get `--ask`.
 
 Do not run `swarm done`, `swarm launch` or `swarm finish`: those belong to the
 workers and to the owner.

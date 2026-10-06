@@ -44,16 +44,17 @@ drives the merge queue.
   still waits for (`State.drain`, shown by `status`, the dashboard and the
   board). A parked session the owner has answered (`State.answered`) holds no
   slot but is at work, so it is waited for and named: `1 worker (P3 in its own
-  window)`; one that still asks is not. When that is nothing it telegrams once
-  and starts `swarm _drain-down` in a session of its own, which runs
+  window)`; one that still asks is not. When that is nothing it sends your last
+  summary (the swarm is shutting down, as you asked) and starts `swarm _drain-down` in a session of its own, which runs
   `swarm down` and then the after-command
   (in a `systemd-run --user --scope` where it can, so neither the tmux teardown
   nor a logout takes it).
 
 **What it may not do:** it never builds, never retries a phase that finished
 `fail`, and never restarts a worker. An exception in one event handler is logged,
-telegrammed and stepped over. Only a failure of the loop itself ends the process,
-and that announces itself (`SUPERVISOR-CRASH` plus a ping). Everything it does is
+stepped over and handed to the Overseer to look at. Only a failure of the loop
+itself ends the process, and that announces itself (`SUPERVISOR-CRASH` plus an
+ask to restart it). Everything it does is
 logged to `<state>/logs/supervisor.log`.
 
 **Watchdog** (`[swarm].watchdog_s`, default 300, `0` = off): the supervisor's one
@@ -142,8 +143,8 @@ the owner console are not touched, and nothing is drained.
    or `handover` left in the pipe for the supervisor before it; then pumps the
    merge queue and fills free slots. Park deadlines, a scheduled pause, the Overseer's deadline and
    usage holds are timestamps in the state, so they carry over unchanged.
-5. If no supervisor comes up (two attempts), you are telegrammed that the swarm
-   is unsupervised and that `swarm restart` brings it back. Sessions are still
+5. If no supervisor comes up (two attempts), you are asked to run
+   `swarm restart`, which brings it back. Sessions are still
    running at that point; nothing was closed.
 
 **A supervisor that predates the command** knows no `handover`. It is told to
@@ -432,15 +433,16 @@ command (patched by the init pass) is their directive. It tells them to:
   - `ok`: clean success. It merges silently.
   - `operator`: merges exactly like `ok`, and the recap becomes the brief for an
     operator job.
-  - `fail`: it is rolled back under worktree isolation, you are pinged, and the
-    phase's dependents stay blocked until `swarm retry`.
+  - `fail`: it is rolled back under worktree isolation, and the phase's
+    dependents stay blocked until `swarm retry`. The Overseer retries it once;
+    you are asked when it fails again, or at once with the Overseer off.
 
 **What they may not do:** under worktree isolation, they commit on `swarm/<phase>`
 and never push; the integrator pushes. Nothing else is clamped: tools,
 permissions and scope are the session's own.
 
-`swarm done` prints what it did: whether the sentinel was written, the telegram,
-the operator route, and the FIFO poke. A second call with a shorter recap never
+`swarm done` prints what it did: whether the sentinel was written, whether you
+were asked, the operator route, and the FIFO poke. A second call with a shorter recap never
 overwrites a fuller one (`--force` to replace it), and every attempt is appended to
 `done/<phase>.jsonl`. A recap under 20 characters or 4 words is too thin to brief
 an operator. The sentinel is still written, but no job is queued.
@@ -455,8 +457,8 @@ only by the supervisor.
 
 - runs `swarm doctor` for the Telegram preflight (a missing Telegram setup is
   noted, never blocking);
-- runs `swarm context` and reports ledger cycles or unknown dependencies with
-  `swarm notify`;
+- runs `swarm context` and asks you to fix ledger cycles or unknown
+  dependencies (`swarm notify`);
 - patches `[worker].command_file` for swarm mode (skip the phase picker, the
   self-classified `swarm done`, `swarm build`, `swarm note` / `waiting` /
   `resumed`, handing a review to the operator (`swarm done <phase> operator
@@ -475,11 +477,21 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
   pass runs at a time. Passes are `min_gap_s` apart, unless a reason is urgent: a held merge
   queue, a doctor FAIL, starvation, or `swarm overseer --now`.
 - **The summary clock:** every `every_s` (4 hours by default) a pass starts to
-  write you its summary. It is the only pass whose summary goes to your phone.
-  The clock counts from the last summary pass (from the swarm's start for the
-  first), so the passes a busy run starts for other reasons never put it off. A
-  summary that comes due as the run ends does not hold the finish: the finish
-  message says more.
+  write you its summary (`swarm overseer-summary`, two short sentences). It is
+  the only pass whose summary goes to your phone; on any other the command only
+  records it. The clock counts from the last summary pass (from the swarm's
+  start for the first), so the passes a busy run starts for other reasons never
+  put it off. If that pass ends, is parked on a question or never starts
+  without having sent one, the supervisor sends a summary of its own with the
+  bare counts (phases landed and failed since the last summary, how many are
+  building, what waits on you), and it does the same on the clock while the
+  Overseer is off. So a summary goes out every `every_s` whatever becomes of
+  the session. The one exception is a swarm that stood still: when nothing
+  landed or failed, nothing was held back and nothing is building since the
+  last summary (paused, idle, or waiting on an answer you were already asked
+  for), no pass starts and nothing is sent; the clock starts again
+  (`SUMMARY-SKIPPED` in the supervisor log). A summary that comes due as the
+  run ends does not hold the finish: the finish is itself the last summary.
 - **No pass per number of finished phases.** A pass used to start every few
   finished phases. What it did for them (read their recaps, file rows for the
   risks they noted) the next pass does, the clock's at the latest. The rest of
@@ -498,8 +510,8 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
 - **What it reads:** before each pass the supervisor writes
   `<state>/overseer/digest-<id>.md` (and `.json`). It holds the trigger, the swarm
   now, every phase finished since the last pass with its recap and notes, every
-  operator job finished since then with its outcome (flagged ones first),
-  failures, questions waiting on you, the `owner-run` rows whose dependencies
+  operator job finished since then with its outcome (ones with an ask first),
+  what the swarm held back for the summary since the last one, failures, questions waiting on you, the `owner-run` rows whose dependencies
   have landed and are holding rows up, a starvation map (which root
   blockers hold how much backlog), and a snapshot of RAM, swap, `/tmp` and disk.
 - **Where it works:** under worktree isolation, in its own mirror `ovs-<id>`,
@@ -514,7 +526,9 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
     review or a pick (`swarm operator-add --phase <row> "<brief>"`);
   - run `swarm gc`;
   - `swarm pause` when the box is in danger;
-  - send you a digest of six lines at most.
+  - ask you for what only you can do (`swarm notify`, or `swarm waiting` when
+    it needs your answer to go on);
+  - write your summary on the pass the clock starts (`swarm overseer-summary`).
 - **What it may not do:**
   - answer a worker's question;
   - restrain a worker: edit its prompt, limit its tools or narrow its phase;
@@ -533,8 +547,8 @@ it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
 concrete work a phase could not wait on: deploys and rolls, checks after a deploy,
 provisioning, downloads, chores that span repos (prompt: `prompts/operator.md`). It
 works with your authority, so it is **off unless you set
-`[operator].enabled = true`**. While it is off, each hand-off is telegrammed to you
-as a to-do instead of being dropped.
+`[operator].enabled = true`**. While it is off, each hand-off asks you to do it
+(the recap is in `swarm todo`) instead of being dropped.
 
 **Where jobs come from:**
 
@@ -604,13 +618,15 @@ it can undo. A decision only you can make is asked before the job finishes:
 `swarm waiting <job> "<question>"`, then, once you answer in its pane,
 `swarm resumed <job> "<answer>"`; your answer is recorded as your decision on
 the job's phase, and follow-up work is queued with `swarm operator-add`. It
-ends with `swarm operator-done <job> "<outcome>"`. `--attention` simply sends
-that outcome to your phone (you must act, something the brief asked for is not
-done or still owed, or a check came back bad); every other outcome is recorded
-(on the job, in `notifications.jsonl` marked `suppressed`, on the dashboard)
-and reaches you in the Overseer's next summary, which lists every operator job
-finished since its last pass. `[operator].notify = "all"` pings every outcome
-again; `"none"` pings none. Questions and abandoned jobs always ping.
+ends with `swarm operator-done <job> "<outcome>"`. When the outcome leaves
+something only you can do (you must act, something the brief asked for is still
+owed, or a check came back bad), the session adds `--ask "<what you must do,
+then why>"`: that short ask goes to your phone, and the outcome stays on the
+job, the board and `swarm todo`. An ask too long for a notification is refused
+before anything is recorded. Every other outcome is recorded (on the job, in
+`notifications.jsonl` as folded, on the dashboard) and the Overseer's next
+summary accounts for it: its digest lists every operator job finished since its
+last pass. Questions and abandoned jobs always ask.
 `swarm operator-done <job> "<why>" --not-before <when>` means the job's moment
 has not come yet: it goes back in the queue until `<when>` (`90m`, `6h`, `3d`,
 `2026-09-30`, `"2026-09-30 08:00"`) instead of finishing, the attempt is not
@@ -635,12 +651,14 @@ phase, an operator job's id, or `overseer`; inside an operator or Overseer
 session the bare job id or `overseer` resolves from the session's own
 environment, and `operator:<job>` / `overseer:<pass>` are accepted as written.
 
-**The ping.** One plain Telegram message: the question in one line (a worker's
-still leads with its cost line), then which tmux window to open, for example
-"Answer in tmux window operator (tmux attach -t myproject); after 2 min it
-moves to its own window wait:op-web-F2." A worker's ping goes every time it
-asks; an operator job's or the Overseer's only when the question is new, so a
-re-run cannot ring you twice.
+**The ask.** The text after `<who>` is what your phone shows, as
+`[<swarm>] Asks you: <text>`: what the session needs from you, then why, in one
+or two short sentences. One that does not fit a notification is refused before
+anything is recorded, with the limit, and the session rewrites it; the question
+in full, with its options, is asked in the session's own pane. `swarm status`,
+the needs-you drawer and the board say which tmux window that is. A worker's
+ask goes every time it asks; an operator job's or the Overseer's only when the
+question is new, so a re-run cannot ring you twice.
 
 **Parking.** Past `[worker].park_after` seconds (default 120, `0` disables it)
 a session still waiting on you is moved, alive, to its own window, freeing
@@ -673,11 +691,11 @@ about them. A ready one (its dependencies have landed, it is not done or
 ticked) that is holding other rows up shows up in "Needs you" in the dashboard
 and the web board (kind "yours to do"), in `swarm status`
 ("yours to do: <row> (holds up N)") and `--json` (`owner_rows`), and in the
-Overseer's digest. The supervisor pings you once per such row when it starts
+Overseer's digest. The supervisor asks you once per such row when it starts
 holding rows up — recorded in `<state>/owner_rows.json`, so never twice, across
-restarts too, with rows found together sharing one message — saying only you
-can do it, how many rows it holds up, and to tick it in the ledger or run
-`swarm skip <row>` once it's done.
+restarts too, with rows found together sharing one ask — to do it and then tick
+it in the ledger or run `swarm skip <row>`, because only you can and rows wait
+on it.
 
 ## The big-picture pass
 
@@ -913,8 +931,8 @@ it in the worktree before the check:
   that is not the one that lands): no check runs, and the result is
   `unprepared`, not red. `LANE-UNPREPARED <phase> <repo> <reason>` in the
   supervisor log gives the command's own last lines. No resolver opens and the
-  merge queue is not held. You are pinged once per phase, with the reason and
-  the log's path. The phase stops holding the repo's landing lock, so other
+  merge queue is not held. It is recorded for the Overseer's next summary, once
+  per phase, with the reason and the log's path. The phase stops holding the repo's landing lock, so other
   phases land there meanwhile.
 - It is tried again five minutes later, at the queue's next look (any event, or
   the watchdog tick): main is merged in again, the quick test is asked again,
@@ -948,7 +966,8 @@ resolver is on the hold: you are told at once (`RESOLVER-SPAWN-FAIL` in the log)
 and the Overseer's next look treats it as a hold nobody is working on.
 
 `swarm resolved` re-checks the repo (no merge in progress, clean tree, on main)
-before releasing the queue. A premature call keeps the hold and pings again.
+before releasing the queue. A premature call keeps the hold, records why, and
+hands the hold to the Overseer.
 
 The merge happens in your checkout but never switches its branch. A checkout on
 another branch holds the queue, with a message saying so, until you switch it
@@ -988,10 +1007,10 @@ whether, that work is wanted.
 [The integration flow diagram](../README.md#integrator-and-merge-conflict-resolver) is in the README.
 
 **Owed pushes** (`pushowed.py`): later workers branch from local main, so a push
-that failed does not hold anything back. The repo is recorded in `push_owed`, and
-you are pinged once if it still owes a push after `[telegram].push_owed_grace_s`
-(1 h), and once more when it clears (immediately and at clearing under
-`[telegram].pings = "all"`). The push is
+that failed does not hold anything back. The repo is recorded in `push_owed`.
+Nothing waits on it and nothing is lost, so you are not asked: the debt is
+folded into the Overseer's next summary, and the Overseer gets a pass for it
+(above) and asks you if the fix is yours. The push is
 retried after every integration and on the watchdog tick, and it clears as soon
 as origin has local main, whoever pushed it: a push made by hand from the same
 checkout is seen at the next tick, without waiting for the spaced retry. `swarm
@@ -1097,8 +1116,8 @@ the owner needs to open:
 - `swarm status`, `swarm doctor` (`keep`, a WARN for one alive past 7 days, never
   a FAIL) and the dashboard list them, with their why and how to stop them.
 - A session that keeps something says so in its recap or outcome: the name, what
-  it serves and `swarm keep --stop <name>`. For the operator that outcome needs
-  the owner, so it gets `--attention`.
+  it serves and `swarm keep --stop <name>`. When you have to open what the
+  operator kept, its outcome carries an `--ask`.
 
 ## Worktree isolation and mirrors
 
@@ -1619,8 +1638,8 @@ reads `/proc` and the state dir, and writes under `<state>/meters/`.
   holds the latest sample, what is running and the sampler's own cost.
 - **Idle holders.** A heavy build that holds a slot for `[resources].idle_s`
   (default 600) with its whole tree under 1% of a core shows in `swarm status`,
-  as a `swarm doctor` WARN, in the dashboard's resources box, and pings once
-  (again hourly while it stays idle). The report says what the gate did about
+  as a `swarm doctor` WARN, in the dashboard's resources box, and is recorded
+  for the Overseer's next summary (again hourly while it stays idle). The report says what the gate did about
   it: its slot was released (the gate set it aside, so builds start beside it),
   or it was kept and why (a command that never yields). This is a report only;
   setting a holder aside is the gate's own doing, by its own measurement, long
@@ -1662,7 +1681,7 @@ They are never made on a timer. A short completion note is used as is. Otherwise
 `claude -p --model haiku` summarizes the last turns.
 
 **Notes** (`swarm note <phase> [decision|assumption|risk] "<text>"`): the silent
-middle register between finishing quietly and stopping to ask. A note pings
+middle register between finishing quietly and stopping to ask. A note messages
 nobody, parks nothing and costs no slot. Your own answers, relayed by
 `swarm resumed`, are stored as `owner_decision` notes. All of them live in
 `<state>/notes/<phase>.jsonl`.
@@ -1752,8 +1771,9 @@ or logged; a failed call is logged (`USAGE-API`) and the last reading stands.
 - **down:** runs `swarm down`, once per window of each account. The swarm stays
   down.
 
-A stale or missing reading never creates a hold and never lifts one. Each
-crossing pings once, and so does a hold lifting. The hold and the reading show on
+A stale or missing reading never creates a hold and never lifts one. A pause
+and its lifting are recorded for the Overseer's next summary; a stop asks you,
+because the swarm stays down until you start it. The hold and the reading show on
 the TUI, the web board, `swarm status`, `swarm why` and `swarm doctor`
 (`usage.caps`). Hold, lift and endpoint events are logged as `USAGE-*`.
 
@@ -2054,81 +2074,140 @@ The swarm has its own sender: `scripts/notify.sh`, with a bot of its own. It rea
 `.env`, which is gitignored; `scripts/resolve-chat-id.sh` fills in the chat id.
 Point `[telegram].notify` at any script that takes the message as `$1`.
 
-Messages are plain text, capped at 3800 characters. A `swarm notify` sent from an
-Overseer pass is its summary. Every send, delivered or not,
-is logged to `<state>/notifications.jsonl`, and the dashboard's alerts tab reads
-that log. A message the swarm holds back on purpose is logged there too, with
-`delivered: false` and a `suppressed` reason; the dashboard shows it as `·`, not
-as a drop, and `swarm doctor` does not count it as one. `swarm notify --ack` (or
-`x` on home or the alerts tab) acknowledges the drops so far without touching the log;
-the footer, the drawer and `swarm doctor` then count only later ones, and doctor
-only fails on a drop that is recent or on sends that are still failing.
-`swarm notify "<text>"` is the only way a session should message you.
-Every shipped prompt, and the init pass's patch to the worker command, says so
-in so many words: use `swarm notify` even when a brief, a ledger row, a recap or
-a project document names another script (a `notify.sh`, say). A message
-sent that way would not come from the swarm's own bot and would not be logged.
-An operator's result that needs you
-(a URL to open, something only you can do) goes in its `operator-done` outcome
-with `--attention`; a decision it needs first is asked with
-`swarm waiting <job> "<question>"`.
+**One sender, two kinds of message.** Everything the swarm sends goes through
+`telegram.py`, which names the swarm at the front of every message, once, so
+several swarms can share one bot and one chat. Only two kinds of message ever
+reach your phone:
 
-**What pings you.** Only necessary messages ring by default
-(`[telegram].pings = "necessary"`); the phone rings only for these:
+- **An ask:** `[<swarm>] Asks you: <what you must do or decide, and why>`. Sent
+  when the swarm, one phase or the operator cannot move forward until you do or
+  decide something.
+- **The Overseer's summary:** `[<swarm>] Overseer: <what landed and what is
+  running since the last summary; whether anything waits on you>`. Sent on a
+  clock, every `[overseer].every_s` (4 hours by default), and once more when the
+  run ends. There is no summary per number of finished phases, and none for a
+  stretch in which the swarm stood still.
 
-- a worker, the operator or the Overseer asking you something (`swarm waiting`);
-- an owner-run row that starts holding other rows up (once per row);
-- a merge hold you must clear: a dirty tree, or a conflict no resolver could
-  start. A conflict a resolver is working on is not sent; if the resolver cannot
-  fix it, it messages you itself (`swarm notify`);
-- an operator job's outcome flagged `--attention`, an abandoned job, or a to-do
-  while the operator is off;
-- a phase that fails again after the Overseer's retry. With the Overseer on, a
-  first `fail` is its to handle (it retries a failed phase once); with it off,
-  every `fail` pings. Which failure this is comes from `done/<phase>.jsonl`: a
-  `swarm done` that finds no sentinel of its status opens a new episode
-  (`"fresh": true`), and `swarm retry` removes the sentinel;
-- phases that finish `blocked` (past that retry), gathered: one ping 15 minutes
-  after the first of a burst lists every phase blocked since, grouped by reason
-  (the recap's first sentence), so one outside cause is one ping;
-- a repo still owing a push after `[telegram].push_owed_grace_s` (default 1 h),
-  checked after every integration and on the watchdog tick; the "pushed" ping
-  follows only if the "owed" one went out;
-- a phase that would not start (`spawn-fail`, `worktree-fail`), once per phase;
-  a launch given up after repeated failures; a worker that died without
-  `swarm done`;
-- a supervisor crash or error; a master that would not start, or an Overseer
-  pass that would not start or ran past its timeout, on the third in a row (and
-  every third after that);
-- the Overseer's summary on the pass the summary clock starts
-  (`[overseer].every_s`, every 4 hours by default). Any other pass (a failure,
-  starvation, a hold, a doctor FAIL, an owner wait, the box, one you asked for
-  with `swarm overseer --now`) records its summary without sending it, unless
-  it runs `swarm notify --attention` because something needs you. The digest
-  tells the pass which case it is in;
-- a note from the init pass or a resolver (`swarm notify`);
-- the finish summary;
-- a usage cap pausing or stopping the swarm, and a usage pause lifting;
-- a heavy build holding a build slot with its whole process tree idle
-  (`[resources].idle_s`, default 10 minutes), again hourly while it stays idle;
-  the message says whether the gate released its slot;
-- the bot's answers to your `/usage` and `/help`.
+Both are read in a phone notification, so the whole message, prefix included,
+is at most **280 characters** and its first sentence carries the point. 280 is
+two plain sentences of about twenty words each plus the prefix: what you take
+in at a glance, and no more than you said you read. A notification banner
+shows only the start of a message, which is why the ask comes first and the
+reason second. Messages are plain text.
 
-**Logged, not sent:** routine operator outcomes (the Overseer's digest lists
-them), parks (you were asked when the session started waiting), a first `fail`, a
-push owed for less than the grace (and its clearing), a conflict a resolver is
-working on, a web board that did not
-start (`swarm up` prints it), a single master or Overseer failure, a repeat
-failed start, and the summary of any other Overseer pass. Each goes to `notifications.jsonl` with `delivered: false` and a
-`suppressed` reason, shows on the dashboard's alerts tab as `·`, and is not
-counted as a drop. `[telegram].pings = "all"` sends all of them again, as before.
-`ok` finishes are silent either way.
+Everything else the swarm has to say is **held back**: written to
+`<state>/notifications.jsonl` and never sent. A held-back row is either
+*folded* (the next summary accounts for it: the Overseer's digest lists what
+was folded since the last summary) or *log only*. The dashboard's alerts tab
+reads the same log and shows a held-back row as `·` with the reason, a sent one
+as `✓` and one that failed to send as `✗`. Only a failed send is a drop:
+`swarm doctor` counts those, and `swarm notify --ack` (or `x` on home or the
+alerts tab) acknowledges the drops so far without touching the log; the footer,
+the drawer and `swarm doctor` then count only later ones, and doctor only fails
+on a drop that is recent or on sends that are still failing.
 
-Question pings start with what the wait costs, for example
-`holding up 3 phases · a worker place is tied up · asked 14:05`, and the question is
-cut to 600 characters. The full text is on screen in the asker's pane. Every ping is
-written for the owner: what is happening, what it means for the run, and whether to act
-and where, with no code detail beyond a command to run.
+**A session's words are a short field, never a cut.** Where an ask or the
+summary is written by a session, the command that takes it refuses text that
+does not fit, before it records anything, and says how long it may be and to
+rewrite it. Nothing is ever truncated to fit: half a recap explains nothing.
+The long form stays where it was (the recap, the operator outcome, the pass
+record) and shows on the board and in `swarm todo`.
+
+| command | the short field | what stays long |
+|---|---|---|
+| `swarm waiting <who> "<ask>"` | the ask itself | the question in full, asked in the session's own pane |
+| `swarm notify "<ask>"` | the ask itself | the session's record or recap |
+| `swarm operator-done <job> "<outcome>" --ask "<ask>"` | `--ask` | the outcome, on the job, the board and `swarm todo` |
+| `swarm overseer-summary "<summary>"` | the summary | the pass record |
+
+`swarm done` takes no ask and is never refused over one: a finish is recorded
+first, whatever else happens. The asks that come out of a finish (a failure
+nothing will retry, a follow-up with the operator off) are worded by the swarm
+and point at the recap. Where the swarm words an ask itself, only a fragment it
+put there (a row's title, git's error, a list of ids) is ever shortened.
+
+`swarm notify "<ask>"` is the only way a session should message you. Every
+shipped prompt, and the init pass's patch to the worker command, says so in so
+many words: use `swarm notify` even when a brief, a ledger row, a recap or a
+project document names another script (a `notify.sh`, say). A message sent that
+way would not come from the swarm's own bot and would not be logged.
+
+**What is sent, and what is held back.** The test for an ask is strict:
+progress is stopped, or will stop, on something only you can do.
+
+| what happened | kind | class |
+|---|---|---|
+| a worker, an operator job or the Overseer needs your answer (`swarm waiting`) | `waiting` | asks you |
+| a session asks you for something it cannot do: the init pass on a broken plan, a resolver that cannot fix a conflict, the Overseer on a failure it will not retry (`swarm notify`) | `session-ask` | asks you |
+| an operator job finished and left something only you can do (`operator-done --ask`) | `operator-done` | asks you |
+| the operator gave up on a follow-up job after its attempts | `operator-abandoned` | asks you |
+| a phase left a follow-up and the operator is off, so only you will do it | `operator-todo` | asks you |
+| a row only you can do started holding other rows up (once per row; rows found together share one ask) | `owner-row` | asks you |
+| a phase failed again after the Overseer's retry, or failed at all with the Overseer off | `worker-done` | asks you |
+| phases finished `blocked` past that retry: one ask 15 minutes after the first of a burst names them all | `blocked` | asks you |
+| a merge is held by a conflict and no resolver would start | `integrate-hold` | asks you |
+| a merge is held by uncommitted changes in your checkout | `integrate-hold` | asks you |
+| a merge is held because your checkout is on another branch | `integrate-hold` | asks you |
+| a merge is held because git itself failed | `integrate-hold` | asks you |
+| a merge is held on a push (a hold an older supervisor recorded) | `integrate-hold` | asks you |
+| a landing is held (catch-up conflict or failed re-test) and no resolver would start | `integrate-hold` | asks you |
+| `swarm up` found finished work it could not merge | `integrate-hold` | asks you |
+| the supervisor crashed | `other` | asks you |
+| a worker died three times in an hour, so its phase is no longer restarted | `other` | asks you |
+| a phase would not start three times in a row, so the launcher gave up | `other` | asks you |
+| the run ended with phases that were ready and never started | `other` | asks you |
+| the Overseer failed three times in a row (would not start, or ran past its limit), and at every third after | `overseer` | asks you |
+| a usage cap stopped the swarm (it stays down until you start it) | `usage-cap` | asks you |
+| a drain finished but the swarm could not shut itself down | `drain` | asks you |
+| a restart failed and left the swarm without a supervisor | `restart` | asks you |
+| a restart failed and left the swarm down | `restart` | asks you |
+| the Overseer's summary on the clock (`swarm overseer-summary`) | `summary` | summary |
+| the swarm's own summary on the clock, when no pass wrote one or the Overseer is off | `summary` | summary |
+| the run finished: what landed, what failed, what is left for you | `finish` | summary |
+| a drain you asked for finished and the swarm is shutting down | `drain` | summary |
+| a first `fail` with the Overseer on (it gets a pass, and retries the phase once) | `worker-done` | folded |
+| an operator job finished with nothing for you | `operator-done` | folded |
+| a repo started owing a push (the Overseer gets a pass if its own check refused it, or it is still owed two minutes on) | `push-owed` | folded |
+| a landing's prepare command failed, the first time for that phase | `lane-unprepared` | folded |
+| a worker died without finishing and its phase was started again | `other` | folded |
+| the supervisor hit an internal error on one event and stepped over it (the Overseer gets a pass) | `other` | folded |
+| a `swarm reload` found an error in the config file; the old settings stay | `other` | folded |
+| a reload could open only some of the extra worker places | `other` | folded |
+| `swarm resolved` came too early and the merge is still held | `integrate-hold` | folded |
+| a usage cap paused the swarm (it resumes by itself) | `usage-cap` | folded |
+| a usage pause lifted | `usage-cap` | folded |
+| a usage pause lifted because the account changed | `usage-cap` | folded |
+| a heavy build holds a build slot with its whole process tree idle (`[resources].idle_s`), again hourly while it stays idle | `idle-build` | folded |
+| a restart did not happen and the swarm runs on unchanged | `restart` | folded |
+| a waiting session moved to its own window (you were asked when it started waiting) | `park` | log only |
+| a merge conflict a resolver is working on | `integrate-hold` | log only |
+| a held landing a resolver is working on | `integrate-hold` | log only |
+| a phase finished `blocked` and was gathered for the burst's one ask | `worker-done` | log only |
+| a workspace could not be set up for a phase (the launcher retries, and asks if it gives up) | `worktree-fail` | log only |
+| a worker failed to start (the same) | `spawn-fail` | log only |
+| an owed push went through | `push-owed` | log only |
+| a landing's prepare command failed again | `lane-unprepared` | log only |
+| the web board did not start (`swarm up` prints it) | `web-board` | log only |
+| the init pass or an Overseer session never became ready | `master-timeout` | log only |
+| the init pass or an Overseer session would not take its instructions | `master-timeout` | log only |
+| an Overseer pass would not start (not yet three in a row) | `overseer` | log only |
+| an Overseer pass ran past its limit (not yet three in a row) | `overseer` | log only |
+| a drain finished and the swarm is restarting (an ask follows only if it does not come back) | `drain` | log only |
+| `swarm overseer-summary` on a pass with no summary due | `summary` | log only |
+| the bot's answer to a command you typed (`/usage`, `/help`) | `bot-reply` | reply |
+
+A reply is not a message the swarm starts: it answers a command you sent, it
+carries the swarm's name like every message, and it is as long as its answer.
+`ok` finishes say nothing at all.
+
+**Why some things are not asks.** A usage pause that resumes by itself needs
+nothing from you; the stop does. A first failure is the Overseer's to retry. A
+conflict is the resolver's until it gives up, and then the resolver asks. An
+owed push loses nothing and holds nothing up: work keeps merging on this
+machine, and the Overseer is given a pass to fix it or ask. With the Overseer
+on, anything folded that turns out to need you reaches you as its ask; with it
+off, the swarm's own summary still tells you every `every_s` how many phases
+failed and what waits on you.
 
 **Commands (`tgbot.py`).** The bot also listens, so you can ask it:
 
@@ -2258,9 +2337,10 @@ names another.
 
 ## Smaller modules
 
-- **`blockedping.py`:** under `[telegram].pings = "necessary"`, gathers a burst of
-  `blocked` outcomes and sends one ping listing the phases under each distinct
-  reason, instead of one ping per phase.
+- **`blockedping.py`:** gathers a burst of `blocked` outcomes that would each
+  ask you (past the Overseer's retry, or with the Overseer off) and sends one ask
+  naming the phases, 15 minutes after the first; the reasons, grouped, are kept
+  in the log beside it.
 - **`todo.py`, `guide.py`:** `swarm todo` lists everything waiting on the owner that
   is not a question (owner-run ledger rows, operator results, and so on). `swarm
   guide` (`g` in the dashboard) opens a chat session in its own tmux window that

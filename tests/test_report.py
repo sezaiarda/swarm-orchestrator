@@ -373,7 +373,7 @@ def test_one_delivered_ping_among_failures_still_counts_as_reaching_them(
 
 
 def test_an_ok_phase_owes_no_ping(tmp_path, monkeypatch):
-    # launch._completion_ping stays silent for `ok`; only needs-owner and fail
+    # a finish says nothing for `ok`; only needs-owner and fail
     # owe the owner a telegram.
     cfg = _cfg(tmp_path, monkeypatch)
     _sentinel(cfg, "P0", "ok", "landed", BASE)

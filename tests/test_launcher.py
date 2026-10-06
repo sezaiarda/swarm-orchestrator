@@ -168,7 +168,7 @@ def test_the_backoff_expiry_wakes_the_loop_and_fires_once(sup, cfg):
     assert sup.stub_launches == []  # acted on once, not on every wake
 
 
-def test_repeated_failures_give_up_ping_once_and_let_the_run_finish(sup, cfg, tmp_path):
+def test_repeated_failures_give_up_ask_once_and_let_the_run_finish(sup, cfg, tmp_path):
     with state_mod.transaction(cfg) as st:
         st.done = {p: "ok" for p in ("P1", "P2", "P3", "P4")}
     _fail(sup, "P0", n=sup_mod.LAUNCH_GIVE_UP, ago=sup_mod.LAUNCH_RETRY_S + 1)
@@ -177,8 +177,10 @@ def test_repeated_failures_give_up_ping_once_and_let_the_run_finish(sup, cfg, tm
     st = state_mod.read(cfg)
     assert st.finished
     tg = _tg(tmp_path)
+    assert sum("Asks you: Fix why P0 will not start" in ln for ln in tg) == 1
     assert sum("failed to start 3 times" in ln for ln in tg) == 1
-    assert any("ready but unlaunched (their worker kept failing to start): P0" in ln for ln in tg)
+    assert any("The run has finished" in ln and "`swarm launch` the 1 that never started" in ln
+               for ln in tg)
 
 
 def test_resume_hands_given_up_phases_back(sup, cfg):
@@ -273,7 +275,7 @@ def test_the_last_done_finishes_the_run_without_a_master(sup, cfg, tmp_path):
         st.claim_slot("P9")
     sup._advance_done("P9", "ok")
     assert state_mod.read(cfg).finished
-    assert any("swarm finished: 6 phase(s) done" in ln for ln in _tg(tmp_path))
+    assert any("The run has finished: 6 phase(s) landed" in ln for ln in _tg(tmp_path))
 
 
 # -- the real thing: threads, the FIFO poke, a racing manual launch ----------------
@@ -415,7 +417,7 @@ def test_a_reload_grow_records_the_new_panes(tmp_path, monkeypatch):
     monkeypatch.setattr(sup_mod.session_mod, "add_slot_panes", fake_add)
     sup = Supervisor(cfg)
     pings: list[str] = []
-    sup._ping = lambda key, msg, *a, **k: pings.append(msg)
+    sup._fold = lambda key, msg, *a, **k: pings.append(msg)
     try:
         sup._on_reload()
     finally:

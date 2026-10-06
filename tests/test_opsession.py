@@ -30,7 +30,7 @@ import pytest
 
 from swarm_orchestrator import notes as notes_mod
 from swarm_orchestrator import operator as operator_mod
-from swarm_orchestrator import opqueue, promptlint
+from swarm_orchestrator import opqueue, promptlint, telegram
 from swarm_orchestrator import state as state_mod
 from swarm_orchestrator.cli import _known_commands
 from swarm_orchestrator.config import load
@@ -413,7 +413,7 @@ def test_an_abandoned_hand_off_does_not_block_and_finish_completes(cfg):
     sup._finish_if_settled(_settled(cfg))
 
     assert state_mod.read(cfg).finished is True
-    assert any("swarm finished" in ln for ln in tg_lines(cfg))
+    assert any("The run has finished" in ln for ln in tg_lines(cfg))
 
 
 def test_an_item_past_its_attempt_cap_stops_blocking(cfg):
@@ -511,8 +511,8 @@ def test_operator_done_on_a_phase_with_no_hand_off_is_refused(cfg):
 KEY = f"operator:{PHASE}"
 
 
-def test_waiting_pings_once_and_keeps_the_session_waiting(cfg, log):
-    """A ping plus a held lease — the session stays and asks in its own window."""
+def test_waiting_asks_once_and_keeps_the_session_waiting(cfg, log):
+    """An ask plus a held lease — the session stays and asks in its own window."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
@@ -520,8 +520,7 @@ def test_waiting_pings_once_and_keeps_the_session_waiting(cfg, log):
 
     assert result.returncode == 0, result.stderr
     assert "AskUserQuestion" in result.stdout and "swarm resumed" in result.stdout
-    asked = [ln for ln in tg_lines(cfg) if "waiting on you" in ln]
-    assert asked == [f"swarm: operator job {PHASE} is waiting on you — which host is the gateway"]
+    assert tg_lines(cfg) == [f"[{cfg.name}] Asks you: which host is the gateway"]
     item = opqueue.load(cfg, PHASE)
     assert item.state == opqueue.WAITING and not item.terminal
     st = state_mod.read(cfg)
@@ -611,8 +610,8 @@ def ledger_rows(cfg) -> list[dict]:
     return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
-def test_a_routine_operator_outcome_is_recorded_but_pings_nobody(cfg, log):
-    """The default is quiet: a stream of routine outcome pings is noise."""
+def test_a_routine_operator_outcome_is_recorded_but_asks_nobody(cfg, log):
+    """An outcome with nothing for the owner is held for the Overseer's summary."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
@@ -623,82 +622,84 @@ def test_a_routine_operator_outcome_is_recorded_but_pings_nobody(cfg, log):
     assert item.state == opqueue.DONE and item.outcome == "rolled webhooks; healthz green"
     assert item.attention is False
     assert tg_lines(cfg) == []
-    # Still in the ledger (the dashboard's alerts), marked held back, not dropped.
+    # Still in the log (the dashboard's alerts), folded for the summary, not dropped.
     [row] = ledger_rows(cfg)
     assert row["kind"] == "operator-done" and "rolled webhooks; healthz green" in row["text"]
-    assert row["delivered"] is False and row["suppressed"] and row["error"] is None
-    assert "not pinged" in result.stdout
+    assert row["class"] == "folded" and row["delivered"] is False and row["error"] is None
+    assert "not asked" in result.stdout
 
 
-def test_an_outcome_flagged_for_attention_is_sent(cfg, log):
-    """``--attention`` is the outcome on the phone, not a question: a decision is
-    asked with ``swarm waiting`` while the session can still act on it."""
+ASK = "Roll api-F26 by hand: the roll script refuses this host and the release waits on it."
+
+
+def test_an_outcome_that_leaves_something_for_the_owner_sends_its_ask(cfg, log):
+    """``--ask`` is the two sentences the phone shows, not the outcome and not a
+    question: a decision is asked with ``swarm waiting`` while the session can
+    still act on it. The outcome stays long, on the job."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
+    outcome = "api-F26 NOT rolled; roll owed. " + "Tried the script three times. " * 20
 
-    result = cli(cfg, "operator-done", PHASE, "api-F26 NOT rolled; roll owed", "--attention")
+    result = cli(cfg, "operator-done", PHASE, outcome, "--ask", ASK)
 
     assert result.returncode == 0, result.stderr
-    assert opqueue.load(cfg, PHASE).attention is True
-    assert tg_lines(cfg) == [f"swarm: operator job {PHASE} needs your attention — api-F26 NOT rolled; roll owed"]
+    item = opqueue.load(cfg, PHASE)
+    assert item.attention is True and item.ask == ASK
+    assert item.outcome == " ".join(outcome.split())  # kept whole for the board and `swarm todo`
+    assert tg_lines(cfg) == [f"[{cfg.name}] Asks you: {ASK}"]
+    [row] = ledger_rows(cfg)
+    assert (row["class"], row["kind"], row["detail"]) == ("ask", "operator-done", item.outcome)
+    assert "owner: asked" in result.stdout
 
 
-def test_notify_all_pings_every_outcome(cfg, log, monkeypatch):
-    monkeypatch.setenv("SWARM_OPERATOR_NOTIFY", "all")
+def test_an_ask_too_long_is_refused_before_the_job_is_finished(cfg, log):
+    """Nothing is cut and nothing is recorded: the session rewrites and runs it again."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
-    assert cli(cfg, "operator-done", PHASE, "already done").returncode == 0
-    [line] = tg_lines(cfg)
-    assert "already done" in line
+    result = cli(cfg, "operator-done", PHASE, "roll owed", "--ask", "the roll failed " * 30)
+
+    assert result.returncode == 2
+    assert "nothing was recorded" in result.stderr
+    assert f"at most {telegram.room(cfg)} fit" in result.stderr
+    assert "Rewrite it, do not cut it" in result.stderr
+    assert opqueue.load(cfg, PHASE).state == opqueue.RUNNING  # still the session's job
+    assert tg_lines(cfg) == [] and ledger_rows(cfg) == []
+    assert cli(cfg, "operator-done", PHASE, "roll owed", "--ask", ASK).returncode == 0
+    assert len(tg_lines(cfg)) == 1
 
 
-def test_telegram_pings_all_restores_every_outcome_ping(cfg, log, monkeypatch):
-    """`[telegram].pings = "all"` is the one switch back to the old behaviour."""
-    monkeypatch.setenv("SWARM_TG_PINGS", "all")
-    queue(cfg, PHASE)
-    assert operator_mod.dispatch(cfg, PHASE, log) is True
-    assert cli(cfg, "operator-done", PHASE, "already done").returncode == 0
-    assert "already done" in "\n".join(tg_lines(cfg))
-
-
-def test_notify_none_silences_even_attention_but_not_questions_or_abandons(
-    cfg, log, monkeypatch
-):
-    monkeypatch.setenv("SWARM_OPERATOR_NOTIFY", "none")
+def test_questions_asks_and_abandons_reach_the_phone_and_routine_outcomes_do_not(cfg, log):
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
     assert cli(cfg, "waiting", KEY, "which", "host?").returncode == 0
     assert cli(cfg, "resumed", KEY, "staging").returncode == 0
-    assert cli(cfg, "operator-done", PHASE, "roll owed", "--attention").returncode == 0
+    assert cli(cfg, "operator-done", PHASE, "rolled on staging; healthz green").returncode == 0
     queue(cfg, OTHER)
     opqueue.abandon(cfg, OTHER, "three crashes")
 
-    sent = "\n".join(tg_lines(cfg))
-    assert "waiting on you" in sent and "which host?" in sent
-    assert "ABANDONED" in sent and OTHER in sent
-    assert "roll owed" not in sent
-    assert [(r["kind"], r["delivered"]) for r in ledger_rows(cfg)] == [
-        ("waiting", True), ("operator-done", False), ("operator-abandoned", True)]
+    sent = tg_lines(cfg)
+    assert sent[0] == f"[{cfg.name}] Asks you: which host?"
+    assert sent[1].startswith(f"[{cfg.name}] Asks you: Do the follow-up job {OTHER} yourself")
+    assert len(sent) == 2 and "healthz green" not in "\n".join(sent)
+    assert [(r["kind"], r["class"]) for r in ledger_rows(cfg)] == [
+        ("waiting", "ask"), ("operator-done", "folded"), ("operator-abandoned", "ask")]
 
 
 def test_an_unknown_flag_never_fails_operator_done(cfg, log):
-    """A newer or older prompt's flag must not lose a finished job."""
+    """A newer or older prompt's flag must not lose a finished job: the retired
+    ``--attention`` is one of them now, and its outcome is folded like any other."""
     queue(cfg, PHASE)
     assert operator_mod.dispatch(cfg, PHASE, log) is True
 
-    result = cli(cfg, "operator-done", PHASE, "--quiet", "done and verified", "--level=2")
+    result = cli(cfg, "operator-done", PHASE, "--quiet", "done and verified", "--level=2",
+                 "--attention")
 
     assert result.returncode == 0, result.stderr
     item = opqueue.load(cfg, PHASE)
     assert item.state == opqueue.DONE and item.outcome == "done and verified"
     # Every other command still refuses what it does not know.
     assert cli(cfg, "status", "--bogus").returncode == 2
-
-
-def test_a_bad_notify_value_falls_back_to_the_quiet_default(cfg, monkeypatch):
-    monkeypatch.setenv("SWARM_OPERATOR_NOTIFY", "loud")
-    assert load(project_dir=str(cfg.project_dir)).operator_notify == "attention"
 
 
 def test_the_brief_carries_the_job_its_exits_and_an_earlier_question(cfg):
@@ -994,9 +995,9 @@ def test_operator_done_releases_the_lease_and_lets_the_run_finish(swarm):
     st = swarm.state()
     assert st["finished"]
     assert st["operator_phase"] is None
-    assert sum("swarm finished" in ln for ln in swarm.tg_lines()) == 1
+    assert sum("The run has finished" in ln for ln in swarm.tg_lines()) == 1
     # Drained, so the finish has nothing to name.
-    assert not any("undrained" in ln for ln in swarm.tg_lines())
+    assert not any("follow-up job" in ln for ln in swarm.tg_lines())
 
 
 def test_swarm_up_requeues_dropped_hand_offs_under_isolation_none(swarm):

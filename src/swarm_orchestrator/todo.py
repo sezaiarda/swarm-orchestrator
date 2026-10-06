@@ -17,9 +17,12 @@ records, and this module is the one reader of all of them:
   about to walk anyway (``coral-W33`` needs ``coral-W26``) is folded into that row,
   so one sitting closes both;
 * **to-dos a finish sent the owner** because no operator would run them
-  (``operator-todo`` pings), the retired ``needs-owner`` finishes, and operator
-  jobs the queue gave up on. Each stays on the list until a later operator job
-  for its phase or a later ``swarm note`` on it says it was handled;
+  (``operator-todo`` asks: the recap kept beside the ask is the to-do), the
+  retired ``needs-owner`` finishes, operator jobs the queue gave up on, and
+  operator jobs that finished with something only the owner can do
+  (``operator-done --ask``: the ask is the title, the outcome the text). Each
+  stays on the list until a later operator job for its phase or a later
+  ``swarm note`` on it says it was handled;
 * **the Overseer's "Left for the owner"**, the only record that is prose. Row ids
   it names are matched to the items above (and promote an excluded row the text
   rules would have left out); a line that names nothing already listed becomes
@@ -50,6 +53,7 @@ OWNER_ROW = "owner-row"
 DEVICE_CHECK = "device-check"
 WORKER_TODO = "worker-todo"
 GIVEN_UP = "given-up"
+OPERATOR_ASK = "operator-ask"
 OVERSEER = "overseer"
 
 #: A row line that marks the row as the owner's to run.
@@ -289,10 +293,26 @@ def collect(cfg: Config, st: state_mod.State | None = None) -> TodoList:
                    else _handled_close(opqueue.owning_phase(item.phase))),
             jobs=[item.phase] if owner_hands else [], since=item.queued_at)
 
+    # 2b. Jobs that finished and left the owner something to do: the ask their
+    # phone showed is the title, the outcome it could not carry is the text.
+    for item in jobs:
+        if item.state != opqueue.DONE or not item.ask or item.phase in items:
+            continue
+        row = opqueue.owning_phase(item.phase)
+        if _handled_after(cfg, row, item.done_at, [j for j in jobs if j is not item]):
+            continue
+        items[item.phase] = Todo(
+            id=item.phase, kind=OPERATOR_ASK, title=_clip(item.ask),
+            releases=[item.phase], sources=[f"operator job {item.phase} asked you"],
+            spec=item.outcome or item.ask, paths=[str(opqueue.item_path(cfg, item.phase))],
+            close=_handled_close(row), since=item.done_at)
+
     # 3. To-dos a finish sent the owner, and the retired needs-owner finishes.
     handed: dict[str, tuple[float, str, str]] = {}
     for rec in _pings(cfg, "operator-todo"):
-        handed[str(rec["phase"])] = (float(rec.get("ts") or 0.0), str(rec.get("text") or ""),
+        # The recap is the to-do; the ask the phone showed only points at it.
+        handed[str(rec["phase"])] = (float(rec.get("ts") or 0.0),
+                                     str(rec.get("detail") or rec.get("text") or ""),
                                      "a to-do a finished phase sent you")
     for phase, status in st.done.items():
         if status == statuses.NEEDS_OWNER:

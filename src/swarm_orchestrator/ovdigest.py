@@ -26,19 +26,22 @@ from . import ledger as ledger_mod
 from . import ledgerw
 from . import notes as notes_mod
 from . import opqueue
+from . import owner as owner_mod
 from . import pushowed
 from . import recap as recap_mod
 from . import state as state_mod
 from . import statuses, telegram
 from .config import Config
 from .master import build_context
-from .overseer import SUMMARY_TRIGGERS, Reason, overseer_dir, starvation_map
+from .overseer import SUMMARY, Reason, overseer_dir, starvation_map
 from .state import State
 
 #: How many recently finished phases the digest lists in full.
 MAX_FINISHED = 40
 MAX_FAILURES = 20
 MAX_BLOCKERS = 15
+#: How many held-back messages the digest lists, newest kept.
+MAX_HELD = 40
 _GIB = 1024**3
 
 
@@ -192,10 +195,11 @@ MAX_OUTCOMES = 30
 
 
 def operator_outcomes(items: list[opqueue.Item], since: float) -> list[dict]:
-    """Every operator job finished since ``since``: flagged ones first, then newest.
+    """Every operator job finished since ``since``: ones that asked the owner
+    first, then newest.
 
-    Routine outcomes no longer ping the owner (``[operator].notify``), so this is
-    how they reach them: the Overseer folds them into its summary.
+    An outcome with nothing for the owner is not sent to them, so this is how
+    it reaches them: the Overseer's summary accounts for it.
     """
     done = [i for i in items if i.state == opqueue.DONE and i.done_at >= since]
     done.sort(key=lambda i: (not i.attention, -i.done_at))
@@ -250,6 +254,67 @@ def lane_blockers(blockers: list[dict], waits: dict[str, dict]) -> list[dict]:
         for holder, rows in waiting.items()
     ]
     return sorted([*blockers, *lanes], key=lambda b: -b["blocks"])
+
+
+def held_back(cfg: Config, since: float) -> dict:
+    """What the swarm had to say since the last summary and held for the next
+    one (:func:`telegram.fold`): the newest :data:`MAX_HELD`, oldest first."""
+    rows = telegram.folded_since(cfg.state_dir, since)
+    return {
+        "since": since,
+        "count": len(rows),
+        "rows": [{"kind": r.get("kind"), "phase": r.get("phase"), "ts": r.get("ts"),
+                  "text": telegram.clip(r.get("text") or "", 300)}
+                 for r in rows[-MAX_HELD:]],
+    }
+
+
+def _finished_counts(cfg: Config, st: State, since: float) -> tuple[int, int]:
+    """How many phases landed, and how many failed, after ``since``. A phase
+    that finished ``later`` waits for its date: it is neither."""
+    waits = ledgerw.dated(cfg)
+    landed = failed = 0
+    for phase, status in st.done.items():
+        if _sentinel_mtime(cfg, phase, status) < since:
+            continue
+        if status in statuses.INTEGRATES:
+            landed += 1
+        elif status == statuses.FAIL and phase not in waits:
+            failed += 1
+    return landed, failed
+
+
+def nothing_to_report(cfg: Config, st: State, since: float) -> bool:
+    """Has the swarm stood still since ``since``? Nothing landed or failed,
+    nothing was held back for the summary, and nothing is building. A summary
+    then would only repeat the last one: what waits on the owner was asked of
+    them when it started to."""
+    if any(s.phase for s in st.busy_slots()):
+        return False
+    if any(_finished_counts(cfg, st, since)):
+        return False
+    return not telegram.folded_since(cfg.state_dir, since)
+
+
+def own_summary(cfg: Config, st: State, since: float, now: float | None = None) -> str:
+    """The summary the swarm writes when no Overseer pass wrote one: the counts
+    since ``since``, what is running, and whether anything waits on the owner.
+    Two sentences, built to fit :func:`telegram.room`."""
+    now = time.time() if now is None else now
+    landed, failed = _finished_counts(cfg, st, since)
+    start = f"Since {time.strftime('%H:%M', time.localtime(since))}" if since else "So far"
+    first = f"{start}: {landed} phase{'' if landed == 1 else 's'} landed"
+    if failed:
+        first += f", {failed} failed"
+    running = sum(1 for s in st.busy_slots() if s.phase)
+    first += f"; {running} building now"
+    if st.usage_hold:
+        first += ", and a usage cap holds new ones until it resets"
+    elif st.paused:
+        first += ", and the swarm is paused"
+    asking = owner_mod.waits(cfg, st)
+    second = f"Waiting on you: {', '.join(asking)}." if asking else "Nothing waits on you."
+    return f"{first}. {second}"
 
 
 # -- assembly ----------------------------------------------------------------
@@ -310,11 +375,11 @@ def build(
     return {
         "generated_at": now,
         "since": since,
-        # Whether this pass's `swarm notify` reaches the phone without --attention.
-        "summary_sends": (
-            telegram.sends_all(cfg)
-            or any(r.key in SUMMARY_TRIGGERS for r in reasons)
-        ),
+        # Whether this is the pass that writes the owner their summary, and how
+        # long `swarm overseer-summary` lets it be.
+        "summary_due": any(r.key == SUMMARY for r in reasons),
+        "summary_room": telegram.room(cfg, telegram.SUMMARY_LEAD),
+        "held_back": held_back(cfg, telegram.last_summary_at(cfg.state_dir) or since),
         "reasons": [
             {"key": r.key, "text": r.text, "urgent": r.urgent, "at": r.at} for r in reasons
         ],
@@ -355,12 +420,16 @@ def render(d: dict) -> str:
     c = d["context"]
     out = [f"# Overseer digest — {when}", "", "## Why this pass"]
     out += [f"- {'[urgent] ' if r['urgent'] else ''}{r['text']}" for r in d["reasons"]] or ["- (manual)"]
-    if d.get("summary_sends", True):
-        out.append("- your summary (`swarm notify`) goes to the owner's phone")
+    if d.get("summary_due"):
+        out.append(
+            "- this is the summary pass: before you sign off, send the owner their"
+            f' summary with `swarm overseer-summary "<text>"` (two short sentences, at'
+            f" most {d.get('summary_room')} characters)"
+        )
     else:
         out.append(
-            "- your summary is recorded, not sent: the owner's summary is not due. Add"
-            " `--attention` only if something needs the owner"
+            "- no summary is due on this pass (`swarm overseer-summary` would only be"
+            " recorded). If something needs the owner, ask them with `swarm notify`"
         )
     out += ["", "## The swarm now"]
     out.append(
@@ -403,9 +472,9 @@ def render(d: dict) -> str:
     since = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(d["since"])) if d["since"] else "the start"
     done = op.get("finished") or []
     flagged = sum(1 for o in done if o["attention"])
-    out += ["", f"## Operator jobs finished since {since} ({len(done)}, {flagged} flagged)"]
+    out += ["", f"## Operator jobs finished since {since} ({len(done)}, {flagged} asked the owner)"]
     for o in done[:MAX_OUTCOMES]:
-        mark = "**[needs the owner]** " if o["attention"] else ""
+        mark = "**[asked the owner]** " if o["attention"] else ""
         out.append(f"- {mark}{o['job']}: {o['outcome'] or '(no outcome given)'}")
     if len(done) > MAX_OUTCOMES:
         out.append(f"- … and {len(done) - MAX_OUTCOMES} more")
@@ -420,6 +489,18 @@ def render(d: dict) -> str:
             out.append(f"  - {n['kind']}: {n['text']}")
     if not d["finished"]:
         out.append("- none")
+
+    held = d.get("held_back") or {}
+    out += ["", f"## Held back since the last summary ({held.get('count', 0)})",
+            "None of these was sent to the owner. The summary accounts for the ones"
+            " that matter to them, in a few words; it never lists them."]
+    for h in held.get("rows") or []:
+        who = f" {h['phase']}" if h.get("phase") else ""
+        out.append(f"- [{h['kind']}{who}] {h['text']}")
+    if held.get("count", 0) > len(held.get("rows") or []):
+        out.append(f"- … and {held['count'] - len(held['rows'])} earlier")
+    if not held.get("count"):
+        out.append("- nothing")
 
     out += ["", f"## Failed phases ({len(d['failures'])})"]
     out += [f"- {f['phase']}: {f['note'] or '(no note)'}" for f in d["failures"]] or ["- none"]

@@ -117,7 +117,9 @@ def test_a_drain_holds_launches_then_stops_once_the_last_worker_is_done(cfg, mon
     assert st.drain["stopping_at"] and st.drain["waiting"] == []
     assert not st.finished  # the drain stops the run; it does not "finish" it
     assert len(spawned) == 1
-    assert "shutting down, as you asked; afterwards it runs: sleep 1" in (cfg.state_dir.parent / "tg.log").read_text()
+    assert (cfg.state_dir.parent / "tg.log").read_text() == (
+        f"[{cfg.name}] Overseer: The work that was running is finished and the swarm is"
+        " shutting down, as you asked. Afterwards it runs: sleep 1\n")
     sup._drain_tick()
     assert len(spawned) == 1  # once
 

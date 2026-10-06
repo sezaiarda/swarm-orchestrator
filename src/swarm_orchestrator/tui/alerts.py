@@ -31,7 +31,7 @@ from .theme import BAD, BRIGHT, GLYPH, MUTED, OK, SOFT, WARN, YOU, paint
 
 
 #: Ping kinds that ask something of the owner, and kinds that report a fault.
-ASKS = frozenset({"waiting", "park", "question", "needs-owner", "operator-ask",
+ASKS = frozenset({"waiting", "park", "question", "needs-owner", "operator-ask", "session-ask",
                   "operator-todo", "operator-abandoned", "integrate-hold", "blocked"})
 FAULTS = frozenset({"spawn-fail", "master-timeout", "usage-cap", "web-board", "push-owed",
                     "lane-unprepared"})

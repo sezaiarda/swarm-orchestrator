@@ -246,8 +246,6 @@ class Master:
         self.log = log
         self.proc: subprocess.Popen | None = None
         self.pane: str | None = None
-        # Prompt deliveries in a row that timed out or would not submit.
-        self._timeouts = 0
 
     def is_alive(self) -> bool:
         """Is a master actually running right now?
@@ -349,15 +347,8 @@ class Master:
             return False
         if not launch_mod.await_ready(self.cfg, pane, self.log):
             self.log.line("ACTION master-ready-timeout")
-            telegram.notify(
-                self.cfg.telegram_notify,
-                f"swarm: the {_NAMES.get(kind, kind)} session would not start (it never"
-                " became ready)."
-                " Workers carry on; if this keeps happening, check the overseer window.",
-                kind="master-timeout",
-                source="master._deliver_prompt",
-                suppressed=self._timeout_hold(),
-            )
+            self._log_failed(f"the {_NAMES.get(kind, kind)} session would not start (it"
+                             " never became ready). Workers carry on.")
             return False
         line = line or (
             f"Read {prompt_file} and follow every instruction in it exactly. "
@@ -365,29 +356,17 @@ class Master:
         )
         if not tmux.send_submit(pane, line):
             self.log.line("ACTION master-submit-lost")
-            telegram.notify(
-                self.cfg.telegram_notify,
-                f"swarm: the {_NAMES.get(kind, kind)} session started but would not take"
-                " its instructions."
-                " Workers carry on; if this keeps happening, check the overseer window.",
-                kind="master-timeout",
-                source="master._deliver_prompt",
-                suppressed=self._timeout_hold(),
-            )
+            self._log_failed(f"the {_NAMES.get(kind, kind)} session started but would"
+                             " not take its instructions. Workers carry on.")
             return False
-        self._timeouts = 0
         return True
 
-    def _timeout_hold(self) -> str | None:
-        """Count one more failed delivery; the hold reason unless it makes a streak.
-
-        A single one is retried by the next pass and is not the owner's problem;
-        :data:`telegram.STREAK` in a row is a master that cannot start at all."""
-        self._timeouts += 1
-        if self._timeouts % telegram.STREAK == 0:
-            return None
-        return telegram.hold(
-            self.cfg, f"failure {self._timeouts} in a row; you hear at {telegram.STREAK}")
+    def _log_failed(self, what: str) -> None:
+        """Record a session that did not come up. Nobody is asked from here: the
+        start-up pass is not needed for the run, and the supervisor counts
+        Overseer passes that fail and asks the owner when they make a streak."""
+        telegram.log(self.cfg, what, why="the supervisor asks if Overseer passes keep failing",
+                     kind="master-timeout", source="master._deliver_prompt")
 
     def inject(self, text: str) -> None:
         """Nudge the live master with one line of guidance."""

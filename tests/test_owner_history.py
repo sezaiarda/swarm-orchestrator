@@ -11,12 +11,11 @@ recorded as an ``owner_decision`` note, ``notes.add`` refusing duplicates, and
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import launch, ledger, opqueue, ovdigest, owner
+from swarm_orchestrator import ledger, opqueue, ovdigest, owner, telegram
 from swarm_orchestrator import notes as notes_mod
 from swarm_orchestrator import report as report_mod
 from swarm_orchestrator import state as state_mod
@@ -85,40 +84,38 @@ def test_a_long_serial_chain_does_not_recurse():
     assert ledger.blocked_behind(chain, "P0", {}) == 4999
 
 
-# -- the ping itself ----------------------------------------------------------
-def test_cost_line_says_what_waiting_costs():
-    at = time.mktime((2026, 9, 23, 14, 5, 0, 0, 0, -1))
-    assert launch.cost_line(3, "slot held", at) == "holding up 3 phases · slot held · asked 14:05"
-    assert launch.cost_line(1, "slot held", at).startswith("holding up 1 phase ·")
-    # Unknown count: say what is known rather than guess a number.
-    assert launch.cost_line(None, "operator session held", at) == "operator session held · asked 14:05"
-
-
-def test_a_long_question_is_cut_to_one_screen_and_says_where_the_rest_is():
-    short = launch.ping_question("  which\n  schema? ")
-    assert short == "which schema?"
-    long = launch.ping_question("word " * 400)
-    assert long.endswith("… (full question in its window)")
-    assert len(long) <= launch.PING_QUESTION_CHARS + len(" … (full question in its window)")
-
-
-def test_the_waiting_ping_leads_with_the_cost_from_the_live_ledger(cfg, tmp_path):
-    with state_mod.transaction(cfg) as st:
-        st.done = {"D": "ok"}
-    owner.waiting(cfg, "A", "roll now or later? " + "x" * 900)
-    cost, body = _sent(tmp_path)[:2]
-    assert cost.startswith("holding up 3 phases · a worker place is tied up · asked ")
-    assert body.startswith("swarm: the worker on A is waiting on you — roll now or later?")
-    assert body.endswith("(full question in its window)")
-    # The digest and doctor still recover the question from the ledger line.
+# -- the ask itself -----------------------------------------------------------
+def test_the_waiting_ask_is_the_sessions_own_words_and_the_question_is_kept(cfg, tmp_path):
+    owner.waiting(cfg, "A", "  Roll the API now or after the weekend?\n Three rows wait on it. ")
+    assert _sent(tmp_path) == [
+        f"[{cfg.name}] Asks you: Roll the API now or after the weekend? Three rows wait on it."]
+    # The digest and doctor recover the question from the log, without the prefix.
     from swarm_orchestrator import doctor
-    assert doctor.waiting_question(cfg, "A").startswith("roll now or later?")
+    assert doctor.waiting_question(cfg, "A") == (
+        "Roll the API now or after the weekend? Three rows wait on it.")
 
 
-def test_operator_and_overseer_pings_are_trimmed_the_same_way():
-    # They share ping_question/cost_line with the worker's ping; the CLI tests
-    # (test_opsession, test_overseer_pass) cover the wiring.
-    assert launch.ping_question("q" * 5000).endswith("(full question in its window)")
+def test_a_waiting_ask_too_long_for_a_notification_is_refused_not_cut(cfg, tmp_path, capsys):
+    assert _cli(cfg, "waiting", "A", "roll now or later? " + "x" * 900) == 2
+    err = capsys.readouterr().err
+    assert "the owner was NOT told" in err
+    assert f"at most {telegram.room(cfg)} fit" in err and "Rewrite it, do not cut it" in err
+    assert _sent(tmp_path) == []
+    assert state_mod.read(cfg).waiting == {}  # nothing was recorded: no park timer either
+    assert _cli(cfg, "waiting", "A") == 2  # and an ask has to say something
+    assert "the ask is empty" in capsys.readouterr().err
+
+
+def test_a_question_asked_before_asks_had_a_field_of_their_own_is_still_read(cfg):
+    """A session waiting across an upgrade: its row carries the question in its text."""
+    from swarm_orchestrator import doctor
+
+    old = {"ts": 1.0, "kind": "waiting", "phase": "A", "delivered": True,
+           "text": "holding up 3 phases · asked 14:05\n"
+                   "swarm: the worker on A is waiting on you — roll now or later?\n"
+                   "Answer in tmux window workers."}
+    (cfg.state_dir / telegram.LEDGER_NAME).write_text(json.dumps(old) + "\n")
+    assert doctor.waiting_question(cfg, "A") == "roll now or later?"
 
 
 # -- the owner's answer goes into history -------------------------------------

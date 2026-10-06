@@ -151,7 +151,10 @@ def test_a_drain_ends_once_the_sweep_has_seen_a_dead_parked_worker_twice(cfg, ru
     assert "WATCHDOG-REAP P1 parked-gone" in text
     assert spawned and st.drain.get("stopping_at"), text  # the drain has nothing left to wait for
     assert "DRAIN-COMPLETE" in text
-    assert any("the worker for P1 stopped without finishing" in ln for ln in tg(cfg))
+    # Started again later, so nobody is asked: it is held for the Overseer's summary.
+    assert "the worker for P1 stopped without finishing" in (
+        cfg.state_dir / "notifications.jsonl").read_text()
+    assert not any("stopped without finishing" in ln for ln in tg(cfg))
 
 
 def test_a_parked_worker_that_is_alive_is_left_alone(cfg, run, monkeypatch):

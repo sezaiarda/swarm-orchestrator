@@ -1394,17 +1394,19 @@ def _check_stall(cfg: Config, st: State) -> Check:
 
 
 def _waiting_question(cfg: Config, phase: str) -> str:
-    """The worker's actual question, recovered from the notification ledger.
+    """The worker's actual question, recovered from the notification log.
 
-    ``swarm waiting`` telegrams the note and does not store it anywhere else, so
-    without the ledger the owner is told they are blocking a phase but not what
-    it wants. Best-effort: no ledger, no question.
+    ``swarm waiting`` sends the ask and does not store it anywhere else, so
+    without the log the owner is told they are blocking a phase but not what
+    it wants. Best-effort: no log, no question. A row written before asks had
+    a field of their own carries the question inside its text.
     """
     for row in reversed(_notifications(cfg)):
         if row.get("kind") == "waiting" and row.get("phase") == phase:
+            if "ask" in row:
+                return str(row["ask"])
             text = str(row.get("text", ""))
             _, sep, tail = text.partition(" — ")
-            # The ping's last line says which window to open, not what is asked.
             lines = (tail if sep else text).strip().splitlines()
             return lines[0] if lines else ""
     return ""

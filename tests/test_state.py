@@ -407,9 +407,9 @@ def test_finish_is_idempotent_and_surfaces_leftover(monkeypatch, tmp_path):
         sup._finish(2, ["P1", "P7"])  # a lost nudge left P1,P7 ready-but-unlaunched
         sent = (tmp_path / "tg.log").read_text()
         tg = sent.splitlines()
-        assert sent.count("swarm finished") == 1
-        assert "2 phase(s) done" in tg[0]
-        assert "unlaunched" in tg[0] and "P1" in tg[0] and "P7" in tg[0]
+        assert sent.count("The run has finished") == 1
+        assert "2 phase(s) landed" in tg[0]
+        assert "`swarm launch` the 2 that never started" in tg[0]
         assert "usage" not in sent  # usage reaches the phone only when asked
         # rule: finish fires exactly once -- a second call is a no-op.
         sup._finish(2, ["P1", "P7"])

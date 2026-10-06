@@ -328,31 +328,34 @@ def describe_hold(hold: dict, now: float) -> list[str]:
             for w, h in sorted(hold.items())]
 
 
-def pause_ping(window: str, h: dict, now: float) -> str:
-    return (f"Swarm paused: {label(window)} usage reached {h['pct']:.0f}% (your limit is "
+def pause_note(window: str, h: dict, now: float) -> str:
+    """A pause that lifts by itself: for the record and the Overseer's summary."""
+    return (f"paused: {label(window)} usage reached {h['pct']:.0f}% (the limit is "
             f"{h['at']:g}%). Running workers finish; no new ones start. It resumes by "
-            f"itself after the reset, {when(h.get('resets_at'), now)}. Nothing to do.")
+            f"itself after the reset, {when(h.get('resets_at'), now)}.")
 
 
-def switch_ping(window: str, reading: Reading | None, account: str | None) -> str:
+def switch_note(window: str, reading: Reading | None, account: str | None) -> str:
     now_pct = "" if reading is None else f", whose {label(window)} usage is {reading.pct:.0f}%"
-    return (f"Swarm resumed: the {label(window)} cap held another account; Claude is now "
+    return (f"resumed: the {label(window)} cap held another account; Claude is now "
             f"logged in as account {account}{now_pct}. New workers start again.")
 
 
-def lift_ping(window: str, reading: Reading | None) -> str:
+def lift_note(window: str, reading: Reading | None) -> str:
     now_pct = "" if reading is None else f" and usage is now {reading.pct:.0f}%"
-    return (f"Swarm resumed: the {label(window)} usage window reset{now_pct}. "
+    return (f"resumed: the {label(window)} usage window reset{now_pct}. "
             "New workers start again.")
 
 
-def down_ping(down: dict, now: float, still_held: bool) -> str:
-    msg = (f"Swarm stopped: {label(down['window'])} usage reached {down['pct']:.0f}% "
-           f"(your limit {down['at']:g}%). It resets {when(down.get('resets_at'), now)}. "
-           "Start it again with swarm up when you want.")
+def down_ask(down: dict, now: float, still_held: bool) -> str:
+    """The swarm stopped itself at a cap and stays down until the owner starts
+    it: what to do first, then why."""
+    msg = (f"Run `swarm up` when you want the swarm back: it stopped itself at "
+           f"{down['pct']:.0f}% {label(down['window'])} usage (your limit "
+           f"{down['at']:g}%), which resets {when(down.get('resets_at'), now)}.")
     if still_held:
-        msg += (" A usage pause still holds new workers until the reset; "
-                "swarm resume --override-cap runs them anyway.")
+        msg += (" A usage pause also holds new workers until then;"
+                " `swarm resume --override-cap` lifts it.")
     return msg
 
 

@@ -134,7 +134,7 @@ def test_the_digest_lists_what_finished_since_the_last_pass_with_its_notes(cfg):
 
 
 def test_the_digest_carries_every_operator_outcome_since_the_last_pass(cfg):
-    """Routine outcomes no longer ping, so the digest is how they reach the owner."""
+    """An outcome with nothing for the owner is not sent: the digest is how it reaches them."""
     from swarm_orchestrator import opqueue
 
     now = time.time()
@@ -151,8 +151,8 @@ def test_the_digest_carries_every_operator_outcome_since_the_last_pass(cfg):
     md = ovdigest.render(data)
 
     assert [o["job"] for o in data["operator"]["finished"]] == ["api-F26", "read-W97"]
-    assert "## Operator jobs finished since" in md and "(2, 1 flagged)" in md
-    assert "- **[needs the owner]** api-F26: NOT rolled; owed: roll api-F18 first" in md
+    assert "## Operator jobs finished since" in md and "(2, 1 asked the owner)" in md
+    assert "- **[asked the owner]** api-F26: NOT rolled; owed: roll api-F18 first" in md
     assert "- read-W97: already done: image on 2026-01-01.1" in md
     assert "old-job" not in md
 
@@ -294,21 +294,24 @@ def test_a_hung_pass_is_killed_at_its_deadline(sup, cfg, tmp_path):
     assert state_mod.read(cfg).overseer_pass is None
 
 
-def test_three_bad_passes_in_a_row_ping_and_a_good_one_resets_the_streak(sup, cfg, tmp_path):
+def test_three_bad_passes_in_a_row_ask_and_a_good_one_resets_the_streak(sup, cfg, tmp_path):
     def hang():
         pid = _start(sup)
         with state_mod.transaction(cfg) as st:
             st.overseer_deadline = time.time() - 1
         sup._overseer_tick()
 
+    ask = "Asks you: Check the overseer window: the Overseer has failed 3 times in a row"
     hang()
     hang()
-    assert "limit and was stopped" not in _tg(tmp_path)
+    assert _tg(tmp_path) == ""
+    assert [(r["class"], "limit and was stopped" in r["text"]) for r in _ledger(cfg)] == [
+        ("logged", True)] * 2
     hang()
-    assert _tg(tmp_path).count("limit and was stopped") == 1
+    assert _tg(tmp_path).count(ask) == 1
     sup._end_overseer_pass(_start(sup), ovrecord.DONE)
     hang()
-    assert _tg(tmp_path).count("limit and was stopped") == 1
+    assert _tg(tmp_path).count("Asks you:") == 1
 
 
 def test_asking_the_owner_stretches_the_deadline_and_answering_resets_it(sup, cfg, monkeypatch, tmp_path):
@@ -317,7 +320,7 @@ def test_asking_the_owner_stretches_the_deadline_and_answering_resets_it(sup, cf
     assert cli_main(["--project-dir", str(cfg.project_dir), "waiting", "overseer",
                      "drop", "the", "look", "campaign?"]) == 0
     assert state_mod.read(cfg).overseer_deadline > time.time() + 6 * 24 * 3600
-    assert "the Overseer is waiting on you — drop the look campaign?" in _tg(tmp_path)
+    assert _tg(tmp_path) == "[project] Asks you: drop the look campaign?\n"
     assert state_mod.read(cfg).waiting == {}  # no FIFO reader here: the poke is lost
     sup._overseer_tick()
     assert sup._overseer_live == pid  # a pass waiting on a person is not hung
@@ -577,8 +580,13 @@ def _passes(swarm) -> list[dict]:
     ] if d.is_dir() else []
 
 
+def _phone(swarm) -> list[str]:
+    return swarm.tg_sink.read_text().splitlines() if swarm.tg_sink.is_file() else []
+
+
 def test_e2e_the_summary_clock_runs_a_pass_that_signs_off(swarm):
     swarm.env["SWARM_OVERSEER"] = "1"
+    swarm.env["FAKE_OVERSEER_SUMMARY"] = "Two phases landed and three are building. Nothing waits on you."
     _toml(swarm, "\n[overseer]\nevery_s = 1\n")
     swarm.up()
     assert swarm.wait(lambda: "ACTION finish" in swarm.log_text(), timeout=60), swarm.log_text()
@@ -596,6 +604,13 @@ def test_e2e_the_summary_clock_runs_a_pass_that_signs_off(swarm):
     assert log.count("ACTION finish") == 1
     out = swarm.cli("overseer").stdout
     assert rec["id"] in out and "[done" in out
+    # The owner's phone: the summary the pass wrote, then the run's last one.
+    name = swarm.project.name
+    assert _phone(swarm) == [
+        f"[{name}] Overseer: Two phases landed and three are building. Nothing waits on you.",
+        f"[{name}] Overseer: The run has finished: 5 phase(s) landed. Nothing waits on you.",
+    ]
+    assert rec["owner_summary"].startswith("Two phases landed")
 
 
 def test_e2e_a_hung_pass_is_killed_and_the_run_still_finishes(swarm):
@@ -607,6 +622,11 @@ def test_e2e_a_hung_pass_is_killed_and_the_run_still_finishes(swarm):
     log = swarm.log_text()
     assert "OVERSEER-TIMEOUT" in log
     assert any(p["status"] == "timeout" for p in _passes(swarm))
+    # The pass never wrote the summary it was started for: the swarm sent its own.
+    assert "SUMMARY-OWN supervisor._summary_owed" in log
+    own, last = _phone(swarm)
+    assert own.startswith(f"[{swarm.project.name}] Overseer: Since ") and "building now" in own
+    assert "The run has finished" in last
     st = swarm.state()
     assert set(st["done"]) >= {"P0", "P1", "P2", "P3", "P4"}
     assert st.get("overseer_pass") is None

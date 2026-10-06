@@ -71,18 +71,6 @@ def session_default(name: str) -> str:
 #: What ``claude --effort`` accepts (CLI 2.1.276). "" means pass nothing.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
-#: ``[operator].notify``: ``attention`` pings only an outcome passed
-#: ``--attention``; ``all`` pings every outcome; ``none`` pings no outcome.
-OPERATOR_NOTIFY = ("attention", "all", "none")
-OPERATOR_NOTIFY_DEFAULT = "attention"
-
-#: ``[telegram].pings``: ``necessary`` sends only what needs the owner (the
-#: rest is logged, and folded into the Overseer's summary); ``all`` sends every
-#: ping the swarm has.
-PINGS = ("necessary", "all")
-PINGS_DEFAULT = "necessary"
-
-
 #: ``[build].pair``: which heavy builds may run side by side (see ``buildpair``).
 BUILD_PAIR_ANY = "any"
 BUILD_PAIR_DISTINCT = "distinct-repo"
@@ -130,17 +118,6 @@ def _usage_rules(raw: object) -> list[dict]:
                              f"got {at!r}")
         out.append({"window": window, "at": at, "action": action})
     return out
-
-
-def _choice(value: object, choices: tuple[str, ...], default: str) -> str:
-    """A valid choice; anything else is ``default``.
-
-    Deliberately not a load error like :func:`_effort`: every ``swarm`` command
-    that pings (``done``, ``operator-done``) loads the config, and a typo in a
-    notification setting must never stop a finish from being recorded.
-    """
-    mode = str(value or "").strip().lower()
-    return mode if mode in choices else default
 
 
 def _effort(value: object) -> str:
@@ -411,27 +388,14 @@ class Config:
     # other bot would put two audiences on one channel.
     telegram_notify: str = _k(
         "telegram", "notify", str(_REPO_NOTIFY), HOT,
-        doc="script that sends the swarm's own Telegram pings",
-        why="the supervisor resolves the notifier per ping, and so does a"
+        doc="script that sends the swarm's Telegram messages",
+        why="the supervisor resolves the sender per message, and so does a"
             " session's own `swarm done`, from the project's file")
     telegram_commands: bool = _k(
         "telegram", "commands", True, RESTART, env="SWARM_TG_COMMANDS",
         doc="answer /usage and /help sent to the swarm bot",
         why="the command listener is started once, by `swarm up`, and stopped by"
             " `swarm down`; there is no later moment a reload could start or stop it")
-    # A held-back ping is still logged to notifications.jsonl, marked `suppressed`.
-    telegram_pings: str = _k(
-        "telegram", "pings", PINGS_DEFAULT, HOT, env="SWARM_TG_PINGS", choices=PINGS,
-        parse=lambda v: _choice(v, PINGS, PINGS_DEFAULT),
-        doc="necessary = only what needs you; all = every ping",
-        why="every ping reads it when it is sent; a worker's own `swarm done` and"
-            " `swarm waiting`, and an operator's `operator-done`, read the"
-            " project's file too")
-    telegram_push_owed_grace_s: int = _k(
-        "telegram", "push_owed_grace_s", 3600, HOT, env="SWARM_PUSH_OWED_GRACE", minimum=0,
-        doc="an owed push pings after this long (s)",
-        why="the supervisor compares each owed push's age against it after every"
-            " integration and on the watchdog tick")
 
     # -- [tmux] -----------------------------------------------------------
     # The swarm's own name, not a generic `swarm`: it is what `tmux ls` shows,
@@ -703,13 +667,6 @@ class Config:
         "operator", "later_wait_s", 10800, HOT, minimum=0,
         doc="seconds a `later` job waits at most; 0 = no cap",
         why="read by the supervisor's queue sweep on every wake")
-    operator_notify: str = _k(
-        "operator", "notify", OPERATOR_NOTIFY_DEFAULT, HOT, env="SWARM_OPERATOR_NOTIFY",
-        choices=OPERATOR_NOTIFY,
-        parse=lambda v: _choice(v, OPERATOR_NOTIFY, OPERATOR_NOTIFY_DEFAULT),
-        doc="which operator outcomes ping you",
-        why="read by the session's own `swarm operator-done` when it runs, from"
-            " the project's file (not its mirror's copy)")
 
     # -- [overseer] -------------------------------------------------------
     overseer_enabled: bool = _k(

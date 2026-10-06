@@ -75,12 +75,13 @@ SATISFIES_DEPS = INTEGRATES | {SKIP, LEDGER}
 CARRIES_ACTION = frozenset({OPERATOR, NEEDS_OWNER})
 
 # PINGS and OWED_PING are deliberately NOT the same set, and must not be merged.
-# PINGS is future tense — "will finishing like this telegram the owner?" — and
-# ``operator`` answers no, because it opens a session instead. OWED_PING is past
+# PINGS is future tense — "does finishing like this say anything to the owner?"
+# (an ask, or a line held for the Overseer's summary; ``launch.done`` decides
+# which) — and ``operator`` answers no, because it opens a session instead. OWED_PING is past
 # tense: "did this outcome, as recorded, owe one?", asked of sentinels already on
 # disk, where older ``needs-owner`` finishes genuinely did. One set would
 # either re-flag those forever as `owner-never-pinged` or erase that history.
-#: Who telegrams the owner NOW.
+#: Whose finish has something to say to the owner NOW.
 PINGS = frozenset({FAIL})
 #: Who owed the owner a telegram THEN, per the status on disk.
 OWED_PING = frozenset({FAIL, NEEDS_OWNER})

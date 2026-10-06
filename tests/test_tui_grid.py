@@ -272,9 +272,9 @@ def test_a_ping_says_sent_held_or_lost_by_its_mark():
 
 
 def test_a_narrow_box_drops_the_kind_column_and_never_wraps():
-    wide = plain(alerts.note_line(note(kind="overseer-digest"), 80, NOW))
-    narrow = plain(alerts.note_line(note(kind="overseer-digest"), 40, NOW))
-    assert "overseer-digest" in wide and "overseer" not in narrow
+    wide = plain(alerts.note_line(note(kind="lane-unprepared"), 80, NOW))
+    narrow = plain(alerts.note_line(note(kind="lane-unprepared"), 40, NOW))
+    assert "lane-unprepared" in wide and "lane" not in narrow
     assert len(wide) <= 80 and len(narrow) <= 40
 
 
@@ -335,7 +335,7 @@ def seeded(tmp_path, monkeypatch):
     (cfg.state_dir / "notifications.jsonl").write_text(
         json.dumps({"ts": NOW - 1900, "kind": "park", "phase": "P2", "delivered": True,
                     "text": "which schema should P2 read?"}) + "\n"
-        + json.dumps({"ts": NOW - 900, "kind": "overseer-digest", "phase": None,
+        + json.dumps({"ts": NOW - 900, "kind": "lane-unprepared", "phase": None,
                       "delivered": False, "suppressed": "routine",
                       "text": "Overseer: nothing needs you."}) + "\n", encoding="utf-8")
     return cfg

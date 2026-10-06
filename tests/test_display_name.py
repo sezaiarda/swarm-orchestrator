@@ -111,16 +111,19 @@ def test_status_and_its_json_carry_the_name(project, capsys):
     assert (config["name"], config["slug"]) == ("New Name", cfg.slug)
 
 
-def test_a_telegram_that_names_the_swarm_uses_the_name(project, tmp_path):
+def test_every_telegram_starts_with_the_swarms_name(project, tmp_path):
     cfg = _load(project, NAMED_BARE)
     cfg.ensure_dirs()
     log = Log(cfg.supervisor_log)
     try:
-        restart_mod.fail(cfg, {"id": "r1", "by": "owner terminal"}, "nothing answered", log)
+        restart_mod.fail(cfg, {"id": "r1", "by": "owner terminal"}, "nothing answered", log,
+                         left=restart_mod.DOWN)
     finally:
         log.close()
     text = _sent(tmp_path)
-    assert "swarm: New Name did not restart" in text
+    assert text.startswith("[New Name] Asks you: Run `swarm up` to start the swarm: the restart"
+                           " owner terminal asked for failed (nothing answered)")
+    assert text.count("New Name") == 1  # in front, once, and nowhere in the words
     assert cfg.slug not in text and FOLDER not in text
 
 
@@ -129,10 +132,26 @@ def test_unnamed_a_telegram_names_the_folder(project, tmp_path):
     cfg.ensure_dirs()
     log = Log(cfg.supervisor_log)
     try:
+        restart_mod.fail(cfg, {"id": "r1", "by": "owner terminal"}, "nothing answered", log,
+                         left=restart_mod.UNSUPERVISED)
+    finally:
+        log.close()
+    assert _sent(tmp_path).startswith(f"[{FOLDER}] Asks you: Run `swarm restart` to bring the"
+                                      " supervisor back")
+
+
+def test_a_restart_that_changed_nothing_asks_nobody(project, tmp_path):
+    cfg = _load(project, BARE)
+    cfg.ensure_dirs()
+    log = Log(cfg.supervisor_log)
+    try:
         restart_mod.fail(cfg, {"id": "r1", "by": "owner terminal"}, "nothing answered", log)
     finally:
         log.close()
-    assert f"swarm: {FOLDER} did not restart" in _sent(tmp_path)
+    assert not (tmp_path / "tg.log").exists()
+    [row] = [json.loads(ln) for ln in
+             (cfg.state_dir / "notifications.jsonl").read_text().splitlines()]
+    assert row["class"] == "folded" and "it runs on as it was" in row["text"]
 
 
 def _board(cfg) -> dict:

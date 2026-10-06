@@ -374,8 +374,9 @@ def _warnings(
 def _ping_warnings(rep: PhaseReport, ping_ledger: bool) -> list[str]:
     """Whether the owner ping this phase's outcome owed actually reached them.
 
-    :func:`launch._completion_ping` telegrams the owner for ``needs-owner`` and
-    ``fail`` and stays silent for ``ok``, so those two statuses owe a ping.
+    A ``fail`` asks the owner or is held for the Overseer's summary, a
+    ``needs-owner`` finish telegrammed them when it was live, and ``ok`` says
+    nothing, so those two statuses owe a row in the log.
     ``notifications.jsonl`` is the only record of whether one landed — a recap
     that says "confirm before GA" and a send that failed look identical from
     every other file.
@@ -388,7 +389,7 @@ def _ping_warnings(rep: PhaseReport, ping_ledger: bool) -> list[str]:
         return []
     sent = [p for p in rep.pings if not p.suppressed]
     if not sent and rep.pings:
-        return []  # held back on purpose by the quiet-pings policy, and logged
+        return []  # held back on purpose (the Overseer's to retry), and logged
     if not rep.pings:
         return [
             f"owner-never-pinged: the sentinel says `{rep.sentinel_status}`, which"

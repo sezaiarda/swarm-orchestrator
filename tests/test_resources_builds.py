@@ -575,8 +575,9 @@ def test_an_idle_holder_ping_goes_through_the_supervisors_notify_path(tmp_path, 
     project = tmp_path / "project"
     project.mkdir()
     sup = Supervisor(load(project_dir=str(project)))
-    sup._resources_ping("idle-build:b1", "swarm: a build has held a build slot for 11 min")
-    assert "held a build slot" in sink.read_text()
+    sup._resources_note("idle-build:b1", "a build has held a build slot for 11 min")
+    assert not sink.exists()  # a report, held for the Overseer's summary: nobody is asked
     rows = [json.loads(line) for line in
             (tmp_path / "state" / "notifications.jsonl").read_text().splitlines()]
-    assert rows[-1]["kind"] == "idle-build"
+    assert (rows[-1]["kind"], rows[-1]["class"]) == ("idle-build", "folded")
+    assert "held a build slot" in rows[-1]["text"]

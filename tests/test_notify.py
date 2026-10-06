@@ -1,19 +1,20 @@
-"""Tests for owner notifications: how a ping is sent, logged, and who sends one.
+"""Tests for the one sender: how a message is sent, held back and logged, and
+what a finishing worker says.
 
 Two failure classes cost the most here, and they pull in opposite directions:
 
 * **the silent drop** — ``notify.sh`` failed on every send and every caller threw
   the exit code away, so a run that never reached the owner looked identical to
-  one that did. Hence the ledger: every attempt, delivered or not, is one JSON
-  line with its error, and ``notify`` never raises into the caller.
-* **the firehose** — a status that pings when it should not trains the owner to
-  ignore the channel. Exactly one worker finish rings the phone now (``fail``),
-  a re-run of ``swarm done`` must not ring it twice, and ``operator`` hands its
-  action to a session instead of a person.
+  one that did. Hence the log: every message, delivered or not, is one JSON
+  line with its error, and a send never raises into the caller.
+* **the firehose** — a message that goes out when it should not trains the owner
+  to ignore the channel. Only an ask and the Overseer's summary reach the phone,
+  each named for its swarm and short enough for a notification; everything
+  else is held back in the log. A session's own words are refused when too
+  long, never cut.
 
 Everything runs against the ``SWARM_TG_SINK`` file or a throwaway ``notify.sh``;
-nothing touches the network. ``SWARM_STATE_DIR`` is always pinned so the ledger
-can never fall through to the real project config.
+nothing touches the network.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from pathlib import Path
 
 import pytest
 
-from swarm_orchestrator import config as config_mod
 from swarm_orchestrator import launch, owner, statuses, telegram
 from swarm_orchestrator.config import load
 
@@ -79,133 +79,232 @@ def script(tmp_path: Path, body: str) -> Path:
 
 
 # -- the send ---------------------------------------------------------------
-def test_sink_send_is_delivered_and_logged(sink, state_dir):
-    ok = telegram.notify(
-        "unused", "swarm: P3 FAILED — tests red", kind="worker-done", phase="P3",
-        source="launch.done",
-    )
-    assert ok is True
-    assert sent(sink) == ["swarm: P3 FAILED — tests red"]
-    [row] = ledger(state_dir)
-    assert row["kind"] == "worker-done" and row["phase"] == "P3"
-    assert row["source"] == "launch.done"
+# -- the two kinds ------------------------------------------------------------
+def test_an_ask_names_the_swarm_once_and_leads_with_asks_you(cfg, sink):
+    result = telegram.ask(cfg, "Approve the price page: the launch waits on it.",
+                          kind="waiting", phase="P3", source="cli.waiting")
+    assert result.delivered is True
+    assert sent(sink) == ["[project] Asks you: Approve the price page: the launch waits on it."]
+    assert sent(sink)[0].count("[project]") == 1
+    [row] = ledger(cfg.state_dir)
+    assert (row["class"], row["kind"], row["phase"], row["source"]) == (
+        "ask", "waiting", "P3", "cli.waiting")
     assert row["delivered"] is True and row["error"] is None
-    assert row["text"] == "swarm: P3 FAILED — tests red"
+    assert row["text"] == sent(sink)[0]
+    assert row["ask"] == "Approve the price page: the launch waits on it."
     assert isinstance(row["ts"], float)
 
 
-def test_a_suppressed_message_is_logged_never_sent_and_never_a_drop(sink, state_dir, tmp_path):
+def test_the_prefix_is_the_swarms_own_name(cfg, sink, monkeypatch):
+    monkeypatch.setattr(cfg, "name", "glasheim")
+    telegram.ask(cfg, "Run `swarm up`.")
+    telegram.summary(cfg, "Two phases landed. Nothing waits on you.")
+    telegram.reply(cfg, "usage: 40%")
+    assert sent(sink) == [
+        "[glasheim] Asks you: Run `swarm up`.",
+        "[glasheim] Overseer: Two phases landed. Nothing waits on you.",
+        "[glasheim] usage: 40%",
+    ]
+    assert [r["class"] for r in ledger(cfg.state_dir)] == ["ask", "summary", "reply"]
+
+
+def test_a_summary_leads_with_overseer_and_is_filed_as_one(cfg, sink):
+    telegram.summary(cfg, "Since 10:00 three phases landed; two are building. Nothing waits on you.")
+    assert sent(sink) == [
+        "[project] Overseer: Since 10:00 three phases landed; two are building."
+        " Nothing waits on you."]
+    [row] = ledger(cfg.state_dir)
+    assert (row["class"], row["kind"], row["delivered"]) == ("summary", "summary", True)
+
+
+@pytest.mark.parametrize("send", [telegram.ask, telegram.summary])
+def test_no_message_the_swarm_starts_is_longer_than_a_notification(cfg, sink, send):
+    """The swarm's own wording is built to fit; one that still runs over is cut
+    rather than lost, and never goes out long."""
+    send(cfg, "word " * 200)
+    [line] = sent(sink)
+    assert len(line) == telegram.PHONE_MAX == 280
+    assert line.endswith("…")
+
+
+def test_the_room_is_what_the_prefix_leaves_of_280(cfg, monkeypatch):
+    assert telegram.room(cfg) == 280 - len("[project] Asks you: ")
+    assert telegram.room(cfg, telegram.SUMMARY_LEAD) == 280 - len("[project] Overseer: ")
+    monkeypatch.setattr(cfg, "name", "a-much-longer-swarm-name")
+    assert telegram.room(cfg) == 280 - len("[a-much-longer-swarm-name] Asks you: ")
+
+
+def test_a_sessions_ask_that_fits_comes_back_on_one_line(cfg):
+    assert telegram.short(cfg, "  which\n schema?  ") == "which schema?"
+    assert telegram.short(cfg, "x" * telegram.room(cfg)) == "x" * telegram.room(cfg)
+
+
+def test_a_sessions_ask_that_is_too_long_is_refused_with_the_limit(cfg):
+    """Never cut: half a recap explains nothing, and the caller can rewrite it."""
+    limit = telegram.room(cfg)
+    with pytest.raises(telegram.TooLong) as err:
+        telegram.short(cfg, "x" * (limit + 1))
+    said = str(err.value)
+    assert f"is {limit + 1} characters and at most {limit} fit" in said
+    assert "Rewrite it, do not cut it" in said and "what you need from them, then why" in said
+
+
+def test_a_summary_that_is_too_long_is_refused_with_its_own_limit(cfg):
+    limit = telegram.room(cfg, telegram.SUMMARY_LEAD)
+    with pytest.raises(telegram.TooLong) as err:
+        telegram.short(cfg, "y" * (limit + 5), telegram.SUMMARY_LEAD)
+    assert f"the summary is {limit + 5} characters and at most {limit} fit" in str(err.value)
+    assert "what landed and what is running" in str(err.value)
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\n"])
+def test_an_empty_ask_is_refused(cfg, empty):
+    with pytest.raises(telegram.TooLong, match="the ask is empty"):
+        telegram.short(cfg, empty)
+
+
+def test_fitted_cuts_only_the_fragment_the_swarm_put_there(cfg):
+    text = telegram.fitted(cfg, "Fix P1 (", "t" * 500, "), then run `swarm retry P1`.")
+    assert len(text) == telegram.room(cfg)
+    assert text.startswith("Fix P1 (ttt") and text.endswith("…), then run `swarm retry P1`.")
+    assert telegram.fitted(cfg, "Fix P1 (", "short", ").") == "Fix P1 (short)."
+
+
+def test_names_lists_a_few_and_counts_the_rest():
+    assert telegram.names(["a", "b"]) == "a, b"
+    assert telegram.names(["a", "b", "c", "d", "e"]) == "a, b, c and 2 more"
+
+
+# -- held back ----------------------------------------------------------------
+def test_a_folded_message_is_logged_never_sent_and_never_a_drop(cfg, sink):
     """Held back on purpose: in the alerts, off the phone, and not read as a failure."""
     from swarm_orchestrator.tui.data import parse_notification
 
-    ok = telegram.notify("unused", "swarm: job done", kind="operator-done", phase="J",
-                         suppressed="routine outcome")
-    assert ok is False and sent(sink) == []
-    [row] = ledger(state_dir)
-    assert row["delivered"] is False and row["error"] is None
-    assert row["suppressed"] == "routine outcome"
+    result = telegram.fold(cfg, "operator job J is done — rolled the api", kind="operator-done",
+                           phase="J", source="cli.operator-done")
+    assert result.delivered is False and sent(sink) == []
+    [row] = ledger(cfg.state_dir)
+    assert row["class"] == "folded" and row["delivered"] is False and row["error"] is None
+    assert row["suppressed"] == telegram.FOLD_REASON
+    assert row["text"] == "operator job J is done — rolled the api"  # no prefix: it went nowhere
     note = parse_notification(json.dumps(row))
-    assert note.suppressed == "routine outcome" and note.dropped is False
+    assert note.suppressed == telegram.FOLD_REASON and note.dropped is False
     assert parse_notification(json.dumps({**row, "suppressed": None})).dropped is True
+    assert telegram.open_drops(ledger(cfg.state_dir), 0.0) == []
 
 
-def test_an_oversized_message_is_clamped_not_rejected(sink, state_dir):
-    """Telegram refuses >4096 chars outright; a refused send is a lost one."""
-    result = telegram.notify_detail("unused", "x" * 10_000)
-    assert result.delivered
-    assert len(result.text) == telegram.MAX_MESSAGE_CHARS
-    assert result.text.endswith("...[truncated]")
-    # the ledger records what actually went out, not what was asked for
-    assert ledger(state_dir)[0]["text"] == result.text
+def test_a_logged_message_keeps_why_it_is_no_news(cfg, sink):
+    telegram.log(cfg, "the worker on P1 moved to its own window", why="the owner was asked",
+                 kind="park", phase="P1")
+    telegram.log(cfg, "nothing special")
+    assert sent(sink) == []
+    first, second = ledger(cfg.state_dir)
+    assert (first["class"], first["suppressed"]) == ("logged", "the owner was asked")
+    assert second["suppressed"] == telegram.LOG_REASON
 
 
-def test_a_message_at_the_limit_is_untouched(sink):
-    text = "y" * telegram.MAX_MESSAGE_CHARS
-    assert telegram.notify_detail("unused", text).text == text
+def test_only_what_was_folded_since_the_last_summary_is_the_next_ones(cfg, sink):
+    telegram.fold(cfg, "old news", kind="push-owed")
+    telegram.summary(cfg, "All quiet. Nothing waits on you.")
+    cut = telegram.last_summary_at(cfg.state_dir)
+    assert cut == ledger(cfg.state_dir)[-1]["ts"]
+    telegram.fold(cfg, "P2 FAILED — tests red", kind="worker-done", phase="P2")
+    telegram.log(cfg, "a park", kind="park", phase="P3")
+    telegram.ask(cfg, "Answer P4.", kind="waiting", phase="P4")
+    assert [r["text"] for r in telegram.folded_since(cfg.state_dir, cut)] == ["P2 FAILED — tests red"]
+    assert telegram.last_summary_at(cfg.state_dir) == cut  # an ask is not a summary
 
 
-def test_an_unwritable_sink_fails_loudly_in_the_ledger(tmp_path, state_dir, monkeypatch):
+def test_recorded_finds_what_was_said_about_a_phase_sent_or_not(cfg, sink):
+    assert not telegram.recorded(cfg.state_dir, ("lane-unprepared",), "P1")
+    telegram.fold(cfg, "P1 cannot land yet", kind="lane-unprepared", phase="P1")
+    assert telegram.recorded(cfg.state_dir, ("lane-unprepared",), "P1")
+    assert not telegram.recorded(cfg.state_dir, ("lane-unprepared",), "P2")
+    assert not telegram.recorded(cfg.state_dir, ("spawn-fail",), "P1")
+
+
+# -- the wire -------------------------------------------------------------------
+def test_an_unwritable_sink_fails_loudly_in_the_log(cfg, tmp_path, monkeypatch):
     blocked = tmp_path / "sink-is-a-dir"
     blocked.mkdir()
     monkeypatch.setenv("SWARM_TG_SINK", str(blocked))
-    result = telegram.notify_detail("unused", "hello", kind="waiting", phase="P1")
+    result = telegram.ask(cfg, "hello", kind="waiting", phase="P1")
     assert result.delivered is False and result.error
-    [row] = ledger(state_dir)
+    [row] = ledger(cfg.state_dir)
     assert row["delivered"] is False and row["error"] == result.error
+    assert telegram.open_drops(ledger(cfg.state_dir), 0.0) == [row]
 
 
-def test_script_success(tmp_path, state_dir, monkeypatch):
+def test_script_success(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
     out = tmp_path / "got.txt"
-    sh = script(tmp_path, f'printf "%s" "$1" > {out}\n')
-    assert telegram.notify(str(sh), "ping") is True
-    assert out.read_text() == "ping"
-    assert ledger(state_dir)[0]["delivered"] is True
+    monkeypatch.setattr(cfg, "telegram_notify", str(script(tmp_path, f'printf "%s" "$1" > {out}\n')))
+    assert telegram.ask(cfg, "ping").delivered is True
+    assert out.read_text() == "[project] Asks you: ping"
+    assert ledger(cfg.state_dir)[0]["delivered"] is True
 
 
-def test_script_failure_keeps_the_api_error(tmp_path, state_dir, monkeypatch):
+def test_script_failure_keeps_the_api_error(cfg, tmp_path, monkeypatch):
     """The redacted API error used to be captured and discarded."""
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
     sh = script(tmp_path, 'echo "400 can\'t parse entities" >&2\nexit 1\n')
-    result = telegram.notify_detail(str(sh), "ping")
+    monkeypatch.setattr(cfg, "telegram_notify", str(sh))
+    result = telegram.ask(cfg, "ping")
     assert result.delivered is False
     assert result.error == "400 can't parse entities"
-    assert ledger(state_dir)[0]["error"] == "400 can't parse entities"
+    assert ledger(cfg.state_dir)[0]["error"] == "400 can't parse entities"
 
 
 @pytest.mark.parametrize(
     ("body", "error"),
     [("echo from-stdout\nexit 2\n", "from-stdout"), ("exit 3\n", "exit 3")],
 )
-def test_script_failure_with_no_stderr_still_says_something(tmp_path, state_dir, monkeypatch,
+def test_script_failure_with_no_stderr_still_says_something(cfg, tmp_path, monkeypatch,
                                                             body, error):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    assert telegram.notify_detail(str(script(tmp_path, body)), "ping").error == error
+    monkeypatch.setattr(cfg, "telegram_notify", str(script(tmp_path, body)))
+    assert telegram.ask(cfg, "ping").error == error
 
 
-def test_a_missing_script_never_raises(tmp_path, state_dir, monkeypatch):
+def test_a_missing_script_never_raises(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    result = telegram.notify_detail(str(tmp_path / "nope.sh"), "ping")
+    monkeypatch.setattr(cfg, "telegram_notify", str(tmp_path / "nope.sh"))
+    result = telegram.summary(cfg, "ping")
     assert result.delivered is False and result.error
-    assert ledger(state_dir)[0]["delivered"] is False
+    assert ledger(cfg.state_dir)[0]["delivered"] is False
 
 
-def test_a_long_script_error_is_capped(tmp_path, state_dir, monkeypatch):
+def test_a_long_script_error_is_capped(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_TG_SINK", raising=False)
-    sh = script(tmp_path, 'printf "%0600d" 0 >&2\nexit 1\n')
-    assert len(telegram.notify_detail(str(sh), "ping").error) == 400
+    monkeypatch.setattr(cfg, "telegram_notify",
+                        str(script(tmp_path, 'printf "%0600d" 0 >&2\nexit 1\n')))
+    assert len(telegram.ask(cfg, "ping").error) == 400
 
 
-# -- the ledger -------------------------------------------------------------
-def test_an_explicit_state_dir_beats_the_environment(tmp_path, sink, state_dir):
-    mine = tmp_path / "other-state"
-    telegram.notify("unused", "hi", state_dir=mine)
-    assert ledger(mine) and not ledger(state_dir)
-
-
-def test_with_nowhere_to_log_the_send_still_goes_out(sink, monkeypatch):
-    monkeypatch.delenv("SWARM_STATE_DIR", raising=False)
-
-    def no_project(*_a, **_kw):
-        raise ValueError("no project here")
-
-    monkeypatch.setattr(config_mod, "load", no_project)
-    assert telegram.notify("unused", "orphan ping") is True
-    assert sent(sink) == ["orphan ping"]
-
-
-def test_an_unwritable_ledger_never_fails_the_send(tmp_path, sink):
+def test_an_unwritable_log_never_fails_the_send(cfg, tmp_path, sink, monkeypatch):
     not_a_dir = tmp_path / "file"
     not_a_dir.write_text("x")
-    assert telegram.notify("unused", "hi", state_dir=not_a_dir) is True
-    assert sent(sink) == ["hi"]
+    monkeypatch.setattr(cfg, "state_dir", not_a_dir)
+    assert telegram.ask(cfg, "hi").delivered is True
+    assert sent(sink) == ["[project] Asks you: hi"]
 
 
-def test_every_send_appends_one_whole_line(sink, state_dir):
+def test_every_message_is_one_whole_line_of_the_log(cfg, sink):
     for i in range(5):
-        telegram.notify("unused", f"line {i}\nwith a newline", kind="other")
-    rows = ledger(state_dir)
-    assert [r["text"] for r in rows] == [f"line {i}\nwith a newline" for i in range(5)]
+        telegram.ask(cfg, f"line {i}\nwith a newline", kind="other")
+    assert [r["ask"] for r in ledger(cfg.state_dir)] == [f"line {i} with a newline" for i in range(5)]
+    assert len(sent(sink)) == 5  # one line each on the phone too
+
+
+def test_a_reply_keeps_its_lines_and_is_as_long_as_its_answer(cfg, sink):
+    """An answer to a command the owner typed is not a message the swarm starts."""
+    answer = "weekly 48%\n5-hour 11%\n" + "detail " * 100
+    assert telegram.reply(cfg, answer, source="tgbot").delivered
+    assert sink.read_text(encoding="utf-8") == "[project] " + answer + "\n"
+    [row] = ledger(cfg.state_dir)
+    assert (row["class"], row["kind"]) == ("reply", "bot-reply")
+    telegram.reply(cfg, "z" * 10_000)
+    assert len(ledger(cfg.state_dir)[-1]["text"]) == telegram.MAX_REPLY_CHARS
 
 
 # -- check ------------------------------------------------------------------
@@ -245,30 +344,23 @@ def test_check_rejects_a_script_it_cannot_run(tmp_path, monkeypatch):
     assert not ok and "not executable" in detail
 
 
-# -- who pings: the completion ping -----------------------------------------
-@pytest.mark.parametrize("status", statuses.ALL)
-def test_only_pinging_statuses_have_a_completion_ping(status):
-    ping = launch._completion_ping("P1", status, "a recap")
-    assert (ping is not None) == (status in statuses.PINGS)
-
-
-def test_the_fail_ping_carries_the_collapsed_recap():
-    assert launch._completion_ping("P1", "fail", "  build\n  broke ") == (
-        "swarm: P1 FAILED — build broke. The phases that depend on it wait; once the cause is fixed, `swarm retry P1` puts it back in play."
-    )
-    assert launch._completion_ping("P1", "fail", "   ") == "swarm: P1 FAILED. The phases that depend on it wait; once the cause is fixed, `swarm retry P1` puts it back in play."
+# -- a finishing worker -------------------------------------------------------
+def test_the_log_keeps_a_failure_with_its_collapsed_recap():
+    assert launch._fail_note("P1", "  build\n  broke ") == (
+        "P1 FAILED — build broke. The phases that depend on it wait.")
+    assert launch._fail_note("P1", "   ") == "P1 FAILED. The phases that depend on it wait."
 
 
 @pytest.mark.parametrize(
     ("status", "why"),
     [("ok", "is a silent success"), ("operator", "hands off to a session")],
 )
-def test_non_pinging_finishes_say_why_they_stayed_silent(status, why):
+def test_finishes_that_say_nothing_say_why(status, why):
     plan, detail = launch._ping_decision("P1", status, "did it", None, "written", False)
     assert plan == "skipped" and why in detail
 
 
-def test_a_failure_always_pings_however_thin_the_note():
+def test_a_failure_always_speaks_however_thin_the_note():
     """Silence here would turn a bad recap into an invisible dead run."""
     assert launch._ping_decision("P1", "fail", "x", None, "written", False) == ("send", "")
 
@@ -283,7 +375,7 @@ def test_a_refused_thinner_failure_is_deduped():
     assert plan == "deduped"
 
 
-def test_force_always_pings():
+def test_force_always_speaks():
     assert launch._ping_decision("P1", "fail", "same", "same", "written", True)[0] == "send"
 
 
@@ -295,14 +387,28 @@ def test_only_operator_routes_and_only_with_a_real_brief():
     assert launch._route_decision("P1", "operator", rich) == ("dispatch", "")
 
 
-# -- who pings: `swarm done` / `swarm waiting` end to end -------------------
-def test_done_fail_pings_once_and_logs_the_ping(cfg, sink):
-    result = launch.done(cfg, "P1", "fail", "cargo test red on the parser")
+# -- `swarm done` / `swarm waiting` end to end --------------------------------
+def test_a_fail_nothing_will_retry_asks_once_in_the_swarms_own_words(cfg, sink):
+    """This cfg has no Overseer (the suite's default), so nothing retries it."""
+    result = launch.done(cfg, "P1", "fail", "cargo test red on the parser " * 20)
     assert result.ping == "sent"
-    assert sent(sink) == ["swarm: P1 FAILED — cargo test red on the parser. The phases that depend on it wait; once the cause is fixed, `swarm retry P1` puts it back in play."]
+    assert sent(sink) == [
+        "[project] Asks you: Fix what stopped P1, then run `swarm retry P1`: it failed; with"
+        " the Overseer off nothing retries it. `swarm report` has its recap."]
     [row] = ledger(cfg.state_dir)
-    assert (row["kind"], row["phase"], row["source"]) == ("worker-done", "P1", "launch.done")
-    assert "owner telegrammed" in result.render()
+    assert (row["class"], row["kind"], row["phase"], row["source"]) == (
+        "ask", "worker-done", "P1", "launch.done")
+    # The recap is never cut into the ask; it is kept whole beside it.
+    assert row["detail"] == ("cargo test red on the parser " * 20).strip()
+    assert "owner asked on telegram" in result.render()
+
+
+def test_the_fail_ask_says_what_waits_on_the_phase_and_names_it(cfg, sink):
+    ledger_file = cfg.project_dir / cfg.ledger
+    ledger_file.write_text("P0\nP1 needs:P0\nP2 needs:P1\nP3 needs:P2\n", encoding="utf-8")
+    launch.done(cfg, "P1", "fail", "boom")
+    assert "it failed, and 2 phases wait on it;" in sent(sink)[0]
+    assert len(sent(sink)[0]) <= telegram.PHONE_MAX
 
 
 def test_done_fail_run_twice_rings_the_phone_once(cfg, sink):
@@ -320,7 +426,7 @@ def test_done_ok_is_silent(cfg, sink):
     assert sent(sink) == [] and ledger(cfg.state_dir) == []
 
 
-def test_done_operator_hands_off_instead_of_pinging(cfg, sink, monkeypatch):
+def test_done_operator_hands_off_instead_of_asking(cfg, sink, monkeypatch):
     from swarm_orchestrator import opqueue
 
     cfg.operator_enabled = True
@@ -334,22 +440,23 @@ def test_done_operator_hands_off_instead_of_pinging(cfg, sink, monkeypatch):
     assert spawned == ["P1"]
 
 
-def test_the_retired_spelling_pings_nobody(cfg, sink, monkeypatch):
-    """`needs-owner` OWED a ping when it was live; today it is `operator`."""
+def test_a_follow_up_with_the_operator_off_asks_and_keeps_the_recap(cfg, sink, monkeypatch):
+    """`needs-owner` OWED a ping when it was live; today it is `operator`. With
+    the operator off (this cfg's default) only the owner will do it: an ask in
+    the swarm's own words, the recap whole beside it for `swarm todo`."""
     monkeypatch.setattr(launch, "_detach_triage", lambda c, p: True)
     assert statuses.NEEDS_OWNER in statuses.OWED_PING
     result = launch.done(cfg, "P1", "needs-owner", "check the auth change")
     assert result.status == "operator" and result.ping == "skipped"
-    # The completion ping stays silent. What reaches the phone with the operator
-    # off (this cfg's default) is the hand-off itself, as a to-do — never silence.
     assert result.route == "owner"
     assert sent(sink) == [
-        "swarm: a to-do for you from P1 (the operator is switched off, so nobody else will do it):"
-        " check the auth change"
-    ]
+        "[project] Asks you: Do the follow-up that P1 left behind: the operator is switched"
+        " off, so nobody else will. `swarm todo` shows what is left to do."]
+    [row] = ledger(cfg.state_dir)
+    assert (row["kind"], row["detail"]) == ("operator-todo", "check the auth change")
 
 
-def test_a_dropped_fail_ping_is_reported_by_done(cfg, tmp_path, monkeypatch):
+def test_a_dropped_fail_ask_is_reported_by_done(cfg, tmp_path, monkeypatch):
     blocked = tmp_path / "sink-dir"
     blocked.mkdir()
     monkeypatch.setenv("SWARM_TG_SINK", str(blocked))
@@ -359,35 +466,55 @@ def test_a_dropped_fail_ping_is_reported_by_done(cfg, tmp_path, monkeypatch):
     assert ledger(cfg.state_dir)[0]["delivered"] is False
 
 
-def test_waiting_pings_the_question_under_its_own_kind(cfg, sink):
-    owner.waiting(cfg, "P1", "  which\n schema? ")
-    cost, head = sent(sink)[:2]
-    assert head == "swarm: the worker on P1 is waiting on you — which schema?"
-    # The first line says what waiting costs (unit-tested in test_owner_history).
-    assert "a worker place is tied up · asked " in cost
+def test_waiting_sends_the_sessions_ask_as_written(cfg, sink):
+    owner.waiting(cfg, "P1", "  Pick the schema\n for orders: the migration waits on it. ")
+    assert sent(sink) == [
+        "[project] Asks you: Pick the schema for orders: the migration waits on it."]
     [row] = ledger(cfg.state_dir)
-    assert (row["kind"], row["phase"], row["source"]) == ("waiting", "P1", "cli.waiting")
+    assert (row["class"], row["kind"], row["phase"], row["source"]) == (
+        "ask", "waiting", "P1", "cli.waiting")
+
+
+def test_waiting_with_an_ask_too_long_records_nothing_and_tells_nobody(cfg, sink, monkeypatch):
+    from swarm_orchestrator import state as state_mod
+
+    poked = []
+    monkeypatch.setattr(launch, "_poke_fifo", lambda c, line: poked.append(line) or True)
+    with pytest.raises(telegram.TooLong):
+        owner.waiting(cfg, "P1", "which schema? " * 40)
+    assert sent(sink) == [] and ledger(cfg.state_dir) == [] and poked == []
+    assert state_mod.read(cfg).waiting == {}
 
 
 def test_call_site_kinds_are_declared():
     """The dashboard renders from KINDS; a kind nobody declared is a blank label."""
-    for kind in ("worker-done", "waiting", "owner-row", "operator-abandoned",
-                 "integrate-hold", "worktree-fail", "spawn-fail", "other"):
-        assert kind in telegram.KINDS
+    import re
+    import swarm_orchestrator
+
+    src = Path(swarm_orchestrator.__file__).parent
+    used = set()
+    for name in ("supervisor", "launch", "owner", "opqueue", "pushowed", "landing", "master",
+                 "restart", "blockedping", "cli", "telegram"):
+        text = (src / f"{name}.py").read_text(encoding="utf-8")
+        used |= set(re.findall(r'(?:\bkind=|said = \{"kind": )"([a-z-]+)"', text))
+    assert {"waiting", "session-ask", "summary", "finish", "worker-done"} <= used
+    assert used <= set(telegram.KINDS), used - set(telegram.KINDS)
 
 
-def test_the_finish_ping_is_filed_as_finish(swarm):
+def test_the_run_ends_with_one_last_summary(swarm):
     swarm.env["FAKE_WORKER_SLEEP"] = "2"  # a full run, as test_lifecycle drives it
     swarm.up()
     assert swarm.wait(lambda: "ACTION finish" in swarm.log_text(), timeout=40), swarm.log_text()
     rows = ledger(swarm.state_dir)
-    finish = [r for r in rows if str(r.get("text", "")).startswith("swarm finished")]
-    assert len(finish) == 1, rows
-    assert finish[0]["delivered"] is True
-    assert finish[0]["kind"] == "finish"
+    [finish] = [r for r in rows if r.get("kind") == "finish"]
+    assert finish["delivered"] is True and finish["class"] == "summary"
+    name = swarm.project.name
+    assert finish["text"] == (f"[{name}] Overseer: The run has finished: 5 phase(s) landed."
+                              " Nothing waits on you.")
+    assert [r for r in rows if r.get("delivered")] == [finish]  # and nothing else was sent
 
 
-def test_a_resolver_messaging_the_owner_tells_the_supervisor_it_gave_up(
+def test_a_resolver_asking_the_owner_tells_the_supervisor_it_gave_up(
     sink: Path, tmp_path: Path, monkeypatch
 ):
     from swarm_orchestrator import cli
@@ -398,15 +525,27 @@ def test_a_resolver_messaging_the_owner_tells_the_supervisor_it_gave_up(
     poked: list[str] = []
     monkeypatch.setattr(launch, "_poke_fifo", lambda cfg, line: poked.append(line) or True)
     monkeypatch.setenv("SWARM_SESSION_ID", "resolver:P1")
-    assert cli.cmd_notify(cfg, "cannot merge the ledger rows of P1") == 0
+    assert cli.cmd_notify(cfg, "Merge P1's ledger rows by hand: I cannot tell which wins.") == 0
     assert poked == ["resolver-escalated P1\n"]
+    assert sent(sink) == [
+        "[proj] Asks you: Merge P1's ledger rows by hand: I cannot tell which wins."]
     monkeypatch.setenv("SWARM_SESSION_ID", "overseer:x")
     cli.cmd_notify(cfg, "hello")
     assert poked == ["resolver-escalated P1\n"]
 
 
-# -- a burst of `blocked` finishes is one ping -----------------------------------
-def test_blocked_phases_of_one_burst_are_one_ping_grouped_by_reason(cfg, sink):
+def test_notify_refuses_an_ask_too_long_and_says_the_limit(cfg, sink, capsys):
+    from swarm_orchestrator import cli
+
+    assert cli.cmd_notify(cfg, "the build broke because " * 30) == 2
+    err = capsys.readouterr().err
+    assert "nothing was sent" in err and f"at most {telegram.room(cfg)} fit" in err
+    assert "Rewrite it, do not cut it" in err
+    assert sent(sink) == [] and ledger(cfg.state_dir) == []
+
+
+# -- a burst of `blocked` finishes is one ask -----------------------------------
+def test_blocked_phases_of_one_burst_are_one_ask_that_names_them(cfg, sink):
     from swarm_orchestrator import blockedping
     from swarm_orchestrator.logutil import Log
 
@@ -416,7 +555,8 @@ def test_blocked_phases_of_one_burst_are_one_ping_grouped_by_reason(cfg, sink):
         assert result.ping == "held"
     launch.done(cfg, "P4", "blocked", "the vendor API is down")
     assert sent(sink) == []
-    assert [r["suppressed"] for r in ledger(cfg.state_dir)] == [blockedping.HELD] * 4
+    assert [(r["class"], r["suppressed"]) for r in ledger(cfg.state_dir)] == [
+        ("logged", blockedping.HELD)] * 4
 
     log = Log(cfg.supervisor_log)
     start = blockedping.deadline(cfg) - blockedping.GATHER_S
@@ -424,17 +564,25 @@ def test_blocked_phases_of_one_burst_are_one_ping_grouped_by_reason(cfg, sink):
     assert blockedping.flush(cfg, log, start + blockedping.GATHER_S)
     assert not blockedping.flush(cfg, log, start + 2 * blockedping.GATHER_S)  # nothing left
     log.close()
-    assert "\n".join(sent(sink)) == (
-        "swarm: 4 phases are blocked and need you, on something outside their own work:\n"
-        "- The live box refuses this host's ssh key. (P1, P2, P3)\n"
-        "- the vendor API is down (P4)\n"
-        "Once the cause is fixed, `swarm retry <phase>` puts each one back in play."
-    )
+    assert sent(sink) == [
+        "[project] Asks you: Clear what blocks 4 phases (P1, P2, P3 and 1 more), then `swarm"
+        " retry` each: they stopped on something outside their own work that the swarm"
+        " cannot fix. `swarm report` has their recaps."]
+    # The reasons, each once, are kept beside the ask.
+    assert ledger(cfg.state_dir)[-1]["detail"] == (
+        "The live box refuses this host's ssh key. (P1, P2, P3); the vendor API is down (P4)")
     assert blockedping.deadline(cfg) is None
 
 
-def test_every_blocked_phase_pings_under_all_pings(cfg, sink, monkeypatch):
-    monkeypatch.setattr(cfg, "telegram_pings", telegram.ALL)
+def test_one_blocked_phase_is_asked_about_by_name(cfg, sink):
+    from swarm_orchestrator import blockedping
+    from swarm_orchestrator.logutil import Log
+
     launch.done(cfg, "P1", "blocked", "the box refuses the key")
-    launch.done(cfg, "P2", "blocked", "the box refuses the key")
-    assert len(sent(sink)) == 2
+    log = Log(cfg.supervisor_log)
+    assert blockedping.flush(cfg, log, blockedping.deadline(cfg))
+    log.close()
+    assert sent(sink) == [
+        "[project] Asks you: Clear what blocks P1, then run `swarm retry P1`: it stopped on"
+        " something outside its own work that the swarm cannot fix. `swarm report` has"
+        " its recap."]

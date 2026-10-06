@@ -12,17 +12,21 @@ Do all of this in this pane, then stop:
 ## 1. Telegram preflight
 Run `swarm doctor` and read its `telegram.config` line: it checks the configured
 `[telegram] notify` script and that script's **own** credentials. Do not look anywhere else for them. If you ever need to message the owner,
-the one door is `swarm notify "<text>"`; never a `notify.sh` or any other
-sender. Write it in plain English about the system (what is stuck,
-what it means for the run, what the owner must do), with no code detail.
+the one door is `swarm notify "<ask>"`; never a `notify.sh` or any other
+sender. It sends an ask to their phone (`[<swarm>] Asks you: <your words>`), read
+in a notification: one or two short plain sentences, first what the owner must
+do, then why, with no code detail. The command refuses one that is too long and
+tells you the limit; rewrite it shorter.
 If anything is missing, do NOT ask the owner — proceed in degraded mode (the
-swarm still runs; telegram pings are best-effort no-ops) and just note it in this
+swarm still runs; telegram messages are best-effort no-ops) and just note it in this
 pane. Never block the swarm on telegram setup.
 
 ## 2. Check the plan
 Run `swarm context`. If `ledger_issues` is non-empty (a dependency cycle /
 self-dep / unknown dep among phases that have **not** landed — every entry is a
-real stall), tell the owner with `swarm notify "<the issues>"`. Do not paper over
+real stall), ask the owner with `swarm notify "<what to fix in the ledger, and that
+the phases behind it cannot start>"`; the issues themselves are in `swarm context`
+and `swarm doctor` for when they look. Do not paper over
 it and do not stop the run for it: an issue strands the phases behind it, never
 the ones that are ready. Launching is not yours — `ready`/`launchable` are what
 the supervisor will start once you idle.
@@ -42,8 +46,8 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   phase (integrates **exactly** like `ok`; the recap becomes the whole brief of an
   operator session that carries the action out, so it must name the action, the
   target and how to check it — and it is never a question: questions go through
-  `swarm waiting`); `fail` = could not complete (rolls the phase back and
-  telegrams the owner). The recap is one line — for `ok` it may be omitted. This
+  `swarm waiting`); `fail` = could not complete (rolls the phase back; the
+  Overseer retries it once, and the owner is asked if it fails again). The recap is one line — for `ok` it may be omitted. This
   generalizes the plain `swarm done "$SWARM_PHASE" ok`: the self-classified form
   is the contract the worker follows. If a plain completion
   hook, or the retired `needs-owner` status, is present, upgrade it to this form.
@@ -63,17 +67,23 @@ yourself. Both edits are guarded by `when $SWARM_PHASE is set` so a manual
   matters or suspects the owner would not want what it is about to do**; small,
   cheap-to-change calls stay the worker's to decide and note — and for the owner's
   calls it must NOT guess: it runs
-  `swarm waiting "$SWARM_PHASE" "<the question>"` *before* it opens the
-  AskUserQuestion, and `swarm resumed "$SWARM_PHASE" "<the answer in one line>"`
+  `swarm waiting "$SWARM_PHASE" "<what it needs from the owner, then why>"`
+  *before* it opens the AskUserQuestion — that text is what the owner's phone
+  shows, so it is one or two short plain sentences naming the decision and what
+  waits on it, with the options left for the AskUserQuestion; one that is too
+  long is refused with the limit, and the worker rewrites it shorter — and `swarm resumed "$SWARM_PHASE" "<the answer in one line>"`
   *immediately after* the answer returns (the answer is recorded in the history).
   It never waits on a deploy/roll, post-build verification, another repo's gate or
   an overnight measurement — that is an `operator` finish with an actionable brief.
   If the file already says this, leave it.
 - **Messaging the owner**: when `SWARM_PHASE` is set, the worker messages the
-  owner only through `swarm notify "<text>"` (the swarm's own bot) — never a
+  owner only through `swarm notify "<ask>"` (the swarm's own bot) — never a
   `notify.sh` or any other sender, even when the ledger
-  row, a brief or a project document names one. Questions still go through
-  `swarm waiting`.
+  row, a brief or a project document names one. It is an ask, for when the
+  phase is stopped on something only the owner can do: one or two short plain
+  sentences, first what they must do, then why, in the owner's words (no ids,
+  paths or code). News and progress are not sent; they go in the recap.
+  Questions still go through `swarm waiting`.
 - **Processes die with the session**: when `SWARM_PHASE` is set, every process
   the worker starts — detached ones (`setsid`, `nohup`, `&`) included — is ended
   when it runs `swarm done`. Only when something must outlive the session (a page

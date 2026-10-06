@@ -512,7 +512,7 @@ def _standing_supervisor(cfg, monkeypatch, since: float) -> Supervisor:
         "operator_enabled": True, "overseer_enabled": True, "overseer_every_s": 1800,
         "overseer_owner_wait_s": 900, "overseer_min_gap_s": 600, "gc_auto": True,
         "gc_every_s": 3600, "gc_idle_s": 0, "backup_every_s": 3600, "watchdog_s": 300,
-        "park_after": 120, "big_picture_every": 5, "telegram_pings": "necessary",
+        "park_after": 120, "big_picture_every": 5,
     }.items():
         monkeypatch.setattr(cfg, key, value)
     _frozen_run(cfg, t0, since)

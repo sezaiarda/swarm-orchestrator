@@ -50,7 +50,7 @@ def drop(cfg, ts: float, error: str = "swarm notify FAILED:") -> None:
 
 
 def delivered(cfg) -> None:
-    telegram.notify(cfg.telegram_notify, "fine", state_dir=cfg.state_dir)  # the sink
+    telegram.ask(cfg, "fine")  # the sink
 
 
 def footer(cfg) -> str:

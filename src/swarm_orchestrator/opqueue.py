@@ -184,9 +184,11 @@ class Item:
     answer: str = ""
     #: The session's one-line account of what it did, from ``operator-done``.
     outcome: str = ""
-    #: The session flagged the outcome for the owner (``operator-done --attention``):
-    #: they must act, something the brief asked for is still owed, or a check failed.
+    #: The outcome leaves something only the owner can do (``operator-done
+    #: --ask``): they must act, something the brief asked for is still owed, or a
+    #: check failed. ``ask`` is what their phone showed.
     attention: bool = False
+    ask: str = ""
     done_at: float = 0.0
     #: The job's own workspace mirror under worktree isolation ("" = project dir).
     mirror: str = ""
@@ -682,7 +684,7 @@ def expire(cfg: Config, phase: str, now: float | None = None) -> Item | None:
 
 
 def complete(
-    cfg: Config, phase: str, outcome: str = "", attention: bool = False
+    cfg: Config, phase: str, outcome: str = "", ask: str = ""
 ) -> Item | None:
     """Mark ``phase``'s hand-off carried out, with the session's own account."""
     with _locked(cfg):
@@ -692,7 +694,8 @@ def complete(
         item.state = DONE
         _let_go(item)
         item.outcome = " ".join((outcome or "").split())
-        item.attention = bool(attention)
+        item.ask = " ".join((ask or "").split())
+        item.attention = bool(item.ask)
         item.done_at = time.time()
         _write(cfg, item)
     return item
@@ -841,22 +844,22 @@ def _abandon(cfg: Config, item: Item, reason: str) -> Item:
 
 
 def _tell_abandoned(cfg: Config, item: Item) -> None:
-    """The one telegram that goes with an abandon.
+    """The one ask that goes with an abandon: the job is the owner's now.
 
     Sent on the transition only, so the owner hears about a given hand-off
     exactly once however many times something asks the queue to give up on it,
-    and outside the lock, so a slow send never holds up the queue.
+    and outside the lock, so a slow send never holds up the queue. The brief
+    itself stays on the job; ``swarm todo`` shows it.
     """
-    tail = f": {item.note}" if item.note else ""
-    telegram.notify(
-        cfg.telegram_notify,
-        f"swarm: {item.phase} operator hand-off ABANDONED: the operator gave up on"
-        f" this follow-up job after {item.attempts} attempt(s), so it is not done"
-        f"{tail}. Do it yourself, or run `swarm operator {item.phase}` to try again.",
+    telegram.ask(
+        cfg,
+        f"Do the follow-up job {item.phase} yourself, or run `swarm operator"
+        f" {item.phase}` to try it again: the operator gave up on it after"
+        f" {item.attempts} attempt(s), so it is not done. `swarm todo` shows the job.",
         kind="operator-abandoned",
         phase=item.phase,
         source="opqueue.abandon",
-        state_dir=cfg.state_dir,
+        detail=item.note,
     )
 
 

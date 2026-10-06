@@ -61,7 +61,7 @@ from . import todo as todo_mod
 from . import usage as usage_mod
 from .resources import view as resources_view
 from .web import lifecycle as web_lifecycle
-from .config import Config, load, session_project
+from .config import Config, WrongSwarm, load, session_project
 from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
@@ -376,12 +376,15 @@ def cmd_up(cfg: Config, attach: bool = True) -> int:
         print(f"kept across the restart, still waiting on you: {', '.join(carried)}")
     # In a scope of its own where one can be made, so that freezing the
     # terminal or the session `up` was typed in never freezes the supervisor.
-    argv = freezer.scoped([sys.executable, "-m", "swarm_orchestrator", "_supervise"])
+    # `swarm up` typed in the owner console, or in any session: the supervisor
+    # is the swarm's own, and carries none of what marks that session. Its state
+    # dir is named, so it can only ever be this project's.
+    env = {**restart_mod.clean_env(cfg), "SWARM_STATE_DIR": str(cfg.state_dir)}
+    argv = freezer.scoped([sys.executable, "-m", "swarm_orchestrator", "_supervise"], env)
     proc = subprocess.Popen(
         argv,
         cwd=str(cfg.project_dir),
-        # `swarm up` typed in the owner console: the supervisor is the swarm's own.
-        env={k: v for k, v in os.environ.items() if k != console_mod.CONSOLE_ENV},
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -3435,17 +3438,26 @@ def _load_config(explicit: str | None, project_dir: str | None) -> Config:
     main has taken since).
 
     The project's file is the owner's live one and may be mid-edit. When it
-    does not load, the command says so and falls back to the cwd rather than
-    fail a worker's ``swarm done`` over a file the worker does not own.
+    does not load, the command says so and runs on the settings the supervisor
+    last recorded rather than fail a worker's ``swarm done`` over a file the
+    worker does not own. Never on the cwd's file: that is another folder's, and
+    the run state is this project's.
     """
     project = None if project_dir else session_project()
-    if project is not None:
-        try:
-            return load(explicit=explicit, project_dir=str(project))
-        except (ValueError, OSError) as exc:
-            print(f"swarm: the config of {project} does not load ({exc});"
-                  " reading the current directory's instead", file=sys.stderr)
-    return load(explicit=explicit, project_dir=project_dir)
+    if project is None:
+        return load(explicit=explicit, project_dir=project_dir)
+    try:
+        return load(explicit=explicit, project_dir=str(project))
+    except WrongSwarm:
+        raise
+    except (ValueError, OSError) as exc:
+        named = os.environ.get("SWARM_STATE_DIR")
+        last = reload_mod.recorded_cfg(Path(named).expanduser()) if named else None
+        if last is None or last.project_dir.resolve() != project:
+            raise
+        print(f"swarm: the config of {project} does not load ({exc}); using the"
+              " settings the swarm is running on instead", file=sys.stderr)
+        return last
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3464,6 +3476,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
     try:
         cfg = _load_config(args.config, args.project_dir)
+    except WrongSwarm as exc:
+        print(f"swarm: {exc}", file=sys.stderr)
+        return 2
     except (ValueError, OSError) as exc:
         # A broken .swarm.toml must not brick `down`/`status` — the commands you
         # reach for precisely when the config is what you just broke.

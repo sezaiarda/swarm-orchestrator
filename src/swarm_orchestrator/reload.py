@@ -60,14 +60,13 @@ so those fields are reported explicitly as :data:`ENV` naming the variable.
 from __future__ import annotations
 
 import dataclasses
-import json
 import os
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .config import HOT, NEXT, RESTART, SETTINGS, Config, Setting, session_default
+from .config import HOT, NEXT, RESTART, SETTINGS, Config, Setting, recorded, session_default
 from .state import State
 
 # Not a policy class — an *outcome*: the file changed (or could) but a SWARM_*
@@ -490,10 +489,17 @@ def snapshot_cfg(cfg: Config) -> Config | None:
     old values at all. A supervisor that takes a run over (``swarm restart``)
     reads it for the same reason: what the last one ran on is its "before".
     """
-    path = cfg.state_dir / "config.json"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    return recorded_cfg(cfg.state_dir)
+
+
+def recorded_cfg(state_dir: Path) -> Config | None:
+    """:func:`snapshot_cfg` for the run in ``state_dir``, whichever project and
+    environment asks: the config its last supervisor recorded, bound to that
+    state dir. None when no supervisor ever started there, or the record does
+    not read as a config."""
+    raw = recorded(state_dir)
+    project = raw.get("project_dir")
+    if not isinstance(project, str) or not project:
         return None
     kwargs = {}
     for f in dataclasses.fields(Config):
@@ -507,14 +513,16 @@ def snapshot_cfg(cfg: Config) -> Config | None:
             if setting is None:
                 return None
             d = setting.default
-            kwargs[name] = d(cfg.project_dir) if callable(d) else d
+            kwargs[name] = d(Path(project)) if callable(d) else d
             continue
         val = raw[name]
         kwargs[name] = Path(val) if name in ("project_dir",) and isinstance(val, str) else val
     try:
-        return Config(**kwargs)
+        cfg = Config(**kwargs)
     except (TypeError, ValueError):
         return None
+    cfg.state_dir = Path(state_dir)
+    return cfg
 
 
 # -- rendering ------------------------------------------------------------

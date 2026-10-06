@@ -518,17 +518,21 @@ def _poke(cfg: Config, verb: str) -> bool:
 #: the session: its end reaps whatever carries its marker.
 _SESSION_KEYS = (
     procs.SESSION_ENV, "SWARM_OWNER_CONSOLE", "SWARM_WORKTREE", "SWARM_MAIN",
-    "SWARM_TOUCHES", "SWARM_BUILD_MAX", "SWARM_BUILD_JOBS", "CARGO_BUILD_JOBS",
-    "SWARM_PROJECT", "SWARM_MASTER_KIND", "SWARM_OVERSEER_PASS", "SWARM_OVERSEER_DIGEST",
-    "SWARM_OVERSEER_RECORD", "SWARM_OPERATOR_JOB", "TMUX_PANE",
+    "SWARM_TOUCHES", "SWARM_PROJECT", "SWARM_MASTER_KIND", "SWARM_OVERSEER_PASS",
+    "SWARM_OVERSEER_DIGEST", "SWARM_OVERSEER_RECORD", "SWARM_OPERATOR_JOB", "TMUX_PANE",
 )
+#: The build caps a session in a mirror is launched with (``launch.session_env``
+#: freezes them beside ``SWARM_WORKTREE``). Anywhere else they are the owner's
+#: own override, typed before ``swarm up``, and the supervisor must keep it.
+_MIRROR_KEYS = ("SWARM_BUILD_MAX", "SWARM_BUILD_JOBS", "CARGO_BUILD_JOBS")
 
 
 def clean_env(cfg: Config, env: dict[str, str] | None = None) -> dict[str, str]:
     """``env`` without what marks it as one session's (see :data:`_SESSION_KEYS`),
     its temp dir included when that is a session's own."""
     env = dict(os.environ if env is None else env)
-    for key in (*_SESSION_KEYS, cfg.env_marker):
+    mirror = _MIRROR_KEYS if "SWARM_WORKTREE" in env else ()
+    for key in (*_SESSION_KEYS, *mirror, cfg.env_marker):
         env.pop(key, None)
     tmp_root = str(cfg.tmp_dir)
     for key in ("TMPDIR", "TMP", "TEMP"):
@@ -632,6 +636,8 @@ def start_supervisor(cfg: Config, env: dict[str, str], log: Log) -> int | None:
     """Start a supervisor that adopts the run as it stands; its pid once it has
     the FIFO open, ``None`` if two attempts both failed."""
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
+    # Its state dir named, as `swarm up` starts one: it can only be this run's.
+    env = {**env, "SWARM_STATE_DIR": str(cfg.state_dir)}
     # In a scope of its own where one can be made, as `swarm up` starts it:
     # asked of the environment it is started in, which is the last
     # supervisor's and not this helper's.

@@ -17,8 +17,9 @@ one back when the owner wants it.
 It is not a worker. It carries no phase marker and no ``SWARM_SESSION_ID``, so no
 ``Stop`` hook recap, slot, ETA, usage-per-phase or session reaper ever counts it;
 it holds no ``@swarm_slot`` pane, so no watchdog looks at it. It does carry the
-run's ``SWARM_STATE_DIR``, so its ``swarm`` commands find this run and
-``swarm down`` ends it with the rest (the transcript stays, for ``/resume``), and
+run's ``SWARM_STATE_DIR`` and ``SWARM_PROJECT``, so its ``swarm`` commands find
+this run and ``swarm down`` ends it with the rest (the transcript stays, for
+``/resume``), and
 ``SWARM_OWNER_CONSOLE``, so ``swarm resources`` shows it apart: neither a worker
 nor the swarm's own overhead. It keeps
 the owner's own settings and hooks, and its primer (``prompts/console.md``, the
@@ -168,11 +169,13 @@ def claude_argv(cfg: Config) -> list[str]:
 
 def claude_env(cfg: Config, base: dict[str, str] | None = None) -> dict[str, str]:
     """``base`` (this environment) without any session marker, plus the run's
-    ``SWARM_STATE_DIR`` so the console's ``swarm`` commands find this run."""
+    ``SWARM_STATE_DIR`` and ``SWARM_PROJECT`` so the console's ``swarm`` commands
+    find this run, and this project, from any cwd."""
     base = dict(os.environ if base is None else base)
     drop = SESSION_MARKERS | {cfg.env_marker}
     env = {k: v for k, v in base.items() if k not in drop}
     env["SWARM_STATE_DIR"] = str(cfg.state_dir)
+    env["SWARM_PROJECT"] = str(cfg.project_dir)
     env[CONSOLE_ENV] = "1"
     return env
 
@@ -193,6 +196,7 @@ def pane_env(cfg: Config) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items()
            if k.startswith("SWARM_") and k not in SESSION_MARKERS and k != cfg.env_marker}
     env["SWARM_STATE_DIR"] = str(cfg.state_dir)
+    env["SWARM_PROJECT"] = str(cfg.project_dir)
     env[CONSOLE_ENV] = "1"
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]

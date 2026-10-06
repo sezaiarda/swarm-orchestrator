@@ -385,7 +385,9 @@ Each worker's environment carries:
 - `SWARM_PROJECT`, the canonical project. The session's `swarm` commands read
   the settings and the ledger from it, whatever folder they are run from: a
   component repo has no `.swarm.toml`, and a mirror's ledger is the copy
-  branched at launch. An explicit `--project-dir` wins;
+  branched at launch. An explicit `--project-dir` that names another project
+  is refused: the session carries this swarm's state dir, and a command there
+  can only act on this swarm;
 - a private `TMPDIR` on disk under `<state>/tmp/<phase>`;
 - `CARGO_INCREMENTAL=0`;
 - under worktree isolation, also `SWARM_WORKTREE`, `SWARM_MAIN` and the
@@ -1823,9 +1825,10 @@ settings and hooks.
 - **Not a worker.** It carries no phase marker and no `SWARM_SESSION_ID`, even if
   the tmux server's environment does, so no `Stop`-hook recap, slot, ETA,
   per-phase usage or session reaper counts it, and its pane has no `@swarm_slot`
-  tag for a watchdog to look at. It carries the run's `SWARM_STATE_DIR`, so its
-  `swarm` commands find the run and `swarm down` ends it; the next `swarm up`
-  opens a fresh one.
+  tag for a watchdog to look at. It carries the run's `SWARM_STATE_DIR` and
+  `SWARM_PROJECT`, so its `swarm` commands find the run from any folder and
+  `swarm down` ends it; the next `swarm up` opens a fresh one. A command typed
+  there for another project is refused, like in any session.
 
 ## The dashboard (`swarm tui`)
 

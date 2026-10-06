@@ -130,7 +130,7 @@ def test_the_console_carries_no_session_or_phase_marker(cfg):
             "SWARM_SLUG": "s"}
     env = console.claude_env(cfg, base)
     assert env == {"PATH": "/bin", "SWARM_SLUG": "s", "SWARM_STATE_DIR": str(cfg.state_dir),
-                   console.CONSOLE_ENV: "1"}
+                   "SWARM_PROJECT": str(cfg.project_dir), console.CONSOLE_ENV: "1"}
     assert console.CONSOLE_ENV == ptree.CONSOLE_ENV
 
 

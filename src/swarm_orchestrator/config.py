@@ -27,6 +27,10 @@ from . import tmux
 from .tmux import AUTO_LAYOUT, LAYOUTS, normalize_layout
 
 
+class WrongSwarm(ValueError):
+    """The command names one project and ``SWARM_STATE_DIR`` another's run state."""
+
+
 def _slugify(name: str) -> str:
     """Turn a project directory name into a filesystem-safe slug."""
     keep = [c.lower() if c.isalnum() else "-" for c in name]
@@ -966,10 +970,54 @@ def load(explicit: str | None = None, project_dir: str | None = None) -> Config:
     if follows:
         values["session"] = session_default(values["name"])
     cfg = Config(project_dir=pdir, **values)
+    _refuse_other_state(cfg)
     cfg.session_wanted = cfg.session
     if follows:
         cfg.session = _live_session(cfg) or cfg.session
     return cfg
+
+
+def recorded(state_dir: Path) -> dict:
+    """What the last supervisor of the run in ``state_dir`` recorded about it
+    (``config.json``: every setting it ran on, ``project_dir`` among them);
+    ``{}`` when no supervisor ever started there."""
+    try:
+        last = json.loads((state_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return last if isinstance(last, dict) else {}
+
+
+def _refuse_other_state(cfg: Config) -> None:
+    """Refuse to pair a project with another project's run state.
+
+    A state dir belongs to the project its last supervisor recorded there
+    (:func:`recorded`), for as long as that project's folder exists: a project
+    that was moved with its ``[swarm].slug`` pinned takes its state along.
+
+    Every session a swarm launches carries its ``SWARM_STATE_DIR``, and that
+    variable decides where a command reads and writes whatever project the
+    command names. So ``swarm --project-dir B down`` typed in a session of swarm
+    A would stop A under B's name. Two projects given one slug by hand share a
+    state dir the same way. Either is refused before the command touches
+    anything.
+    """
+    owner = recorded(cfg.state_dir).get("project_dir")
+    if not isinstance(owner, str) or not owner:
+        return
+    was = Path(owner)
+    if not was.is_dir() or was.resolve() == cfg.project_dir.resolve():
+        return
+    if os.environ.get("SWARM_STATE_DIR"):
+        raise WrongSwarm(
+            f"this command names the project {cfg.project_dir}, but SWARM_STATE_DIR"
+            f" ({cfg.state_dir}) is the run state of {was}. A session of one swarm cannot"
+            " act on another: run the command from a shell outside the swarm, or with"
+            " `env -u SWARM_STATE_DIR -u SWARM_PROJECT`")
+    raise WrongSwarm(
+        f"the project {cfg.project_dir} has the slug {cfg.slug!r}, and so has {was}, whose"
+        f" run state is in {cfg.state_dir}. Two swarms cannot share a state dir: give one"
+        " of them another `slug` under [swarm] in its .swarm.toml")
 
 
 def _live_session(cfg: Config) -> str | None:
@@ -985,11 +1033,7 @@ def _live_session(cfg: Config) -> str | None:
     """
     if cfg.driver != "tmux":
         return None
-    try:
-        last = json.loads((cfg.state_dir / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    was = last.get("session") if isinstance(last, dict) else None
+    was = recorded(cfg.state_dir).get("session")
     if not isinstance(was, str) or not was or was == cfg.session:
         return None
     try:

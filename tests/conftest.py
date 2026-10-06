@@ -158,6 +158,24 @@ def pytest_configure(config) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _own_state_root(tmp_path_factory, monkeypatch):
+    """No test reads or writes the machine's own state root.
+
+    A config loaded with no ``SWARM_STATE_DIR`` keeps its run under
+    ``$XDG_STATE_HOME/swarm-orchestrator``, which is where the swarms really
+    running on this machine keep theirs. Set in the environment, so every
+    ``swarm`` a test starts looks in the same throwaway root.
+
+    Nor the run of a session the suite itself is started in: with that session's
+    ``SWARM_STATE_DIR`` still set, a test's config would land in a live swarm's
+    state dir, and is refused there (it names another project). A test that
+    needs the variable sets it.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))
+    monkeypatch.delenv("SWARM_STATE_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_session_project(monkeypatch):
     """No test inherits a project from the session that runs the suite.
 
@@ -300,50 +318,75 @@ def _no_inprocess_launch(request, monkeypatch):
     monkeypatch.setattr(Supervisor, "_start_launch", record)
 
 
+#: What a ``swarm`` under test must not inherit from the shell that runs the suite.
+_LEAKS = (
+    "SWARM_DRIVER",
+    "SWARM_MASTER_CMD",
+    "SWARM_WORKER_CMD",
+    "SWARM_READY_MARKER",
+    "SWARM_SESSION",
+    "SWARM_SESSION_ID",
+    "SWARM_SLUG",
+    "SWARM_LAYOUT",
+)
+
+
+def _fake_env(tg: Path, **extra: str) -> dict[str, str]:
+    """This environment, for a swarm of fakes that pings into ``tg``."""
+    env = {k: v for k, v in os.environ.items() if k not in _LEAKS}
+    env.update({"SWARM_TG_SINK": str(tg), "SWARM_BIN": SWARM_BIN,
+                "FAKE_WORKER_SLEEP": "1", "FAKE_MASTER_WAIT": "1", **extra})
+    return env
+
+
+def _end(inst: Swarm) -> None:
+    """Stop ``inst`` whatever state the test left it in."""
+    try:
+        inst.down()
+    except Exception:  # noqa: BLE001
+        pass
+    st = inst.state()
+    if st and st.get("supervisor_pid"):
+        try:
+            os.kill(st["supervisor_pid"], signal.SIGKILL)
+        except OSError:
+            pass
+    _kill_orphan_fakes(inst.state_dir)  # insurance net, scoped to THIS run
+
+
 @pytest.fixture
 def swarm(tmp_path: Path):
     project = tmp_path / "project"
     shutil.copytree(DEMO, project)
     state_dir = tmp_path / "state"
-    tg = tmp_path / "tg.log"
-
-    env = {k: v for k, v in os.environ.items()}
-    for leak in (
-        "SWARM_DRIVER",
-        "SWARM_MASTER_CMD",
-        "SWARM_WORKER_CMD",
-        "SWARM_READY_MARKER",
-        "SWARM_SESSION",
-        "SWARM_SESSION_ID",
-        "SWARM_SLUG",
-        "SWARM_LAYOUT",
-    ):
-        env.pop(leak, None)
-    env.update(
-        {
-            "SWARM_STATE_DIR": str(state_dir),
-            "SWARM_TG_SINK": str(tg),
-            "SWARM_BIN": SWARM_BIN,
-            "SWARM_SLUG": "test",
-            "FAKE_WORKER_SLEEP": "1",
-            "FAKE_MASTER_WAIT": "1",
-        }
-    )
+    env = _fake_env(tmp_path / "tg.log", SWARM_STATE_DIR=str(state_dir), SWARM_SLUG="test")
     inst = Swarm(project, state_dir, env)
     try:
         yield inst
     finally:
-        try:
-            inst.down()
-        except Exception:  # noqa: BLE001
-            pass
-        st = inst.state()
-        if st and st.get("supervisor_pid"):
-            try:
-                os.kill(st["supervisor_pid"], signal.SIGKILL)
-            except OSError:
-                pass
-        _kill_orphan_fakes(state_dir)  # insurance net, scoped to THIS run
+        _end(inst)
+
+
+@pytest.fixture
+def two_swarms(tmp_path: Path):
+    """Two projects side by side on one machine, as two real swarms are: one
+    state root (``XDG_STATE_HOME``), and each run in the state dir its own path
+    gives it — no ``SWARM_STATE_DIR``, no ``SWARM_SLUG``. Neither is up."""
+    from swarm_orchestrator.config import _default_slug
+
+    root = Path(os.environ["XDG_STATE_HOME"])
+    pair = []
+    for name in ("alpha", "beta"):
+        project = tmp_path / name
+        shutil.copytree(DEMO, project)
+        env = _fake_env(tmp_path / f"tg-{name}.log")
+        env.pop("SWARM_STATE_DIR", None)
+        pair.append(Swarm(project, root / "swarm-orchestrator" / _default_slug(project), env))
+    try:
+        yield tuple(pair)
+    finally:
+        for inst in pair:
+            _end(inst)
 
 
 class FakeCgroups:

@@ -7,10 +7,18 @@ exact flags.
 
 The project is `--project-dir`; without it, the project of the session the
 command runs in (`SWARM_PROJECT`, set for every worker, operator job and
-Overseer pass), and outside a session the current directory. A session's
-command therefore answers for its project from a mirror, a component repo
-inside one or any other checkout. To check the files of the folder you are in
-from inside a session (a mirror's edited prompt, say), pass `--project-dir .`.
+Overseer pass, the console and the dashboard), and outside a session the
+current directory. A session's command therefore answers for its project from
+a mirror, a component repo inside one or any other checkout.
+
+A session can only run commands on its own swarm. It carries that swarm's
+state dir (`SWARM_STATE_DIR`), and the state dir records the project it
+belongs to. A command there that names another project, with `--project-dir`
+or from that project's folder, is refused before it reads or changes anything,
+and the message names both paths. To run one on another project all the same,
+or to check the files of the folder you are in (a mirror's edited prompt, say),
+drop the session's two variables:
+`env -u SWARM_STATE_DIR -u SWARM_PROJECT swarm --project-dir . check`.
 
 ## Run control
 

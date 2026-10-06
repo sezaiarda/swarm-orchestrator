@@ -34,7 +34,8 @@ are run from: `SWARM_PROJECT` names the project. So what a worker's
 `swarm done` or an operator's `swarm operator-done` reads
 (`[operator].enabled`, `triage_model`, `notify`, `done_grace_s`, the
 `[telegram]` keys) is "hot": the next such command uses the saved value. If the
-file does not load, the command says so and reads the folder it is run from.
+file does not load, the command says so and runs on the settings the supervisor
+last recorded (`<state>/config.json`), never on another folder's file.
 
 ## `[swarm]`
 
@@ -43,7 +44,7 @@ file does not load, the command says so and reads the folder it is run from.
 | `name` | the project folder's name | `SWARM_NAME` | hot | The swarm's display name: what you read wherever the swarm names itself. `""` means the folder's name. It names nothing on disk: the slug, the state dir, the worktrees and `SWARM_PROJECT` follow the folder, so renaming the swarm moves no state and needs no folder rename. See [the display name](#the-display-name-swarmname) for what an edit reaches when. |
 | `max_workers` | `4` | | hot | Worker slots. Must be at least 1. Growing adds panes live; shrinking marks the extra slots retiring, and a busy one finishes its phase first. |
 | `master_model` | `""` | | next | `--model` for the init pass and, by default, the Overseer. `""` inherits the user's setting. |
-| `slug` | `<dirname>-<sha1 of path, 8 chars>` | `SWARM_SLUG` | restart | Names the state dir. The hash keeps two projects with the same folder name apart. |
+| `slug` | `<dirname>-<sha1 of path, 8 chars>` | `SWARM_SLUG` | restart | Names the state dir. The hash keeps two projects with the same folder name apart. A slug another project already runs under is refused: two swarms cannot share a state dir, and the second is told both paths. A project that is moved keeps its state when its slug is set here. |
 | `driver` | `"tmux"` | `SWARM_DRIVER` | restart | `tmux`, or `bare` (headless subprocesses, no panes; the hermetic tests use it). |
 | `master_cmd` | `""` | `SWARM_MASTER_CMD` | next | Replaces the built-in `claude` command in the overseer window (the init pass, and the Overseer when `[overseer].cmd` is empty). With it set, no prompt is typed in. The tests use it to inject a fake master. |
 | `resolver_cmd` | `""` | `SWARM_RESOLVER_CMD` | next | Replaces `cd <repo> && exec claude` for the merge-conflict resolver. With it set, no prompt is typed in. |
@@ -413,7 +414,7 @@ and `swarm resources` in [cli.md](cli.md)). It reads `/proc` and never signals a
 
 | variable | effect |
 |---|---|
-| `SWARM_STATE_DIR` | Use this directory as the state dir instead of `$XDG_STATE_HOME/swarm-orchestrator/<slug>`. Every session the swarm starts gets it. |
+| `SWARM_STATE_DIR` | Use this directory as the state dir instead of `$XDG_STATE_HOME/swarm-orchestrator/<slug>`. Every session the swarm starts gets it, and so does the supervisor. Once a supervisor has run there the directory belongs to that project: a command that names any other project while this is set is refused. |
 | `XDG_STATE_HOME` | The state root. Default `~/.local/state`. |
 | `SWARM_TG_SINK` | Append telegrams to this file instead of sending them. The tests use it; it also skips recap generation. |
 | `SWARM_TG_ENV` | The credentials file the bundled `notify.sh` reads, and the command listener too. |

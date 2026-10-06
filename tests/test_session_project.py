@@ -27,6 +27,7 @@ from swarm_orchestrator import why as why_mod
 from swarm_orchestrator.cli import main as cli_main
 from swarm_orchestrator.config import load, session_project
 from swarm_orchestrator.logutil import Log
+from swarm_orchestrator.supervisor import Supervisor
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
@@ -95,6 +96,12 @@ def ws(tmp_path, monkeypatch):
     return cfg, mirror
 
 
+def _supervised(cfg) -> None:
+    """What a supervisor writes when it starts: the config the run is on, the
+    project it belongs to among it."""
+    Supervisor(cfg)._write_config_snapshot()
+
+
 def _queued(cfg, kind: str) -> list[dict]:
     return [op for data in ledgerw.pending(cfg).values() for op in data["ops"]
             if op.get("kind") == kind]
@@ -150,25 +157,35 @@ def test_record_reshape_and_why_read_the_projects_ledger(ws, monkeypatch, capsys
     assert json.loads(capsys.readouterr().out)["reason"] != why_mod.UNKNOWN
 
 
-def test_an_explicit_project_dir_still_wins(ws, tmp_path, monkeypatch, capsys):
+def test_an_explicit_project_dir_that_is_not_the_sessions_is_refused(
+        ws, tmp_path, monkeypatch, capsys):
+    """It used to win: the other folder's settings on this run's state."""
     cfg, mirror = ws
+    _supervised(cfg)
     other = tmp_path / "other"
     other.mkdir()
     monkeypatch.chdir(mirror / "alpha")
-    assert cli_main(["--project-dir", str(other), "widen", "hold-W1", "alpha/src/new.py"]) == 0
-    assert "lanes are off" in capsys.readouterr().out
-    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/tests/**"]
+    assert cli_main(["--project-dir", str(other), "widen", "hold-W1", "alpha/src/new.py"]) == 2
+    err = capsys.readouterr().err
+    assert str(other) in err and str(cfg.project_dir) in err
+    assert cli_main(["--project-dir", str(cfg.project_dir), "widen", "hold-W1",
+                     "alpha/src/new.py"]) == 0
+    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
 
 
 def test_outside_a_session_the_cwd_is_the_project(ws, monkeypatch, capsys):
     cfg, mirror = ws
+    _supervised(cfg)
     monkeypatch.delenv("SWARM_PROJECT")
     monkeypatch.chdir(cfg.project_dir)
     assert cli_main(["widen", "hold-W1", "alpha/src/new.py"]) == 0
     assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
+    # A mirror is another folder: with the run's state dir still named, a
+    # command from there is one for another project.
     monkeypatch.chdir(mirror / "alpha")
-    assert cli_main(["widen", "hold-W1", "alpha/src/other.py"]) == 0
-    assert "lanes are off" in capsys.readouterr().out
+    assert cli_main(["widen", "hold-W1", "alpha/src/other.py"]) == 2
+    assert str(cfg.project_dir) in capsys.readouterr().err
+    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
 
 
 def test_every_session_is_told_its_project_whatever_the_isolation(ws, monkeypatch):
@@ -193,15 +210,29 @@ def test_session_project_is_the_named_directory_or_nothing(tmp_path, monkeypatch
     assert session_project() == (tmp_path / "real").resolve()
 
 
-def test_a_project_config_that_does_not_load_falls_back_to_the_cwd_and_says_so(
+def test_a_project_config_that_does_not_load_runs_on_the_recorded_one_and_says_so(
         ws, monkeypatch, capsys):
-    """The owner's live file may be mid-edit; a worker's command must still run."""
+    """The owner's live file may be mid-edit; a worker's command must still run,
+    on the settings the supervisor has, never on the mirror's copy of the file."""
+    cfg, mirror = ws
+    _supervised(cfg)
+    (cfg.project_dir / ".swarm.toml").write_text("[lanes\nenabled = true\n")
+    (mirror / ".swarm.toml").write_text("[lanes]\nenabled = false\n")
+    monkeypatch.chdir(mirror)
+    assert cli_main(["widen", "hold-W1", "alpha/src/new.py"]) == 0
+    captured = capsys.readouterr()
+    assert "does not load" in captured.err and "lanes are off" not in captured.out
+    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
+
+
+def test_a_project_config_that_does_not_load_with_nothing_recorded_is_an_error(
+        ws, monkeypatch, capsys):
     cfg, mirror = ws
     (cfg.project_dir / ".swarm.toml").write_text("[lanes\nenabled = true\n")
     monkeypatch.chdir(mirror)
-    assert cli_main(["widen", "hold-W1", "alpha/src/new.py"]) == 0
-    assert "does not load" in capsys.readouterr().err
-    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
+    assert cli_main(["widen", "hold-W1", "alpha/src/new.py"]) == 2
+    assert "config error" in capsys.readouterr().err
+    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/tests/**"]
 
 
 def test_a_session_whose_project_is_gone_falls_back_to_the_cwd(ws, tmp_path, monkeypatch):

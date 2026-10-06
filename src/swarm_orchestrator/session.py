@@ -127,14 +127,13 @@ def start_dashboard(cfg: Config, dash_pane: str) -> None:
     ``swarm up`` starts it, ``swarm restart`` starts it again on the new code.
 
     cd first: tmux.new_session takes no -c, so window 0 inherits whatever cwd
-    `swarm up` ran from. The dashboard resolves its project from cwd, so under
-    `swarm up --project-dir /elsewhere` it would read the wrong .swarm.toml and
-    the wrong ledger -- SWARM_STATE_DIR pins the state dir but says nothing
-    about which project it belongs to."""
+    `swarm up` ran from. And told its project like every other session
+    (``SWARM_PROJECT``): SWARM_STATE_DIR pins the state dir, and a command the
+    dashboard runs must read the settings and the ledger of the same project."""
     tmux.respawn_pane(
         dash_pane,
         f"cd {shlex.quote(str(cfg.project_dir))} && exec {cfg.tui_cmd}",
-        env={"SWARM_STATE_DIR": str(cfg.state_dir)},
+        env={"SWARM_STATE_DIR": str(cfg.state_dir), "SWARM_PROJECT": str(cfg.project_dir)},
     )
 
 

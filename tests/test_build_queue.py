@@ -1,6 +1,5 @@
 """The ``swarm build`` queue with real processes: FIFO order under contention,
-never more than ``max_concurrent`` heavy builds (also against an old-style
-bare-flock holder), crashes of waiters and holders, light bypass, pre-flight,
+never more than ``max_concurrent`` heavy builds, crashes of waiters and holders, light bypass, pre-flight,
 ``--timeout`` counted from the start, short-first with bounded overtaking, the
 event log's shape and ``--status``.
 
@@ -171,30 +170,6 @@ def test_never_more_than_max_concurrent_and_next_slot_goes_to_oldest(gate):
     assert _starts(lines)[2:] == tags  # served in arrival order
     starts = [e for e in g.events() if e["event"] == "start"]
     assert {e["slot"] for e in starts} == {0, 1}
-
-
-def test_old_style_flock_holder_and_new_queue_share_the_cap(gate):
-    """A pre-queue ``swarm build`` only takes the bare slot flock; the new gate
-    must count it: it waits while the old one holds the slot."""
-    g = gate(max_concurrent=1)
-    cfg = g.cfg()
-    fd = buildsem._try_once(cfg)  # exactly what the old code did before exec'ing
-    assert fd is not None
-    p = g.start("new")
-    g.wait_event("queued", "P-new")
-    time.sleep(1.0)
-    assert g.lines() == []  # still waiting behind the old-style holder
-    os.close(fd)  # the old build ends
-    p.wait(timeout=15)
-    assert p.returncode == 0 and _starts(g.lines()) == ["new"]
-    # and the other way round: an old-style poller cannot get in while it runs
-    p = g.start("new2", dur=1.0)
-    g.wait_event("start", "P-new2")
-    assert buildsem._try_once(cfg) is None
-    p.wait(timeout=15)
-    fd = buildsem._try_once(cfg)
-    assert fd is not None
-    os.close(fd)
 
 
 # -- crashes ----------------------------------------------------------------

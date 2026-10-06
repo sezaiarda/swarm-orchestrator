@@ -347,32 +347,26 @@ class Sampler:
 
 def gate_holds(cfg: Config, b: builds_mod.Build) -> bool:
     """Does the build gate agree that ``b`` is still a holder? The gate's own
-    record is its word: the seat file naming ``b`` (``buildsem/seatK``), or, for
-    a gate from before seats, the start of ``buildsem/slotN``. A record saying
-    the build ended, or no record naming it where one names another build, means
-    the sampler missed the ``end`` and ``b`` holds nothing
-    (:attr:`Build.released`). A matching record's phase and command replace the
-    sampler's. No record at all (a gate that writes none, a bare ``flock``)
+    record is its word: the seat file naming ``b`` (``buildsem/seatK``). A
+    record saying the build ended, or seats that name other builds and none
+    this one (its seat went to the next build), means the sampler missed the
+    ``end`` and ``b`` holds nothing (:attr:`Build.released`). A matching
+    record's phase and command replace the sampler's. No seat record at all
     leaves the sampler's view as it is."""
     if b.source != "events" or b.slot is None:
         return True
-    own = None
+    own, others = None, False
     for k in buildsem._seat_indices(cfg):
         rec = buildsem.read_record(buildsem._seat_path(cfg, k))
-        if rec and rec.get("v") == 1 and rec.get("id") == b.id:
+        if not rec or rec.get("v") != 1:
+            continue
+        if rec.get("id") == b.id:
             own = rec
             break
+        others = True
     if own is None:
-        try:
-            rec = buildsem.read_record(buildsem._slot_path(cfg, int(b.slot)))
-        except (TypeError, ValueError):
-            return True
-        if not rec or rec.get("v") != 1:
-            return True
-        if rec.get("id") != b.id or "seat" in rec:  # its seat went to another build
-            b.released = True
-            return False
-        own = rec
+        b.released = others
+        return not others
     if own.get("ended"):
         b.released = True
         return False

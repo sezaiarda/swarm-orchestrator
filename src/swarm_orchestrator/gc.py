@@ -29,8 +29,8 @@ touched at all without an explicit ``--canonical``.
 **Build-safety interlock.** GC must not race a build that is mid-write in a
 target dir. A build holds a seat and shares one slot; GC needs the inverse — it
 holds *every* build slot exclusively while it works, which the kernel grants
-only while no build is alive on any of them (set aside as idle or not, started
-by an older ``swarm build`` or not). The slots are the machine's, so that is no
+only while no build is alive on any of them (set aside as idle or not). The
+slots are the machine's, so that is no
 build of any swarm: this one's output is all a GC deletes, but the disk the
 builds strain is one. It never takes them one at a time: with
 two slots, a GC that took slot 0 and then waited ten minutes for a long build

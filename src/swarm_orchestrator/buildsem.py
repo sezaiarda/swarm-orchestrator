@@ -27,12 +27,11 @@ them is gone. No daemon, no counter to leak.
   caps the builds the gate can have alive. The seat file holds the build's
   record (id, swarm, phase, pid, command, start), which ``--status`` and the
   waiting line show; whether the lock is held is whether the build is alive.
-- A **slot**, ``buildsem/slotN`` (``N < max_concurrent``), *shared*.
-  Anything that wants a slot to itself takes it exclusively, which works only
-  while no build is on it: ``swarm gc`` (which holds every slot while it
-  deletes build output, see *gc takes its turn*) and a ``swarm build`` from
-  before seats existed. So gc never runs while any build is alive, set aside
-  or not, and an old caller never starts on a slot that has a build on it.
+- A **slot**, ``buildsem/slotN`` (``N < max_concurrent``), *shared*. It is
+  a lock and nothing else. ``swarm gc`` takes every slot exclusively while it
+  deletes build output (see *gc takes its turn*), which works only while no
+  build is on any of them. So gc never runs while a build is alive, set aside
+  or not, and no build starts while gc runs.
 
 **Idle yield.** A holder whose whole process tree has done nothing for
 ``[build].idle_yield_s`` is *set aside*: it is not stopped or signalled, it
@@ -101,8 +100,8 @@ ticket waits:
   queued after it starts until it has run, so the builds alive end and the
   gate empties under constant load too. Only builds at work are waited for
   like that; while a holder set aside as idle, a process a build left behind,
-  or someone outside the queue is on the gate, nobody knows when it will be
-  empty, and builds go on passing.
+  or another gc is on the gate, nobody knows when it will be empty, and builds
+  go on passing.
 - *When its wait is over* it leaves the queue (a ``left`` event) and its caller
   tries again later. It never held a lock.
 
@@ -218,32 +217,10 @@ def _slot_indices(cfg: Config) -> list[int]:
     return sorted(found)
 
 
-# -- slots ----------------------------------------------------------------
-def _try_slots(cfg: Config) -> tuple[int, int] | None:
-    """One non-blocking sweep for a slot nobody is on, taken *exclusively*:
-    ``(index, locked fd)`` or ``None``. This is how a ``swarm build`` from before
-    seats took its slot; it fails while any build shares the slot.
-    The fd stays open on purpose -- the flock lives on it."""
-    cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
-    for i in range(cfg.build_max_concurrent):
-        fd = os.open(_slot_path(cfg, i), os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
-            continue
-        return i, fd
-    return None
-
-
-def _try_once(cfg: Config) -> int | None:
-    """A whole slot's held fd, or ``None`` (no queue: an old caller, tests)."""
-    got = _try_slots(cfg)
-    return got[1] if got else None
-
-
+# -- records --------------------------------------------------------------
 def read_record(path: Path) -> dict | None:
-    """The holder record at the start of a slot file (``None`` if none/partial)."""
+    """The holder record at the start of a seat file, or of gc's (``None`` if
+    none/partial)."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace").lstrip()
     except OSError:
@@ -275,18 +252,6 @@ def _mark_ended(path: Path, rec: dict, ts: float) -> None:
         _write_record(fd, rec)
     finally:
         os.close(fd)
-
-
-def _end_slot_copy(cfg: Config, rec: dict, ts: float) -> None:
-    """The slot file carries a copy of the record of the last build that started
-    on it (older readers look there). Mark it ended only while it is still this
-    build's: a build that started beside this one has since replaced it."""
-    slot = rec.get("slot")
-    if not isinstance(slot, int):
-        return
-    cur = read_record(_slot_path(cfg, slot))
-    if cur and cur.get("id") == rec.get("id") and not cur.get("ended"):
-        _mark_ended(_slot_path(cfg, slot), cur, ts)
 
 
 def _locked(path: Path) -> bool:
@@ -321,49 +286,29 @@ def _synthetic_end(cfg: Config, rec: dict, slot: int | None, now: float) -> None
                    exit=None, repo=rec.get("repo"), ts=now, who=rec)
 
 
-def reap_records(cfg: Config, only: int | None = None, force: bool = False,
-                 seat: int | None = None) -> None:
+def reap_records(cfg: Config, seat: int | None = None) -> None:
     """Write the ``end`` a dead holder never wrote (``exit`` null), whichever
     swarm's build it was: the lock is the kernel's word, and it is the same for
     every swarm. Call under ``queue.lock`` so two noticers cannot both write it.
     A seat's holder is dead when its lock is free or both its processes are
-    gone; one that stands frozen is neither. ``seat`` is one the
-    caller has just taken: it was free, so whatever its record says is over.
-    ``only``/``force`` name a slot just found free, for a record a build from
-    before seats left there."""
+    gone; one that stands frozen is neither. ``seat`` is one the caller has
+    just taken: it was free, so whatever its record says is over."""
     now = time.time()
-    if only is None:
-        for k in _seat_indices(cfg):
-            path = _seat_path(cfg, k)
-            rec = read_record(path)
-            if not rec or rec.get("ended") or rec.get("v") != 1:
-                continue
-            if k != seat and _locked(path) and _holder_alive(rec):
-                continue
-            slot = rec.get("slot") if isinstance(rec.get("slot"), int) else None
-            copy = read_record(_slot_path(cfg, slot)) if slot is not None else None
-            if not (copy and copy.get("id") == rec.get("id") and copy.get("ended")):
-                _synthetic_end(cfg, rec, slot, now)  # unless an older reaper already did
-            _mark_ended(path, rec, now)
-            _end_slot_copy(cfg, rec, now)
-        path = gc_path(cfg)  # a gc killed while it held the gate
+    for k in _seat_indices(cfg):
+        path = _seat_path(cfg, k)
         rec = read_record(path)
-        if rec and not rec.get("ended") and rec.get("v") == 1 and not _locked(path):
-            _synthetic_end(cfg, rec, None, now)
-            _mark_ended(path, rec, now)
-    idx = [only] if only is not None else range(cfg.build_max_concurrent)
-    for i in idx:
-        rec = read_record(_slot_path(cfg, i))
         if not rec or rec.get("ended") or rec.get("v") != 1:
             continue
-        if "seat" in rec:  # a copy: the seat pass above writes that build's end
-            if force:
-                _mark_ended(_slot_path(cfg, i), rec, now)
+        if k != seat and _locked(path) and _holder_alive(rec):
             continue
-        if not force and _holder_alive(rec):
-            continue
-        _synthetic_end(cfg, rec, i, now)
-        _mark_ended(_slot_path(cfg, i), rec, now)
+        _synthetic_end(cfg, rec, rec.get("slot") if isinstance(rec.get("slot"), int) else None,
+                       now)
+        _mark_ended(path, rec, now)
+    path = gc_path(cfg)  # a gc killed while it held the gate
+    rec = read_record(path)
+    if rec and not rec.get("ended") and rec.get("v") == 1 and not _locked(path):
+        _synthetic_end(cfg, rec, None, now)
+        _mark_ended(path, rec, now)
 
 
 # -- the queue ------------------------------------------------------------
@@ -591,7 +536,6 @@ class Claim:
     seat: int
     seat_fd: int
     beside: list[dict] = field(default_factory=list)  # the idle holders that made room
-    alone: bool = True  # nobody else is on its slot
 
     @property
     def fds(self) -> tuple[int, int]:
@@ -626,14 +570,14 @@ def _gate_state(cfg: Config, holders: list[dict], now: float) -> tuple[bool, boo
     """``(busy, working)`` for :func:`gc_view`. Busy: something is on the gate,
     so a gc cannot start. Working: all of it is builds at work, which end; not
     a holder set aside as idle, one whose swarm stands frozen, a process a
-    build left behind, or someone who holds a slot from outside the queue.
+    build left behind, or another gc, which holds the slots while it runs.
     Under ``queue.lock``."""
-    foreign = any(_locked(_slot_path(cfg, i)) for i in _slot_indices(cfg))
-    if not holders and not foreign:
+    sweeping = any(_locked(_slot_path(cfg, i)) for i in _slot_indices(cfg))
+    if not holders and not sweeping:
         return False, False
     aside = {h.get("id") for h in buildidle.set_aside(cfg, buildidle.load(cfg), holders, now)}
-    working = not foreign and all(not h.get("over") and h.get("id") not in aside
-                                  and not buildlog.frozen(cfg, h) for h in holders)
+    working = not sweeping and all(not h.get("over") and h.get("id") not in aside
+                                   and not buildlog.frozen(cfg, h) for h in holders)
     return True, working
 
 
@@ -699,15 +643,14 @@ def _free_seat(cfg: Config) -> tuple[int, int] | None:
     return None
 
 
-def _claim(cfg: Config, strict: bool = False) -> Claim | None:
+def _claim(cfg: Config) -> Claim | None:
     """Take a seat and a slot if a build may start now. Under ``queue.lock``.
 
     May start: fewer than ``max_concurrent`` builds *count* (alive and not set
-    aside, plus whoever holds a slot exclusively: gc, an older ``swarm build``),
-    a slot has no counted build on it, and a seat is free. A slot with nobody on
-    it is preferred to one whose holders are all set aside. ``strict`` (the
-    pairing rules are on): not while anyone holds a slot exclusively either,
-    since what that is, and in which repo, cannot be read."""
+    aside), a slot has no counted build on it, and a seat is free. A slot with
+    nobody on it is preferred to one whose holders are all set aside. A slot
+    that cannot be shared is gc's: it holds every one of them while it runs, so
+    then there is none to take."""
     now = time.time()
     cap = cfg.build_max_concurrent
     holders = live_holders(cfg)
@@ -728,7 +671,6 @@ def _claim(cfg: Config, strict: bool = False) -> Claim | None:
     busy = {h.get("slot") for h in counted}
     alive = {h.get("slot") for h in holders}
     free: list[tuple[int, int]] = []
-    foreign = 0
     try:
         for i in range(cap):
             fd = os.open(_slot_path(cfg, i), os.O_CREAT | os.O_RDWR, 0o644)
@@ -736,15 +678,13 @@ def _claim(cfg: Config, strict: bool = False) -> Claim | None:
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except OSError:
                 os.close(fd)
-                foreign += 1
                 continue
             if i in busy:
                 os.close(fd)
             else:
                 free.append((i, fd))
         free.sort(key=lambda g: (g[0] in alive, g[0]))
-        room = free and len(counted) + foreign < cap and not (strict and foreign)
-        seat = _free_seat(cfg) if room else None
+        seat = _free_seat(cfg) if free else None
     except BaseException:
         for _, fd in free:
             os.close(fd)
@@ -753,9 +693,8 @@ def _claim(cfg: Config, strict: bool = False) -> Claim | None:
         os.close(fd)
     if seat is None:
         return None
-    relied = len(holders) + foreign >= cap  # only the set-aside ones made room
-    return Claim(free[0][0], free[0][1], seat[0], seat[1], aside if relied else [],
-                 alone=free[0][0] not in alive)
+    relied = len(holders) >= cap  # only the set-aside ones made room
+    return Claim(free[0][0], free[0][1], seat[0], seat[1], aside if relied else [])
 
 
 def _try_turn(cfg: Config, t: Ticket, overtake: int,
@@ -792,7 +731,7 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
             if buildidle.enabled(cfg):
                 _idle_pass(cfg, live_holders(cfg), time.time())
             return None, view
-        got = _claim(cfg, strict=rules)
+        got = _claim(cfg)
         if got is None:
             return None, view
         if rules and beside:
@@ -816,11 +755,7 @@ def _try_turn(cfg: Config, t: Ticket, overtake: int,
         q["overtaken"] = counts
         _write_q(cfg, q)
         reap_records(cfg, seat=got.seat)  # its last holder is gone: the end it never wrote
-        if got.alone:  # and so is whoever left a record on this slot
-            reap_records(cfg, only=got.slot, force=True)
-        rec = _record(t.meta, None, None, got)
-        _write_record(got.seat_fd, rec)
-        _write_record(got.slot_fd, rec)
+        _write_record(got.seat_fd, _record(t.meta, None, None, got))
         _drop(t)
     return got, view
 
@@ -1123,15 +1058,11 @@ def _ticker(ticks: list):
     return run if ticks else None
 
 
-def _finish(cfg: Config, claim: Claim, rec: dict, now: float) -> None:
-    """The build is over: say so in its seat's record and the slot's copy. The
-    lock only keeps the copy from being rewritten under a build that is starting
-    on the same slot; without it the records are written all the same."""
-    with _qlock(cfg, wait_s=2.0):
-        # ``over``: its own gate saw the command end. Whatever still holds the
-        # seat is a process it left behind, not a build (see buildpair.counted).
-        _write_record(claim.seat_fd, dict(rec, ended=now, over=True))
-        _end_slot_copy(cfg, rec, now)
+def _finish(claim: Claim, rec: dict, now: float) -> None:
+    """The build is over: say so in its seat's record. ``over``: its own gate
+    saw the command end. Whatever still holds the seat is a process it left
+    behind, not a build (see :func:`buildpair.counted`)."""
+    _write_record(claim.seat_fd, dict(rec, ended=now, over=True))
 
 
 def _beside_text(cfg: Config, beside: list[dict]) -> str:
@@ -1157,7 +1088,7 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
         _say(f"cannot run {call.argv[0]!r}: {exc}")
         now = time.time()
         if held:
-            _finish(cfg, held, _record(meta or {"id": call.id}, None, now, held), now)
+            _finish(held, _record(meta or {"id": call.id}, None, now, held), now)
         call.log(cfg, "start" if held else "bypass", pid=os.getpid(), slot=slot,
                  wait_s=wait_s, **_start_kw(meta, held))
         call.log(cfg, "end", pid=os.getpid(), slot=slot, run_s=0.0, exit=127)
@@ -1169,7 +1100,6 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
     if held:
         rec = _record(meta or {"id": call.id}, proc.pid, start, held)
         _write_record(held.seat_fd, rec)
-        _write_record(held.slot_fd, rec)
         waited = "no wait" if wait_s < 1 else f"queued {buildlog.fmt_s(wait_s)}"
         alone = f" — alone ({rec['alone']})" if rec.get("alone") else ""
         _say(f"{waited}, starting on slot {slot}: {buildlog.short_cmd(call.text)}"
@@ -1184,7 +1114,7 @@ def _run_child(cfg: Config, call: _Call, *, held: Claim | None,
     now = time.time()
     ran = freezer.awake_elapsed(cfg, start, now)  # what the next run is predicted from
     if held:
-        _finish(cfg, held, rec, now)
+        _finish(held, rec, now)
     call.log(cfg, "end", pid=proc.pid, slot=slot, run_s=ran, exit=code, ts=now)
     if held:
         _say(f"ran {buildlog.fmt_s(ran)}, exit {code} (queued {buildlog.fmt_s(wait_s)})")
@@ -1215,12 +1145,10 @@ def _phase(cfg: Config) -> str | None:
 
 def _inside_held(cfg: Config) -> bool:
     """Are we running inside a build that already holds a slot (nested call)?"""
-    slot, _, rest = os.environ.get(HELD_ENV, "").partition(":")
-    bid, _, seat = rest.partition(":")
-    if not slot.isdigit() or not bid:
+    _slot, bid, seat = (os.environ.get(HELD_ENV, "").split(":") + ["", ""])[:3]
+    if not bid or not seat.isdigit():
         return False
-    path = _seat_path(cfg, int(seat)) if seat.isdigit() else _slot_path(cfg, int(slot))
-    rec = read_record(path)
+    rec = read_record(_seat_path(cfg, int(seat)))
     return bool(rec and rec.get("id") == bid and not rec.get("ended"))
 
 
@@ -1336,14 +1264,13 @@ def slot(cfg: Config, argv: list[str] | str = "", cwd: str | Path = "",
     start = time.time()
     rec = _record(ticket.meta, os.getpid(), start, claim)
     _write_record(claim.seat_fd, rec)
-    _write_record(claim.slot_fd, rec)
     call.log(cfg, "start", pid=os.getpid(), slot=claim.slot, wait_s=start - queued,
              hold=False, alone=bool(alone), why=alone)
     try:
         yield held
     finally:
         now = time.time()
-        _finish(cfg, claim, rec, now)
+        _finish(claim, rec, now)
         call.log(cfg, "end", pid=os.getpid(), slot=claim.slot,
                  run_s=freezer.awake_elapsed(cfg, start, now), exit=held.exit, ts=now)
         claim.close()
@@ -1391,10 +1318,8 @@ def _take_whole(cfg: Config, t: Ticket) -> tuple[list[int] | None, str]:
                 except OSError:
                     for held in fds:  # all of them or none: nothing is kept
                         os.close(held)
-                    return None, f"build slot {i} is held from outside the queue"
+                    return None, "another gc holds the gate"
             reap_records(cfg)  # whoever was here is gone: the ends never written
-            for i in _slot_indices(cfg):
-                reap_records(cfg, only=i, force=True)
             seat = os.open(gc_path(cfg), os.O_CREAT | os.O_RDWR, 0o644)
             fds.append(seat)
             fcntl.flock(seat, fcntl.LOCK_EX)  # only a momentary probe can be on it

@@ -6,7 +6,7 @@ beside it. Proved here: the yield itself and its events; no yield for a busy
 holder, across short quiet gaps, for work that runs in a daemon, or under
 ``--hold``; what the command itself is told; a woken holder counts again; the
 cap on set-aside holders; SIGKILL of a yielded holder
-and of the waiter that was measuring; gc and old callers still shut out;
+and of the waiter that was measuring; gc still shut out;
 ``--status``; and the rule itself (:func:`buildidle.advance`) sample by sample.
 
 Each build is a fake ``cargo`` that follows ``$PLAN`` (``sleep:3 burn:2``: idle
@@ -360,10 +360,7 @@ def test_a_killed_yielded_holder_leaks_nothing(gate):
     assert len(ends) == 1 and ends[0]["exit"] is None  # written by the gate, once
     assert "unyield" not in g.kinds("P-h")
     cfg = g.cfg()
-    assert buildsem.live_holders(cfg) == []  # no seat, no slot, no mark left behind
-    fd = buildsem._try_once(cfg)
-    assert fd is not None
-    os.close(fd)
+    assert buildsem.live_holders(cfg) == []  # no seat and no mark left behind
     again = g.run("a", "sleep:0.1")
     again.wait(timeout=15)
     assert g.wait_event("start", "P-a")["wait_s"] < 1.0
@@ -423,11 +420,10 @@ def test_a_process_a_build_left_behind_stops_blocking_once_idle(gate):
     assert g.lines() == ["start left", "start w", "end w", "end left"]
 
 
-# -- gc and older callers stay shut out -----------------------------------------
-def test_gc_and_old_callers_wait_for_a_yielded_holder_too(gate):
-    """gc takes every slot before it deletes build output, and an older ``swarm
-    build`` takes its slot whole: neither may get in while any build is alive,
-    set aside or beside one."""
+# -- gc stays shut out -----------------------------------------------------------
+def test_gc_waits_for_a_yielded_holder_too(gate):
+    """gc takes every slot before it deletes build output: it may not get in
+    while any build is alive, set aside or beside one."""
     g = gate()
     h = g.run("h", f"sleep:{WINDOW * 2 + 2.5}")
     g.wait_event("start", "P-h")
@@ -439,7 +435,6 @@ def test_gc_and_old_callers_wait_for_a_yielded_holder_too(gate):
         with pytest.raises(gc.GcRefused):
             with gc.build_gate(cfg, opts):
                 pass
-        assert buildsem._try_once(cfg) is None
         _finish([w])
     assert h.poll() is None
     _finish([h])

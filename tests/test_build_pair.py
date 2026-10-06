@@ -484,15 +484,15 @@ def test_select_steps_over_blocked_waiters_within_the_budget():
     assert buildsem.select(q, {}, 2, 60, blocked)["id"] == "t1"
     # a holder found alone while running, one that says nothing of its repo, a --hold
     for holder, why in [({"id": "h", "slot": 0, "repos": ["z"]}, "seen"),
-                        ({"id": "h", "slot": 0}, buildpair.OLD_HOLDER),
-                        ({"slot": 0, "repos": ["z"]}, buildpair.OLD_HOLDER),
+                        ({"id": "h", "slot": 0}, buildpair.UNREAD),
+                        ({"slot": 0, "repos": ["z"]}, buildpair.UNREAD),
                         ({"id": "h", "slot": 0, "repos": None}, buildpair.UNKNOWN_REPO),
                         ({"id": "h", "slot": 0, "repos": ["z"], "hold": True}, buildpair.HOLD)]:
         assert buildpair.blocked(q[0], [holder], {"h": "seen"} if why == "seen" else {}) == \
             f"slot 0 runs alone ({why})"
     # a build whose command ended, with a leftover process on the seat, is not a build
     assert buildpair.counted([{"id": "h", "over": True}, {"id": "i"}]) == [{"id": "i"}]
-    # a waiter from an older swarm build says nothing of its repo: it runs alone
+    # a waiter that says nothing of its repo runs alone
     old = buildpair.waiters([{"id": "o", "seq": 9}])
     assert buildpair.blocked(old[0], holders, {}) == f"waits to run alone ({buildpair.UNKNOWN_REPO})"
 

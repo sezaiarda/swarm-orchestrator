@@ -326,7 +326,7 @@ def test_a_gc_killed_while_it_holds_the_gate_frees_it(gate):
     assert snap["gc"] == [{"state": "running", "id": snap["slots"][0]["id"], "swarm": "state",
                            "swarm_name": "proj", "mine": True, "pid": proc.pid,
                            "running_s": snap["slots"][0]["running_s"]}]
-    assert text.count("gc running") == 2 and "no current record" not in text
+    assert text.count("gc running") == 2 and "no record" not in text
     assert buildstatus.summary_line(g.cfg()).startswith("build gate: 2/2 busy on this machine (gc ")
     b = g.start("b", dur=0.2)
     g.wait_event("queued", "P-b")

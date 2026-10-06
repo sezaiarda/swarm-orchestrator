@@ -522,9 +522,10 @@ def _tick(sup) -> None:
         sup._gc_thread.join(5)
 
 
-def _hold_slot0(cfg) -> int:
+def _hold_seat0(cfg) -> int:
+    """A build alive on the gate, as the gate knows one: its seat is locked."""
     cfg.buildsem_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(cfg.buildsem_dir / "slot0", os.O_CREAT | os.O_RDWR, 0o644)
+    fd = os.open(cfg.buildsem_dir / "seat0", os.O_CREAT | os.O_RDWR, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     return fd
 
@@ -534,7 +535,7 @@ def test_auto_gc_skips_a_held_build_slot_and_retries_later(cfg, monkeypatch):
     `busy`, and nothing is planned or deleted while it runs."""
     monkeypatch.setattr(cfg, "gc_wait_s", 1)
     _fill(cfg.tmp_dir / "P-dead" / "f")
-    fd = _hold_slot0(cfg)
+    fd = _hold_seat0(cfg)
     try:
         t0 = time.monotonic()
         result = gc_mod.auto(cfg)
@@ -554,7 +555,7 @@ def test_auto_gc_waits_for_the_slot_and_runs_between_two_builds(cfg, monkeypatch
     so a gc on a swarm that is never idle still runs."""
     monkeypatch.setattr(cfg, "gc_wait_s", 30)
     _fill(cfg.tmp_dir / "P-dead" / "f")
-    fd = _hold_slot0(cfg)
+    fd = _hold_seat0(cfg)
     threading.Timer(0.5, os.close, args=(fd,)).start()  # the build ends mid-wait
     t0 = time.monotonic()
     result = gc_mod.auto(cfg)

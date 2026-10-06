@@ -434,8 +434,8 @@ flowchart TD
   running 4m``. Every call is logged to `machine/buildsem/events.jsonl` in the
   state root, each line naming its swarm.
 - **How:** the build inherits its locks (a seat of its own, and its slot,
-  shared), so a killed build frees them, and an older `swarm build` still shares
-  the same cap. Workers wrap their gates in it (`swarm build cargo nextest run`;
+  shared), so a killed build frees them. Workers wrap their gates in it
+  (`swarm build cargo nextest run`;
   several steps in one turn with `swarm build -- sh -c 'a && b'`). gc holds
   every slot while it deletes, so it never runs while a build of any swarm is
   alive; it waits for that as a ticket in the same queue, holding no slot, and

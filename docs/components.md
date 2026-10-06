@@ -1267,11 +1267,9 @@ is no daemon and no counter to leak.
   builds the gate can have alive at once. The seat file holds a small record of
   its build (id, swarm, phase, pid, command, start), which is what `--status`
   and the waiting line show.
-- A **slot**, `buildsem/slot<N>` (`N < max_concurrent`), held *shared*.
-  Whatever needs a slot to itself takes it exclusively and so waits for every
-  build on it: gc, and a `swarm build` from before seats existed (which
-  therefore never starts on a slot that has a build on it). The slot file
-  carries a copy of the record of the last build that started on it.
+- A **slot**, `buildsem/slot<N>` (`N < max_concurrent`), held *shared*. It
+  is a lock and nothing else. gc takes every slot exclusively while it sweeps,
+  and so waits for every build on them; while it holds them no build starts.
 
 A build may start when fewer than `max_concurrent` builds *count* (alive and not
 set aside as idle, see below), a seat is free, and some slot has no counted
@@ -1634,8 +1632,7 @@ of one slot's time went to a gc that never ran.)
   and gc runs. That is what lets it run with two slots under constant load,
   where the gate is otherwise never empty and the disk fills. It holds builds
   back only for builds at work: while a holder set aside as idle, one whose
-  swarm is frozen, a process a build left behind, or a slot held from outside
-  the queue is in the way,
+  swarm is frozen, a process a build left behind, or another gc is in the way,
   nobody knows when the gate will be empty, and builds go on passing.
 - **When its wait is over** it leaves the queue (`left`), the supervisor logs
   `GC-AUTO-SKIP … busy` with what was still alive, and tries again ten
@@ -1675,9 +1672,8 @@ slot while it sweeps, and in the recent list with how long it queued and ran
 (or `gc waited 10m00s for the gate to empty and left; it held nothing`);
 `--json` carries it under `gc` (`state` `waiting` or `running`, and for a
 waiting one `firm_in_s`, `leaves_in_s` and `holding`), and a waiter it holds
-back says `held back: gc runs first`. A slot that is busy with no current
-record is an older `swarm build` or a process such a build left behind;
-`--status` names the pids holding it open. Under the pairing rules
+back says `held back: gc runs first`. A slot shown as `busy, no record` is a
+gc in the moment it takes the gate or lets it go. Under the pairing rules
 each holder's line ends with its repo and, if so, `runs alone (why)`, a waiter
 the rules hold back says `held back: …`, and `--json` carries `pair`, `alone`
 (the patterns), `repo`/`alone` on each holder and `repo`/`alone`/`blocked` on
@@ -1778,8 +1774,8 @@ directory, and writes under `<state>/meters/`.
   or it was kept and why (a command that never yields). This is a report only;
   setting a holder aside is the gate's own doing, by its own measurement, long
   before this warning. The gate's own holder record (`seatK` in the machine's
-  `buildsem/`, or `slotN` for a gate from before seats) confirms it first: a
-  record saying the build ended, or naming another build, means the sampler
+  `buildsem/`) confirms it first: a
+  record saying the build ended, or seats that name only other builds, means the sampler
   missed an `end` and nothing is reported; a matching one supplies the phase
   and command. Nothing is killed. Another swarm's idle build is that swarm's
   supervisor's to report: here it is only shown as idle, under its swarm's

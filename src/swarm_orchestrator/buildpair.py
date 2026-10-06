@@ -81,7 +81,7 @@ _MAX_PLACES = 12
 _GIT_TIMEOUT_S = 10.0
 HOLD = "started with --hold"
 UNKNOWN_REPO = "its repo is unknown: not in a git checkout"
-OLD_HOLDER = "an older swarm build started it"
+UNREAD = "its record cannot be read"
 
 
 def enabled(cfg: Config) -> bool:
@@ -302,7 +302,7 @@ def counted(holders: list[dict]) -> list[dict]:
 def holder_alone(h: dict, found: dict[str, str]) -> str | None:
     """Why nothing may start beside this holder, or ``None``."""
     if not h.get("id") or "repos" not in h:
-        return OLD_HOLDER  # nothing is known of it: assume the worst
+        return UNREAD  # nothing is known of it: assume the worst
     if h.get("alone"):
         return str(h["alone"])
     if h.get("hold"):
@@ -320,7 +320,7 @@ def _slot_text(h: dict) -> str:
 
 def waiters(tickets: list[dict]) -> list[dict]:
     """The tickets as the rules read them: a waiter that says nothing of its
-    repos (queued by an older ``swarm build``, or with the rules off) is one
+    repos (in no git checkout, and queued while the rules were off) is one
     whose repo is unknown, so it runs alone. Marks the tickets in place."""
     for t in tickets:
         if not t.get("alone") and not (isinstance(t.get("repos"), list) and t["repos"]):

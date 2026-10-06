@@ -27,21 +27,6 @@ def _cfg(tmp_path: Path, monkeypatch, **overrides):
     return load(project_dir=str(tmp_path))
 
 
-# -- the semaphore --------------------------------------------------------
-def test_semaphore_caps_and_releases(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path, monkeypatch)
-    machine_toml(build={"max_concurrent": 2})
-    a = buildsem._try_once(cfg)
-    b = buildsem._try_once(cfg)
-    assert a is not None and b is not None  # both slots free
-    assert buildsem._try_once(cfg) is None  # capped: no third slot
-    os.close(a)  # a build dies -> its flock releases
-    c = buildsem._try_once(cfg)
-    assert c is not None  # the freed slot is reusable
-    os.close(b)
-    os.close(c)
-
-
 def test_env_override_beats_config(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch, SWARM_BUILD_JOBS=4, SWARM_BUILD_CACHE=0)
     assert (cfg.build_jobs, cfg.build_cache) == (4, False)

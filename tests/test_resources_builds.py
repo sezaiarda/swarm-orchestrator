@@ -453,10 +453,6 @@ def test_an_idle_holder_is_reported_once_an_hour_and_never_killed(env):
     assert len(pings) == 2
 
 
-def _holder_record(cfg, slot: int, **rec) -> None:
-    (cfg.buildsem_dir / f"slot{slot}").write_text(json.dumps({"v": 1, "ended": None, **rec}))
-
-
 def test_an_idle_holder_is_confirmed_by_the_gates_own_record(env):
     """The gate's holder record decides: another build's id there means the
     sampler missed an end, so no warning; a matching one lends its words."""
@@ -467,8 +463,8 @@ def test_an_idle_holder_is_confirmed_by_the_gates_own_record(env):
           argv="old cmd")
     event(cfg, ts=T0 - 1, event="start", id="mine", pid=901, slot=1, cls="heavy",
           argv="cmd")
-    _holder_record(cfg, 0, id="newer", phase="P9", argv="cargo build")
-    _holder_record(cfg, 1, id="mine", phase="P2", argv="cargo test --workspace")
+    _seat_record(cfg, 0, id="newer", slot=0, phase="P9", argv="cargo build")
+    _seat_record(cfg, 1, id="mine", slot=1, phase="P2", argv="cargo test --workspace")
     s = make_sampler(cfg, fake, pings)
     for t in (0, 300, 610):
         s.step(T0 + t)
@@ -539,7 +535,6 @@ def test_a_yielded_build_is_summarised_and_its_warning_says_the_slot_was_release
     event(cfg, ts=T0 + 150, event="yield", id="idle", pid=900, idle_s=150.0, **base)
     event(cfg, ts=T0 + 200, event="start", id="beside", pid=901, argv="cargo test", **base)
     # the slot file now names the build that started beside it; its seat still names it
-    _holder_record(cfg, 0, id="beside", phase="P5", argv="cargo test", seat=1)
     _seat_record(cfg, 1, id="beside", slot=0, phase="P5", argv="cargo test")
     for t in (210, 400, 620):
         fake.cpu(901, own=100 + t * 100)
@@ -595,7 +590,6 @@ def test_a_seat_that_went_to_another_build_means_the_end_was_missed(env):
     fake.add(900, started=T0 - 1, own=100, argv="sleep 9999")
     event(cfg, ts=T0 - 1, event="start", id="old", pid=900, slot=0, cls="heavy", argv="x")
     _seat_record(cfg, 0, id="newer", slot=0, phase="P9", argv="cargo build")
-    _holder_record(cfg, 0, id="newer", phase="P9", argv="cargo build", seat=0)
     s = make_sampler(cfg, fake, pings)
     for t in (0, 300, 610):
         s.step(T0 + t)

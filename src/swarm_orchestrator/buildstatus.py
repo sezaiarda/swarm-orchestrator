@@ -76,25 +76,6 @@ def _whose(cfg: Config, rec: dict) -> dict:
     return {**buildlog.whose(rec), "mine": buildlog.mine(cfg, rec)}
 
 
-def _openers(path: Path) -> list[int]:
-    """Processes that have ``path`` open (what holds a slot nobody claims)."""
-    target = str(path)
-    out = []
-    try:
-        pids = [e for e in Path("/proc").iterdir() if e.name.isdigit()]
-    except OSError:
-        return out
-    for p in pids:
-        try:
-            for fd in (p / "fd").iterdir():
-                if os.readlink(fd) == target:
-                    out.append(int(p.name))
-                    break
-        except OSError:
-            continue
-    return out
-
-
 def builds(cfg: Config, now: float) -> list[dict]:
     """Every build alive on a seat, any swarm's, oldest first: ``state`` is
     ``active``, ``yielded`` (set aside as idle; it does not count) or ``left``
@@ -140,11 +121,11 @@ def gc_running(cfg: Config, locked: set[int] | None) -> dict | None:
 
 
 def holders(cfg: Config, hist: buildlog.History, now: float,
-            find_openers: bool = False, alive: list[dict] | None = None) -> list[dict]:
+            alive: list[dict] | None = None) -> list[dict]:
     """One entry per slot: the build that counts on it (``busy``), else free. A
-    slot held exclusively with no seat behind it is gc (``gc``: it holds every
-    slot while it runs) or someone from outside: an older ``swarm build``, or a
-    process such a build left behind."""
+    slot held exclusively is gc's (``gc``: it holds every slot while it runs);
+    in the moment it takes the gate or lets it go its record does not say so
+    yet, or no more, and the slot is ``unknown``."""
     alive = builds(cfg, now) if alive is None else alive
     locked = _locked_inodes(write_only=True)
     gc = gc_running(cfg, locked)
@@ -169,23 +150,7 @@ def holders(cfg: Config, hist: buildlog.History, now: float,
                          pid=gc.get("pid"), running_s=now - (gc.get("start_ts") or now),
                          pred_s=None)
         elif slot_busy(path, locked):
-            rec = buildsem.read_record(path)
-            entry["busy"] = True
-            if rec and not rec.get("ended") and rec.get("v") == 1 and "seat" not in rec:
-                start = rec.get("start_ts") or now
-                entry.update(id=rec.get("id"), **_whose(cfg, rec), phase=rec.get("phase"),
-                             argv=rec.get("argv", ""), cwd=rec.get("cwd", ""),
-                             pid=rec.get("pid") or rec.get("gate_pid"),
-                             running_s=now - start, pred_s=rec.get("pred_s"))
-            else:
-                entry["unknown"] = True
-                if rec and rec.get("ended"):
-                    entry["after"] = {"id": rec.get("id"), **_whose(cfg, rec),
-                                      "phase": rec.get("phase"),
-                                      "argv": rec.get("argv", ""),
-                                      "ended_s": now - rec["ended"]}
-                if find_openers:
-                    entry["pids"] = _openers(path)
+            entry.update(busy=True, unknown=True)
         out.append(entry)
     return out
 
@@ -232,11 +197,10 @@ def blocked_now(cfg: Config, tickets: list[dict], alive: list[dict]) -> dict[str
 def gate_state(alive: list[dict], slots: list[dict]) -> tuple[bool, bool]:
     """``(busy, working)`` as :func:`buildsem.gc_view` wants them, read from
     :func:`builds` and :func:`holders`."""
-    foreign = any(h.get("unknown") or h.get("gc") or (h["busy"] and "seat" not in h)
-                  for h in slots)
-    busy = bool(alive) or foreign
-    return busy, busy and not foreign and all(b["state"] == "active" and not b.get("frozen")
-                                              for b in alive)
+    sweeping = any(h.get("unknown") or h.get("gc") for h in slots)
+    busy = bool(alive) or sweeping
+    return busy, busy and not sweeping and all(b["state"] == "active" and not b.get("frozen")
+                                               for b in alive)
 
 
 def gcs(cfg: Config, tickets: list[dict], wall: str | None, busy: bool,
@@ -285,16 +249,7 @@ def _holder_text(h: dict, yield_s: int = 0, pair: bool = False) -> str:
         return (f"slot {h['slot']}: {_gc_name(h)} running {fmt_s(h['running_s'])} (it deletes"
                 " build output: no build runs beside it)")
     if h.get("unknown"):
-        after = h.get("after")
-        text = f"slot {h['slot']}: busy, no current record (an older swarm build, or a"
-        text += " process a build left behind"
-        if after:
-            text += f" — the last build here, {buildlog.who(after)}"
-            text += f" `{short_cmd(after['argv'], 40)}`, ended {fmt_s(after['ended_s'])} ago"
-        pids = h.get("pids")
-        if pids:
-            text += f"; held open by pid {', '.join(map(str, pids[:5]))}"
-        return text + ")"
+        return f"slot {h['slot']}: busy, no record (a gc taking the gate or letting it go)"
     usual = f" (usually ~{fmt_s(h['pred_s'])})" if h.get("pred_s") else ""
     text = (f"slot {h['slot']}: {buildlog.who(h)} `{short_cmd(h['argv'], 50)}`"
             f" running {fmt_s(h['running_s'])}{usual}")
@@ -396,7 +351,7 @@ def snapshot(cfg: Config, n_recent: int = 10) -> dict:
     events = buildlog.read_events(cfg)
     hist = buildlog.History(cfg, events)
     alive = builds(cfg, now)
-    slots = holders(cfg, hist, now, find_openers=True, alive=alive)
+    slots = holders(cfg, hist, now, alive=alive)
     waiting = buildsem.live_tickets(cfg, prune=False)
     busy, working = gate_state(alive, slots)
     tickets, wall = buildsem.gc_view(waiting, now, busy, working)
@@ -530,7 +485,7 @@ def summary_line(cfg: Config) -> str | None:
         who = ", ".join(
             f"{buildlog.who(h)} `{short_cmd(h.get('argv', ''), 30)}`"
             f" {fmt_s(h['running_s'])}"
-            if not h.get("unknown") else "unrecorded holder" for h in busy)
+            if not h.get("unknown") else "gc" for h in busy)
     line = (f"build gate: {len(busy)}/{len(slots)} busy on this machine"
             + (f" ({who})" if who else ""))
     aside = [b for b in alive if b["state"] == "yielded"]

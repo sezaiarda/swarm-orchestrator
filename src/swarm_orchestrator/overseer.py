@@ -21,8 +21,17 @@ after :data:`PUSH_GRACE_S`; a
 cheap doctor check turning FAIL; a session asking the owner for longer than
 ``[overseer] owner_wait_s`` (once per unanswered question); starvation — free slots and
 nothing launchable while non-excluded backlog remains, sustained for
-``[overseer] starve_s`` (once per episode). *Counters* — every
-``[overseer] every_finished`` phases finished, and every ``[overseer] every_s``.
+``[overseer] starve_s`` (once per episode); the box running short of RAM, swap,
+``/tmp`` or disk for :data:`BOX_S` (once per episode). *The clock* — every
+``[overseer] every_s`` a pass that writes the owner their summary. It is the
+only pass whose summary goes to the phone, and it counts from the last such
+pass, not from the last pass of any kind: a busy run's event passes never put
+the summary off.
+
+No pass is started for a number of finished phases. What a pass does for them
+(reads their recaps, files rows for the risks they noted) it does on whichever
+pass comes next, the clock's at the latest; the rest of what such a pass did
+has a trigger of its own (a ``fail``, starvation, the box).
 
 A merge conflict opens a resolver session, which almost always clears the hold
 within a minute; a pass that looks meanwhile finds nothing to do. So a hold
@@ -72,21 +81,21 @@ PUSH = "push"
 DOCTOR = "doctor"
 OWNER = "owner"
 STARVE = "starve"
-FINISHED = "finished"
-EVERY = "every"
+BOX = "box"
+SUMMARY = "summary"
 MANUAL = "manual"
 
 #: How long a push that failed without the repo's own check refusing it may stay
 #: owed before it triggers a pass: the next push, seconds later, settles most.
 PUSH_GRACE_S = 120.0
 
+#: How long the box must stay short of RAM, swap, ``/tmp`` or disk before it
+#: triggers a pass: one sample taken in the middle of a link step is not danger.
+BOX_S = 300.0
+
 #: A pass triggered by one of these sends its summary to the owner's phone; any
 #: other pass sends it only with ``swarm notify --attention`` (``cli._summary_hold``).
-SUMMARY_TRIGGERS = frozenset({FINISHED, MANUAL})
-
-#: Statuses that count as a phase *finishing* for the every-N counter. ``skip`` is
-#: the owner declaring a phase unnecessary — nothing ran, nothing to review.
-_COUNTED = statuses.INTEGRATES | {statuses.FAIL}
+SUMMARY_TRIGGERS = frozenset({SUMMARY})
 
 
 def overseer_dir(cfg: Config) -> Path:
@@ -116,7 +125,7 @@ class Memory:
     by an older or newer version never stops the policy from running.
     """
 
-    #: Start of the last pass (the min-gap and every-s clocks run from here).
+    #: Start of the last pass (the min-gap clock runs from here).
     last_pass_at: float = 0.0
     #: How far thaws have moved the clocks' start (``last_pass_at``, else
     #: ``anchor``) along since it was set (:meth:`shift`). The clocks count from
@@ -124,9 +133,12 @@ class Memory:
     #: (:meth:`Policy.since`).
     frozen_s: float = 0.0
     last_pass_end: float = 0.0
-    #: When the every-s clock started if no pass has run yet (supervisor start).
+    #: When the policy first looked (supervisor start): where the summary clock
+    #: starts until a summary pass has run.
     anchor: float = 0.0
-    finished_since: int = 0
+    #: Start of the last pass that wrote the owner their summary (the every-s
+    #: clock runs from here).
+    last_summary_at: float = 0.0
     #: ``done`` as last observed. None = never observed: the first observation
     #: baselines instead of firing.
     seen_done: dict[str, str] | None = None
@@ -145,6 +157,10 @@ class Memory:
     doctor_failing: list[str] = field(default_factory=list)
     starving_since: float = 0.0
     starve_fired: bool = False
+    #: Since when the box has been short of something, and whether that
+    #: episode has triggered a pass.
+    box_since: float = 0.0
+    box_fired: bool = False
     pending: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -160,8 +176,10 @@ class Memory:
         self.last_pass_at = state_mod.moved(self.last_pass_at, delta, now)
         self.anchor = state_mod.moved(self.anchor, delta, now)
         self.frozen_s += (self.last_pass_at or self.anchor) - was
+        self.last_summary_at = state_mod.moved(self.last_summary_at, delta, now)
         self.hold_since = state_mod.moved(self.hold_since, delta, now)
         self.starving_since = state_mod.moved(self.starving_since, delta, now)
+        self.box_since = state_mod.moved(self.box_since, delta, now)
         self.owner_since = {k: state_mod.moved(v, delta, now)
                             for k, v in self.owner_since.items()}
         self.push_since = {k: state_mod.moved(v, delta, now)
@@ -256,7 +274,8 @@ class Policy:
         self.mem.pending = []
         self.mem.last_pass_at = now
         self.mem.frozen_s = 0.0
-        self.mem.finished_since = 0
+        if any(r.key == SUMMARY for r in taken):
+            self.mem.last_summary_at = now
         self.save()
         return taken
 
@@ -278,6 +297,7 @@ class Policy:
         *,
         starving: bool | None = False,
         doctor_fails: dict[str, str] | None = None,
+        box: list[str] | None = None,
     ) -> list[str]:
         """Fold one look at the run into the memory; return the keys requested.
 
@@ -286,7 +306,8 @@ class Policy:
         the starvation episode as it was. ``doctor_fails``
         maps check name -> detail for the cheap checks that FAILed, or ``None``
         when they were not probed on this wake (so an unprobed wake is never read
-        as "all clear").
+        as "all clear"). ``box`` is what the box is short of, in words
+        (:func:`ovdigest.resources`' flags), with the same ``None``.
         """
         now = time.time() if now is None else now
         before = json.dumps(asdict(self.mem), sort_keys=True)
@@ -301,7 +322,9 @@ class Policy:
             fired += self._observe_starve(starving, now)
         if doctor_fails is not None:
             fired += self._observe_doctor(doctor_fails, now)
-        fired += self._observe_counters(now)
+        if box is not None:
+            fired += self._observe_box(box, now)
+        fired += self._observe_clock(now)
         if json.dumps(asdict(self.mem), sort_keys=True) != before:
             self.save()  # the baselines move even on a wake that fires nothing
         return fired
@@ -321,8 +344,6 @@ class Policy:
         waits = ledgerw.dated(self.cfg) if statuses.FAIL in (done[p] for p in new) else {}
         for phase in new:
             status = done[phase]
-            if status in _COUNTED:
-                self.mem.finished_since += 1
             if status == statuses.FAIL:
                 if phase in waits or ledgerw.later_date(self.cfg, phase):
                     continue  # finished `later`: it waits for a date, nothing failed
@@ -491,18 +512,31 @@ class Policy:
             out += self._want(f"{DOCTOR}:{name}", f"doctor FAIL {name}: {fails[name]}", True, now)
         return out
 
-    def _observe_counters(self, now: float) -> list[str]:
-        out: list[str] = []
-        n = self.cfg.overseer_every_finished
-        if n and self.mem.finished_since >= n:
-            out += self._want(
-                FINISHED, f"{self.mem.finished_since} phase(s) finished since the last pass", False, now
-            )
+    def _observe_box(self, flags: list[str], now: float) -> list[str]:
+        """The box short of RAM, swap, ``/tmp`` or disk for :data:`BOX_S`, once
+        per episode (it must clear to fire again). Not urgent: the pass may
+        pause the swarm, and one started every time a build peaks would cost
+        more than it saves."""
+        if not flags:
+            self.mem.box_since = 0.0
+            self.mem.box_fired = False
+            return []
+        if not self.mem.box_since:
+            self.mem.box_since = now
+        if self.mem.box_fired or now - self.mem.box_since < BOX_S:
+            return []
+        self.mem.box_fired = True
+        return self._want(BOX, f"the box is short: {'; '.join(flags)}", False, now)
+
+    def _observe_clock(self, now: float) -> list[str]:
+        """The owner's summary, every ``[overseer] every_s`` since the last one."""
         every = self.cfg.overseer_every_s
-        start = self.mem.last_pass_at or self.mem.anchor
+        start = self.mem.last_summary_at or self.mem.anchor
         if every and start and now - start >= every:
-            out += self._want(EVERY, f"no pass for {_age(now - start)}", False, now)
-        return out
+            return self._want(
+                SUMMARY, f"the owner's summary is due: none for {_age(now - start)}", False, now
+            )
+        return []
 
     # -- timing -----------------------------------------------------------
     def next_deadline(self, now: float | None = None) -> float | None:
@@ -517,11 +551,13 @@ class Policy:
         stamps: list[float] = []
         if self.mem.pending:
             stamps.append(self.mem.last_pass_at + self.cfg.overseer_min_gap_s)
-        start = self.mem.last_pass_at or self.mem.anchor
+        start = self.mem.last_summary_at or self.mem.anchor
         if self.cfg.overseer_every_s and start:
             stamps.append(start + self.cfg.overseer_every_s)
         if self.mem.starving_since and not self.mem.starve_fired:
             stamps.append(self.mem.starving_since + self.cfg.overseer_starve_s)
+        if self.mem.box_since and not self.mem.box_fired:
+            stamps.append(self.mem.box_since + BOX_S)
         for phase, since in self.mem.owner_since.items():
             if phase not in self.mem.owner_fired:
                 stamps.append(since + self.cfg.overseer_owner_wait_s)

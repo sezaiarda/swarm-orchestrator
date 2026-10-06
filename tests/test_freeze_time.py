@@ -177,8 +177,9 @@ def test_the_overseers_policy_moves_and_still_reads_on_from_the_real_moment(cfg)
     policy = overseer.Policy(cfg)
     policy.mem = overseer.Memory(
         last_pass_at=t0 - 600, last_pass_end=t0 - 300, anchor=t0 - 5000, hold_since=t0 - 60,
+        last_summary_at=t0 - 900, box_since=t0 - 20,
         seen_hold="P0:conflict", owner_since={"P1": t0 - 100}, push_since={"/r/a": t0 - 10},
-        starving_since=t0 - 30, pending=[{"key": "every", "text": "x", "at": t0 - 1}])
+        starving_since=t0 - 30, pending=[{"key": "summary", "text": "x", "at": t0 - 1}])
     policy.save()
 
     overseer.shift(cfg, FROZE, now)  # the thaw's, on the file
@@ -186,6 +187,8 @@ def test_the_overseers_policy_moves_and_still_reads_on_from_the_real_moment(cfg)
     mem = overseer.Policy(cfg).mem
     assert mem.last_pass_at == pytest.approx(t0 - 600 + FROZE)
     assert mem.anchor == pytest.approx(t0 - 5000 + FROZE)
+    assert mem.last_summary_at == pytest.approx(t0 - 900 + FROZE)
+    assert mem.box_since == pytest.approx(t0 - 20 + FROZE)
     assert mem.hold_since == pytest.approx(t0 - 60 + FROZE)
     assert mem.owner_since == {"P1": pytest.approx(t0 - 100 + FROZE)}
     assert mem.push_since == {"/r/a": pytest.approx(t0 - 10 + FROZE)}
@@ -266,7 +269,7 @@ def _frozen_run(cfg, t0: float, since: float) -> None:
     _job(cfg, "run", state=opqueue.RUNNING, queued_at=t0 - 500, lease_until=t0 + 3600)
     policy = overseer.Policy(cfg)
     policy.mem = overseer.Memory(last_pass_at=t0 - 600, anchor=t0 - 5000,
-                                 owner_since={"P0": t0 - 60})
+                                 last_summary_at=t0 - 600, owner_since={"P0": t0 - 60})
     policy.save()
     bigpic.save(cfg, bigpic.Memory(live="bp-1", live_at=t0 - 300, anchor=t0 - 9000))
     blockedping.gather(cfg, "P9", "the host refuses the key", now=t0)

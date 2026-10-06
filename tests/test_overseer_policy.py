@@ -44,7 +44,7 @@ def _keys(pol: ov.Policy) -> list[str]:
 
 def test_defaults_match_the_plan(cfg):
     assert cfg.overseer_enabled is True
-    assert (cfg.overseer_min_gap_s, cfg.overseer_every_finished, cfg.overseer_every_s) == (600, 3, 10800)
+    assert (cfg.overseer_min_gap_s, cfg.overseer_every_s) == (600, 14400)
     assert (cfg.overseer_owner_wait_s, cfg.overseer_starve_s, cfg.overseer_timeout_s) == (3600, 600, 2700)
     assert cfg.overseer_hold_wait_s == 600
 
@@ -53,7 +53,6 @@ def test_the_first_look_baselines_history_instead_of_reporting_it(cfg):
     pol = ov.Policy(cfg)
     pol.observe(_st({"A": "ok", "B": "fail", "C": "ok", "D": "ok"}), T0)
     assert pol.pending == []
-    assert pol.mem.finished_since == 0
 
 
 def test_a_new_failure_is_a_reason_and_due_at_once_when_no_pass_ran_yet(cfg):
@@ -65,25 +64,21 @@ def test_a_new_failure_is_a_reason_and_due_at_once_when_no_pass_ran_yet(cfg):
     assert pol.due(T0 + 5)
 
 
-def test_every_n_finished_counts_builds_and_failures_but_not_skips(cfg):
+def test_no_number_of_finished_phases_starts_a_pass(cfg):
     pol = ov.Policy(cfg)
     pol.observe(_st({}), T0)
-    pol.observe(_st({"A": "ok", "S": "skip"}), T0 + 1)
-    pol.observe(_st({"A": "ok", "S": "skip", "B": "operator"}), T0 + 2)
-    assert ov.FINISHED not in _keys(pol)
-    pol.observe(_st({"A": "ok", "S": "skip", "B": "operator", "C": "fail"}), T0 + 3)
-    assert ov.FINISHED in _keys(pol)
-    assert pol.mem.finished_since == 3
+    done = {f"P{i}": "ok" for i in range(40)} | {"S": "skip", "B": "operator"}
+    pol.observe(_st(done), T0 + 1)
+    assert pol.pending == [] and not pol.due(T0 + 2)
 
 
-def test_a_pass_takes_every_reason_and_resets_the_counter(cfg):
+def test_a_pass_takes_every_reason(cfg):
     pol = ov.Policy(cfg)
     pol.request("a", "one", now=T0)
     pol.request("b", "two", now=T0)
-    pol.mem.finished_since = 2
     taken = pol.begin(T0 + 1)
     assert [r.key for r in taken] == ["a", "b"]
-    assert pol.pending == [] and pol.mem.finished_since == 0
+    assert pol.pending == []
     assert not pol.due(T0 + 2)
 
 
@@ -323,15 +318,77 @@ def test_a_doctor_fail_fires_once_per_episode_and_an_unprobed_wake_changes_nothi
     assert _keys(pol) == ["doctor:ledger"]
 
 
-def test_the_cadence_runs_from_the_last_pass_or_the_first_look(cfg):
+def test_the_summary_clock_runs_from_the_last_summary_or_the_first_look(cfg):
     pol = ov.Policy(cfg)
     pol.observe(_st(), T0)
-    pol.observe(_st(), T0 + 10799)
+    pol.observe(_st(), T0 + 14399)
     assert pol.pending == []
-    pol.observe(_st(), T0 + 10800)
-    assert _keys(pol) == [ov.EVERY]
-    pol.begin(T0 + 10801)
-    pol.observe(_st(), T0 + 20000)
+    pol.observe(_st(), T0 + 14400)
+    assert _keys(pol) == [ov.SUMMARY] and not pol.pending[0].urgent
+    pol.begin(T0 + 14401)
+    pol.observe(_st(), T0 + 28000)
+    assert pol.pending == []
+    pol.observe(_st(), T0 + 14401 + 14400)
+    assert _keys(pol) == [ov.SUMMARY]
+
+
+def test_a_pass_for_anything_else_does_not_put_the_summary_off(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_st({"A": "ok"}), T0)
+    done = {"A": "ok"}
+    for hour in (1, 2, 3):  # a busy run: an event pass every hour
+        done = {**done, f"F{hour}": "fail"}
+        pol.observe(_st(done), T0 + hour * 3600)
+        assert [r.key for r in pol.begin(T0 + hour * 3600 + 1)] == [f"fail:F{hour}"]
+    pol.observe(_st(done), T0 + 14400)
+    assert _keys(pol) == [ov.SUMMARY]
+    assert pol.next_deadline(T0 + 14401) is None  # pending, and the gap has passed
+
+
+def test_the_summary_clock_is_off_at_zero(cfg):
+    cfg.overseer_every_s = 0
+    pol = ov.Policy(cfg)
+    pol.observe(_st(), T0)
+    pol.observe(_st(), T0 + 10 * 14400)
+    assert pol.pending == []
+
+
+def test_a_thaw_moves_the_summary_clock_along(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_st(), T0)
+    pol.request(ov.SUMMARY, "due", now=T0 + 1)
+    pol.begin(T0 + 1)
+    pol.shift(3600, T0 + 5000)
+    pol.observe(_st(), T0 + 1 + 14400)
+    assert pol.pending == []
+    pol.observe(_st(), T0 + 1 + 14400 + 3600)
+    assert _keys(pol) == [ov.SUMMARY]
+
+
+def test_a_box_short_of_something_for_five_minutes_is_one_reason_per_episode(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_st(), T0, box=["RAM low: 1.0 GiB available of 32.0 GiB"])
+    assert pol.pending == []
+    assert pol.next_deadline(T0 + 1) == T0 + ov.BOX_S
+    pol.observe(_st(), T0 + 100, box=None)  # not probed: neither clear nor short
+    pol.observe(_st(), T0 + ov.BOX_S, box=["RAM low: 1.0 GiB available of 32.0 GiB"])
+    assert _keys(pol) == [ov.BOX] and not pol.pending[0].urgent
+    assert "RAM low" in pol.pending[0].text
+    pol.begin(T0 + ov.BOX_S + 1)
+    pol.observe(_st(), T0 + 2 * ov.BOX_S, box=["swap 90% used"])
+    assert pol.pending == []  # the same episode
+    pol.observe(_st(), T0 + 3 * ov.BOX_S, box=[])
+    pol.observe(_st(), T0 + 4 * ov.BOX_S, box=["swap 90% used"])
+    assert pol.pending == []  # a new episode, not yet five minutes old
+    pol.observe(_st(), T0 + 5 * ov.BOX_S, box=["swap 90% used"])
+    assert _keys(pol) == [ov.BOX]
+
+
+def test_one_short_sample_of_the_box_is_not_a_reason(cfg):
+    pol = ov.Policy(cfg)
+    pol.observe(_st(), T0, box=["/tmp 90% full"])
+    pol.observe(_st(), T0 + 60, box=[])
+    pol.observe(_st(), T0 + ov.BOX_S + 60, box=["/tmp 90% full"])
     assert pol.pending == []
 
 

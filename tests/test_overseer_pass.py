@@ -198,6 +198,7 @@ def sup(cfg, monkeypatch):
     s.spawn_args = []
     monkeypatch.setattr(s, "_start_overseer_spawn", lambda *a: s.spawn_args.append(a))
     s._doctor_probed = time.time()  # the probe has its own test
+    s._box_probed = time.time()  # and so has the look at the box
     yield s
     s.log.close()
 
@@ -409,6 +410,32 @@ def test_a_live_or_owed_pass_holds_the_finish(sup, cfg):
     assert state_mod.read(cfg).finished
 
 
+def test_a_summary_that_is_due_does_not_hold_the_finish(sup, cfg):
+    """The finish message says more than a summary would."""
+    with state_mod.transaction(cfg) as st:
+        for p in ("P0", "P1", "P2", "P3"):
+            st.mark_done(p, "ok")
+    sup.overseer.mem.anchor = time.time() - cfg.overseer_every_s - 1
+    sup._finish_if_settled()
+    assert [r.key for r in sup.overseer.pending] == ["summary"]
+    assert state_mod.read(cfg).finished
+
+
+def test_the_policy_is_told_what_the_box_is_short_of_once_a_minute(sup, cfg, monkeypatch):
+    looks = []
+    monkeypatch.setattr(ovdigest, "resources",
+                        lambda _cfg: looks.append(1) or {"flags": ["swap 91% used"]})
+    sup._box_probed = 0.0
+    sup._overseer_tick()
+    sup._overseer_tick()
+    assert len(looks) == 1 and sup.overseer.mem.box_since
+    assert sup.overseer.pending == []  # short for a moment is not a reason
+    sup.overseer.mem.box_since -= ov.BOX_S
+    sup._box_probed = 0.0
+    sup._overseer_tick()
+    assert "OVERSEER-TRIGGER box — the box is short: swap 91% used" in cfg.supervisor_log.read_text()
+
+
 def test_the_last_failure_of_a_run_still_gets_its_pass(sup, cfg):
     """The event that settles the run is the trigger: it is seen before the finish."""
     with state_mod.transaction(cfg) as st:
@@ -550,20 +577,20 @@ def _passes(swarm) -> list[dict]:
     ] if d.is_dir() else []
 
 
-def test_e2e_every_three_finished_runs_a_pass_that_signs_off(swarm):
+def test_e2e_the_summary_clock_runs_a_pass_that_signs_off(swarm):
     swarm.env["SWARM_OVERSEER"] = "1"
-    _toml(swarm, "\n[overseer]\nevery_finished = 3\nevery_s = 0\n")
+    _toml(swarm, "\n[overseer]\nevery_s = 1\n")
     swarm.up()
     assert swarm.wait(lambda: "ACTION finish" in swarm.log_text(), timeout=60), swarm.log_text()
 
     log = swarm.log_text()
-    assert "OVERSEER-TRIGGER finished" in log
+    assert "OVERSEER-TRIGGER summary" in log
     assert "OVERSEER-PASS-START" in log and "OVERSEER-PASS-END" in log
-    [rec] = [p for p in _passes(swarm) if p["reasons"][0]["key"] == "finished"]
+    [rec] = [p for p in _passes(swarm) if p["reasons"][0]["key"] == "summary"]
     assert rec["status"] == "done"
     assert rec["summary"].startswith("fake overseer pass: read the digest")
     digest = rec["digest"]
-    assert os.path.isfile(digest) and "phase(s) finished since the last pass" in open(digest).read()
+    assert os.path.isfile(digest) and "the owner's summary is due" in open(digest).read()
     md = open(rec["record"]).read()
     assert "nothing to do (fake overseer)" in md
     assert log.count("ACTION finish") == 1
@@ -574,7 +601,7 @@ def test_e2e_every_three_finished_runs_a_pass_that_signs_off(swarm):
 def test_e2e_a_hung_pass_is_killed_and_the_run_still_finishes(swarm):
     swarm.env["SWARM_OVERSEER"] = "1"
     swarm.env["FAKE_OVERSEER_HANG"] = "1"
-    _toml(swarm, "\n[overseer]\nevery_finished = 1\nevery_s = 0\ntimeout_s = 2\nmin_gap_s = 0\n")
+    _toml(swarm, "\n[overseer]\nevery_s = 1\ntimeout_s = 2\n")
     swarm.up()
     assert swarm.wait(lambda: "ACTION finish" in swarm.log_text(), timeout=60), swarm.log_text()
     log = swarm.log_text()
@@ -588,7 +615,7 @@ def test_e2e_a_hung_pass_is_killed_and_the_run_still_finishes(swarm):
 def test_e2e_overseer_now_runs_a_pass_mid_run(swarm):
     swarm.env["SWARM_OVERSEER"] = "1"
     swarm.env["FAKE_WORKER_SLEEP"] = "4"
-    _toml(swarm, "\n[overseer]\nevery_finished = 0\nevery_s = 0\n")
+    _toml(swarm, "\n[overseer]\nevery_s = 0\n")
     swarm.up()
     assert swarm.wait(lambda: "EVENT master-idle" in swarm.log_text(), timeout=20), swarm.log_text()
     assert swarm.cli("overseer", "--now").returncode == 0

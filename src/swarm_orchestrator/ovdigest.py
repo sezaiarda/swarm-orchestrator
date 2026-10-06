@@ -359,8 +359,8 @@ def render(d: dict) -> str:
         out.append("- your summary (`swarm notify`) goes to the owner's phone")
     else:
         out.append(
-            "- your summary is recorded, not sent: not a cadence pass. Add `--attention`"
-            " only if something needs the owner"
+            "- your summary is recorded, not sent: the owner's summary is not due. Add"
+            " `--attention` only if something needs the owner"
         )
     out += ["", "## The swarm now"]
     out.append(

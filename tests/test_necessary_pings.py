@@ -150,14 +150,13 @@ def _notify(cfg, *args: str) -> int:
     return cli_main(["--project-dir", str(cfg.project_dir), "notify", *args])
 
 
-@pytest.mark.parametrize("key", ["finished", "manual"])
-def test_a_cadence_or_requested_pass_sends_its_summary_as_written(cfg, monkeypatch, key):
-    _pass(cfg, monkeypatch, key)
+def test_the_pass_the_summary_clock_started_sends_its_summary_as_written(cfg, monkeypatch):
+    _pass(cfg, monkeypatch, "summary")
     assert _notify(cfg, "10 done, all green") == 0
     assert sent(cfg) == "10 done, all green\n"  # usage only when the owner asks
 
 
-@pytest.mark.parametrize("key", ["every", "starve", "hold:P1", "doctor:x", "owner:P1"])
+@pytest.mark.parametrize("key", ["manual", "starve", "hold:P1", "doctor:x", "owner:P1", "box"])
 def test_any_other_pass_records_its_summary_and_sends_nothing(cfg, monkeypatch, capsys, key):
     _pass(cfg, monkeypatch, key)
     assert _notify(cfg, "nothing new") == 0
@@ -168,14 +167,14 @@ def test_any_other_pass_records_its_summary_and_sends_nothing(cfg, monkeypatch, 
 
 
 def test_attention_sends_the_summary_from_any_pass(cfg, monkeypatch):
-    _pass(cfg, monkeypatch, "every")
+    _pass(cfg, monkeypatch, "starve")
     assert _notify(cfg, "P3 failed twice; needs you", "--attention") == 0
     assert "P3 failed twice; needs you" in sent(cfg)
 
 
 def test_pings_all_sends_every_summary(cfg, monkeypatch):
     monkeypatch.setenv("SWARM_TG_PINGS", "all")
-    _pass(cfg, monkeypatch, "every")
+    _pass(cfg, monkeypatch, "starve")
     assert _notify(cfg, "hourly") == 0
     assert "hourly" in sent(cfg)
 
@@ -192,7 +191,7 @@ def test_the_digest_tells_the_overseer_whether_its_summary_goes_out(cfg):
     from swarm_orchestrator.overseer import Reason
 
     st = state_mod.read(cfg)
-    quiet = ovdigest.render(ovdigest.build(cfg, st, [Reason("every", "no pass for 3h")], since=0.0))
-    loud = ovdigest.render(ovdigest.build(cfg, st, [Reason("finished", "10 finished")], since=0.0))
+    quiet = ovdigest.render(ovdigest.build(cfg, st, [Reason("starve", "free slots for 10m")], since=0.0))
+    loud = ovdigest.render(ovdigest.build(cfg, st, [Reason("summary", "the owner's summary is due")], since=0.0))
     assert "summary is recorded, not sent" in quiet and "`--attention`" in quiet
     assert "goes to the owner's phone" in loud

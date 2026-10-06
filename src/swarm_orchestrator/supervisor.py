@@ -98,6 +98,8 @@ CRASH_WINDOW_S = 3600.0
 #: The cheap doctor checks behind the Overseer's ``doctor`` trigger are probed at
 #: most this often: they parse the ledger, and a FAIL that matters lasts minutes.
 DOCTOR_PROBE_S = 600.0
+#: How often the Overseer's policy is told what the box is short of.
+BOX_PROBE_S = 60.0
 #: While a hand-over waits for a safe point, and while a restart it started is
 #: running, the loop wakes this often: what it waits for sends no event.
 HANDOVER_POLL_S = 0.5
@@ -189,6 +191,7 @@ class Supervisor:
         # not the owner's problem (its reasons wait for the next pass); a streak is.
         self._overseer_bad = 0
         self._doctor_probed = 0.0
+        self._box_probed = 0.0
         # Automatic gc (see `_gc_tick`). Its clock resumes from the last recorded
         # run; a run that never had one anchors at start-up, so a fresh `swarm up`
         # does not open with a full sweep while its first workers are booting —
@@ -974,6 +977,7 @@ class Supervisor:
 
         self._last_sweep = moved(self._last_sweep)
         self._doctor_probed = moved(self._doctor_probed)
+        self._box_probed = moved(self._box_probed)
         self._pinged = {k: moved(v) for k, v in self._pinged.items()}
         self._crashes = {p: [moved(t) for t in ts] for p, ts in self._crashes.items()}
         with self._launch_lock:
@@ -2773,10 +2777,10 @@ class Supervisor:
             # later: a reload that turns it on re-baselines instead of reporting
             # every phase that finished in the meantime.
             self.overseer.mem.seen_done = None
-            self.overseer.mem.finished_since = 0
             return
         self.overseer.observe(
-            st, now, starving=self._starving(st), doctor_fails=self._doctor_probe(st, now)
+            st, now, starving=self._starving(st), doctor_fails=self._doctor_probe(st, now),
+            box=self._box_probe(now),
         )
         self._maybe_start_overseer(st, now)
 
@@ -2838,6 +2842,15 @@ class Supervisor:
             doctor_mod._check_nudge(st, startable, ctx["free_slots"], held=held, now=now),
         ]
         return {c.name: c.detail for c in checks if c.status == doctor_mod.FAIL}
+
+    def _box_probe(self, now: float) -> list[str] | None:
+        """What the box is short of (RAM, swap, ``/tmp``, the state disk), at
+        most every :data:`BOX_PROBE_S`: a read of ``/proc/meminfo`` and two
+        ``statvfs`` calls. ``None`` = not probed."""
+        if now - self._box_probed < BOX_PROBE_S:
+            return None
+        self._box_probed = now
+        return ovdigest.resources(self.cfg)["flags"]
 
     def _maybe_start_overseer(self, st: state_mod.State, now: float) -> None:
         if not self._bootstrapped or self._overseer_live is not None or st.drain:
@@ -3032,8 +3045,8 @@ class Supervisor:
         """A live pass, or one owed, holds the finish.
 
         The event that settles a run may be the very one that should trigger a
-        pass (the last phase failing, the Nth finishing), and a run that finishes
-        first never gets it. So look once more here — without the starvation
+        pass (the last phase failing), and a run that finishes first never gets
+        it. So look once more here — without the starvation
         verdict, which a settled run with excluded rows left over would satisfy
         forever."""
         if self._overseer_live is not None:
@@ -3041,7 +3054,8 @@ class Supervisor:
         if not self.cfg.overseer_enabled or not self._bootstrapped:
             return False
         self.overseer.observe(st, starving=None, doctor_fails=None)
-        pending = self.overseer.pending
+        # A summary that has come due does not hold it: the finish says more.
+        pending = [r for r in self.overseer.pending if r.key != overseer_mod.SUMMARY]
         if pending:
             self.log.line(f"FINISH-HELD overseer pending={[r.key for r in pending]}")
             return True

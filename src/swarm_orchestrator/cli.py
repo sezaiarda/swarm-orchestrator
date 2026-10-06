@@ -2062,11 +2062,11 @@ def cmd_free(cfg: Config, target: str) -> int:
 def _summary_hold(cfg: Config, attention: bool) -> str | None:
     """Why an Overseer pass's summary stays off the phone, or ``None`` to send it.
 
-    It goes out on a cadence pass (``[overseer].every_finished``), a pass the
-    owner asked for (``swarm overseer --now``), or with ``--attention`` when
-    something needs the owner. Every other pass — the clock, starvation, a hold,
-    a doctor FAIL, an owner wait — records it and sends nothing, so pings stay
-    quiet unless something needs the owner.
+    It goes out on the pass the summary clock starts (``[overseer].every_s``),
+    or with ``--attention`` when something needs the owner. Every other pass —
+    a failure, starvation, a hold, a doctor FAIL, an owner wait, the box, one the
+    owner asked for — records it and sends nothing, so pings stay quiet unless
+    something needs the owner.
     """
     if attention:
         return None
@@ -2075,7 +2075,7 @@ def _summary_hold(cfg: Config, attention: bool) -> str | None:
     keys = {str(r.get("key", "")) for r in (rec.reasons if rec else [])}
     if keys & overseer_mod.SUMMARY_TRIGGERS:
         return None
-    return telegram.hold(cfg, "not a cadence pass and nothing flagged --attention")
+    return telegram.hold(cfg, "the summary is not due and nothing flagged --attention")
 
 
 def _notify_entry(cfg: Config, a) -> int:

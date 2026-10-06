@@ -729,14 +729,10 @@ class Config:
         "overseer", "min_gap_s", 600, HOT, env="SWARM_OVERSEER_MIN_GAP", minimum=0,
         doc="min seconds between non-urgent passes",
         why="read each time the policy asks whether a pass is due")
-    overseer_every_finished: int = _k(
-        "overseer", "every_finished", 3, HOT, env="SWARM_OVERSEER_EVERY_FINISHED", minimum=0,
-        doc="a pass every N finished phases; 0 = off",
-        why="the finished-phase counter is compared against it on every wake")
     overseer_every_s: int = _k(
-        "overseer", "every_s", 10800, HOT, env="SWARM_OVERSEER_EVERY", minimum=0,
-        doc="a pass at least this often (s); 0 = off",
-        why="the cadence clock is compared against it on every wake")
+        "overseer", "every_s", 14400, HOT, env="SWARM_OVERSEER_EVERY", minimum=0,
+        doc="your summary this often (s); 0 = never",
+        why="the summary clock is compared against it on every wake")
     overseer_owner_wait_s: int = _k(
         "overseer", "owner_wait_s", 3600, HOT, env="SWARM_OVERSEER_OWNER_WAIT", minimum=0,
         doc="owner-wait age that triggers a pass (s)",

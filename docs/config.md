@@ -307,8 +307,7 @@ it starts real work will yield and then wake, which a longer window avoids.
 | `cmd` | `""` | `SWARM_OVERSEER_CMD` | next | Replaces the built-in session command. Falls back to `[swarm].master_cmd`. |
 | `model` | `""` | | next | `""` uses `[swarm].master_model`. |
 | `min_gap_s` | `600` | `SWARM_OVERSEER_MIN_GAP` | hot | The minimum time between the starts of two non-urgent passes. |
-| `every_finished` | `3` | `SWARM_OVERSEER_EVERY_FINISHED` | hot | Run a pass every N finished phases. `0` turns this off. |
-| `every_s` | `10800` | `SWARM_OVERSEER_EVERY` | hot | Run a pass at least this often. `0` turns this off. |
+| `every_s` | `14400` | `SWARM_OVERSEER_EVERY` | hot | How often you get the Overseer's summary: a pass that writes it starts this long after the last one did (after the swarm started, for the first). Passes for anything else do not move this clock. `0` means no summary pass ever starts. |
 | `owner_wait_s` | `3600` | `SWARM_OVERSEER_OWNER_WAIT` | hot | A session asking you this long triggers a pass, once per unanswered question (one parked and answered is working, and does not count). |
 | `starve_s` | `600` | `SWARM_OVERSEER_STARVE` | hot | Free slots, nothing launchable and backlog still open for this long triggers a pass, once per episode. |
 | `hold_wait_s` | `600` | `SWARM_OVERSEER_HOLD_WAIT` | hot | A merge conflict the resolver is working on triggers a pass only once it has been held this long. A hold with no resolver, or one the resolver gave up on, triggers at once. |

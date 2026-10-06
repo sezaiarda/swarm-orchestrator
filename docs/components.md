@@ -470,10 +470,23 @@ goes ahead without it.
 **The Overseer** is a full Claude session that looks over the whole run and acts on
 it (prompt: `prompts/overseer.md`). It is on by default (`[overseer]`).
 
-- **When it runs:** a pass is triggered by events and counters, collected into one
+- **When it runs:** a pass is triggered by events and by one clock, collected into one
   pending list (see [the diagram](../README.md#init-pass-and-overseer)). Only one
   pass runs at a time. Passes are `min_gap_s` apart, unless a reason is urgent: a held merge
   queue, a doctor FAIL, starvation, or `swarm overseer --now`.
+- **The summary clock:** every `every_s` (4 hours by default) a pass starts to
+  write you its summary. It is the only pass whose summary goes to your phone.
+  The clock counts from the last summary pass (from the swarm's start for the
+  first), so the passes a busy run starts for other reasons never put it off. A
+  summary that comes due as the run ends does not hold the finish: the finish
+  message says more.
+- **No pass per number of finished phases.** A pass used to start every few
+  finished phases. What it did for them (read their recaps, file rows for the
+  risks they noted) the next pass does, the clock's at the latest. The rest of
+  what it did has triggers of its own: a `fail`, starvation, and the box.
+- **The box:** RAM, swap, `/tmp` or the state disk at a dangerous level (the
+  digest's own warnings) for five minutes in a row triggers a pass, once until
+  the box has recovered. The supervisor looks once a minute.
 - **Merge holds:** a conflict the resolver is working on is left to it. The hold
   triggers a pass only when no resolver opened, the resolver gave up (it messaged
   you, or ran `swarm resolved` on an unfinished merge), or the hold is older than
@@ -2087,12 +2100,12 @@ with `--attention`; a decision it needs first is asked with
 - a supervisor crash or error; a master that would not start, or an Overseer
   pass that would not start or ran past its timeout, on the third in a row (and
   every third after that);
-- the Overseer's summary on a cadence pass
-  (`[overseer].every_finished`) or a pass you asked for (`swarm overseer --now`).
-  Any other pass (the clock, starvation, a hold, a doctor FAIL, an owner wait)
-  records its summary without sending it, unless it runs
-  `swarm notify --attention` because something needs you. The digest tells the
-  pass which case it is in;
+- the Overseer's summary on the pass the summary clock starts
+  (`[overseer].every_s`, every 4 hours by default). Any other pass (a failure,
+  starvation, a hold, a doctor FAIL, an owner wait, the box, one you asked for
+  with `swarm overseer --now`) records its summary without sending it, unless
+  it runs `swarm notify --attention` because something needs you. The digest
+  tells the pass which case it is in;
 - a note from the init pass or a resolver (`swarm notify`);
 - the finish summary;
 - a usage cap pausing or stopping the swarm, and a usage pause lifting;

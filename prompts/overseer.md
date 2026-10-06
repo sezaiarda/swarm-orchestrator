@@ -163,8 +163,8 @@ it serves, and `swarm keep --stop <name>`.
 ## 5. Report and sign off
 
 1. **Tell the owner, only when it is worth a message.** Send only necessary messages.
-   Send the summary on a cadence pass (phases finished since the last pass) or a
-   pass the owner asked for; the digest's "Why this pass" says which this is.
+   Send the summary on the pass the summary clock started (every few hours); the
+   digest's "Why this pass" says whether this is it.
    On any other pass, send it only when something needs the owner (a decision,
    a failure you will not retry, a hold you cannot clear, work still owed), and
    then add `--attention`; without it the summary is recorded, not sent. Either

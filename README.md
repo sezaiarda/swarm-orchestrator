@@ -222,7 +222,8 @@ by the supervisor.
 flowchart TD
   ev1["a phase fails · a merge hold no resolver is clearing<br/>a push its repo's check refused, or still owed after 2 min · a cheap doctor check FAILs"] --> pend
   ev2["a phase waits on the owner past owner_wait_s<br/>free slots, nothing launchable, past starve_s"] --> pend
-  ct["every every_finished phases · every every_s seconds"] --> pend
+  bx["the box short of RAM, swap, /tmp or disk for 5 min"] --> pend
+  ct["your summary is due: every_s since the last one"] --> pend
   mn["swarm overseer --now"] --> pend
   pend["pending reasons, coalesced<br/>(overseer/policy.json)"] --> due["a pass starts when none is running,<br/>the init pass is over and min_gap_s has passed<br/>(urgent reasons: no gap)"]
   due --> prep["supervisor writes the digest, record and brief;<br/>worktree mode: builds mirror ovs-&lt;id&gt;"]
@@ -577,8 +578,8 @@ terminal.
     that died without `swarm done`;
   - a supervisor crash or error; a master that would not start, or an Overseer
     pass that failed or ran long, three times in a row;
-  - the Overseer's summary on a cadence pass (`every_finished`) or one you asked
-    for, or any summary it flags `--attention`;
+  - the Overseer's summary every `every_s` (4 hours by default), or any
+    summary it flags `--attention`;
   - a note from the init pass or a resolver (`swarm notify`);
   - the finish summary;
   - a usage cap pausing or stopping the swarm, and a usage pause lifting.

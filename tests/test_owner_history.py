@@ -43,6 +43,7 @@ def cfg(tmp_path: Path, monkeypatch):
     project = tmp_path / "project"
     (project / "docs").mkdir(parents=True)
     (project / "docs" / "PHASE-LEDGER.md").write_text(LEDGER, encoding="utf-8")
+    (project / ".swarm.toml").touch()
     c = load(project_dir=str(project))
     c.ensure_dirs()
     return c

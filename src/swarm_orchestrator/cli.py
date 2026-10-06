@@ -61,7 +61,7 @@ from . import todo as todo_mod
 from . import usage as usage_mod
 from .resources import view as resources_view
 from .web import lifecycle as web_lifecycle
-from .config import Config, WrongSwarm, load, session_project
+from .config import Config, NoProject, WrongSwarm, find_project, load
 from . import logutil
 from .logutil import Log
 from .procs import SESSION_ENV
@@ -2902,9 +2902,10 @@ def cmd_resources(cfg: Config, as_json: bool = False, hours: float = 24.0,
 # -- parser ---------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarm", description=__doc__)
-    p.add_argument("--config", help="path to .swarm.toml (default: ./.swarm.toml)")
+    p.add_argument("--config", help="path to .swarm.toml (default: the project's own)")
     p.add_argument("--project-dir",
-                   help="project directory (default: $SWARM_PROJECT in a launched session, else cwd)")
+                   help="project directory (default: $SWARM_PROJECT in a launched session,"
+                        " else the nearest folder with a .swarm.toml from here upward)")
     sub = p.add_subparsers(dest="command", required=True)
 
     up = sub.add_parser("up", help="set up + start the supervisor, then attach")
@@ -3427,32 +3428,32 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _load_config(explicit: str | None, project_dir: str | None) -> Config:
-    """The config a command runs under: ``--project-dir``, else the project the
-    session belongs to (:func:`config.session_project`), else the cwd.
+    """The config a command runs under, of the project :func:`config.find_project`
+    says it names: ``--project-dir``, else the project the session belongs to,
+    else the nearest one from the cwd upward.
 
     A launched session runs its commands from its mirror, a component repo
     inside it or an external checkout, and every one of them reads and writes
-    the project's run state. Read from the cwd, a component repo answers with
-    the defaults (lanes off, so ``swarm widen`` records nothing) and a mirror
-    with the ledger branched at launch (so ``swarm follow-up`` accepts an id
-    main has taken since).
+    the project's run state. Read from the cwd, a mirror answers with the
+    ledger branched at launch (so ``swarm follow-up`` accepts an id main has
+    taken since) and with whatever its copy of the settings says.
 
     The project's file is the owner's live one and may be mid-edit. When it
-    does not load, the command says so and runs on the settings the supervisor
-    last recorded rather than fail a worker's ``swarm done`` over a file the
-    worker does not own. Never on the cwd's file: that is another folder's, and
-    the run state is this project's.
+    does not load, a session's command says so and runs on the settings the
+    supervisor last recorded rather than fail a worker's ``swarm done`` over a
+    file the worker does not own. Never on the cwd's file: that is another
+    folder's, and the run state is this project's.
     """
-    project = None if project_dir else session_project()
-    if project is None:
-        return load(explicit=explicit, project_dir=project_dir)
+    project = find_project(project_dir, explicit)
     try:
         return load(explicit=explicit, project_dir=str(project))
     except WrongSwarm:
         raise
     except (ValueError, OSError) as exc:
         named = os.environ.get("SWARM_STATE_DIR")
-        last = reload_mod.recorded_cfg(Path(named).expanduser()) if named else None
+        in_session = not project_dir and os.environ.get("SWARM_PROJECT")
+        last = reload_mod.recorded_cfg(Path(named).expanduser()) if (
+            in_session and named) else None
         if last is None or last.project_dir.resolve() != project:
             raise
         print(f"swarm: the config of {project} does not load ({exc}); using the"
@@ -3476,7 +3477,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
     try:
         cfg = _load_config(args.config, args.project_dir)
-    except WrongSwarm as exc:
+    except (WrongSwarm, NoProject) as exc:
         print(f"swarm: {exc}", file=sys.stderr)
         return 2
     except (ValueError, OSError) as exc:

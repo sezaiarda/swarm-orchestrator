@@ -782,7 +782,10 @@ git, and the `claude` CLI logged in. `cargo-sweep` is optional, for gc.
    ```
 
    [`examples/multi-repo.swarm.toml`](examples/multi-repo.swarm.toml) is a fuller
-   example, and [docs/config.md](docs/config.md) lists every key.
+   example, and [docs/config.md](docs/config.md) lists every key. The file is
+   what makes the folder a swarm project: a `swarm` command typed anywhere
+   inside it finds it, and one typed in a folder with no `.swarm.toml` above it
+   is refused instead of starting an empty swarm there.
 
 6. **Check and run:**
 
@@ -924,7 +927,8 @@ in **[docs/config.md](docs/config.md)**.
 State lives outside the project, under
 `~/.local/state/swarm-orchestrator/<folder>-<hash>/`. The hash is of the full
 project path, so two projects with the same folder name never share state.
-`SWARM_STATE_DIR` overrides the location.
+`SWARM_STATE_DIR` overrides the location. The directory is made by `swarm up`
+or the first command that changes something, never by one that only reads.
 
 | path | what it holds |
 |---|---|

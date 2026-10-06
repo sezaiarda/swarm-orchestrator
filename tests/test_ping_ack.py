@@ -33,6 +33,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
     monkeypatch.setenv("SWARM_SLUG", "pingack")
     monkeypatch.setenv("SWARM_DRIVER", "bare")
+    (project / ".swarm.toml").touch()
     c = load(project_dir=str(project))
     c.ensure_dirs()
     return c

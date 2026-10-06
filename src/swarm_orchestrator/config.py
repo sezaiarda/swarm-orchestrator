@@ -27,8 +27,16 @@ from . import tmux
 from .tmux import AUTO_LAYOUT, LAYOUTS, normalize_layout
 
 
+#: The file that makes a folder a swarm project.
+CONFIG_NAME = ".swarm.toml"
+
+
 class WrongSwarm(ValueError):
     """The command names one project and ``SWARM_STATE_DIR`` another's run state."""
+
+
+class NoProject(ValueError):
+    """The command names no swarm project; the message says where it looked."""
 
 
 def _slugify(name: str) -> str:
@@ -946,7 +954,7 @@ def _find_config_file(explicit: str | None, project_dir: Path) -> Path | None:
     if explicit:
         p = Path(explicit).expanduser()
         return p if p.is_file() else None
-    candidate = project_dir / ".swarm.toml"
+    candidate = project_dir / CONFIG_NAME
     return candidate if candidate.is_file() else None
 
 
@@ -1043,22 +1051,53 @@ def _live_session(cfg: Config) -> str | None:
     return was if owner == str(cfg.state_dir) else None
 
 
-def session_project() -> Path | None:
-    """The project a launched session belongs to (``SWARM_PROJECT``), or None.
+def find_project(project_dir: str | None = None, explicit: str | None = None) -> Path:
+    """The project a ``swarm`` command runs on; :class:`NoProject` when there is
+    none, with where it looked.
 
-    A session's cwd is wherever its work is: its mirror, a component repo inside
-    the mirror, a checkout of an external repo. None of those is the project: a
-    component repo has no ``.swarm.toml`` at all, and a mirror's ledger is the
-    copy branched at launch. ``SWARM_STATE_DIR`` already points the session at
-    the project's run state, so the ``swarm`` command reads the settings and the
-    ledger from here too rather than pair that state with another folder's.
-    None outside a session, or when the named directory is gone.
+    ``--project-dir`` names it, else the session the command runs in
+    (``SWARM_PROJECT``), else the folder it is typed in. A named project is
+    taken as it is: the directory must be there and hold a ``.swarm.toml``
+    (``--config`` names another file for it). From the cwd the project is the
+    nearest folder that holds one, this one or one above it, so a command typed
+    in a subfolder or a component repo still reaches its project.
+
+    A folder with no ``.swarm.toml`` is not a project. Loading one anyway gave
+    every setting its default and a state dir of its own: a command one folder
+    off, in a renamed folder or with a mistyped ``--project-dir`` addressed a
+    new, empty swarm in silence, and a ``swarm build`` there ran on a build gate
+    of its own.
+
+    A session's cwd is wherever its work is: its mirror, a component repo
+    inside the mirror, a checkout of an external repo. None of those is its
+    project (a mirror's ledger is the copy branched at launch), which is why a
+    session is told (:func:`launch.session_env`) and never searches.
     """
-    named = os.environ.get("SWARM_PROJECT")
-    if not named:
-        return None
-    path = Path(named).expanduser()
-    return path.resolve() if path.is_dir() else None
+    file = Path(explicit).expanduser() if explicit else None
+    if file is not None and not file.is_file():
+        raise NoProject(f"--config names {file}, which is not a file")
+    how = "--project-dir" if project_dir else "SWARM_PROJECT"
+    named = project_dir or os.environ.get("SWARM_PROJECT")
+    if named:
+        path = Path(named).expanduser()
+        if not path.is_dir():
+            raise NoProject(f"{how} names {path}, which is not a directory")
+        path = path.resolve()
+        if file is None and not (path / CONFIG_NAME).is_file():
+            raise NoProject(
+                f"{how} names {path}, which holds no {CONFIG_NAME}: it is not a swarm"
+                " project (a named project is taken as it is; the folders above it are"
+                " not searched)")
+        return path
+    cwd = Path.cwd()
+    if file is not None:
+        return cwd
+    for folder in (cwd, *cwd.parents):
+        if (folder / CONFIG_NAME).is_file():
+            return folder
+    raise NoProject(
+        f"no {CONFIG_NAME} in {cwd} or in any folder above it: this is not a swarm"
+        " project. Run the command in the project, or name it with --project-dir")
 
 
 def claude_version() -> str:

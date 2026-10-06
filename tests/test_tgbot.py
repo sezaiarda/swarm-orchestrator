@@ -104,6 +104,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_STATE_DIR", str(state))
     monkeypatch.setenv("SWARM_TG_SINK", str(tmp_path / "tg.log"))
     monkeypatch.delenv("SWARM_MASTER_KIND", raising=False)
+    (tmp_path / ".swarm.toml").touch()
     c = load(project_dir=str(tmp_path))
     c.ensure_dirs()
     return c

@@ -6,7 +6,13 @@ project the command named, so ``swarm --project-dir B down`` typed in a session
 of swarm A (its console is taught that very form) sent the shutdown into A's
 FIFO and ended A's processes under B's name. The state dir records the project
 it belongs to; a command naming another one is refused before it touches
-anything. Real supervisors, the bare driver, fake master and workers.
+anything.
+
+And a command names a swarm only where there is one. A folder with no
+``.swarm.toml`` used to load as a project of defaults with a state dir of its
+own, so a command one folder off, in a renamed folder or with a mistyped
+``--project-dir`` addressed a new, empty swarm in silence. Real supervisors, the
+bare driver, fake master and workers.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from swarm_orchestrator import console, restart
 from swarm_orchestrator import session as session_mod
 from swarm_orchestrator import tmux
 from swarm_orchestrator.cli import main as cli_main
-from swarm_orchestrator.config import WrongSwarm, load
+from swarm_orchestrator.config import NoProject, WrongSwarm, find_project, load
 
 
 def _alive(pid: int) -> bool:
@@ -242,3 +248,144 @@ def test_the_console_and_the_dashboard_are_told_their_project(tmp_path, monkeypa
     monkeypatch.setattr(tmux, "respawn_pane", lambda pane, cmd, env=None: seen.update(env))
     session_mod.start_dashboard(cfg, "%0")
     assert seen == want
+
+
+# -- no phantom swarms: which project a command names ----------------------------
+@pytest.fixture
+def tree(tmp_path, monkeypatch):
+    """``work/project`` is a project; ``work/project/crate/src`` is inside it;
+    ``work/plain`` is a folder beside it."""
+    monkeypatch.delenv("SWARM_PROJECT", raising=False)
+    project = tmp_path / "work" / "project"
+    (project / "crate" / "src").mkdir(parents=True)
+    (project / ".swarm.toml").write_text("")
+    (tmp_path / "work" / "plain" / "deep").mkdir(parents=True)
+    return project
+
+
+def test_the_project_is_the_nearest_folder_with_a_swarm_toml_from_the_cwd_up(
+        tree, monkeypatch):
+    for cwd in (tree, tree / "crate", tree / "crate" / "src"):
+        monkeypatch.chdir(cwd)
+        assert find_project() == tree
+    (tree / "crate" / ".swarm.toml").write_text("")
+    monkeypatch.chdir(tree / "crate" / "src")
+    assert find_project() == tree / "crate"
+
+
+def test_a_folder_under_no_project_names_none_and_the_refusal_says_where_it_looked(
+        tree, monkeypatch):
+    plain = tree.parent / "plain" / "deep"
+    monkeypatch.chdir(plain)
+    with pytest.raises(NoProject) as exc:
+        find_project()
+    assert str(plain) in str(exc.value) and "any folder above" in str(exc.value)
+
+
+def test_a_named_project_is_taken_as_it_is_and_must_be_one(tree, tmp_path, monkeypatch):
+    monkeypatch.chdir(tree.parent / "plain")
+    assert find_project(str(tree)) == tree
+    for how, name in (("--project-dir", None), ("SWARM_PROJECT", "SWARM_PROJECT")):
+        for path, why in ((tree / "crate", "holds no .swarm.toml"),
+                          (tmp_path / "gone", "not a directory")):
+            if name:
+                monkeypatch.setenv(name, str(path))
+            with pytest.raises(NoProject) as exc:
+                find_project(None if name else str(path))
+            assert how in str(exc.value) and str(path) in str(exc.value)
+            assert why in str(exc.value)
+
+
+def test_the_flag_beats_the_session_which_beats_the_cwd(tree, tmp_path, monkeypatch):
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / ".swarm.toml").write_text("")
+    monkeypatch.chdir(tree)
+    monkeypatch.setenv("SWARM_PROJECT", str(other / "." ))
+    assert find_project() == other
+    assert find_project(str(tree)) == tree
+
+
+def test_config_names_the_file_of_a_project_that_holds_none(tree, monkeypatch):
+    plain = tree.parent / "plain"
+    file = tree / ".swarm.toml"
+    monkeypatch.chdir(plain)
+    assert find_project(explicit=str(file)) == plain
+    assert find_project(str(plain / "deep"), str(file)) == plain / "deep"
+    with pytest.raises(NoProject) as exc:
+        find_project(str(tree), str(plain / "none.toml"))
+    assert "--config" in str(exc.value)
+
+
+# -- no phantom swarms: what the commands do -------------------------------------
+def _state_root(inst) -> Path:
+    return Path(inst.env["XDG_STATE_HOME"])
+
+
+@pytest.mark.parametrize("command", [
+    ["up", "--no-attach"], ["down"], ["pause"], ["resume"], ["status"], ["doctor"],
+    ["done", "P0", "ok"], ["build", "--", "true"], ["keep", "--list"], ["gc"],
+    ["freeze"], ["note", "P0", "a decision"],
+])
+def test_no_command_makes_a_swarm_of_a_folder_that_is_not_a_project(
+        two_swarms, tmp_path, command):
+    a, _ = two_swarms
+    folder = tmp_path / "typo" / "deeper"
+    folder.mkdir(parents=True)
+    r = _swarm(a.env, folder, *command)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert ".swarm.toml" in r.stderr and str(folder) in r.stderr
+    assert not _state_root(a).exists() or not any(_state_root(a).iterdir())
+
+
+@pytest.mark.parametrize("command", [["--help"], ["status", "-h"], ["up", "-h"]])
+def test_help_needs_no_project(two_swarms, tmp_path, command):
+    a, _ = two_swarms
+    r = _swarm(a.env, tmp_path, *command)
+    assert r.returncode == 0 and r.stdout.startswith("usage: swarm")
+    assert not _state_root(a).exists() or not any(_state_root(a).iterdir())
+
+
+@pytest.mark.parametrize("command", [["up", "--no-attach"], ["pause"], ["status"]])
+def test_a_mistyped_project_dir_is_refused_not_started(two_swarms, tmp_path, command):
+    a, _ = two_swarms
+    for wrong in (tmp_path / "alpah", a.project / "nested"):
+        (a.project / "nested").mkdir(exist_ok=True)
+        r = _swarm(a.env, a.project, "--project-dir", str(wrong), *command)
+        assert r.returncode == 2 and str(wrong) in r.stderr, r.stdout + r.stderr
+    assert not _state_root(a).exists() or not any(_state_root(a).iterdir())
+
+
+def test_a_command_typed_inside_a_project_reaches_its_swarm_not_one_of_its_own(two_swarms):
+    """A build started in a component folder ran on a private gate of that
+    folder's own state dir, beside the project's."""
+    a, _ = two_swarms
+    _up(a)
+    inside = a.project / "component" / "src"
+    inside.mkdir(parents=True)
+    assert "BUSY P0" in _swarm(a.env, inside, "status").stdout
+    assert _swarm(a.env, inside, "build", "--", "true").returncode == 0
+    assert _swarm(a.env, inside, "pause").returncode == 0
+    assert a.wait(lambda: a.state()["paused"], timeout=10)
+    assert [d.name for d in (_state_root(a) / "swarm-orchestrator").iterdir()] \
+        == [a.state_dir.name]
+
+
+#: Commands that only read. None of them may leave a run behind for a project
+#: that was never started.
+READ_ONLY = [
+    ["status"], ["status", "--json"], ["status", "--all"], ["context"], ["why", "P0"],
+    ["report"], ["todo"], ["check"], ["doctor"], ["usage"], ["resources"], ["overseer"],
+    ["big-picture"], ["layout"], ["reload", "--dry-run"], ["build", "--status"],
+    ["keep", "--list"], ["gc"],
+]
+
+
+@pytest.mark.parametrize("command", READ_ONLY, ids=" ".join)
+def test_a_read_only_command_creates_no_state_dir(two_swarms, command):
+    a, _ = two_swarms
+    r = _swarm(a.env, a.project, *command)
+    assert r.returncode in (0, 1), r.stdout + r.stderr  # doctor: 1 = it found something
+    assert "Traceback" not in r.stderr
+    assert not a.state_dir.exists()
+    assert not _state_root(a).exists() or not any(_state_root(a).iterdir())

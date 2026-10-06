@@ -25,7 +25,7 @@ from swarm_orchestrator import launch as launch_mod
 from swarm_orchestrator import state as state_mod
 from swarm_orchestrator import why as why_mod
 from swarm_orchestrator.cli import main as cli_main
-from swarm_orchestrator.config import load, session_project
+from swarm_orchestrator.config import load
 from swarm_orchestrator.logutil import Log
 from swarm_orchestrator.supervisor import Supervisor
 
@@ -164,6 +164,7 @@ def test_an_explicit_project_dir_that_is_not_the_sessions_is_refused(
     _supervised(cfg)
     other = tmp_path / "other"
     other.mkdir()
+    (other / ".swarm.toml").write_text(TOML)
     monkeypatch.chdir(mirror / "alpha")
     assert cli_main(["--project-dir", str(other), "widen", "hold-W1", "alpha/src/new.py"]) == 2
     err = capsys.readouterr().err
@@ -198,18 +199,6 @@ def test_every_session_is_told_its_project_whatever_the_isolation(ws, monkeypatc
     assert env["SWARM_PROJECT"] == str(cfg.project_dir) and "SWARM_WORKTREE" not in env
 
 
-def test_session_project_is_the_named_directory_or_nothing(tmp_path, monkeypatch):
-    monkeypatch.delenv("SWARM_PROJECT", raising=False)
-    assert session_project() is None
-    monkeypatch.setenv("SWARM_PROJECT", "")
-    assert session_project() is None
-    monkeypatch.setenv("SWARM_PROJECT", str(tmp_path / "gone"))
-    assert session_project() is None
-    (tmp_path / "real").mkdir()
-    monkeypatch.setenv("SWARM_PROJECT", str(tmp_path / "real" / ".." / "real"))
-    assert session_project() == (tmp_path / "real").resolve()
-
-
 def test_a_project_config_that_does_not_load_runs_on_the_recorded_one_and_says_so(
         ws, monkeypatch, capsys):
     """The owner's live file may be mid-edit; a worker's command must still run,
@@ -235,9 +224,14 @@ def test_a_project_config_that_does_not_load_with_nothing_recorded_is_an_error(
     assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/tests/**"]
 
 
-def test_a_session_whose_project_is_gone_falls_back_to_the_cwd(ws, tmp_path, monkeypatch):
+def test_a_session_whose_project_is_gone_is_refused_whatever_folder_it_stands_in(
+        ws, tmp_path, monkeypatch, capsys):
+    """It used to fall back to the cwd: a session naming one project, acting on
+    whichever one it happened to stand in."""
     cfg, mirror = ws
     monkeypatch.setenv("SWARM_PROJECT", str(tmp_path / "gone"))
-    monkeypatch.chdir(cfg.project_dir)
-    assert cli_main(["widen", "hold-W1", "alpha/src/new.py"]) == 0
-    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/src/new.py", "alpha/tests/**"]
+    for cwd in (cfg.project_dir, mirror):
+        monkeypatch.chdir(cwd)
+        assert cli_main(["widen", "hold-W1", "alpha/src/new.py"]) == 2
+        assert str(tmp_path / "gone") in capsys.readouterr().err
+    assert state_mod.read(cfg).lanes["hold-W1"] == ["alpha/tests/**"]

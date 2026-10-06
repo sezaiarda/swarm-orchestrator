@@ -187,6 +187,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_RESOURCES", "1")
     project = tmp_path / "project"
     project.mkdir()
+    (project / ".swarm.toml").touch()
     return load(project_dir=str(project))
 
 

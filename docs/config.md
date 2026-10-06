@@ -5,7 +5,10 @@ overrides it, and what `swarm reload` does with an edit to it. Each key is
 declared once, on its `Config` field in `src/swarm_orchestrator/config.py`; the
 loader, `swarm reload` and the TUI config form all read that declaration, and a
 test checks these tables against it. The file lives at the project root (or pass `--config`). A missing
-table or key takes the default, so a minimal file works.
+table or key takes the default, so a minimal file works, and an empty one too.
+The file is what makes a folder a project: `swarm` finds it from the folder a
+command is typed in upward, and refuses every command where there is none (see
+[docs/cli.md](cli.md)).
 
 A key the loader does not read is ignored, so a file that still sets a retired
 key (`[worker].done_hook`, `[tasks].roadmap`) loads unchanged.

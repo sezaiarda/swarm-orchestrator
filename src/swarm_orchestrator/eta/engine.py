@@ -469,6 +469,9 @@ def shared(cfg, inputs: Inputs, fitted: Fitted, fit_id: str, runs: int,
     ``max_age`` seconds ago, by default :func:`recompute_s`), else one simulated
     and cached now. The lock makes a second asker wait for the first one's
     answer instead of simulating the same thing beside it."""
+    if not Path(cfg.state_dir).is_dir():
+        # No run was ever started here: answer, and leave no state dir behind.
+        return compute(inputs, fitted, runs)
     want = key(inputs, fit_id)
     not_before = inputs.now - (recompute_s(inputs) if max_age is None else max_age)
     path = cache_path(cfg)

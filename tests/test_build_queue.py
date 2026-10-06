@@ -30,13 +30,14 @@ KEYS = {"ts", "event", "id", "phase", "pid", "slot", "cls", "argv", "cwd", "wait
 
 
 class Gate:
-    """A temp state dir, a project dir with a Cargo.toml and a fake cargo."""
+    """A temp state dir, a project with a Cargo.toml, and a fake cargo."""
 
     def __init__(self, tmp: Path, max_concurrent: int = 1, overtake: int = 0):
         self.tmp = tmp
         self.state = tmp / "state"
         self.proj = tmp / "proj"
         self.proj.mkdir(parents=True)
+        (self.proj / ".swarm.toml").touch()
         (self.proj / "Cargo.toml").write_text("[package]\n")
         self.bin = tmp / "bin"
         self.bin.mkdir()

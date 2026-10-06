@@ -62,6 +62,7 @@ def test_int_env_degrades_instead_of_crashing(monkeypatch):
 def _build(tmp_path, *argv, extra_env=None):
     env = {**os.environ, "SWARM_STATE_DIR": str(tmp_path / "state")}
     env.update(extra_env or {})
+    (tmp_path / ".swarm.toml").touch()
     return subprocess.run(
         [sys.executable, "-m", "swarm_orchestrator", "build", *argv],
         cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=30,

@@ -52,6 +52,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.delenv("SWARM_GIT_ISOLATION", raising=False)
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "PHASE-LEDGER.md").write_text(LEDGER, encoding="utf-8")
+    (tmp_path / ".swarm.toml").touch()
     cfg = load(project_dir=str(tmp_path))
     state_mod.init_state(cfg)
     return cfg

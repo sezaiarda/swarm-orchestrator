@@ -85,6 +85,7 @@ def _peak(intervals: list[tuple[float, float]]) -> int:
 def test_the_sampler_measures_real_gated_builds(tmp_path, monkeypatch):
     state, proj = tmp_path / "state", tmp_path / "proj"
     proj.mkdir()
+    (proj / ".swarm.toml").touch()
     burn = proj / "burn.py"
     burn.write_text(BURN)
     log = tmp_path / "burn.log"

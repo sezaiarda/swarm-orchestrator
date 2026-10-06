@@ -8,8 +8,24 @@ exact flags.
 The project is `--project-dir`; without it, the project of the session the
 command runs in (`SWARM_PROJECT`, set for every worker, operator job and
 Overseer pass, the console and the dashboard), and outside a session the
-current directory. A session's command therefore answers for its project from
-a mirror, a component repo inside one or any other checkout.
+nearest folder that holds a `.swarm.toml`: the current directory, or one above
+it. So a command typed in a subfolder or a component repo of a project reaches
+that project, and a session's command answers for its project from a mirror, a
+component repo inside one or any other checkout.
+
+A folder is a project only if it holds a `.swarm.toml`. Where there is none,
+every command is refused and says where it looked; nothing is created. A
+project named with `--project-dir` or `SWARM_PROJECT` is taken as it is: that
+directory must exist and hold the file (or `--config` names it), and the folders
+above it are not searched. So a mistyped path, a renamed folder or a command
+typed one folder off can no longer start, or build in, a new and empty swarm.
+
+A run's state dir is made by `swarm up` or by the first command that changes
+something. A command that only reads (`status`, `context`, `why`, `report`,
+`todo`, `check`, `doctor`, `usage`, `resources`, `overseer`, `big-picture`,
+`layout`, `reload --dry-run`, `build --status`, `keep --list`, a `gc` dry run)
+never makes one, so looking at a project that was never started leaves nothing
+behind.
 
 A session can only run commands on its own swarm. It carries that swarm's
 state dir (`SWARM_STATE_DIR`), and the state dir records the project it

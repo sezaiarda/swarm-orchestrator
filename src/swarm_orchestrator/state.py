@@ -665,8 +665,12 @@ def _save(cfg: Config, state: State) -> None:
 
 
 def read(cfg: Config) -> State:
-    """Read state under a shared lock (no mutation)."""
-    cfg.ensure_dirs()
+    """Read state under a shared lock (no mutation).
+
+    A run that was never started has no state dir, and reading it makes none:
+    `swarm status` in a project must not leave a run behind for it."""
+    if not cfg.state_dir.is_dir():
+        return State.fresh(cfg.max_workers)
     with cfg.lock_path.open("w") as lockf:
         fcntl.flock(lockf, fcntl.LOCK_SH)
         try:

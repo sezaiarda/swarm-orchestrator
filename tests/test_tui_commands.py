@@ -218,6 +218,7 @@ def cfg(tmp_path, monkeypatch):
             monkeypatch.delenv(setting.env, raising=False)
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("SWARM_DRIVER", "bare")
+    (project / ".swarm.toml").touch()
     cfg = load_config(project_dir=str(project))
     cfg.ensure_dirs()
     return cfg

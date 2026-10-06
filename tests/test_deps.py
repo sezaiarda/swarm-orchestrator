@@ -84,6 +84,7 @@ def _bare_cfg(tmp_path, monkeypatch, ledger_text: str):
 
     (tmp_path / "docs").mkdir(parents=True, exist_ok=True)
     (tmp_path / "docs" / "PHASE-LEDGER.md").write_text(ledger_text, encoding="utf-8")
+    (tmp_path / ".swarm.toml").touch()
     return load(project_dir=str(tmp_path))
 
 

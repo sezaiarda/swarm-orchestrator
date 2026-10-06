@@ -329,7 +329,7 @@ def session_env(
 
     ``SWARM_PROJECT`` is the canonical project path, whatever the isolation: the
     session's ``swarm`` commands read the settings and the ledger from it
-    (:func:`config.session_project`), so they answer for the project from a
+    (:func:`config.find_project`), so they answer for the project from a
     component repo or any other cwd the session works in.
 
     Under ``isolation = worktree`` the worker also gets ``SWARM_WORKTREE`` (its

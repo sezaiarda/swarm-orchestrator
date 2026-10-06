@@ -38,6 +38,7 @@ def cfg(tmp_path: Path, monkeypatch):
     for leak in ("SWARM_TG_PINGS", "SWARM_GIT_ISOLATION", "SWARM_MASTER_KIND",
                  "SWARM_OVERSEER_PASS", "SWARM_MASTER_CMD"):
         monkeypatch.delenv(leak, raising=False)
+    (project / ".swarm.toml").touch()
     c = load(project_dir=str(project))
     c.ensure_dirs()
     state_mod.init_state(c)

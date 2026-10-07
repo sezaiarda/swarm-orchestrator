@@ -383,7 +383,8 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
     A slot the state calls busy while its pane holds no claude is tagged ``gone``
     and goes red: that stall is invisible in ``state.json`` and is why this panel
     exists. A slot whose phase is in ``blockers`` is repainted as waiting, so the
-    row and the blocker drawer can never disagree.
+    row and the blocker drawer can never disagree. A slot whose session builds a
+    batch reads ``seed +n``: its riders are at work in it too.
 
     After the slots comes a row per parked worker, asking the owner or at work on
     the answer (``Dash.parked_rows``), read like a slot's: it runs in a tmux
@@ -433,7 +434,7 @@ def worker_rows(dash, width: int = 44, selected: int | None = None) -> list[tupl
             tag = " " + paint(status, state)
         line = (
             f"{mark}[{COLOR[state]}]{slot.id:<2}[/]  "
-            f"{clip(escape(slot.phase), phase_w):<{phase_w}} "
+            f"{clip(escape(slot.label), phase_w):<{phase_w}} "
             f"{fmt_duration(slot.elapsed_s):>6} {eta_cell(eta_runs_of(dash), slot.elapsed_s)}"
             f"  {gauge} {pct}{tag}"
         )

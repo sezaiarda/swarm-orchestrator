@@ -325,6 +325,10 @@ class Config:
         choices=("", *EFFORTS), parse=_effort,
         doc='claude --effort per worker; "" = inherit yours',
         why="passed as `claude --effort` on the command line a pane is spawned with")
+    builder_model: str = _k(
+        "worker", "builder_model", "sonnet", NEXT,
+        doc="model the lead gives each builder subagent",
+        why="written into a worker's brief once, at launch")
     env_marker: str = _k(
         "worker", "env_marker", "SWARM_PHASE", NEXT,
         doc="env var carrying the phase name into the worker",
@@ -583,6 +587,34 @@ class Config:
         "lanes", "prepare_timeout_s", 600, HOT, minimum=1,
         doc="seconds a prepare command may run",
         why="read by every landing check when it starts")
+
+    # -- [batch] ----------------------------------------------------------
+    # Batch claims: a slot takes up to max_rows related ready rows (one family,
+    # one repo, a chain) and one lead session builds them in order (batcher.py).
+    batch_enabled: bool = _k(
+        "batch", "enabled", True, HOT, env="SWARM_BATCHING",
+        doc="let one worker claim related ready rows",
+        why="read each time a slot is filled")
+    batch_max_rows: int = _k(
+        "batch", "max_rows", 5, HOT, minimum=1,
+        doc="rows per batch (at most 5)",
+        why="read each time a slot is filled")
+    batch_max_points: int = _k(
+        "batch", "max_points", 60, HOT, minimum=1,
+        doc="size cap of a batch, in row points",
+        why="read each time a slot is filled")
+    batch_max_repos: int = _k(
+        "batch", "max_repos", 3, HOT, minimum=1,
+        doc="code repos one batch may span",
+        why="read each time a slot is filled")
+    batch_model: str = _k(
+        "batch", "model", "sonnet", HOT,
+        doc='model that picks a batch; "" = rule only',
+        why="read each time a slot is filled")
+    batch_timeout_s: int = _k(
+        "batch", "timeout_s", 60, HOT, minimum=1,
+        doc="seconds the batch model call may take",
+        why="read each time a slot is filled")
 
     # -- [operator] -------------------------------------------------------
     # Positive opt-in: the only thing between a test suite and an autonomous

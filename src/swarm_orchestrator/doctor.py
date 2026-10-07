@@ -637,8 +637,11 @@ def _reported(cfg: Config, st: State, phase: str) -> bool:
     minutes while a landing check runs. A sentinel counts only when written
     since the phase was last claimed, the supervisor's own rule
     (``_unread_report``): one left by an earlier attempt says nothing about
-    the worker running now.
+    the worker running now. A batch's session has not, while a row of its
+    batch is still to report: its seed's sentinel says nothing of the rest.
     """
+    if st.batch_left(phase):
+        return False
     if phase in _landing(st):
         return True
     written: list[float] = []
@@ -1741,16 +1744,19 @@ def _check_sentinels(cfg: Config, st: State) -> Check:
 
     A phase that is landing has its sentinel and no entry in the map yet: the
     map is written when it lands, so it is counted apart and is not missing.
+    So has a row of an open batch that has reported (``State.batch_done``):
+    nothing of the batch is recorded before it lands.
     """
     sentinels = _sentinels(cfg)
     if not sentinels:
         return Check("sentinels", OK, "no sentinels written yet")
+    on_way = _landing(st) | set(st.batch_done)
     mismatched = [
         f"{p}: sentinel={s} state={st.done[p]}"
         for p, s in sorted(sentinels.items())
         if p in st.done and st.done[p] != s
     ]
-    landing = sorted(p for p in _landing(st) if p in sentinels and p not in st.done)
+    landing = sorted(p for p in on_way if p in sentinels and p not in st.done)
     missing = sorted(p for p in sentinels if p not in st.done and p not in landing)
     if mismatched:
         return Check(
@@ -1882,7 +1888,7 @@ def _check_open(cfg: Config, st: State) -> Check:
         return Check("phases.open", OK, "the ledger has no checkboxes to compare")
     graph = ledger_mod.load(path)
     ticked = ledger_mod.load_ticked(path)
-    on_its_way = {*ledgerw.reported(cfg), *_landing(st), *st.claimed_phases()}
+    on_its_way = {*ledgerw.reported(cfg), *_landing(st), *st.claimed_phases(), *st.batch_rows()}
     still_open = sorted(
         p for p, s in st.done.items()
         if s in statuses.INTEGRATES and p in graph and p not in ticked and p not in on_its_way

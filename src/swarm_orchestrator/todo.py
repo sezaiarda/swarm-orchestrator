@@ -223,7 +223,8 @@ def collect(cfg: Config, st: state_mod.State | None = None) -> TodoList:
     graph = ledger_mod.load(path)
     rows = _read_rows(path) if graph else {}
     ticked = ledger_mod.load_ticked(path)
-    flying = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+    flying = ({s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+              | st.batch_rows())
     done = ledger_mod.with_ticked(st.done, ticked, flying)
     satisfied = {p for p, s in done.items() if s in statuses.SATISFIES_DEPS}
     excluded = set(cfg.exclude or [])

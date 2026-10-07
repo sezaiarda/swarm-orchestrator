@@ -103,7 +103,8 @@ def explain(cfg: Config, phase: str, st: State | None = None) -> Explanation:
     graph = ledger_mod.load(path)
     # Read the done map the launcher reads: a ticked row it holds no record of is
     # landed. A copy, so the caller's state is never touched.
-    flying = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+    flying = ({s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+              | st.batch_rows())
     # The launcher's own reading of the dates still ahead, today in UTC. A row
     # that finished `later` waits for one: its record is not a failure.
     dated = ledgerw.dated(cfg)
@@ -160,9 +161,14 @@ def _classify(cfg: Config, phase: str, st: State, graph: dict[str, set[str]],
         )
 
     slot = next((s for s in st.busy_slots() if s.phase == phase), None)
+    seed = st.batch_of(phase)
+    if seed is not None and seed != phase:
+        return _rider(phase, seed, st)
     if slot is not None:
+        rows = st.batches.get(phase, [])
+        tail = f", with {', '.join(rows[1:])} in its batch" if len(rows) > 1 else ""
         return Explanation(
-            phase, BUSY, f"running right now in slot {slot.id} — it is not stuck"
+            phase, BUSY, f"running right now in slot {slot.id}{tail} — it is not stuck"
         )
 
     if st.integ_blocked == phase:
@@ -381,6 +387,22 @@ def _tree(
 
 
 # -- the `[tasks].exclude` comment ---------------------------------------
+def _rider(phase: str, seed: str, st: State) -> Explanation:
+    """``phase`` rides in ``seed``'s batch: its session builds it, in turn, and it
+    is recorded when the batch lands."""
+    slot = next((s for s in st.busy_slots() if s.phase == seed), None)
+    said = st.batch_done.get(phase)
+    if said is not None:
+        n = len(st.batch_left(seed))
+        wait = (f"; it lands with the batch once {n} more row{'' if n == 1 else 's'}"
+                f" {'has' if n == 1 else 'have'} reported" if n else "; the batch is landing")
+        return Explanation(phase, INTEGRATING,
+                           f"rides in {seed}'s batch and has reported `{said}`{wait}")
+    where = f" in slot {slot.id}" if slot is not None else ""
+    return Explanation(phase, BUSY, f"rides in {seed}'s batch: that session{where} builds it,"
+                       " in turn, and it is recorded when the batch lands — it is not stuck")
+
+
 def _exclude_comment(cfg: Config, phase: str) -> str | None:
     """The config comment explaining why ``phase`` is excluded, if there is one.
 

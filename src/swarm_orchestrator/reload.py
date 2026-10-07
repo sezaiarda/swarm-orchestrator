@@ -87,6 +87,7 @@ class Facts:
     """What the live run looks like, as far as reload policy is concerned."""
 
     busy: dict[int, str] = field(default_factory=dict)  # slot id -> phase
+    riders: list[str] = field(default_factory=list)  # in a batch, in its seed's slot
     parked: list[str] = field(default_factory=list)
     waiting: dict[str, float] = field(default_factory=dict)  # phase -> deadline
     integ_queue: list[str] = field(default_factory=list)
@@ -103,6 +104,7 @@ class Facts:
     ) -> "Facts":
         return cls(
             busy={s.id: s.phase for s in st.busy_slots() if s.phase},
+            riders=sorted(r for seed, rows in st.batches.items() for r in rows if r != seed),
             parked=list(st.parked),
             waiting=dict(st.waiting),
             integ_queue=list(st.integ_queue),
@@ -117,7 +119,7 @@ class Facts:
     def in_flight(self) -> list[str]:
         """Phases that would be crossed by a mid-run change: in a slot, off-grid
         awaiting the owner, or somewhere in the merge queue."""
-        out = list(self.busy.values()) + list(self.parked) + list(self.waiting)
+        out = list(self.busy.values()) + self.riders + list(self.parked) + list(self.waiting)
         out += list(self.integ_queue)
         if self.integ_blocked:
             out.append(self.integ_blocked)

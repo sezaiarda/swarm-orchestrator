@@ -977,9 +977,10 @@ def _done_refusal(cfg: Config, phase: str, st: state_mod.State) -> str | None:
     if not ledger_mod.safe_id(phase):
         return f"{phase!r} is not a phase id (letters, digits, '.', '_', '-')"
     own = os.environ.get(cfg.env_marker)
-    if own and own != phase:
-        return (f"this session is the worker for {own}; it cannot report {phase}."
-                f" Did you mean `swarm done {own} ...`?")
+    if own and own != phase and st.batch_of(phase) != own:
+        rows = st.batches.get(own) or [own]
+        return (f"this session is the worker for {', '.join(rows)}; it cannot report {phase}."
+                f" Did you mean `swarm done {rows[0]} ...`?")
     if not st.in_flight(phase):
         return f"{phase} is not in flight (no worker is running it)"
     return None
@@ -1014,6 +1015,64 @@ def cmd_why(cfg: Config, phase: str, as_json: bool, tree: bool) -> int:
     if as_json:
         return _dump(asdict(exp))
     print(why_mod.render(exp, show_tree=tree))
+    return 0
+
+
+def cmd_unbatch(cfg: Config, row: str, why: str) -> int:
+    """Hand a row of this session's batch back unbuilt: it goes back to the
+    ready rows (a rider at once, the session's own row when the batch ends),
+    nothing is recorded against it, and it runs alone the next time."""
+    from . import batcher
+
+    if len(why.strip()) < models_mod.MIN_WHY_CHARS:
+        print(f"swarm unbatch refused: say why (at least {models_mod.MIN_WHY_CHARS}"
+              " characters); the next worker reads it", file=sys.stderr)
+        return 2
+    with state_mod.transaction(cfg) as st:
+        seed = st.batch_of(row)
+        own = os.environ.get(cfg.env_marker)
+        if seed is None:
+            refusal = f"{row} rides in no open batch"
+        elif own and own != seed:
+            refusal = f"this session is the worker for {own}; {row} is not one of its rows"
+        elif row in st.batch_done:
+            refusal = f"{row} has already reported ({st.batch_done[row]})"
+        else:
+            refusal = None
+            if row == seed:
+                st.batch_done[row] = batcher.RELEASED
+            else:
+                st.batches[seed].remove(row)
+    if refusal is not None:
+        print(f"swarm unbatch refused: {refusal}", file=sys.stderr)
+        return 2
+    batcher.release(cfg, row, why.strip())
+    log = Log(cfg.supervisor_log)
+    log.line(f"UNBATCH {row} batch={seed}")
+    if row != seed:
+        logutil.run_ended(log, row, "unbatched")
+    poked = _poke(cfg, f"unbatched {seed}")
+    print(f"{row}: handed back; nothing is recorded against it, and it runs alone next time")
+    print("  it is ready again " + ("when this session ends" if row == seed else "now"))
+    print("  commit nothing of it, and leave its changes out of the tree"
+          f" (`git stash push -u -m \"swarm: {row}\"`)")
+    if not poked:
+        print("  no supervisor is reading: it acts on this when it next starts")
+    return 0
+
+
+def cmd_batch(cfg: Config, as_json: bool) -> int:
+    """The batches the deterministic rule would form for the ready rows now.
+    Read-only: no model call, nothing claimed."""
+    from . import batcher
+
+    batches = batcher.plan(cfg, state_mod.read(cfg))
+    if as_json:
+        return _dump([asdict(b) for b in batches])
+    for b in batches:
+        print(f"{' '.join(b.rows)}  ({b.reason})")
+    if not batches:
+        print("no ready rows")
     return 0
 
 
@@ -1760,6 +1819,9 @@ def cmd_escalate(cfg: Config, phase: str, why: str) -> int:
         else models_mod.override(cfg, phase)
     if refusal is None and phase in st.integrating():
         refusal = f"{phase} has finished and its work is waiting to merge"
+    if refusal is None and st.batch_of(phase) is not None:
+        refusal = (f"{phase} is one row of a batch; hand it back unbuilt with"
+                   f" `swarm unbatch {phase} \"<why>\"`, and it runs alone, where it can be handed up")
     if refusal is None and not any(s.busy and s.phase == phase for s in st.slots):
         refusal = f"{phase} is waiting on the owner, not building"
     if refusal is None and models_mod.handup(cfg, phase) is not None:
@@ -2846,6 +2908,11 @@ def cmd_status(cfg: Config, as_json: bool = False, show_all: bool = False) -> in
         mark = f"BUSY {s.phase}" if s.busy else "free"
         wt = f" branch={s.branch}" if s.branch else ""
         on = f" model={row_models[s.phase]}" if s.busy and s.phase in row_models else ""
+        # A batch: every row its session builds, in order, with what each reported.
+        rows = st.batches.get(s.phase or "") if s.busy else None
+        if rows:
+            on += " batch=" + ",".join(
+                f"{r}:{st.batch_done[r]}" if r in st.batch_done else r for r in rows)
         lines.append(f"  slot {s.id} pane={s.pane_id} {mark}{wt}{on}")
     if st.waiting or st.parked:
         # A parked session the owner answered is working again, in its own window.
@@ -3336,6 +3403,15 @@ def _build_parser() -> argparse.ArgumentParser:
     whp.add_argument("--json", action="store_true")
     whp.add_argument("--tree", action="store_true", help="show the dependency tree")
     whp.set_defaults(func=lambda cfg, a: cmd_why(cfg, a.phase, a.json, a.tree))
+
+    ubp = sub.add_parser("unbatch", help="hand a row of this session's batch back unbuilt")
+    ubp.add_argument("phase")
+    ubp.add_argument("why")
+    ubp.set_defaults(func=lambda cfg, a: cmd_unbatch(cfg, a.phase, a.why))
+
+    bap = sub.add_parser("batch", help="the batches the ready rows would launch as (dry run)")
+    bap.add_argument("--json", action="store_true")
+    bap.set_defaults(func=lambda cfg, a: cmd_batch(cfg, a.json))
 
     rpp = sub.add_parser("report", help="what every phase did, with its recap")
     rpp.add_argument("--json", action="store_true")

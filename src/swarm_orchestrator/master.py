@@ -84,6 +84,7 @@ def build_context(cfg: Config, st: State) -> dict:
         | set(st.parked)
         | set(st.waiting)
         | st.integrating()
+        | st.batch_rows()  # riding in another row's session
     )
     # A row that finished `later` waits for its `after:` date: in the ledger,
     # or still in the report queue when the ledger could not be written yet.

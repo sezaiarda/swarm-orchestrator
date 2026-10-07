@@ -91,6 +91,7 @@ address, and the listener answers for it under the new name.
 |---|---|---|---|---|
 | `command_template` | `"/prime {phase}"` | | next | The line typed into a worker's pane once `claude` has booted. |
 | `command_file` | `".claude/commands/prime.md"` | | next | The project's slash-command file. The init pass patches it for swarm mode, and `swarm check` lints it. |
+| `builder_model` | `"sonnet"` | | next | The model a worker's lead session gives each builder subagent it spawns. |
 | `env_marker` | `"SWARM_PHASE"` | | next | The variable that carries the phase id into the worker's environment. |
 | `worker_cmd` | `"claude"` | `SWARM_WORKER_CMD` | next | The base command a slot pane is respawned with, as `cd <cwd> && exec <worker_cmd> -n 'swarm · worker · <phase>' --settings … --effort …`. `{phase}` expands. The `-n` display name is added only when the command sets none itself (an older `-n worker:{phase}` is kept as it is). The `--model` it names is the swarm's own model: a row whose `model:` field names another runs with that model swapped in, and its worker gets `--append-system-prompt` with the rule for `swarm escalate`. |
 | `ready_marker` | `""` | `SWARM_READY_MARKER` | next | Text that means "claude has booted". `""` means the running `claude --version`, which the boot banner prints; if that cannot be read, `Claude Code`. |
@@ -252,6 +253,43 @@ check     = { "*" = "scripts/push-gate.sh", "." = "bash ci/push-gate.sh" }
 prepare    = { "app" = "sh scripts/sync-deps.sh" }
 prepare_if = { "app" = "sh scripts/sync-deps.sh --check" }
 ```
+
+## `[batch]`
+
+Batch claims: when a slot frees, the row the launcher would start (the *seed*) takes up to `max_rows`
+related ready rows with it, and one lead session builds them in order, each row still its own commit
+and its own `swarm done`. A row may ride with the seed when it is open and in flight nowhere, is not
+excluded or dated, runs on the seed's model, overlaps no lane in flight, and every row it `needs` has
+landed or comes earlier in the batch (a chain successor rides after its need). Rows that run alone
+whatever the settings: one touching `./**`, one touching 3 or more code repos, an oversize row, and
+one that failed or was handed up before. `model` picks among those rows with one `claude -p` call; the
+answer is checked (seed first, known ids only, `needs` in order, one model, within the caps, no lane
+clash) and any failure, timeout or error falls back to the deterministic rule, with a
+`BATCH-FALLBACK <seed> <why>` line in the supervisor log. `swarm batch` prints what the rule would form
+now (see [cli.md](cli.md)). A row's size in points is `max(3, its ledger text in KB) + 0.5` per touch.
+
+At run time the batch is one claim: the seed's slot, mirror, `swarm/<seed>` branch and lane (the
+union of the rows' touches), with the riders in flight beside it (`CLAIM <row> slot=N batch=<seed>`
+in the log, `batches` in `state.json`, shown running everywhere the seed is). Every worker, a batch
+of one included, gets `prompts/worker_lead.md` appended to its system prompt (`--append-system-prompt-file`,
+written to `<state>/briefs/<seed>.lead.md`, with `$SWARM_BATCH` listing the rows): it orients once,
+hands each row to a builder subagent on `[worker] builder_model`, reviews, commits one commit per
+row, runs the full gate once for the batch, and reports each row with its own `swarm done`. Nothing
+is merged or recorded before the last row reports; then the branch lands once and each row is
+recorded with its own outcome and history. A row that fails leaves no commit (the lead stashes it)
+and goes alone to the Overseer or the owner; `swarm unbatch` hands a row back unbuilt. A session
+that dies lands the rows it reported (what it had not committed goes to `refs/swarm-attic/`), and
+its unreported rows are ready again; with nothing reported the seed keeps its branch for its next
+attempt, as a lone row does.
+
+| key | default | env | reload | meaning |
+|---|---|---|---|---|
+| `enabled` | `true` | `SWARM_BATCHING` | hot | Let a slot claim a batch. `false`: one row per slot, as before. |
+| `max_rows` | `5` | | hot | Rows per batch, seed included. At least 1; anything above 5 counts as 5. |
+| `max_points` | `60` | | hot | Most points one batch may sum to. A seed above it still runs, alone. |
+| `max_repos` | `3` | | hot | Most distinct code repos (`.` and `@resources` aside) one batch may touch. |
+| `model` | `"sonnet"` | | hot | `--model` for the call that picks the batch. `""` skips the call and always uses the deterministic rule. |
+| `timeout_s` | `60` | | hot | Seconds that call may take before the rule is used instead. |
 
 ## `[build]`
 

@@ -439,7 +439,9 @@ class Dash:
         must show."""
         done = state.get("done") if isinstance(state.get("done"), dict) else {}
         busy = frozenset(s.phase for s in self.snapshot.slots if s.busy and s.phase)
-        real = (self._mtimes.get("ledger"), frozenset(done.items()), busy)
+        # ``batch_done``: a batch's row reporting moves its session to the next.
+        real = (self._mtimes.get("ledger"), frozenset(done.items()), busy,
+                tuple(sorted(map(str, state.get("batch_done") or {}))))
         mine = usage_mod.current(self._samples.samples)
         usage = tuple(eta_mod.usage_key(usage_mod.latest(mine, w, now))
                       for w in ("week", "five"))

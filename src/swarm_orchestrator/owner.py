@@ -165,7 +165,8 @@ def current_owner_rows(cfg: Config, st: state_mod.State) -> list[tuple[str, int]
     """:func:`ledger.owner_rows` against the live ledger and ``state.json``."""
     path = cfg.project_dir / cfg.ledger
     graph = ledger_mod.load(path)
-    flying = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+    flying = ({s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+              | st.batch_rows())
     done = ledger_mod.with_ticked(st.done, ledger_mod.load_ticked(path), flying)
     return ledger_mod.owner_rows(graph, done, set(cfg.exclude), flying)
 

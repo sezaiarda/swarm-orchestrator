@@ -314,6 +314,15 @@ def _tg_bot_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _one_row_per_worker(monkeypatch):
+    """Batch claims are on by default; the suite's timings, slot counts and
+    worker command lines were written for one row per worker, so it runs with
+    them off. ``tests/test_batch.py`` turns them on (``SWARM_BATCHING=1``), and
+    the ``swarm`` fixture's copy of the environment carries the switch."""
+    monkeypatch.setenv("SWARM_BATCHING", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_owner_settings(monkeypatch):
     """A lean session carries the owner's ``~/.claude/settings.json`` on its
     command line; in the suite there is none, so no command under test holds

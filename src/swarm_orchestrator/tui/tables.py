@@ -424,7 +424,7 @@ def worker_row(entry, repo=None, meter=None, history=None, gone=None,
     return (
         paint("✖", state) if gone else glyph(live),
         str(slot.id) if slot.id >= 0 else "—",
-        cell(slot.phase or "—", 20, BAD if gone else (None if slot.busy else MUTED)),
+        cell(slot.label or "—", 20, BAD if gone else (None if slot.busy else MUTED)),
         paint(live, state),
         model_cell(*(model or (None,))) if slot.busy else paint("—", MUTED),
         cell(fmt_duration(slot.elapsed_s) if slot.busy else "—", 8,
@@ -605,6 +605,9 @@ def worker_detail(entry, dash) -> str:
         lines.append(field("window", escape(str(pane.window_name))))
     lines.append(field("branch", escape(slot.branch or "—")))
     lines.append(field("worktree", escape(slot.worktree or "—")))
+    if len(slot.batch) > 1:
+        lines.append(field("batch", escape(data.batch_line(
+            slot.batch, getattr(dash.snapshot, "batch_done", None) or {}))))
     lines.append(field("started", fmt_ago(slot.started_at)))
     lines.extend(_work_lines(dash, slot.phase, slot.elapsed_s, ctx, waiting, slot.pane_id))
     return join_rows(*lines)

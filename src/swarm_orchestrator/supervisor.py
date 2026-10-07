@@ -49,6 +49,7 @@ import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from . import batcher
 from . import caps
 from . import backup as backup_mod
 from . import bigpic as bigpic_mod
@@ -523,6 +524,8 @@ class Supervisor:
             self._on_done(phase, status)
         elif verb == "escalate":
             self._on_escalate(parts[1] if len(parts) > 1 else "?")
+        elif verb == "unbatched":
+            self._on_unbatched(parts[1] if len(parts) > 1 else "?")
         elif verb == "master-idle":
             self._on_master_idle()
         elif verb == "resolved":
@@ -1286,6 +1289,8 @@ class Supervisor:
         status = sentinels.get(phase)
         if status is None or phase in st.done or phase in st.integrating():
             return None
+        if phase in st.batch_done:
+            return None  # its batch has it, and lands it with the rest
         try:
             written = (self.cfg.done_dir / f"{phase}.{status}").stat().st_mtime
         except OSError:
@@ -1303,7 +1308,8 @@ class Supervisor:
         cfg = self.cfg
         st = state_mod.read(cfg)
         sentinels = gitq.sentinel_done(cfg)
-        flying = [p for p in st.claimed_phases() if p in sentinels]
+        flying = [p for p in [*st.claimed_phases(), *sorted(st.batch_rows())]
+                  if p in sentinels]
         if not flying:
             return
         claimed = self._claim_times()
@@ -1362,14 +1368,21 @@ class Supervisor:
         Ignored for a malformed id and for a phase with no worker, merge or
         record: ending a session and removing a worktree by that name would act
         on something no worker reported.
+
+        A row of an open batch only reports (:meth:`_on_batch_report`): its
+        session goes on until the batch's last row has reported.
         """
         with state_mod.transaction(self.cfg) as st:
             known = (
                 ledger_mod.safe_id(phase)
                 and (st.in_flight(phase) or phase in st.done or phase in st.integrating())
             )
+            seed = st.batch_of(phase)
         if not known:
             self.log.line(f"DONE-REFUSED {phase!r} {status} not a phase in flight")
+            return
+        if seed is not None:
+            self._on_batch_report(seed, phase, status)
             return
         self._end_worker(phase)
         if self.cfg.git_isolation != "worktree":
@@ -1394,6 +1407,112 @@ class Supervisor:
             if not (already and not has_slot):
                 st.integ_push(phase, status)
         self._pump_integrations()
+
+    # -- batch claims: one session, several rows --------------------------
+    def _on_batch_report(self, seed: str, phase: str, status: str) -> None:
+        """A row of ``seed``'s batch reported. Nothing is merged or recorded yet:
+        the session builds on, and the batch ends with its last report."""
+        with state_mod.transaction(self.cfg) as st:
+            st.batch_done[phase] = status
+            left = st.batch_left(seed)
+        self.log.line(f"BATCH-ROW {phase} {status} batch={seed} left={len(left)}")
+        if not left:
+            self._end_batch(seed)
+
+    def _on_unbatched(self, seed: str) -> None:
+        """``swarm unbatch`` handed a row of ``seed``'s batch back (the CLI has
+        already dropped it from the batch). It may launch elsewhere now, and the
+        batch ends if that was all it still waited for."""
+        with state_mod.transaction(self.cfg) as st:
+            rows = st.batches.get(seed)
+            left = st.batch_left(seed) if rows else None
+        self.log.line(f"EVENT unbatched {seed} left={len(left) if left is not None else '-'}")
+        if rows and not left:
+            self._end_batch(seed)
+            return
+        if not st.on_hold:
+            self._fill_slots(f"a row of {seed}'s batch was handed back")
+
+    def _end_batch(self, seed: str) -> None:
+        """Every row of ``seed``'s batch has reported: end its session, then land
+        its branch once, for every row that finished ``ok`` or ``operator``.
+        When nothing lands, the branch is set aside like a failed phase's and
+        each row is recorded at once."""
+        with state_mod.transaction(self.cfg) as st:
+            reports = {r: st.batch_done[r] for r in st.batches.get(seed, [])
+                       if r in st.batch_done}
+        self._end_worker(seed)
+        lands = sorted(r for r, s in reports.items() if s in gitq.DONE_INTEGRATE)
+        self.log.line(f"BATCH-END {seed} " + " ".join(f"{r}={s}" for r, s in reports.items()))
+        if self.cfg.git_isolation == "worktree":
+            if lands:
+                with state_mod.transaction(self.cfg) as st:
+                    st.integ_push(seed, batcher.INTEG_STATUS)
+                self._pump_integrations()
+                return
+            gitq.discard(self.cfg, seed, self.log)
+        self._close_batch(seed)
+
+    def _reap_batch(self, seed: str) -> bool:
+        """The session of ``seed``'s batch died (its slot is already free). The
+        rows it never reported go back to the ready rows. What its reported rows
+        committed lands, without what it had not committed yet (that goes to the
+        attic, :func:`gitq.shelve`), and the seed, if it never reported, starts
+        again from main. With nothing to land, the seed is reaped like a lone
+        phase and keeps its branch. True when the mirror is settled here."""
+        with state_mod.transaction(self.cfg) as st:
+            rows = st.batches.get(seed)
+            if not rows:
+                return False
+            released = [r for r in rows[1:] if r not in st.batch_done]
+            st.batches[seed] = [r for r in rows if r not in released]
+            reports = {r: st.batch_done[r] for r in rows if r in st.batch_done}
+        for row in released:
+            logutil.run_ended(self.log, row, "released")
+        self.log.line(f"BATCH-DIED {seed} released={' '.join(released) or '-'} "
+                      + " ".join(f"{r}={s}" for r, s in reports.items()))
+        lands = any(s in gitq.DONE_INTEGRATE for s in reports.values())
+        if lands and self.cfg.git_isolation == "worktree":
+            try:
+                gitq.shelve(self.cfg, seed, self.log)
+            except gitq.GitError as exc:
+                self.log.line(f"BATCH-SHELVE-ERROR {seed} {exc}")
+            with state_mod.transaction(self.cfg) as st:
+                st.integ_push(seed, batcher.INTEG_STATUS)
+            self._pump_integrations()
+            return True
+        if seed in reports and self.cfg.git_isolation == "worktree":
+            gitq.discard(self.cfg, seed, self.log)  # its own row reported; nothing lands
+        self._close_batch(seed)
+        return seed in reports or lands
+
+    def _close_batch(self, seed: str) -> None:
+        """Record each row of ``seed``'s batch with its own report, now that its
+        branch has landed (or nothing of it was to land): the riders first, the
+        seed last, which frees the slot and starts the next launch. A row that
+        never reported, or was handed back, is ready again."""
+        with state_mod.transaction(self.cfg) as st:
+            reports = st.close_batch(seed)
+            freed = None
+            if reports.get(seed, batcher.RELEASED) == batcher.RELEASED:
+                freed = st.free_slot_for(seed)  # nothing records the seed
+                st.release_lane(seed)
+        recorded = {r: s for r, s in reports.items() if s != batcher.RELEASED}
+        self.log.line(f"BATCH-CLOSED {seed} "
+                      + (" ".join(f"{r}={s}" for r, s in recorded.items()) or "nothing recorded"))
+        if recorded:
+            self._flush_ledger(recorded)  # one ledger commit for the whole batch
+        for row, status in recorded.items():
+            if row != seed:
+                self._advance_done(row, status)
+        if seed in recorded:
+            self._advance_done(seed, recorded[seed])
+            return
+        if reports.get(seed) == batcher.RELEASED:
+            logutil.run_ended(self.log, seed, "released")
+        if freed is not None:  # a reaped seed's slot is the reaper's to refill
+            self._fill_slots(f"batch {seed} closed")
+        self._finish_if_settled()
 
     def _on_escalate(self, phase: str) -> None:
         """A worker handed its phase back to the swarm's own model (``swarm
@@ -1606,6 +1725,8 @@ class Supervisor:
                     # so the launcher may have new work to pick up.
                     self.log.line(f"OVERSEER-INTEGRATED {phase}")
                     self._fill_slots(f"overseer edits landed ({phase})")
+                elif status == batcher.INTEG_STATUS:
+                    self._close_batch(phase)  # every row is recorded now
                 else:
                     self._advance_done(phase, status)
                 pushowed.retry(self.cfg, self.log, skip=set(pushes))
@@ -1638,7 +1759,7 @@ class Supervisor:
         """
         ride = None
         if self.cfg.ledger_in_merge and status not in (
-            operator_mod.INTEG_STATUS, ovrecord.INTEG_STATUS
+            operator_mod.INTEG_STATUS, ovrecord.INTEG_STATUS, batcher.INTEG_STATUS
         ):
             ride = ledgerw.Ride(self.cfg, self.log, phase, status)
         try:
@@ -2071,6 +2192,12 @@ class Supervisor:
             # poke no supervisor was there to read: the queue looks again.
             self._pump_integrations()
             st = state_mod.read(self.cfg)
+        # A batch whose last report was handed back with no poke read.
+        for seed, rows in list(st.batches.items()):
+            if rows and not st.batch_left(seed) and seed not in st.integrating():
+                self.log.line(f"WATCHDOG-BATCH-END {seed}")
+                self._end_batch(seed)
+                st = state_mod.read(self.cfg)
         # Reports the checkout could not take earlier, and `later` rows whose
         # date has come.
         self._flush_ledger(dict(st.done))
@@ -2304,7 +2431,8 @@ class Supervisor:
         recorded in ``done``: the phase stays launchable, and its next launch
         resumes on the same branch. After :data:`CRASH_LIMIT` deaths within
         :data:`CRASH_WINDOW_S` it is given up on instead, like a phase that
-        keeps failing to launch, until the owner puts it back."""
+        keeps failing to launch, until the owner puts it back. A batch's
+        session settles its rows first (:meth:`_reap_batch`)."""
         self.log.line(f"WATCHDOG-REAP {phase} {why}")
         now = time.time()
         recent = [t for t in self._crashes.get(phase, []) if now - t < CRASH_WINDOW_S]
@@ -2320,6 +2448,7 @@ class Supervisor:
             st.free_slot_for(phase)
             st.last_event_at = now
         logutil.run_ended(self.log, phase, "reaped")
+        settled = self._reap_batch(phase)
         if crash_looping:
             self._ask(
                 f"crash-hold:{phase}",
@@ -2337,7 +2466,7 @@ class Supervisor:
                 " kept, and the phase is started again from there.",
                 phase=phase,
             )
-        if self.cfg.git_isolation == "worktree":
+        if self.cfg.git_isolation == "worktree" and not settled:
             try:
                 gitq.set_aside(self.cfg, phase, self.log)
             except gitq.GitError as exc:
@@ -2655,7 +2784,8 @@ class Supervisor:
         """Thread body: launch, settle the guard, report through the FIFO."""
         cfg = self.cfg
         try:
-            outcome = launch_mod.launch_outcome(cfg, phase, self.log, quiet=True)
+            batch = self._pick_batch(phase)
+            outcome = launch_mod.launch_outcome(cfg, phase, self.log, quiet=True, batch=batch)
         except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
             self.log.line(f"LAUNCH-ERROR {phase} {exc!r}")
             outcome = launch_mod.FROZEN if freezer.peek(cfg) else launch_mod.FAILED
@@ -2671,6 +2801,28 @@ class Supervisor:
                 self._launch_fails.pop(phase, None)
         self._publish_launches()
         launch_mod._poke_fifo(cfg, f"launched {phase} {outcome}\n")
+
+    def _pick_batch(self, phase: str) -> list[str]:
+        """The rows that ride with ``phase`` in its session (:func:`batcher.choose`),
+        ``phase`` first; empty when it runs alone. Rows another launch of this
+        pass is starting, or that are backing off or given up on, are not free."""
+        if not self.cfg.batch_enabled:
+            return []
+        now = time.time()
+        with self._launch_lock:
+            taken = {p for p in self._launching if p != phase} | {
+                p for p, (n, _last) in self._launch_fails.items()
+                if n >= LAUNCH_GIVE_UP or self._backing_off(p, now)}
+        try:
+            got = batcher.choose(self.cfg, state_mod.read(self.cfg), phase,
+                                 taken=frozenset(taken), log=self.log)
+        except Exception as exc:  # noqa: BLE001 - a bad pick must not stop the launch
+            self.log.line(f"BATCH-ERROR {phase} {exc!r}")
+            return []
+        if len(got.rows) < 2:
+            return []
+        self.log.line(f"BATCH {' '.join(got.rows)} source={got.source} reason={got.reason}")
+        return got.rows
 
     def _on_launched(self, phase: str, outcome: str) -> None:
         """A launch thread settled. Tell the owner once if the phase has now

@@ -196,9 +196,10 @@ ASKING_KINDS = frozenset({"waiting", "parked"})
 
 
 def at_work(dash) -> set[str]:
-    """The phases a worker is at work on: in a busy slot, or parked and at work on
-    the owner's answer in a window of its own (``Dash.working_parked``)."""
-    return ({s.phase for s in dash.snapshot.slots if s.busy and s.phase}
+    """The phases a worker is at work on: in a busy slot (a batch's riders with
+    its seed), or parked and at work on the owner's answer in a window of its
+    own (``Dash.working_parked``)."""
+    return ({r for s in dash.snapshot.slots for r in s.rows}
             | {w.phase for w in getattr(dash, "working_parked", None) or ()})
 
 
@@ -262,8 +263,10 @@ def counts(cfg, st) -> dict:
     graph = ledger_mod.load(path)
     ticked = ledger_mod.load_ticked(path)
     dated = ledgerw.dated(cfg)
-    # At work: in a slot, or parked and working on the owner's answer.
-    busy = {s.phase for s in st.busy_slots() if s.phase} | set(st.working_parked())
+    # At work: in a slot (a batch's riders with its seed), or parked and working
+    # on the owner's answer.
+    busy = ({s.phase for s in st.busy_slots() if s.phase} | set(st.working_parked())
+            | st.batch_rows())
     # Its worker waits on the owner, in its slot or parked: the launcher will
     # not start it, so it is never ready, and it builds nothing until answered.
     asking = set(st.on_owner())

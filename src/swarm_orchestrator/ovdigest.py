@@ -258,6 +258,8 @@ def in_flight(st: State, launching: set[str] | frozenset[str] = frozenset()) -> 
     """``phase -> building|parked`` for the starvation map. ``parked`` is a phase
     asking the owner now, on its park timer or in its own window."""
     out = {s.phase: "building" for s in st.busy_slots() if s.phase}
+    for p in st.batch_rows():
+        out.setdefault(p, "building")  # in its seed's session, or its merge
     for p in st.integ_queue:
         out.setdefault(p, "building")
     if st.integ_blocked:
@@ -337,7 +339,9 @@ def own_summary(cfg: Config, st: State, since: float, now: float | None = None) 
     first = f"{start}: {landed} phase{'' if landed == 1 else 's'} landed"
     if failed:
         first += f", {failed} failed"
-    running = sum(1 for s in st.busy_slots() if s.phase)
+    # A batch's rows still to report are building in their seed's session.
+    running = len({s.phase for s in st.busy_slots() if s.phase}
+                  | (st.batch_rows() - set(st.batch_done)))
     first += f"; {running} building now"
     if st.usage_hold:
         first += ", and a usage cap holds new ones until it resets"
@@ -381,6 +385,9 @@ def build(
         # Parked and asking now; the answered ones are working, listed apart.
         "parked": [k for k in st.parked if k not in st.answered],
         "parked_working": st.working_parked(),
+        # One session builds every row of a batch, its seed's slot: what each reported.
+        "batches": {seed: {r: st.batch_done.get(r, "") for r in rows}
+                    for seed, rows in st.batches.items()},
         "integ_queue": list(st.integ_queue),
         "integ_blocked": (
             {"phase": st.integ_blocked, "kind": st.integ_blocked_kind,

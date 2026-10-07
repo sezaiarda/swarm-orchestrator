@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from . import batcher
 from . import blockedping
 from . import freezer
 from . import gitq
@@ -282,14 +283,23 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
 
     A phase worker whose row names a model of its own (:mod:`models`) runs
     ``worker_cmd`` with that model, and is told how to hand the phase back.
+    With ``[batch] enabled`` a phase worker leads: :func:`lead_brief_file` is
+    appended to its system prompt, naming the rows of its batch.
     """
     model = models_mod.override(cfg, phase) if cmd is None else ""
     base = cfg.worker_cmd.format(phase=phase)
     if model:
         base = models_mod.swap(base, model)
+    worker = cmd is None
     cmd = with_name(cmd or base, name or session_name("worker", phase))
-    if model:
+    rows = batch_rows(cfg, phase) if worker else [phase]
+    told = ""
+    if model and len(rows) == 1:  # a batch hands a row back with `swarm unbatch`
         told = models_mod.brief(model, models_mod.default(cfg), phase)
+    if worker and cfg.batch_enabled:
+        brief = lead_brief_file(cfg, phase, rows, told)
+        cmd += f" --append-system-prompt-file {shlex.quote(str(brief))}"
+    elif told:
         cmd += f" --append-system-prompt {shlex.quote(told)}"
     settings = ""
     if cfg.worker_settings:
@@ -305,6 +315,37 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
     return f"cd {shlex.quote(str(cwd))} && exec {cmd}"
 
 
+#: The lead's part of a worker's system prompt (``prompts/worker_lead.md``).
+LEAD_PROMPT = "worker_lead.md"
+
+
+def batch_rows(cfg: Config, phase: str) -> list[str]:
+    """The rows ``phase``'s session builds, in order: its batch, or itself."""
+    return state_mod.read(cfg).batches.get(phase) or [phase]
+
+
+def lead_brief_file(cfg: Config, phase: str, rows: list[str], extra: str = "") -> Path:
+    """Write the lead brief of ``phase``'s session and return its path.
+
+    A file, not an inline ``--append-system-prompt``: it runs to a few thousand
+    characters, and it is the pane's whole command line. ``extra`` (a row's own
+    model brief) follows it."""
+    from .resolver import prompt_path  # lazy: resolver builds on this module
+
+    try:
+        text = prompt_path(LEAD_PROMPT).read_text(encoding="utf-8")
+    except OSError:
+        text = "Build the rows {rows}, in that order, one `swarm done <row>` each."
+    listed = ", ".join(f"`{r}`" for r in rows)
+    text = (text.replace("{rows}", listed).replace("{first}", rows[0])
+            .replace("{count}", str(len(rows)))
+            .replace("{builder_model}", cfg.builder_model or "sonnet"))
+    path = cfg.state_dir / "briefs" / f"{phase}.lead.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text + (f"\n\n{extra}\n" if extra else ""), encoding="utf-8")
+    return path
+
+
 def _worker_env(
     cfg: Config, phase: str, worktree: Path | None = None
 ) -> dict[str, str]:
@@ -313,7 +354,8 @@ def _worker_env(
     lanes on ``SWARM_TOUCHES``, the lane it was launched with, space-separated."""
     env = {cfg.env_marker: phase,
            **session_env(cfg, worktree, tmp=phase, session=f"worker:{phase}"),
-           models_mod.ENV: models_mod.override(cfg, phase)}
+           models_mod.ENV: models_mod.override(cfg, phase),
+           "SWARM_BATCH": " ".join(batch_rows(cfg, phase))}
     if cfg.lanes_enabled:
         env["SWARM_TOUCHES"] = " ".join(state_mod.read(cfg).lanes.get(phase, []))
     return env
@@ -587,18 +629,24 @@ def relane(cfg: Config, st: state_mod.State, phase: str, touches: list[lanes_mod
     return sorted(str(t) for t in new), sorted(str(t) for t in held)
 
 
-def _lane_busy(cfg: Config, st: state_mod.State, phase: str) -> str | None:
+def _lane_busy(cfg: Config, st: state_mod.State, phase: str,
+               riders: list[str] | tuple[str, ...] = ()) -> str | None:
     """The lane backstop, under the claiming flock: record ``phase``'s lane, or
     say why it may not launch (its touches do not parse, or a phase in flight
     holds an overlapping touch — two launch threads raced past the scheduler).
-    The lane is recorded as the row names it, ``[lanes] commons`` touches too."""
+    The lane is recorded as the row names it, ``[lanes] commons`` touches too.
+    A batch's lane is the union of its rows' (``riders`` beside ``phase``)."""
     view = lane_view(cfg, st)
-    held = {p: lane for p, lane in view.held.items() if p != phase}
-    lane = view.rows.get(phase)
-    if lane is None:
-        if phase in view.ledger:
-            return "lane-invalid"
-        lane = lanes_mod.legacy(ledger_mod.home(phase, {}))
+    mine = {phase, *riders}
+    held = {p: lane for p, lane in view.held.items() if p not in mine}
+    lane: frozenset[lanes_mod.Touch] = frozenset()
+    for row in (phase, *riders):
+        own = view.rows.get(row)
+        if own is None:
+            if row in view.ledger:
+                return "lane-invalid"
+            own = lanes_mod.legacy(ledger_mod.home(row, {}))
+        lane |= own
     for holder in sorted(held):
         pair = lanes_mod.collide(lane, held[holder], cfg.lanes_commons)
         if pair is not None:
@@ -627,7 +675,8 @@ def launch(cfg: Config, phase: str, log: Log) -> bool:
     return launch_outcome(cfg, phase, log) == LAUNCHED
 
 
-def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) -> str:
+def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False,
+                   batch: list[str] | tuple[str, ...] = ()) -> str:
     """Claim a slot and start a worker for ``phase``; return what happened.
 
     One of :data:`LAUNCHED`, :data:`DENIED`, :data:`FAILED` or :data:`FROZEN`. ``quiet``
@@ -641,6 +690,12 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
     claiming transaction*, so a crash between claim and worktree creation can
     still be reconciled/freed. Concurrent phases in the same repo are fine —
     each has its own worktree/branch — so there is no per-repo launch gate.
+
+    ``batch`` (the supervisor's pick, :mod:`batcher`) is ``phase`` and the rows
+    that ride with it, in order. Those still free under the claiming flock are
+    claimed with the slot (``State.batches``): one session, one mirror and one
+    branch, the seed's, and one lane, the union of theirs. A rider taken
+    meanwhile is dropped, with any row of the batch that needs it.
     """
     with state_mod.transaction(cfg) as st:
         if st.paused:
@@ -670,7 +725,8 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         # depends on has merged — even if the LLM master mis-reasons over the prose
         # ledger and asks to launch it out of order. Undo the just-claimed slot
         # under the same flock so it isn't stranded.
-        in_flight = {s.phase for s in st.busy_slots() if s.phase} | set(st.parked) | set(st.waiting)
+        in_flight = ({s.phase for s in st.busy_slots() if s.phase} | set(st.parked)
+                     | set(st.waiting) | st.batch_rows())
         missing = _unmet_deps(cfg, phase, st.done, in_flight)
         if missing:
             st.free_slot_for(phase)
@@ -682,7 +738,12 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         # Lane backstop, beside the dependency one and under the
         # same flock: the scheduler already kept overlapping rows apart, but two
         # launch threads can race past it. On success this records the lane.
-        busy = _lane_busy(cfg, st, phase) if cfg.lanes_enabled else None
+        riders = batcher.still_free(cfg, st, list(batch))[1:] if len(batch) > 1 else []
+        busy = _lane_busy(cfg, st, phase, riders) if cfg.lanes_enabled else None
+        if busy and riders:
+            log.line(f"BATCH-DROPPED {phase} {' '.join(riders)}: {busy}")
+            riders = []
+            busy = _lane_busy(cfg, st, phase)
         if busy:
             st.free_slot_for(phase)
             log.line(f"LAUNCH-DENIED {phase} {busy}")
@@ -693,17 +754,18 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         if cfg.git_isolation == "worktree":
             slot.branch = f"swarm/{phase}"
             slot.worktree = str(cfg.wt_dir / phase)
+        if riders:
+            st.batches[phase] = [phase, *riders]
     log.line(f"CLAIM {phase} slot={sid}")
+    for row in riders:
+        log.line(f"CLAIM {row} slot={sid} batch={phase}")
 
     worktree: Path | None = None
     if cfg.git_isolation == "worktree":
         try:
             worktree = gitq.worktree_add(cfg, phase, log)
         except gitq.GitError as exc:
-            with state_mod.transaction(cfg) as st:
-                st.free_slot_for(phase)
-                st.release_lane(phase)
-            logutil.run_ended(log, phase, "launch-failed")
+            _unclaim(cfg, phase, log)
             telegram.log(
                 cfg,
                 f"could not set up a workspace for {phase}, so its worker did not"
@@ -740,10 +802,7 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
                 tmux.respawn_pane(pane, "exec sleep infinity")
             except subprocess.CalledProcessError:
                 pass  # the pane is gone: nothing left running in the worktree
-        with state_mod.transaction(cfg) as st:
-            st.free_slot_for(phase)
-            st.release_lane(phase)
-        logutil.run_ended(log, phase, "launch-failed")
+        _unclaim(cfg, phase, log)
         if worktree is not None:
             # An empty mirror goes; one an earlier attempt left work in stays.
             gitq.set_aside(cfg, phase, log)
@@ -762,6 +821,19 @@ def launch_outcome(cfg: Config, phase: str, log: Log, *, quiet: bool = False) ->
         return FAILED
     log.line(f"LAUNCH {phase} slot={sid}")
     return LAUNCHED
+
+
+def _unclaim(cfg: Config, phase: str, log: Log) -> None:
+    """Undo a claim whose worker did not start: its slot, its lane, and the
+    rows of its batch, which are ready again."""
+    with state_mod.transaction(cfg) as st:
+        st.free_slot_for(phase)
+        st.release_lane(phase)
+        riders = [r for r in st.batches.get(phase, []) if r != phase]
+        st.close_batch(phase)
+    logutil.run_ended(log, phase, "launch-failed")
+    for row in riders:
+        logutil.run_ended(log, row, "launch-failed")
 
 
 def _launch_bare(cfg: Config, phase: str, worktree: Path | None, log: Log) -> bool:
@@ -1294,6 +1366,7 @@ class DoneResult:
     poke: str  # delivered | detached | no-reader
     grace_s: int
     work: str = ""  # what becomes of the phase's commits when nothing lands
+    batch: str = ""  # what this report does to the batch the row rides in
 
     def render(self) -> str:
         """The human-readable multi-line summary; the CLI prints it verbatim."""
@@ -1330,6 +1403,7 @@ class DoneResult:
             + (f" (as `{self.spelling}`)" if self.spelling in statuses.ALIASES else ""),
             f"  {sentinel}",
             *([f"  {self.work}"] if self.work else []),
+            *([f"  {self.batch}"] if self.batch else []),
             f"  {ping}",
             f"  {route}",
             f"  {poke}",
@@ -1418,7 +1492,8 @@ def _queue_operator(
     """
     if verdict == "refused" or plan.route != "dispatch":
         return False
-    branch = f"swarm/{phase}" if cfg.git_isolation == "worktree" else ""
+    owner = state_mod.read(cfg).batch_of(phase) or phase  # a rider's work is on its seed's
+    branch = f"swarm/{owner}" if cfg.git_isolation == "worktree" else ""
     item = opqueue.add(cfg, phase, status=status, note=note, branch=branch)
     if item is None:
         return False
@@ -1496,6 +1571,7 @@ def done(
     history appended) even when the recap is too thin to brief a session on.
     """
     spelling, status = status, statuses.canonical(status)
+    batch = _batch_line(cfg, phase)
     recorded = _sentinel_note(cfg, phase, status)  # before we rewrite it
     fresh = recorded is None
     episode = _fail_episode(cfg, phase, fresh) if status == statuses.FAIL else 0
@@ -1538,11 +1614,13 @@ def done(
     poke = "no-reader"
     if not os.environ.get("SWARM_TG_SINK"):
         _detach_recap(cfg, phase)  # hermetic tests must not spawn a model call
-    if cfg.done_grace_s > 0 and _detach_poke(cfg, phase, status):
+    # A row with more of its batch to come ends nothing: no grace to wait out.
+    grace = cfg.done_grace_s if not batch.startswith(_BATCH_GOES_ON) else 0
+    if grace > 0 and _detach_poke(cfg, phase, status):
         poke = "detached"
     else:
-        if cfg.done_grace_s > 0:
-            time.sleep(cfg.done_grace_s)
+        if grace > 0:
+            time.sleep(grace)
         if _poke_fifo(cfg, f"done {phase} {status}\n"):
             poke = "delivered"
     return DoneResult(
@@ -1558,17 +1636,41 @@ def done(
         route=plan.route,
         route_detail=plan.route_detail,
         poke=poke,
-        grace_s=cfg.done_grace_s,
-        work=_work_line(cfg, phase, status),
+        grace_s=grace,
+        work=_work_line(cfg, phase, status, in_batch=bool(batch)),
+        batch=batch,
     )
 
 
-def _work_line(cfg: Config, phase: str, status: str) -> str:
+#: How :func:`_batch_line` starts when the session goes on after this row.
+_BATCH_GOES_ON = "batch: this session goes on"
+
+
+def _batch_line(cfg: Config, phase: str) -> str:
+    """What this report does to the batch ``phase`` rides in, said to its lead;
+    empty for a row that runs alone."""
+    st = state_mod.read(cfg)
+    seed = st.batch_of(phase)
+    if seed is None:
+        return ""
+    left = [r for r in st.batch_left(seed) if r != phase]
+    if left:
+        return (f"{_BATCH_GOES_ON}: {len(left)} row(s) still to report ({', '.join(left)})."
+                " Nothing merges until the last one reports")
+    return ("batch: this is its last row. The session ends now, and every row that"
+            " finished ok or operator lands together, each recorded with its own outcome")
+
+
+def _work_line(cfg: Config, phase: str, status: str, in_batch: bool = False) -> str:
     """What becomes of the phase's commits, said to the worker that made them:
     a finish that lands nothing must not let it believe its work went to main,
     nor that it is lost. Empty when the phase lands, or works in place."""
     if status in statuses.INTEGRATES or cfg.git_isolation != "worktree":
         return ""
+    if in_batch:
+        return ("work: nothing of this row lands. The batch's branch lands with its other"
+                " rows, so no commit of yours may carry this row's changes: stash them"
+                f" (`git stash push -u -m \"swarm: {phase}\"`) and name the stash in the recap")
     from . import restart as restart_mod  # lazy: restart builds on this module
 
     after = ledgerw.later_date(cfg, phase)

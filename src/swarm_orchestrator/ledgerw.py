@@ -1357,7 +1357,7 @@ def settled(cfg: Config, st) -> set[str]:
     (a failure record, work kept for a date) is let go."""
     text = gitq.committed_text(cfg, cfg.ledger)
     rows = closed_rows(text) if text else set()
-    return rows - reported(cfg) - {*st.claimed_phases(), *st.integrating()}
+    return rows - reported(cfg) - {*st.claimed_phases(), *st.integrating(), *st.batch_rows()}
 
 
 def release_kept(cfg: Config, log: Log) -> list[str]:

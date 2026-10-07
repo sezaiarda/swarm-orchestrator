@@ -108,7 +108,8 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
     parked = list(state.get("parked") or [])
     # Parked sessions the owner has answered (``State.answered``): at work again.
     answered = dict(state.get("answered") or {})
-    busy = {s.phase: s for s in snap.slots if s.busy and s.phase}
+    # A batch's riders build in their seed's slot.
+    busy = {r: s for s in snap.slots for r in s.rows}
     queue = [p for p, _ in snap.integ_queue]
     owed = {str(rec.get("phase")): (repo, rec)
             for repo, rec in (state.get("push_owed") or {}).items() if isinstance(rec, dict)}
@@ -140,6 +141,7 @@ def build(cfg, dash, *, state: dict | None, rows: dict, metas: dict, passes: lis
             card["m"] = named.get(pid) or own_model or "default"
         col, extra = _place(pid, graph, view, satisfied, excluded, waiting, parked, busy,
                             queue, snap, owed, jobs, questions, roots_of, dated, answered)
+        _batch_sub(pid, extra, snap)
         card["col"] = col
         card.update({k: v for k, v in extra.items() if v not in (None, "", [], {})})
         cards[pid] = card
@@ -237,7 +239,10 @@ def _in_flight(snap, waiting: dict, parked: list, answered=()) -> dict[str, str]
     holds the dashboard's normalised snapshot instead (a state file from a newer
     build would not load as a ``State``).
     """
-    out = {s.phase: "building" for s in snap.slots if s.busy and s.phase}
+    out = {r: "building" for s in snap.slots for r in s.rows}
+    for rows in (getattr(snap, "batches", None) or {}).values():
+        for r in rows:
+            out.setdefault(r, "building")  # its batch is merging
     for p, _ in snap.integ_queue:
         out.setdefault(p, "building")
     if snap.integ_blocked:
@@ -245,6 +250,22 @@ def _in_flight(snap, waiting: dict, parked: list, answered=()) -> dict[str, str]
     for p in list(waiting) + list(parked):
         out[p] = "building" if p in answered and p not in waiting else "parked"
     return out
+
+
+def _batch_sub(pid: str, extra: dict, snap) -> None:
+    """A row of an open batch says so on its card: whose session builds it, and
+    what it reported while the batch builds on (it lands with the batch)."""
+    batches = getattr(snap, "batches", None) or {}
+    seed = next((s for s, rows in batches.items() if pid in rows and len(rows) > 1), None)
+    if seed is None or "sub" in extra:
+        return
+    said = (getattr(snap, "batch_done", None) or {}).get(pid)
+    if said:
+        extra["sub"] = f"reported {said} · lands with its batch"
+    elif pid == seed:
+        extra["sub"] = f"its session builds a batch of {len(batches[seed])}"
+    else:
+        extra["sub"] = f"rides in {seed}'s batch"
 
 
 def _working_since(dash, working: list) -> dict:

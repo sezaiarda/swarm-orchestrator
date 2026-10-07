@@ -642,6 +642,24 @@ def set_aside(cfg: Config, phase: str, log: Log) -> bool:
     return True
 
 
+def shelve(cfg: Config, phase: str, log: Log) -> None:
+    """Move what a phase's worktrees have not committed to the attic, and leave
+    them clean on their branch: a batch whose session died lands the rows it
+    reported, never the half-made one it was on. Kept as a commit under
+    :data:`ATTIC` (``swarm: unfinished work``), as :func:`set_aside` would."""
+    for repo, _main in _repos(cfg):
+        with repo_lock(cfg, repo):
+            wt = _wt_for(cfg, repo, phase)
+            if not _is_worktree(wt):
+                continue
+            before = _tip(wt, "HEAD")
+            if not before or not _save_wip(cfg, repo, phase, log):
+                continue
+            after = _tip(wt, "HEAD")
+            if after != before and _to_attic(repo, phase, after, log, "unfinished, not landed"):
+                _git(wt, "reset", "-q", "--hard", before, check=False)
+
+
 def attic_refs(repo: Path) -> list[tuple[str, float]]:
     """Every :data:`ATTIC` ref in ``repo`` with the UTC time it was made (from
     its name). A name that does not parse is left out, so it is never pruned."""

@@ -61,7 +61,7 @@ def phase(cfg, dash, board: dict, rows: dict, metas: dict, pid: str,
     deps = sorted(graph.get(pid, ()))
     dependents = sorted(p for p, ds in graph.items() if pid in ds)
     excluded = set(getattr(cfg, "exclude", None) or [])
-    slot = next((s for s in snap.slots if s.busy and s.phase == pid), None)
+    slot = next((s for s in snap.slots if pid in s.rows), None)  # a rider: its seed's
     sentinel = (getattr(dash, "sentinels", None) or {}).get(pid)
     recap = (getattr(dash, "recaps", None) or {}).get(pid)
     runs = [r for r in (getattr(dash, "history", None) or []) if r.phase == pid]

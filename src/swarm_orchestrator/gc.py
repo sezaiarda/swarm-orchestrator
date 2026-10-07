@@ -310,10 +310,12 @@ def _live_names(cfg: Config, st: State) -> set[str]:
 
 
 def _live_phases(st: State) -> set[str]:
-    """Phases whose worktree must not be touched: in a slot, parked (a worker is
-    alive off-grid on its branch), waiting, or queued for integration."""
+    """Phases whose worktree must not be touched: in a slot (a batch's riders
+    with its seed), parked (a worker is alive off-grid on its branch), waiting,
+    or queued for integration."""
     return (
         {s.phase for s in st.busy_slots() if s.phase}
+        | st.batch_rows()
         | set(st.parked)
         | set(st.waiting)
         | set(st.integ_queue)

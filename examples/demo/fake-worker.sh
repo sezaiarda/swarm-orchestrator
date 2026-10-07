@@ -15,8 +15,10 @@
 #   FAKE_WORKER_DETACH  path prefix => start a setsid'd `sleep` and write its
 #                       pid to <prefix>.<phase> (a child that left the tree)
 #   FAKE_WORKER_KEEP    1 => `swarm keep` a `sleep` as keep-<phase>
+#   FAKE_ROW_STATUS     "<row>=<status> ..." => that status for that row of a batch
 #   SWARM_BIN           how to invoke the CLI           (default swarm)
 #   SWARM_PHASE         phase id (set by the launcher)
+#   SWARM_BATCH         the rows this session builds, in order (set by the launcher)
 set -u
 
 # Optional: simulate claude's folder-trust dialog before the banner, with a
@@ -91,7 +93,14 @@ if [ "${FAKE_WORKER_KEEP:-0}" = "1" ]; then
     ${SWARM_BIN:-swarm} keep --name "keep-$SWARM_PHASE" --why "a test stand-in" -- sleep 300
 fi
 
-sleep "${FAKE_WORKER_SLEEP:-2}"
-
-# shellcheck disable=SC2086
-${SWARM_BIN:-swarm} done "$SWARM_PHASE" "${FAKE_WORKER_STATUS:-ok}"
+# A batch is built one row at a time, each reported on its own, the session's
+# own row included; a lone row is a batch of one.
+for row in ${SWARM_BATCH:-$SWARM_PHASE}; do
+    sleep "${FAKE_WORKER_SLEEP:-2}"
+    status="${FAKE_WORKER_STATUS:-ok}"
+    for pick in ${FAKE_ROW_STATUS:-}; do
+        [ "${pick%%=*}" = "$row" ] && status="${pick#*=}"
+    done
+    # shellcheck disable=SC2086
+    ${SWARM_BIN:-swarm} done "$row" "$status"
+done

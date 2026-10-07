@@ -242,6 +242,16 @@ class State:
     # non-empty. An older supervisor would drop it on its next write, which is
     # why ``swarm freeze`` refuses one (``"freeze"`` in :data:`restart.CAPS`).
     frozen: dict = field(default_factory=dict)
+    # Batch claims (see :mod:`batcher`): ``{seed: [seed, rider, ...]}`` for each
+    # slot that runs more than one row in one session, in execution order. The
+    # slot, the mirror, the branch and the lane are the seed's (its lane is the
+    # union of every row's); the riders are in flight with it. ``batch_done``
+    # holds the status each row of an open batch has reported: nothing is
+    # recorded or merged before the batch ends, when its branch lands once and
+    # every row is recorded with its own status. Same compatibility rule as
+    # ``lanes``: top-level, written only when non-empty.
+    batches: dict[str, list[str]] = field(default_factory=dict)
+    batch_done: dict[str, str] = field(default_factory=dict)
 
     # -- slot accounting -------------------------------------------------
     def free_slots(self) -> list[Slot]:
@@ -267,9 +277,11 @@ class State:
         return self.any_busy() or bool(self.parked) or bool(self.waiting)
 
     def in_flight(self, phase: str) -> bool:
-        """``phase`` has a live worker: in a slot, waiting on the owner, or parked."""
+        """``phase`` has a live worker: in a slot, waiting on the owner, parked,
+        or riding in another row's batch."""
         return (
-            phase in self.parked
+            phase in self.batch_rows()
+            or phase in self.parked
             or phase in self.waiting
             or any(s.busy and s.phase == phase for s in self.slots)
         )
@@ -284,6 +296,24 @@ class State:
             if kind == WORKER and ident not in out:
                 out.append(ident)
         return out
+
+    def batch_rows(self) -> set[str]:
+        """Every row of every open batch, seeds included."""
+        return {row for rows in self.batches.values() for row in rows}
+
+    def batch_of(self, phase: str) -> str | None:
+        """The seed of the open batch ``phase`` is a row of, or ``None``."""
+        return next((seed for seed, rows in self.batches.items() if phase in rows), None)
+
+    def batch_left(self, seed: str) -> list[str]:
+        """The rows of ``seed``'s batch that have not reported yet, in order."""
+        return [r for r in self.batches.get(seed, []) if r not in self.batch_done]
+
+    def close_batch(self, seed: str) -> dict[str, str]:
+        """Drop ``seed``'s batch; return what its rows reported, in batch order.
+        A row that never reported is in flight no more: it is ready again."""
+        rows = self.batches.pop(seed, [])
+        return {r: self.batch_done.pop(r) for r in rows if r in self.batch_done}
 
     def integrating(self) -> set[str]:
         """Phases whose finished work is queued or held for merging. Their
@@ -592,7 +622,8 @@ class State:
             del d["lanes"]  # a run with lanes off writes no new key
         if not d["landing"]:
             del d["landing"]
-        for mark in ("asked", "answered", "launching", "launch_fails", "frozen"):
+        for mark in ("asked", "answered", "launching", "launch_fails", "frozen",
+                     "batches", "batch_done"):
             if not d[mark]:
                 del d[mark]  # nothing to say: no new key
         return d
@@ -641,6 +672,8 @@ class State:
             launching=list(data.get("launching") or []),
             launch_fails={k: list(v) for k, v in (data.get("launch_fails") or {}).items()},
             frozen=dict(data.get("frozen") or {}),
+            batches={k: list(v) for k, v in (data.get("batches") or {}).items()},
+            batch_done=dict(data.get("batch_done") or {}),
         )
 
     @classmethod
@@ -751,7 +784,8 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None, log=None,
     ever said ``swarm done``; with a ``log`` each gets its ``RUN-ENDED`` line, so
     the phase history never keeps a wiped claim open as "running". Bar the
     ``carried`` phases: a restart brought their sessions across alive
-    (:func:`restart.carry_in` parks them again), so their run goes on.
+    (:func:`restart.carry_in` parks them again), so their run goes on, and so
+    does the batch each one is working through.
     """
     with transaction(cfg) as state:
         if log is not None:
@@ -771,6 +805,10 @@ def init_state(cfg: Config, windows: dict[str, str] | None = None, log=None,
         fresh.usage_override = dict(state.usage_override)
         fresh.usage_api_at = state.usage_api_at
         fresh.pause_at = state.pause_at
+        # A carried session goes on with its batch: its riders stay claimed.
+        fresh.batches = {seed: rows for seed, rows in state.batches.items() if seed in carried}
+        fresh.batch_done = {r: s for r, s in state.batch_done.items()
+                            if state.batch_of(r) in fresh.batches}
         fresh.bootstrapping = True  # the supervisor clears it (see the field)
         state.__dict__.update(fresh.__dict__)
         return state

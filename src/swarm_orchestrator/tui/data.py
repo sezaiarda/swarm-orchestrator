@@ -242,10 +242,26 @@ class SlotView:
     waiting_for: str | None = None
     context_pct: float | None = None
     title: str | None = None
+    #: The rows its session builds when it runs a batch (``State.batches``), in
+    #: order: ``phase`` is the first, the seed; the riders hold no slot of their own.
+    batch: tuple[str, ...] = ()
 
     @property
     def elapsed_s(self) -> float | None:
         return None if self.started_at is None else max(0.0, time.time() - self.started_at)
+
+    @property
+    def rows(self) -> tuple[str, ...]:
+        """Every row at work in this slot: its phase, and its batch's riders."""
+        if not self.busy or not self.phase:
+            return ()
+        return self.batch or (self.phase,)
+
+    @property
+    def label(self) -> str:
+        """Its phase, and how many rows ride with it: ``k-W1 +2``."""
+        extra = len(self.batch) - 1
+        return f"{self.phase} +{extra}" if self.phase and extra > 0 else (self.phase or "")
 
 
 @dataclass(frozen=True)
@@ -338,6 +354,10 @@ class Snapshot:
     blockers: list[Blocker] = field(default_factory=list)
     #: The operator hand-off queue, oldest first — work the swarm owes itself.
     operator: list[opqueue.Item] = field(default_factory=list)
+    #: ``State.batches`` and ``State.batch_done``: the open batches, seed first,
+    #: and what their rows have reported (recorded only when the batch lands).
+    batches: dict[str, list[str]] = field(default_factory=dict)
+    batch_done: dict[str, str] = field(default_factory=dict)
     progress: Progress = field(default_factory=Progress)
     windows: dict[str, str] = field(default_factory=dict)
     layout: str | None = None
@@ -471,6 +491,7 @@ def build_snapshot(
     questions = questions or {}
     operator = list(operator or [])
 
+    batches = _batches(state)
     slots: list[SlotView] = []
     for raw in state.get("slots") or []:
         if not isinstance(raw, dict):
@@ -487,6 +508,7 @@ def build_snapshot(
                 retiring=bool(raw.get("retiring", False)),
                 started_at=launch_times.get(phase) if phase else None,
                 last_event_at=_as_float(raw.get("last_event_at")),
+                batch=tuple(batches.get(phase) or ()) if raw.get("busy") and phase else (),
             )
         )
 
@@ -502,7 +524,9 @@ def build_snapshot(
     # When a parked session's unanswered question was asked (``State.asked``).
     asked = state.get("asked") or {}
     busy_phases = {s.phase for s in slots if s.busy and s.phase}
-    in_flight = busy_phases | set(parked) | {p for p in waiting}
+    # A batch's riders are in flight with its seed, in its slot or its merge.
+    in_flight = (busy_phases | set(parked) | {p for p in waiting}
+                 | {r for rows in batches.values() for r in rows})
     # The launcher's done view: a ticked row with no record counts as landed.
     landed = ledger_mod.with_ticked(done, ticked or set(), in_flight)
 
@@ -629,6 +653,8 @@ def build_snapshot(
         integ_blocked_repo=_as_str(state.get("integ_blocked_repo")),
         blockers=blockers,
         operator=operator,
+        batches=batches,
+        batch_done={str(k): str(v) for k, v in (state.get("batch_done") or {}).items()},
         progress=phase_progress(
             graph,
             landed,
@@ -641,6 +667,28 @@ def build_snapshot(
         started_at=started_at,
         last_event_at=_as_float(state.get("last_event_at")) or None,
     )
+
+
+def batch_line(rows, reported: dict[str, str]) -> str:
+    """A batch's rows in the order its session builds them, each with what it
+    reported, the first still to report "at work": ``k-W1 ok · k-W2 at work · k-W3``."""
+    out, turn = [], True
+    for row in rows:
+        if row in reported:
+            out.append(f"{row} {reported[row]}")
+        else:
+            out.append(f"{row} at work" if turn else row)
+            turn = False
+    return " · ".join(out)
+
+
+def _batches(state: dict) -> dict[str, list[str]]:
+    """``State.batches`` from a raw ``state.json``: none from an older run."""
+    got = state.get("batches")
+    if not isinstance(got, dict):
+        return {}
+    return {str(seed): [str(r) for r in rows] for seed, rows in got.items()
+            if isinstance(rows, list)}
 
 
 def _as_float(value) -> float | None:
@@ -965,6 +1013,8 @@ ENDED_WHY = {
     "escalated": "its worker handed the phase up to the swarm's own model",
     "relaunched": "the phase was started again before this run reported",
     "stale": "no slot holds it any more",
+    "unbatched": "its batch's session handed it back unbuilt (`swarm unbatch`)",
+    "released": "its batch ended before it was built; it is ready again",
 }
 
 
@@ -1037,6 +1087,18 @@ def _live_holds(state: dict) -> dict[str, str]:
     for raw in state.get("slots") or []:
         if isinstance(raw, dict) and raw.get("busy") and isinstance(raw.get("phase"), str):
             out[raw["phase"]] = "running"
+    # A batch's riders are held as its seed is, in its slot or its merge; a row
+    # that has reported waits for the batch to land with the rest of it.
+    from ..batcher import RELEASED  # deferred, like the state reader
+
+    reported = state.get("batch_done") or {}
+    for seed, rows in _batches(state).items():
+        held = out.get(seed)
+        for row in rows:
+            if reported.get(row) not in (None, RELEASED):
+                out[row] = "integrating"
+            elif row != seed and held is not None:
+                out[row] = held
     return out
 
 
@@ -1069,6 +1131,13 @@ def build_history(
     sentinel reads as that sentinel; one the ledger has ticked since (``ticked``)
     and this swarm holds no report of reads as "done elsewhere".
 
+    A batch's rows (``CLAIM <row> slot=<n> batch=<seed>``) are claimed together
+    and built one after another in one session, and each is recorded only when
+    the batch lands: a row's run is its turn, from the batch's previous
+    ``BATCH-ROW`` report (or its claim) to its own, whenever ``EVENT done``
+    closes it. A row that has reported and waits for its batch is held
+    ``integrating``.
+
     ``frozen`` are the stretches the run stood frozen (:func:`freezer.spans`):
     what of them falls inside a run is not time that run took.
     """
@@ -1078,6 +1147,7 @@ def build_history(
     ordered = sorted(events, key=lambda e: (e.ts is None, e.ts or 0.0))
     open_runs: dict[str, dict] = {}
     runs: list[dict] = []
+    turns: dict[str, float | None] = {}  # seed -> its batch's last report
 
     def lose(run: dict, ts: float | None, why: str) -> None:
         run.update(ended_at=ts, status=LOST, why=why)
@@ -1093,6 +1163,8 @@ def build_history(
             elif prior is not None and prior["by"] == "launch":
                 lose(open_runs.pop(ev.phase), None, "relaunched")
             # else: CLAIM then LAUNCH is one run; the launch is when it started.
+            if ev.kind == "claim" and "batch" not in ev.fields:
+                turns.pop(ev.phase, None)  # a new session: no batch report yet
             open_runs[ev.phase] = {
                 "phase": ev.phase,
                 "started_at": ev.ts,
@@ -1101,11 +1173,17 @@ def build_history(
             }
         elif ev.kind == "done" and ev.phase:
             run = open_runs.pop(ev.phase, {"phase": ev.phase, "started_at": None, "slot": None})
-            run["ended_at"] = ev.ts
+            run["ended_at"] = run.pop("reported_at", None) or ev.ts
             run["status"] = ev.status
             run["parked"] = ev.fields.get("parked", "").lower() == "true"
             run["closed"] = "done"
             runs.append(run)
+        elif ev.kind == "batch-row" and ev.phase in open_runs:
+            run, seed = open_runs[ev.phase], ev.fields.get("batch", "")
+            turn = turns.get(seed)
+            if turn is not None and (run["started_at"] or 0.0) < turn:
+                run["started_at"] = turn  # it waited for the rows before it
+            run["reported_at"] = turns[seed] = ev.ts
         elif ev.kind == logutil.RUN_ENDED.lower() and ev.phase in open_runs:
             lose(open_runs.pop(ev.phase), ev.ts, ev.fields.get("reason") or "stale")
         elif ev.kind in _ENDED_BY and ev.phase in open_runs:
@@ -1117,6 +1195,7 @@ def build_history(
 
     holds = _live_holds(state) if isinstance(state, dict) else None
     for run in open_runs.values():
+        run["ended_at"] = run.pop("reported_at", None)  # a batch row that reported
         hold = "running" if holds is None else holds.get(run["phase"])
         if hold is None:
             lose(run, None, "stale")

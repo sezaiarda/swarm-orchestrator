@@ -643,6 +643,10 @@ def _live_map(st: State) -> dict[str, str]:
     live.update({p: "waiting" for p in st.waiting})
     # A parked worker the owner has answered is at work again, in its own window.
     live.update({p: "parked" if st.asking(p) else "busy" for p in st.parked})
+    # A batch's rows are at work in its seed's slot; one that has reported waits
+    # to land with the batch (its sentinel is there, its record is not yet).
+    for row in st.batch_rows():
+        live.setdefault(row, "integrating" if row in st.batch_done else "busy")
     return live
 
 

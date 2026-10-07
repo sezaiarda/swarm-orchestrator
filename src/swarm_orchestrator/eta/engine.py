@@ -140,11 +140,22 @@ def gather(cfg, state, *, events, history, ledger_history, usage, text: str | No
             dated = None  # the ledger's own dates, from the text
     graph = ledger_mod.parse(text)
     flying = ({s.phase for s in state.busy_slots() if s.phase} | set(state.parked)
-              | set(state.waiting))
+              | set(state.waiting) | state.batch_rows())
     started: dict[str, float] = {}
+    turns: dict[str, float] = {}  # seed -> its batch's last report
     for ev in events:
         if ev.kind in ("launch", "claim") and ev.phase and ev.ts is not None:
             started[ev.phase] = ev.ts
+            if ev.kind == "claim" and "batch" not in ev.fields:
+                turns.pop(ev.phase, None)
+        elif ev.kind == "batch-row" and ev.ts is not None:
+            turns[ev.fields.get("batch", "")] = ev.ts
+    # A batch's session builds its rows one after another: the row at work
+    # started when the one before it reported, not when the batch was claimed.
+    for seed, ts in turns.items():
+        left = state.batch_left(seed)
+        if left and ts > started.get(left[0], 0.0):
+            started[left[0]] = ts
     row_models = _row_models(cfg, text)
     ran_on = {ev.phase for ev in events if ev.kind == "model" and ev.phase}
     ran_models = {p: m for p, m in row_models.items() if p in ran_on}
@@ -237,8 +248,25 @@ def from_files(cfg, st, now: float | None = None) -> Inputs:
 # -- what a forecast is made from ---------------------------------------------------
 def at_work(st) -> list[str]:
     """The rows a worker is building now: the ones in a slot, and the parked
-    ones the owner has answered, which work on in a window of their own."""
-    return [s.phase for s in st.busy_slots() if s.phase] + st.working_parked()
+    ones the owner has answered, which work on in a window of their own. A
+    slot whose session builds a batch is at work on its first row still to
+    report (:func:`batch_queue` has the rest)."""
+    out = []
+    for s in st.busy_slots():
+        if s.phase:
+            left = st.batch_left(s.phase)
+            out.append(left[0] if left else s.phase)
+    return out + st.working_parked()
+
+
+def batch_queue(st) -> dict[str, str]:
+    """Each row of an open batch that waits its turn -> the row before it: the
+    session builds them one after another in its one slot."""
+    out = {}
+    for seed in st.batches:
+        left = st.batch_left(seed)
+        out.update(zip(left[1:], left))
+    return out
 
 
 def plan_of(inputs: Inputs) -> plan_mod.Plan:
@@ -247,13 +275,29 @@ def plan_of(inputs: Inputs) -> plan_mod.Plan:
     # not elapsed time): its start is moved along by what stood frozen since.
     started = data_mod.awake_starts(inputs.started, list(inputs.frozen), inputs.now)
     busy = {p: started.get(p, inputs.now) for p in at_work(st)}
-    return plan_mod.build(
-        inputs.graph, inputs.text, inputs.landed, now=inputs.now, busy=busy,
-        asking=set(st.on_owner()), merging=st.integrating(),
+    # A batch's rows are in flight, none of them still to start: a row that has
+    # reported lands with its batch, as one merging does, and a row waiting its
+    # turn runs once the row before it is done, in the seat that one frees.
+    queue = batch_queue(st)
+    from ..batcher import RELEASED  # deferred: the batcher reads the ledger
+
+    reported = {r for r, said in st.batch_done.items() if said != RELEASED}
+    plan = plan_mod.build(
+        inputs.graph, inputs.text, inputs.landed, now=inputs.now,
+        busy=busy | {p: inputs.now for p in queue},
+        asking=set(st.on_owner()), merging=st.integrating() | reported,
         excluded=set(inputs.exclude), workers=inputs.workers,
         build_slots=inputs.build_slots, park_after=inputs.park_after, dated=inputs.dated,
         outside=set(st.working_parked()), models=inputs.models,
         burn_weight=inputs.burn_weight)
+    turn = {p: prev for p, prev in queue.items() if p in plan.rows and prev in plan.rows}
+    if not turn:
+        return plan
+    return replace(
+        plan,
+        rows={p: replace(r, needs=r.needs | {turn[p]}) if p in turn else r
+              for p, r in plan.rows.items()},
+        running={p: age for p, age in plan.running.items() if p not in turn})
 
 
 @dataclass(frozen=True)

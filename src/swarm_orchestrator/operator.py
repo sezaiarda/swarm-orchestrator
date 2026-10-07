@@ -548,6 +548,7 @@ def _in_flight(st: state_mod.State, phase: str) -> bool:
         not merging.isdisjoint(st.integ_queue)
         or st.integ_blocked in merging
         or any(s.busy and s.phase == phase for s in st.slots)
+        or phase in st.batch_rows()  # its batch builds on, or lands
     )
 
 

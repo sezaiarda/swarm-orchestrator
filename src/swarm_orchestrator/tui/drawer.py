@@ -238,11 +238,12 @@ class Row:
 
 
 def slot_of(snap, phase: str | None) -> int | None:
-    """The slot holding ``phase`` right now, so a selection can jump to its pane."""
+    """The slot holding ``phase`` right now, so a selection can jump to its pane.
+    A batch's rider is in its seed's slot."""
     if not phase:
         return None
     for slot in snap.slots:
-        if slot.busy and slot.phase == phase:
+        if phase in slot.rows:
             return slot.id
     return None
 

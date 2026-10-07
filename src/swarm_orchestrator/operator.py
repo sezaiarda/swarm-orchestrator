@@ -106,7 +106,8 @@ def operator_command(cfg: Config, job: str = "", cwd: Path | None = None) -> str
     model = f" --model {shlex.quote(cfg.operator_model)}" if cfg.operator_model else ""
     where = cwd or cfg.project_dir
     return launch_mod._worker_shell(cfg, job or "operator", where, f"claude{model}",
-                                    name=launch_mod.session_name("operator", job))
+                                    name=launch_mod.session_name("operator", job),
+                                    effort=cfg.operator_effort)
 
 
 def prepare_mirror(cfg: Config, item: opqueue.Item, log: Log) -> Path | None:

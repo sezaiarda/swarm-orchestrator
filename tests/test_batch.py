@@ -274,7 +274,7 @@ def test_launch_claims_the_batch_and_briefs_the_lead(ws):
     brief = cfg.state_dir / "briefs" / "k-W1.lead.md"
     assert f"--append-system-prompt-file {brief}" in shell
     text = brief.read_text()
-    assert "`k-W1`, `k-W2`, `k-W3`" in text and 'model: "sonnet"' in text
+    assert "`k-W1`, `k-W2`, `k-W3`" in text and "claude-sonnet-5-5" in text
     assert launch_mod._worker_env(cfg, "k-W1")["SWARM_BATCH"] == "k-W1 k-W2 k-W3"
 
 

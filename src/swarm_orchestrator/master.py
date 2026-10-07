@@ -199,7 +199,8 @@ def master_command(cfg: Config, kind: str, cwd: Path | None = None) -> str:
         model = cfg.overseer_model or cfg.master_model
         base = "claude" + (f" --model {shlex.quote(model)}" if model else "")
         return launch_mod._worker_shell(cfg, OVERSEER, cwd or cfg.project_dir, base,
-                                        name=launch_mod.session_name(OVERSEER))
+                                        name=launch_mod.session_name(OVERSEER),
+                                        effort=cfg.overseer_effort)
     model = f" --model {cfg.master_model}" if cfg.master_model else ""
     name = shlex.quote(launch_mod.session_name(INIT))
     base = f"claude{model} -n {name}"

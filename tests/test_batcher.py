@@ -226,7 +226,7 @@ def test_choose_takes_a_valid_model_answer(tmp_path, monkeypatch):
     log = _Log()
     b = batcher.choose(cfg, _st(cfg), "kern-W1", log=log)
     assert b == batcher.Batch(["kern-W1", "kern-W3"], "chain", "model")
-    assert log.lines == ["BATCH-MODEL kern-W1 model=sonnet cost=$0.0012"]
+    assert log.lines == ["BATCH-MODEL kern-W1 model=claude-sonnet-5-5 cost=$0.0012"]
     sent = json.loads(seen[0].split("INPUT:\n", 1)[1])
     assert sent["seed"] == "kern-W1" and sent["max_rows"] == 5
     ids = [r["id"] for r in sent["rows"]]
@@ -290,8 +290,10 @@ def test_still_free_drops_taken_rows_and_their_in_batch_dependents(tmp_path, mon
 def test_plan_forms_batches_in_launch_order_without_reusing_a_row(tmp_path, monkeypatch):
     cfg = _project(tmp_path, monkeypatch, toml="[lanes]\nper_repo = 5\n")
     got = [b.rows for b in batcher.plan(cfg, _st(cfg))]
-    assert got == [["kern-W1", "kern-F2", "kern-W4", "kern-W5", "kern-W3"], ["kern-W6"],
-                   ["ui-W1"], ["son-W1", "son-W2"], ["wide-W1"], ["cross-W1"]]
+    # kern-W6 has no related row left, so it pairs with the next row that fits
+    # rather than run alone ([batch] min_rows = 2).
+    assert got == [["kern-W1", "kern-F2", "kern-W4", "kern-W5", "kern-W3"], ["kern-W6", "ui-W1"],
+                   ["son-W1", "son-W2"], ["wide-W1"], ["cross-W1"]]
 
 
 def test_plan_counts_a_batch_once_per_repo_and_respects_lanes(tmp_path, monkeypatch):
@@ -332,3 +334,34 @@ def test_an_open_batch_holds_one_union_lane(tmp_path, monkeypatch):
         ["kern-W1", "kern-F2", "kern-W6", "kern-W3"], ["ui-W1"], ["wide-W1"]]
     # and its rows' lanes are held: a row overlapping kern-W5 cannot ride
     assert batcher.check(cfg, st, "kern-W1", ["kern-W1", "kern-W5"]) == "kern-W5 is not eligible"
+
+
+# -- at least two rows, and never a lane-starved slot -------------------------------
+def test_a_seed_with_no_related_row_pairs_with_the_best_fitting_one(tmp_path, monkeypatch):
+    ledger = ("# Ledger\n\n"
+              "- [ ] `a-W1` · dir:`app` · touches:`app/src/a.rs` · **alone in its family**\n"
+              "- [ ] `b-W1` · dir:`web` · touches:`web/src/b.ts` · **another family**\n")
+    cfg = _project(tmp_path, monkeypatch, ledger=ledger)
+    got = batcher.greedy(cfg, _st(cfg), "a-W1", batcher.candidates(cfg, _st(cfg), "a-W1"))
+    assert got.rows == ["a-W1", "b-W1"]
+    # And a model that answers with the seed alone while a partner fits is not taken.
+    assert "min_rows" in batcher.check(cfg, _st(cfg), "a-W1", ["a-W1"])
+    # With min_rows = 1 the old rule stands: unrelated rows do not ride.
+    cfg.batch_min_rows = 1
+    assert batcher.greedy(cfg, _st(cfg), "a-W1", ["b-W1"]).rows == ["a-W1"]
+
+
+def test_a_row_whose_lane_would_starve_the_next_slot_stays_out(tmp_path, monkeypatch):
+    ledger = ("# Ledger\n\n"
+              "- [ ] `k-W1` · dir:`app` · touches:`app/src/a.rs` · **one**\n"
+              "- [ ] `k-W2` · dir:`app` · touches:`app/**` · **the whole repo**\n"
+              "- [ ] `z-W1` · dir:`app` · touches:`app/src/z.rs` · **another family**\n"
+              "- [ ] `s-W1` · dir:`app` · model:`sonnet` · touches:`app/src/s.rs` · **for a"
+              " slot of its own**\n")
+    cfg = _project(tmp_path, monkeypatch, ledger=ledger, toml="[lanes]\nper_repo = 5\n")
+    st = _st(cfg)
+    # With k-W2's `app/**` in the batch, s-W1 (another model, so never a rider)
+    # could launch nowhere: k-W2 waits for its own turn.
+    assert batcher.greedy(cfg, st, "k-W1", batcher.candidates(cfg, st, "k-W1")).rows == [
+        "k-W1", "z-W1"]
+    assert "lane" in batcher.check(cfg, st, "k-W1", ["k-W1", "k-W2"])

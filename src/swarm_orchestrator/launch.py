@@ -41,6 +41,7 @@ from . import meters, opqueue
 from . import models as models_mod
 from . import state as state_mod
 from . import statuses
+from . import subagents
 from . import telegram, tmux
 from .config import Config, ready_needle
 from . import logutil
@@ -272,7 +273,7 @@ def with_name(cmd: str, name: str) -> str:
 
 
 def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
-                  name: str | None = None) -> str:
+                  name: str | None = None, effort: str | None = None) -> str:
     """``cd <cwd> && exec <claude ...>`` for one session, worker-configured.
 
     ``cmd`` overrides the ``worker_cmd`` base for a session that is not a phase
@@ -285,6 +286,10 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
     ``worker_cmd`` with that model, and is told how to hand the phase back.
     With ``[batch] enabled`` a phase worker leads: :func:`lead_brief_file` is
     appended to its system prompt, naming the rows of its batch.
+
+    ``effort`` replaces ``[worker].effort`` for a session of another kind ("" or
+    None keeps it). Every session's subagents run on ``[worker]
+    subagent_model``/``subagent_effort`` (:mod:`subagents`).
     """
     model = models_mod.override(cfg, phase) if cmd is None else ""
     base = cfg.worker_cmd.format(phase=phase)
@@ -307,12 +312,31 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
         # extra tmux panes in the workers window. Merges over the user's
         # settings, so bypassPermissions etc. are preserved. The status line is
         # swapped for the meters tap, which still draws the owner's own bar.
-        settings = meters.settings_with_tap(cfg.worker_settings, cfg.state_dir, phase)
+        settings = meters.settings_with_tap(
+            _with_env(cfg.worker_settings, subagents.env(cfg, lead=worker)),
+            cfg.state_dir, phase)
     # Lean: the project's setup, not the owner's personal one (lean.py).
     cmd += lean.shell(cfg, cwd, settings, cmd)
-    if cfg.worker_effort:
-        cmd += f" --effort {shlex.quote(cfg.worker_effort)}"
+    cmd += f" --agents {shlex.quote(subagents.agents_arg(cfg, lead=worker))}"
+    level = effort or cfg.worker_effort
+    if level:
+        cmd += f" --effort {shlex.quote(level)}"
     return f"cd {shlex.quote(str(cwd))} && exec {cmd}"
+
+
+def _with_env(settings: str, env: dict[str, str]) -> str:
+    """``settings`` (a JSON object) with ``env`` added under its ``env`` key;
+    anything that is not a JSON object is left as it is."""
+    if not env:
+        return settings
+    try:
+        data = json.loads(settings)
+    except ValueError:
+        return settings
+    if not isinstance(data, dict):
+        return settings
+    data["env"] = {**env, **(data.get("env") or {})}
+    return json.dumps(data, separators=(",", ":"))
 
 
 #: The lead's part of a worker's system prompt (``prompts/worker_lead.md``).
@@ -339,7 +363,8 @@ def lead_brief_file(cfg: Config, phase: str, rows: list[str], extra: str = "") -
     listed = ", ".join(f"`{r}`" for r in rows)
     text = (text.replace("{rows}", listed).replace("{first}", rows[0])
             .replace("{count}", str(len(rows)))
-            .replace("{builder_model}", cfg.builder_model or "sonnet"))
+            .replace("{builder_model}", cfg.subagent_model or "sonnet")
+            .replace("{escalation_model}", cfg.builder_escalation_model or "opus"))
     path = cfg.state_dir / "briefs" / f"{phase}.lead.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text + (f"\n\n{extra}\n" if extra else ""), encoding="utf-8")

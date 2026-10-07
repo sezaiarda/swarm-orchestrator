@@ -325,10 +325,20 @@ class Config:
         choices=("", *EFFORTS), parse=_effort,
         doc='claude --effort per worker; "" = inherit yours',
         why="passed as `claude --effort` on the command line a pane is spawned with")
-    builder_model: str = _k(
-        "worker", "builder_model", "sonnet", NEXT,
-        doc="model the lead gives each builder subagent",
-        why="written into a worker's brief once, at launch")
+    # Every subagent a swarm session starts (a lead's builders, an Explore, the
+    # operator's or the Overseer's helpers) runs on these: see subagents.py.
+    subagent_model: str = _k(
+        "worker", "subagent_model", "claude-sonnet-5-5", NEXT,
+        doc="model of every subagent a swarm session starts",
+        why="baked into a session's command line when its pane is spawned")
+    subagent_effort: str = _k(
+        "worker", "subagent_effort", "high", NEXT, choices=("", *EFFORTS), parse=_effort,
+        doc='effort of every subagent; "" = the session\'s own',
+        why="baked into a session's command line when its pane is spawned")
+    builder_escalation_model: str = _k(
+        "worker", "builder_escalation_model", "claude-opus-5-5", NEXT,
+        doc="builder model for a row two builders failed",
+        why="baked into a worker's command line when its pane is spawned")
     env_marker: str = _k(
         "worker", "env_marker", "SWARM_PHASE", NEXT,
         doc="env var carrying the phase name into the worker",
@@ -595,6 +605,10 @@ class Config:
         "batch", "enabled", True, HOT, env="SWARM_BATCHING",
         doc="let one worker claim related ready rows",
         why="read each time a slot is filled")
+    batch_min_rows: int = _k(
+        "batch", "min_rows", 2, HOT, minimum=1,
+        doc="fewest rows per batch when a partner fits",
+        why="read each time a slot is filled")
     batch_max_rows: int = _k(
         "batch", "max_rows", 5, HOT, minimum=1,
         doc="rows per batch (at most 5)",
@@ -608,7 +622,7 @@ class Config:
         doc="code repos one batch may span",
         why="read each time a slot is filled")
     batch_model: str = _k(
-        "batch", "model", "sonnet", HOT,
+        "batch", "model", "claude-sonnet-5-5", HOT,
         doc='model that picks a batch; "" = rule only',
         why="read each time a slot is filled")
     batch_timeout_s: int = _k(
@@ -630,8 +644,13 @@ class Config:
         why="read once, when a queued hand-off opens an operator pane; an"
             " already-open session keeps the command it was spawned with")
     operator_model: str = _k(
-        "operator", "model", "", NEXT,
+        "operator", "model", "claude-sonnet-5-5", NEXT,
         doc='model for an operator session; "" inherits',
+        why="baked into the operator session's command line when its pane is"
+            " spawned")
+    operator_effort: str = _k(
+        "operator", "effort", "high", NEXT, choices=("", *EFFORTS), parse=_effort,
+        doc='operator --effort; "" = [worker].effort',
         why="baked into the operator session's command line when its pane is"
             " spawned")
     # An alias, never a dated build: triage runs unattended, and a pinned
@@ -660,8 +679,12 @@ class Config:
         doc='command an Overseer pass runs; "" = built-in',
         why="baked into the Overseer pane's command line when a pass is spawned")
     overseer_model: str = _k(
-        "overseer", "model", "", NEXT,
+        "overseer", "model", "claude-sonnet-5-5", NEXT,
         doc='model for the Overseer; "" = master_model',
+        why="baked into the Overseer session's command line when a pass is spawned")
+    overseer_effort: str = _k(
+        "overseer", "effort", "high", NEXT, choices=("", *EFFORTS), parse=_effort,
+        doc='Overseer --effort; "" = [worker].effort',
         why="baked into the Overseer session's command line when a pass is spawned")
     overseer_min_gap_s: int = _k(
         "overseer", "min_gap_s", 600, HOT, env="SWARM_OVERSEER_MIN_GAP", minimum=0,

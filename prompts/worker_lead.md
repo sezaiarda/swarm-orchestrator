@@ -16,14 +16,22 @@ history and what it points at, narrowly (grep, line ranges). Decide the order (d
 the order above is a good default) and what each builder must be told.
 
 ## 2. One builder per row
-`Agent` with `model: "{builder_model}"`, one row each. Use a stronger model only for a row that
-clearly needs it, and say why in its recap. Brief the builder with what you already know so it does
-not re-orient: the row id, its exit criteria, the files and decisions that matter, the project rules
-that bite (its gates, `swarm build` for heavy commands, no ledger edits), what it must not touch.
-It does not commit, push or run `swarm done`; it runs the targeted tests for its row. Ask for a
-short reply only, at most ten lines: what changed, files, tests run and their result, anything
-unresolved; details go to a file under `$TMPDIR`, not into the reply. Rows whose files do not
-overlap may build at the same time; otherwise one after another, in this worktree.
+`Agent` with `subagent_type: "builder"` (it runs on {builder_model}), one row each, never a fork:
+a builder starts from its brief alone, not from your context. Any other subagent (`Explore`,
+`Plan`, `general-purpose`) is already set to {builder_model}; pass no `model` to any of them.
+The brief, and nothing more (the builder knows the swarm's rules and the reply format):
+
+    Row <id>: <the goal, one or two lines, and its exit criteria>
+    Files: <the files and directories it touches; what it must not touch>
+    Constraints: <decisions and project rules that bite: contracts, no ledger edits, ...>
+    Done when: <the observable result, and the targeted tests that show it>
+    Gate: <the exact command, heavy ones through `swarm build`>
+
+Rows whose files do not overlap may build at the same time; otherwise one after another, in this
+worktree. Escalate a row only when a builder has failed it twice, or the row is plainly hard
+(kernel, scheduler, concurrency or other correctness-critical code): then `subagent_type:
+"builder-hard"` ({escalation_model}), and first record it with
+`swarm note <row> decision "builder escalated to {escalation_model}: <why>"`.
 
 ## 3. Review, commit, one row at a time
 Review each row from its diff (`git diff --stat`, then the hunks that matter). Send the builder

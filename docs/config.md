@@ -91,7 +91,9 @@ address, and the listener answers for it under the new name.
 |---|---|---|---|---|
 | `command_template` | `"/prime {phase}"` | | next | The line typed into a worker's pane once `claude` has booted. |
 | `command_file` | `".claude/commands/prime.md"` | | next | The project's slash-command file. The init pass patches it for swarm mode, and `swarm check` lints it. |
-| `builder_model` | `"sonnet"` | | next | The model a worker's lead session gives each builder subagent it spawns. |
+| `subagent_model` | `"claude-sonnet-5-5"` | | next | The model of every subagent a swarm session starts: a lead's builders, and every `general-purpose`, `Explore` or `Plan` of any worker, operator, Overseer, big-picture or guide session. Each session gets `--agents` redefining those built-ins and a `builder` on this model, and `CLAUDE_CODE_SUBAGENT_MODEL` for any other (forced with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` outside a worker). A subagent starts from its own brief, never from its session's context. `""` leaves subagents to Claude Code. |
+| `subagent_effort` | `"high"` | | next | The effort those subagent definitions carry. `""` leaves each at its session's effort. |
+| `builder_escalation_model` | `"claude-opus-5-5"` | | next | A worker's `builder-hard` subagent: the lead gives it a row that a builder has failed twice, or that is plainly hard, and records that with `swarm note <row> decision`. `""` defines none. |
 | `env_marker` | `"SWARM_PHASE"` | | next | The variable that carries the phase id into the worker's environment. |
 | `worker_cmd` | `"claude"` | `SWARM_WORKER_CMD` | next | The base command a slot pane is respawned with, as `cd <cwd> && exec <worker_cmd> -n 'swarm · worker · <phase>' --settings … --effort …`. `{phase}` expands. The `-n` display name is added only when the command sets none itself (an older `-n worker:{phase}` is kept as it is). The `--model` it names is the swarm's own model: a row whose `model:` field names another runs with that model swapped in, and its worker gets `--append-system-prompt` with the rule for `swarm escalate`. |
 | `ready_marker` | `""` | `SWARM_READY_MARKER` | next | Text that means "claude has booted". `""` means the running `claude --version`, which the boot banner prints; if that cannot be read, `Claude Code`. |
@@ -269,11 +271,13 @@ clash) and any failure, timeout or error falls back to the deterministic rule, w
 now (see [cli.md](cli.md)). A row's size in points is `max(3, its ledger text in KB) + 0.5` per touch.
 
 At run time the batch is one claim: the seed's slot, mirror, `swarm/<seed>` branch and lane (the
-union of the rows' touches), with the riders in flight beside it (`CLAIM <row> slot=N batch=<seed>`
+union of the rows' touches; with lanes on, a row is left out of a batch when adding its lane would
+leave no other ready row a lane to launch in, so a wide batch never idles the next slot), with the
+riders in flight beside it (`CLAIM <row> slot=N batch=<seed>`
 in the log, `batches` in `state.json`, shown running everywhere the seed is). Every worker, a batch
 of one included, gets `prompts/worker_lead.md` appended to its system prompt (`--append-system-prompt-file`,
 written to `<state>/briefs/<seed>.lead.md`, with `$SWARM_BATCH` listing the rows): it orients once,
-hands each row to a builder subagent on `[worker] builder_model`, reviews, commits one commit per
+hands each row to a `builder` subagent on `[worker] subagent_model`, reviews, commits one commit per
 row, runs the full gate once for the batch, and reports each row with its own `swarm done`. Nothing
 is merged or recorded before the last row reports; then the branch lands once and each row is
 recorded with its own outcome and history. A row that fails leaves no commit (the lead stashes it)
@@ -285,10 +289,11 @@ attempt, as a lone row does.
 | key | default | env | reload | meaning |
 |---|---|---|---|---|
 | `enabled` | `true` | `SWARM_BATCHING` | hot | Let a slot claim a batch. `false`: one row per slot, as before. |
+| `min_rows` | `2` | | hot | Rows a batch is filled to: when no related row is left, the rows that fit best (caps, needs, model, lanes) ride anyway. A row runs alone only when nothing fits with it; a slot never waits for a partner. |
 | `max_rows` | `5` | | hot | Rows per batch, seed included. At least 1; anything above 5 counts as 5. |
 | `max_points` | `60` | | hot | Most points one batch may sum to. A seed above it still runs, alone. |
 | `max_repos` | `3` | | hot | Most distinct code repos (`.` and `@resources` aside) one batch may touch. |
-| `model` | `"sonnet"` | | hot | `--model` for the call that picks the batch. `""` skips the call and always uses the deterministic rule. |
+| `model` | `"claude-sonnet-5-5"` | | hot | `--model` for the call that picks the batch. `""` skips the call and always uses the deterministic rule. |
 | `timeout_s` | `60` | | hot | Seconds that call may take before the rule is used instead. |
 
 ## `[build]`
@@ -315,7 +320,8 @@ exceed the cores; the other swarms' `jobs` count toward the same total.
 |---|---|---|---|---|
 | `enabled` | `false` | `SWARM_OPERATOR` | hot | Opt-in. `true` lets the swarm open an unattended session with your authority. While `false`, nothing is queued and each `operator` hand-off is telegrammed to you as a to-do. |
 | `cmd` | `""` | `SWARM_OPERATOR_CMD` | next | Replaces the built-in session command. With it set, no brief is typed in. |
-| `model` | `""` | | next | `--model` for operator sessions. `""` inherits the user's setting. |
+| `model` | `"claude-sonnet-5-5"` | | next | `--model` for operator sessions (and the owner guide). `""` inherits the user's setting. |
+| `effort` | `"high"` | | next | `claude --effort` for operator sessions. `""` uses `[worker].effort`. |
 | `triage_model` | `"haiku"` | | hot | The model that answers now-or-later for each hand-off. Use an alias, not a dated build. |
 | `later_wait_s` | `10800` | | hot | The longest a job triaged `later` waits. It normally opens when a worker slot is free that no ready phase wants; with a deep backlog that never happens, so once it has been queued this long it opens anyway, oldest first, one session at a time, never before its phase has merged. The session takes no worker slot. `0` means no cap. |
 
@@ -325,7 +331,8 @@ exceed the cores; the other swarms' `jobs` count toward the same total.
 |---|---|---|---|---|
 | `enabled` | `true` | `SWARM_OVERSEER` | hot | `false` leaves only launching and integrating. |
 | `cmd` | `""` | `SWARM_OVERSEER_CMD` | next | Replaces the built-in session command. Falls back to `[swarm].master_cmd`. |
-| `model` | `""` | | next | `""` uses `[swarm].master_model`. |
+| `model` | `"claude-sonnet-5-5"` | | next | `--model` for an Overseer pass. `""` uses `[swarm].master_model`. |
+| `effort` | `"high"` | | next | `claude --effort` for an Overseer pass. `""` uses `[worker].effort`. |
 | `min_gap_s` | `600` | `SWARM_OVERSEER_MIN_GAP` | hot | The minimum time between the starts of two non-urgent passes. |
 | `every_s` | `14400` | `SWARM_OVERSEER_EVERY` | hot | How often you get the Overseer's summary on your phone, in seconds. A pass that writes it (`swarm overseer-summary`) starts this long after the last one did (after the swarm started, for the first); passes for anything else do not move this clock. If that pass sends none, or the Overseer is off, the supervisor sends a summary of its own with the bare counts. A stretch in which nothing landed, failed, was held back or is building sends none. `0` means no summary on the clock: you still get asks, and the one at the end of the run. |
 | `owner_wait_s` | `3600` | `SWARM_OVERSEER_OWNER_WAIT` | hot | A session asking you this long triggers a pass, once per unanswered question (one parked and answered is working, and does not count). |

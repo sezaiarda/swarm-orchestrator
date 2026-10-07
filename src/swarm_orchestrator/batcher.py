@@ -294,6 +294,11 @@ def _limits(cfg: Config) -> tuple[int, float, int]:
             max(1, cfg.batch_max_repos))
 
 
+def _min_rows(cfg: Config) -> int:
+    """The rows a batch is filled to when any row fits, related or not."""
+    return max(1, min(cfg.batch_min_rows, _limits(cfg)[0]))
+
+
 # -- eligibility ------------------------------------------------------
 def _lane_ok(v: _View, row: str, *, as_seed: bool = False) -> bool:
     """Not lane-blocked: its lane parses, overlaps nothing in flight, and adds no
@@ -315,6 +320,36 @@ def _lane_ok(v: _View, row: str, *, as_seed: bool = False) -> bool:
             counts[repo] = counts.get(repo, 0) + 1
     return all(counts.get(repo, 0) < v.per_repo
                for repo in lanes_mod.repos_of(lanes_mod.owned(lane, v.commons)) - seed_repos)
+
+
+def _free(v: _View, lane: frozenset, held: dict) -> bool:
+    """``lane`` overlaps nothing in ``held`` and adds to no repo at ``per_repo``."""
+    if any(lanes_mod.collide(lane, h, v.commons) is not None for h in held.values()):
+        return False
+    counts: dict[str, int] = {}
+    for theirs in held.values():
+        for repo in lanes_mod.repos_of(lanes_mod.owned(theirs, v.commons)):
+            counts[repo] = counts.get(repo, 0) + 1
+    return all(counts.get(repo, 0) < v.per_repo
+               for repo in lanes_mod.repos_of(lanes_mod.owned(lane, v.commons)))
+
+
+def _starves(v: _View, batch: list[str], row: str) -> bool:
+    """Adding ``row`` would leave no other ready row a lane to launch in, where
+    the batch without it left one. A batch holds the union of its rows' lanes, so
+    one grown too wide idles the next slot; such a row waits for its own turn."""
+    if not v.lanes_on:
+        return False
+    inside = {*batch, row}
+    rest = [r for r in v.pool if r not in inside and r in v.lanes
+            and all(d in v.landed for d in v.graph[r])]
+
+    def any_free(rows: list[str]) -> bool:
+        lane = frozenset().union(*(v.lanes.get(r, frozenset()) for r in rows))
+        held = {**v.held, "\0batch": lane}
+        return any(_free(v, v.lanes[r], held) for r in rest)
+
+    return any_free(batch) and not any_free([*batch, row])
 
 
 def _eligible(v: _View, seed: str) -> list[str]:
@@ -345,7 +380,10 @@ def candidates(cfg: Config, st, seed: str, *, taken=frozenset()) -> list[str]:
 
 
 # -- the deterministic rule -----------------------------------------
-def _compatible(cfg: Config, v: _View, batch: list[str], row: str) -> bool:
+def _compatible(cfg: Config, v: _View, batch: list[str], row: str, *,
+                related: bool = True) -> bool:
+    """``row`` may join ``batch``: within the caps, its needs met, no lane
+    starvation, and (``related``) sharing a family, a repo or a directory."""
     max_rows, max_points, max_repos = _limits(cfg)
     if len(batch) >= max_rows:
         return False
@@ -355,6 +393,10 @@ def _compatible(cfg: Config, v: _View, batch: list[str], row: str) -> bool:
         return False
     have = set().union(*(code_repos(v, r) for r in batch))
     mine = code_repos(v, row)
+    if len(have | mine) > max_repos or _starves(v, batch, row):
+        return False
+    if not related:
+        return True
     fams = {family(r) for r in batch}
     if have and mine:
         return bool(have & mine or family(row) in fams) and len(have | mine) <= max_repos
@@ -413,9 +455,17 @@ def _greedy(cfg: Config, v: _View, seed: str, cands: list[str]) -> Batch:
         best = max(fit, key=lambda c: (_affinity(v, batch, c), -v.order[c]))
         batch.append(best)
         left.remove(best)
+    while len(batch) < _min_rows(cfg):
+        # No related row is left: a slot builds two unrelated rows rather than one.
+        fit = [c for c in left if _compatible(cfg, v, batch, c, related=False)]
+        if not fit:
+            break
+        best = max(fit, key=lambda c: (_affinity(v, batch, c), -v.order[c]))
+        batch.append(best)
+        left.remove(best)
     if len(batch) == 1:
         why = v.solo(seed)
-        return Batch([seed], f"runs alone: {why}" if why else "no related ready row", SINGLE)
+        return Batch([seed], f"runs alone: {why}" if why else "no ready row fits with it", SINGLE)
     rows = _order(v, batch)
     return Batch(rows, _describe(v, rows), FALLBACK)
 
@@ -471,6 +521,14 @@ def _check(cfg: Config, v: _View, seed: str, rows: list[str], eligible: list[str
             for holder in sorted(v.held):
                 if lanes_mod.collide(lane, v.held[holder], v.commons) is not None:
                     return f"{r} lane-busy [{holder}]"
+        for i in range(1, len(rows)):
+            if _starves(v, rows[:i], rows[i]):
+                return f"{rows[i]} would leave no other ready row a lane"
+    if len(rows) < _min_rows(cfg) and not v.solo(seed):
+        spare = [c for c in eligible if c not in rows
+                 and _compatible(cfg, v, rows, c, related=False)]
+        if spare:
+            return f"{len(rows)} row(s) < min_rows {_min_rows(cfg)} while {spare[0]} fits"
     return None
 
 
@@ -488,7 +546,8 @@ phases saves that cost; unrelated phases waste it. Choose a batch from the rows 
 
 Hard rules:
 - The batch must start with the seed row.
-- 1 to max_rows rows; sum of pts <= max_points; at most max_repos distinct entries across all "repos".
+- min_rows to max_rows rows; sum of pts <= max_points; at most max_repos distinct entries across all "repos".
+- Fewer than min_rows rows only when no other row in INPUT fits these rules with the seed.
 - Only use ids that appear in rows. Do not invent ids.
 - If a row's "needs" lists an id, that id must be in the batch BEFORE it, or the row cannot be in the batch.
 - Order the batch so dependencies come first, then the smaller rows before the larger ones.
@@ -496,7 +555,7 @@ Hard rules:
 
 Preferences, in order: same family (fam); same repo; rows whose touch paths overlap or sit in the same directories; a row that is a
 follow-up (F) of a W row already in the batch; a docs-only row whose docs belong to the batch. Aim for 3 to 5 rows when related rows exist.
-A single row is correct only if nothing in INPUT is related to the seed. Never pad a batch with unrelated rows to reach 5.
+When no row is related to the seed, still reach min_rows with the rows that fit best. Beyond min_rows, never pad with unrelated rows.
 
 Reply with ONLY one JSON object, no prose, no code fence:
 {"batch":["<id>",...],"reason":"<one line, under 140 characters>"}
@@ -529,8 +588,8 @@ def _input(cfg: Config, v: _View, seed: str, cands: list[str]) -> dict:
             "needs": sorted(d for d in v.graph[r] if d in inside),
             "title": title[:TITLE_CHARS], "touch": _touch_globs(_touches(v, r)),
         })
-    return {"max_rows": max_rows, "max_points": max_points, "max_repos": max_repos,
-            "seed": seed, "rows": rows}
+    return {"min_rows": _min_rows(cfg), "max_rows": max_rows, "max_points": max_points,
+            "max_repos": max_repos, "seed": seed, "rows": rows}
 
 
 def prompt(cfg: Config, v: _View, seed: str, cands: list[str]) -> str:

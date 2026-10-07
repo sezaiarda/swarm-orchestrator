@@ -38,6 +38,19 @@ def valid(name: str) -> bool:
     return bool(_NAME_RE.match(name)) and name != DEFAULT_WORD
 
 
+#: What the family aliases name on the CLI the swarm runs (Claude Code 2.1.293:
+#: ``claude -p --model opus`` answers as ``claude-opus-5-5``). A row that says
+#: ``opus`` under a ``worker_cmd`` naming ``claude-opus-5-5`` runs on the swarm's
+#: own model, not on a model of its own.
+ALIASES = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
+           "haiku": "claude-haiku-5-5"}
+
+
+def same(a: str, b: str) -> bool:
+    """``a`` and ``b`` name one model (an alias and the id it stands for)."""
+    return ALIASES.get(a, a) == ALIASES.get(b, b)
+
+
 def _tokens(cmd: str) -> list[str]:
     try:
         return shlex.split(cmd)
@@ -94,14 +107,15 @@ def overrides(cfg: Config, text: str | None = None) -> dict[str, str]:
     own = default(cfg)
     rows = ledger_mod.models(_ledger_text(cfg) if text is None else text)
     gone = handed_up(cfg)
-    return {p: m for p, m in rows.items() if m != own and p not in gone and valid(m)}
+    return {p: m for p, m in rows.items()
+            if not same(m, own) and p not in gone and valid(m)}
 
 
 def override(cfg: Config, phase: str, text: str | None = None) -> str:
     """The model ``phase`` launches on when it is not the swarm's own, else ""."""
     own = default(cfg)
     model = ledger_mod.models(_ledger_text(cfg) if text is None else text).get(phase, "")
-    if not model or model == own or not valid(model) or handup(cfg, phase) is not None:
+    if not model or same(model, own) or not valid(model) or handup(cfg, phase) is not None:
         return ""
     return model
 

@@ -313,11 +313,11 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
         # settings, so bypassPermissions etc. are preserved. The status line is
         # swapped for the meters tap, which still draws the owner's own bar.
         settings = meters.settings_with_tap(
-            _with_env(cfg.worker_settings, subagents.env(cfg, lead=worker)),
+            _with_env(cfg.worker_settings, subagents.env(cfg)),
             cfg.state_dir, phase)
     # Lean: the project's setup, not the owner's personal one (lean.py).
     cmd += lean.shell(cfg, cwd, settings, cmd)
-    cmd += f" --agents {shlex.quote(subagents.agents_arg(cfg, lead=worker))}"
+    cmd += f" --agents {shlex.quote(subagents.agents_arg(cfg))}"
     level = effort or cfg.worker_effort
     if level:
         cmd += f" --effort {shlex.quote(level)}"
@@ -363,8 +363,7 @@ def lead_brief_file(cfg: Config, phase: str, rows: list[str], extra: str = "") -
     listed = ", ".join(f"`{r}`" for r in rows)
     text = (text.replace("{rows}", listed).replace("{first}", rows[0])
             .replace("{count}", str(len(rows)))
-            .replace("{builder_model}", cfg.subagent_model or "sonnet")
-            .replace("{escalation_model}", cfg.builder_escalation_model or "opus"))
+            .replace("{builder_model}", cfg.subagent_model or "sonnet"))
     path = cfg.state_dir / "briefs" / f"{phase}.lead.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text + (f"\n\n{extra}\n" if extra else ""), encoding="utf-8")

@@ -40,18 +40,19 @@ def _flags(shell: str) -> dict[str, str]:
     return {w: words[i + 1] for i, w in enumerate(words[:-1]) if w.startswith("--")}
 
 
-def test_a_lead_gets_sonnet_builders_and_an_opus_builder_for_hard_rows(cfg):
+def test_a_lead_gets_only_sonnet_subagents_and_forces_them(cfg):
     flags = _flags(launch_mod._worker_shell(cfg, "k-W1", cfg.project_dir))
     agents = json.loads(flags["--agents"])
     assert agents["builder"]["model"] == "claude-sonnet-5-5"
-    assert agents["builder-hard"]["model"] == "claude-opus-5-5"
-    for name in ("builder", "builder-hard", "general-purpose", "Explore", "Plan"):
+    assert "builder-hard" not in agents
+    assert {a["model"] for a in agents.values()} == {"claude-sonnet-5-5"}
+    for name in ("builder", "general-purpose", "Explore", "Plan"):
         assert agents[name]["effort"] == "high", name
     assert agents["Explore"]["model"] == "claude-sonnet-5-5"
     assert "Edit" not in agents["Explore"]["tools"]
     env = _settings(flags)["env"]
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-sonnet-5-5"
-    assert "CLAUDE_CODE_SUBAGENT_MODEL_FORCE" not in env  # or builder-hard could not be Opus
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] == "1"
     assert flags["--effort"] == "medium"  # the lead's own, from [worker].effort
 
 
@@ -68,7 +69,7 @@ def test_operator_and_overseer_run_sonnet_high_and_force_their_subagents(cfg, ki
 
 
 def test_subagent_settings_can_be_left_to_claude(cfg):
-    cfg.subagent_model, cfg.subagent_effort, cfg.builder_escalation_model = "", "", ""
+    cfg.subagent_model, cfg.subagent_effort = "", ""
     flags = _flags(launch_mod._worker_shell(cfg, "k-W1", cfg.project_dir))
     agents = json.loads(flags["--agents"])
     assert all("model" not in a and "effort" not in a for a in agents.values())

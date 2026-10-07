@@ -335,10 +335,6 @@ class Config:
         "worker", "subagent_effort", "high", NEXT, choices=("", *EFFORTS), parse=_effort,
         doc='effort of every subagent; "" = the session\'s own',
         why="baked into a session's command line when its pane is spawned")
-    builder_escalation_model: str = _k(
-        "worker", "builder_escalation_model", "claude-opus-5-5", NEXT,
-        doc="builder model for a row two builders failed",
-        why="baked into a worker's command line when its pane is spawned")
     env_marker: str = _k(
         "worker", "env_marker", "SWARM_PHASE", NEXT,
         doc="env var carrying the phase name into the worker",

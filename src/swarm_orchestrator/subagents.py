@@ -9,14 +9,12 @@ both checked on Claude Code 2.1.293 against the requests it sends:
 * ``--agents`` (:func:`agents`): the built-in ``general-purpose``, ``Explore``
   and ``Plan`` redefined, and a ``builder``, each with ``[worker]
   subagent_model`` and ``subagent_effort``. A definition's ``model`` and
-  ``effort`` are what its subagent runs with, built-ins included. A lead also
-  gets ``builder-hard`` on ``builder_escalation_model``, for the row a builder
-  has failed twice.
-* ``CLAUDE_CODE_SUBAGENT_MODEL`` in the session's settings ``env``
-  (:func:`env`): the model of any other subagent that names none. Outside a
-  lead, ``CLAUDE_CODE_SUBAGENT_MODEL_FORCE`` makes it win over a model the
-  session names itself, and over the definitions; a lead goes without it, or
-  its ``builder-hard`` could not be Opus.
+  ``effort`` are what its subagent runs with, built-ins included.
+* ``CLAUDE_CODE_SUBAGENT_MODEL`` and ``CLAUDE_CODE_SUBAGENT_MODEL_FORCE`` in the
+  session's settings ``env`` (:func:`env`): the model of every subagent, over a
+  model the session names itself and over the definitions. There is no Opus
+  builder: a lead that sent "hard" rows to one sent every row to it (owner
+  2026-10-08: subagents are always Sonnet).
 
 A subagent starts from its own prompt, never the lead's context (only a
 ``fork`` would inherit it), so a builder pays only for what its brief says.
@@ -76,29 +74,23 @@ def _one(cfg: Config, description: str, prompt: str, model: str,
     return out
 
 
-def agents(cfg: Config, *, lead: bool) -> dict:
-    """The ``--agents`` definitions of a session; ``lead`` for a phase worker."""
+def agents(cfg: Config) -> dict:
+    """The ``--agents`` definitions of a session."""
     out = {name: _one(cfg, desc, prompt, cfg.subagent_model, tools)
            for name, (desc, prompt, tools) in _BUILTINS.items()}
     out["builder"] = _one(cfg, "Builds one ledger row from the lead's brief.", BUILDER,
                           cfg.subagent_model)
-    if lead and cfg.builder_escalation_model:
-        out["builder-hard"] = _one(
-            cfg, "Builds one hard ledger row, after a builder failed it twice.", BUILDER,
-            cfg.builder_escalation_model)
     return out
 
 
-def env(cfg: Config, *, lead: bool) -> dict[str, str]:
-    """The settings ``env`` that pins the model of any other subagent."""
+def env(cfg: Config) -> dict[str, str]:
+    """The settings ``env`` that pins the model of every subagent."""
     if not cfg.subagent_model:
         return {}
-    out = {"CLAUDE_CODE_SUBAGENT_MODEL": cfg.subagent_model}
-    if not lead:
-        out["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] = "1"
-    return out
+    return {"CLAUDE_CODE_SUBAGENT_MODEL": cfg.subagent_model,
+            "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1"}
 
 
-def agents_arg(cfg: Config, *, lead: bool) -> str:
+def agents_arg(cfg: Config) -> str:
     """:func:`agents` as the JSON ``--agents`` takes."""
-    return json.dumps(agents(cfg, lead=lead), separators=(",", ":"))
+    return json.dumps(agents(cfg), separators=(",", ":"))

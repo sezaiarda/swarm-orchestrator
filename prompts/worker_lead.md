@@ -28,10 +28,9 @@ The brief, and nothing more (the builder knows the swarm's rules and the reply f
     Gate: <the exact command, heavy ones through `swarm build`>
 
 Rows whose files do not overlap may build at the same time; otherwise one after another, in this
-worktree. Escalate a row only when a builder has failed it twice, or the row is plainly hard
-(kernel, scheduler, concurrency or other correctness-critical code): then `subagent_type:
-"builder-hard"` ({escalation_model}), and first record it with
-`swarm note <row> decision "builder escalated to {escalation_model}: <why>"`.
+worktree. Every subagent runs on {builder_model}, hard rows included. A builder that fails a row
+gets a second brief with what went wrong; a row two builders failed is reported `fail` with what
+both found, not built by you.
 
 ## 3. Review, commit, one row at a time
 Review each row from its diff (`git diff --stat`, then the hunks that matter). Send the builder

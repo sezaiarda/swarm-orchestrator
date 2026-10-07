@@ -40,6 +40,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import launch as launch_mod
+from . import lean
 from . import procs, resolver
 from . import session as session_mod
 from . import tmux
@@ -163,6 +164,7 @@ def claude_argv(cfg: Config) -> list[str]:
         argv += ["--model", cfg.console_model]
     if not launch_mod.names_itself(shlex.join(argv)):
         argv += ["-n", launch_mod.session_name(WINDOW)]
+    argv += lean.args(cfg, cfg.project_dir, cmd=argv)
     return argv + ["--append-system-prompt", primer(cfg)]
 
 

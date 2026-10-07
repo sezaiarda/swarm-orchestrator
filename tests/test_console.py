@@ -109,8 +109,9 @@ def test_the_console_prompt_lints_clean():
 # -- a fresh conversation ----------------------------------------------------------------
 def test_the_command_names_no_conversation_so_every_start_is_fresh(cfg):
     argv = console.claude_argv(cfg)
-    assert argv[:4] == ["claude", "-n", "swarm · console", "--append-system-prompt"]
-    assert len(argv) == 5 and "owner's console" in argv[-1]
+    assert argv[:5] == ["claude", "-n", "swarm · console", "--setting-sources", "project,local"]
+    assert argv[5] == "--settings" and argv[7] == "--append-system-prompt"
+    assert len(argv) == 9 and "owner's console" in argv[-1]
     assert not {"--resume", "--continue", "--session-id", "-r", "-c"} & set(argv)
 
 
@@ -119,7 +120,8 @@ def test_model_and_command_come_from_the_config(cfg):
     cfg.console_cmd = "/opt/claude --verbose"
     argv = console.claude_argv(cfg)
     assert argv[:7] == ["/opt/claude", "--verbose", "--model", "opus", "-n", "swarm · console",
-                        "--append-system-prompt"]
+                        "--setting-sources"]
+    assert argv[-2] == "--append-system-prompt"
 
 
 # -- not a worker ------------------------------------------------------------------------

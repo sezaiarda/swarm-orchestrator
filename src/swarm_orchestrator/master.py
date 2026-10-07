@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import lanes as lanes_mod
 from . import launch as launch_mod
+from . import lean
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import resolver, telegram, tmux
@@ -200,7 +201,8 @@ def master_command(cfg: Config, kind: str, cwd: Path | None = None) -> str:
                                         name=launch_mod.session_name(OVERSEER))
     model = f" --model {cfg.master_model}" if cfg.master_model else ""
     name = shlex.quote(launch_mod.session_name(INIT))
-    return f"cd {cfg.project_dir} && exec claude{model} -n {name}"
+    base = f"claude{model} -n {name}"
+    return f"cd {cfg.project_dir} && exec {base}{lean.shell(cfg, cfg.project_dir, cmd=base)}"
 
 
 def overseer_brief(

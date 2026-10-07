@@ -26,6 +26,7 @@ import threading
 from pathlib import Path
 
 from . import launch as launch_mod
+from . import lean
 from . import session as session_mod
 from . import tmux
 from .config import Config
@@ -113,7 +114,7 @@ def spawn(
     # landing on the owner to fix by hand.
     model = f" --model {cfg.resolver_model}" if cfg.resolver_model else ""
     name = launch_mod.with_name(f"claude{model}", launch_mod.session_name("resolver", phase))
-    cmd = cfg.resolver_cmd or f"cd {repo} && exec {name}"
+    cmd = cfg.resolver_cmd or f"cd {repo} && exec {name}{lean.shell(cfg, repo, cmd=name)}"
     for attempt in range(1, SPAWN_ATTEMPTS + 1):
         _await_reap(phase)
         win = tmux.new_window(cfg.session, f"resolve-{phase}")

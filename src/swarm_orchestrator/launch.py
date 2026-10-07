@@ -32,6 +32,7 @@ from . import blockedping
 from . import freezer
 from . import gitq
 from . import lanes as lanes_mod
+from . import lean
 from . import ledger as ledger_mod
 from . import ledgerw
 from . import machine
@@ -290,13 +291,15 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
     if model:
         told = models_mod.brief(model, models_mod.default(cfg), phase)
         cmd += f" --append-system-prompt {shlex.quote(told)}"
+    settings = ""
     if cfg.worker_settings:
         # Force in-process teammates: a worker's own subagents then never open
         # extra tmux panes in the workers window. Merges over the user's
         # settings, so bypassPermissions etc. are preserved. The status line is
         # swapped for the meters tap, which still draws the owner's own bar.
         settings = meters.settings_with_tap(cfg.worker_settings, cfg.state_dir, phase)
-        cmd += f" --settings {shlex.quote(settings)}"
+    # Lean: the project's setup, not the owner's personal one (lean.py).
+    cmd += lean.shell(cfg, cwd, settings, cmd)
     if cfg.worker_effort:
         cmd += f" --effort {shlex.quote(cfg.worker_effort)}"
     return f"cd {shlex.quote(str(cwd))} && exec {cmd}"

@@ -62,7 +62,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-from . import statuses
+from . import lean, statuses
 from .config import Config
 
 # A CLI family alias, never a version: `haiku` always resolves to the newest Haiku.
@@ -378,7 +378,8 @@ def _cli_summary(
     cwd = cfg.project_dir if cfg.project_dir.is_dir() else cfg.state_dir
     try:
         proc = subprocess.run(
-            ["claude", "-p", prompt, "--model", model, "--output-format", "json"],
+            ["claude", "-p", prompt, "--model", model, "--output-format", "json",
+             *lean.args(cfg, cwd)],
             cwd=str(cwd),
             capture_output=True,
             text=True,

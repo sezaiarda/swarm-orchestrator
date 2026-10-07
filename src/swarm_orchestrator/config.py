@@ -269,6 +269,12 @@ class Config:
         "swarm", "resolver_model", "sonnet", NEXT,
         doc='model for the resolver; "" inherits',
         why="baked into the resolver's command line when a conflict opens its pane")
+    # The owner's personal setup (CLAUDE.md, memory, plugins, user skills, MCP)
+    # is not the project's: see lean.py.
+    lean_sessions: bool = _k(
+        "swarm", "lean_sessions", True, NEXT, env="SWARM_LEAN_SESSIONS",
+        doc="sessions skip your personal ~/.claude setup",
+        why="baked into each session's command line when it is spawned")
     driver: str = _k(
         "swarm", "driver", "tmux", RESTART, env="SWARM_DRIVER", choices=("tmux", "bare"),
         doc="tmux = real panes; bare = headless test driver",

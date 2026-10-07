@@ -43,12 +43,12 @@ def _spawned_cmd(cfg, monkeypatch) -> str:
 
 def test_the_resolver_runs_on_sonnet_by_default(cfg, monkeypatch):
     assert cfg.resolver_model == "sonnet"
-    assert _spawned_cmd(cfg, monkeypatch).endswith("exec claude --model sonnet -n 'swarm · resolver · P1'")
+    assert "exec claude --model sonnet -n 'swarm · resolver · P1'" + " --setting-sources project,local --settings " in _spawned_cmd(cfg, monkeypatch)
 
 
 def test_an_empty_resolver_model_inherits_the_users_setting(cfg, monkeypatch):
     cfg.resolver_model = ""
-    assert _spawned_cmd(cfg, monkeypatch).endswith("exec claude -n 'swarm · resolver · P1'")
+    assert "exec claude -n 'swarm · resolver · P1'" + " --setting-sources project,local --settings " in _spawned_cmd(cfg, monkeypatch)
 
 
 def test_a_custom_resolver_cmd_is_used_as_is(cfg, monkeypatch):

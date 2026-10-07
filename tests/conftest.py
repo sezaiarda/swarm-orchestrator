@@ -314,6 +314,16 @@ def _tg_bot_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_owner_settings(monkeypatch):
+    """A lean session carries the owner's ``~/.claude/settings.json`` on its
+    command line; in the suite there is none, so no command under test holds
+    the owner's real settings. ``tests/test_lean.py`` hands it one of its own."""
+    from swarm_orchestrator import lean
+
+    monkeypatch.setattr(lean, "OWNER_SETTINGS", Path("/nonexistent/settings.json"))
+
+
+@pytest.fixture(autouse=True)
 def _no_scopes(monkeypatch):
     """Nothing the suite starts gets a systemd scope of its own.
 

@@ -401,19 +401,20 @@ def test_a_stale_yield_mark_on_a_working_holder_is_measured_again_first(gate):
     assert g.kinds("P-h") == ["queued", "start", "unyield", "end"]
 
 
-def test_a_process_a_build_left_behind_stops_blocking_once_idle(gate):
+def test_a_process_a_build_left_behind_never_blocks(gate):
     """The build ended but a child it started still holds its seat and slot. It
-    used to hold the slot until it exited; idle, it is set aside like any holder."""
+    used to count until it was idle and then took a place of ``idle_yield_max``;
+    it is no build, so it counts on no slot and is never measured."""
     g = gate()
     left = g.start("left", "sh", "-c", "cargo build & sleep 0.3",
                    env={"PLAN": f"sleep:{WINDOW * 2 + 1.5}"})
     g.wait_event("end", "P-left")
+    snap, text = g.look()
+    assert not snap["slots"][0]["busy"] and "left behind: P-left `sh -c" in text
     w = g.run("w", "burn:0.3")
-    g.wait_event("queued", "P-w")
-    snap, text = g.look()  # well before a window has passed
-    assert snap["slots"][0]["left"] and "still holds the slot" in text
+    assert g.wait_event("start", "P-w")["wait_s"] < 1.0  # well before a window has passed
     _finish([left, w])
-    assert g.kinds("P-left") == ["queued", "start", "end", "yield"]
+    assert g.kinds("P-left") == ["queued", "start", "end"]
     deadline = time.time() + 20
     while "end left" not in g.lines() and time.time() < deadline:
         time.sleep(0.1)

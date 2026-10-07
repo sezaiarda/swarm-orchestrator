@@ -15,6 +15,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -246,6 +247,61 @@ def test_gc_waits_for_a_neighbours_build_and_holds_the_machines_gate(box):
     gc = [e for e in a.events() if e["cls"] == "gc"]
     assert {e["swarm"] for e in gc} == {"beta"} and [e["event"] for e in gc] == [
         "queued", "left", "queued", "start", "end"]
+
+
+def _gc_turns(cfg, until: float, out: list) -> threading.Thread:
+    """A swarm's automatic gc, its interval cut to nothing: it queues, waits its
+    turn, leaves when the wait is over and queues again, until it runs."""
+    def run() -> None:
+        while time.time() < until:
+            try:
+                with buildsem.whole(cfg, wait_s=1.5, hold_s=1.0):
+                    out.append(("ran", time.time()))
+                    return
+            except buildsem.Busy as exc:
+                out.append(("busy", str(exc)))
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    return th
+
+
+def test_processes_builds_left_behind_never_fill_the_gate_while_two_gcs_wait(box):
+    """2026-10-07, 03:23 to 04:35: three builds had each ended and left a process
+    on its seat (a failing test's children), which were all the seats of
+    ``max_concurrent = 2`` plus ``idle_yield_max = 1``; the two swarms' gcs took
+    turns waiting for an empty gate, and no build of either swarm started for 72
+    minutes. A process a build left behind is not a build: it takes neither a
+    slot nor one of the seats, however many there are, so the builds go on; gc
+    still waits for it (it may be using build output), and runs once it is gone."""
+    a, b = box(kind=PairGate, max_concurrent=2)
+    a.machine(idle_yield_s=300, idle_yield_max=1)  # the live limits: three seats
+    assert buildsem.seats(a.cfg()) == 3
+    left_s = 8.0
+    for g, where, tag in ((a, a.a, "l1"), (b, b.a, "l2"), (a, a.b, "l3"), (b, b.b, "l4")):
+        g.at(where, tag, "sh", "-c", f"sleep {left_s} & cargo build", dur=0.1)
+        assert g.wait_event("start", f"P-{tag}")["wait_s"] < 1.5  # beside every leftover
+        g.wait_event("end", f"P-{tag}")
+    assert len(buildsem.live_holders(a.cfg())) == 4  # more than there are seats
+    until = time.time() + left_s + 15
+    turns = {"alpha": [], "beta": []}
+    gcs = [_gc_turns(a.cfg(), until, turns["alpha"]), _gc_turns(b.cfg(), until, turns["beta"])]
+    procs = []
+    for g, where, tag in ((a, a.c, "a1"), (b, b.c, "b1"), (a, a.a, "a2"), (b, b.a, "b2")):
+        procs.append(g.at(where, tag, dur=0.6))
+        time.sleep(0.3)
+    _finish(procs)
+    for tag in ("a1", "b1", "a2", "b2"):
+        assert a.wait_event("start", f"P-{tag}")["wait_s"] < 1.5
+    assert _max_overlap(a.lines()) <= 2
+    snap = buildstatus.snapshot(a.cfg())
+    assert not any(s["busy"] for s in snap["slots"])  # what is left there is no build
+    for th in gcs:
+        th.join(until - time.time() + 5)
+    for swarm, out in turns.items():
+        assert out and out[-1][0] == "ran", (swarm, out)  # each gc ran once they were gone
+        assert all("left behind" in why for kind, why in out if kind == "busy"), out
+        assert out[-1][1] >= a.wait_event("start", "P-l4")["ts"] + left_s - 0.5
 
 
 # -- a holder that is gone ---------------------------------------------------------

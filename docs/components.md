@@ -1276,6 +1276,19 @@ A build may start when fewer than `max_concurrent` builds *count* (alive and not
 set aside as idle, see below), a seat is free, and some slot has no counted
 build on it.
 
+**A process a build left behind is not a build.** When a build's own `swarm
+build` sees its command end, it marks the seat's record `over`. Whatever still
+holds that seat afterwards is a process the command started and did not wait
+for (a test's server, a gated `ffmpeg`, a daemon), and nobody knows when it
+will end. It counts on no slot, is not measured for idle yield, and does not
+use up a seat: the next build takes the next seat number, so such processes,
+however many, never fill the gate. Only gc still waits for one, since it may be
+using build output. (They used to count until set aside as idle, at most
+`idle_yield_max` of them, and to keep their seats. On 2026-10-07 three of them,
+left by a failing test, were the three seats of `max_concurrent = 2` plus
+`idle_yield_max = 1`: no build of either swarm on the machine started for 72
+minutes, until the session that started them ended.)
+
 **The queue.** A heavy command takes a ticket, `buildsem/queue/<seq>-<id>.json`,
 numbered under `queue.lock` and locked by its waiter for as long as it waits.
 A ticket whose lock can be taken belongs to a dead waiter and is deleted, so a
@@ -1362,7 +1375,8 @@ starts beside it, on the same slot.
 - *The caps.* At most `idle_yield_max` (default 2) holders are set aside at
   once; a further idle holder keeps counting and the queue waits, as it does
   with `idle_yield_s = 0`. The seats bound the builds alive at
-  `max_concurrent + idle_yield_max` whatever happens.
+  `max_concurrent + idle_yield_max` whatever happens (a process a build left
+  behind is none of them, see *Slots and seats*).
 - *Who measures.* The waiters, from `/proc`, under `queue.lock`, keeping the
   running figures in `buildsem/idle.json`. It needs no supervisor and no daemon:
   when nobody waits, nobody needs the answer. The holders are the machine's, so
@@ -1604,7 +1618,8 @@ logged under `pair = "any"` too), on every event of that build; it is null when 
 checkout, and for a light command. `yield` and `unyield` carry the `id`, `pid` and `slot` of the build
 they are about and are written by whoever measured it; a build that ends while
 set aside gets no `unyield` (its `end` closes the stretch), and a `yield` after
-a build's `end` is a process that build left behind, set aside in its turn. A
+a build's `end` was a process that build left behind, set aside in its turn,
+before such a process stopped counting at all (*Slots and seats*). A
 `queued` with no `start` gave up while waiting. A `start` whose
 `end` never came and whose `pid` is gone died unrecorded: the gate writes a
 synthetic `end` with `exit` null as soon as it notices (when a waiter reports,

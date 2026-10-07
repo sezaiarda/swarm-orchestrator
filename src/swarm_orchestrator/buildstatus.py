@@ -132,7 +132,8 @@ def holders(cfg: Config, hist: buildlog.History, now: float,
     out = []
     for i in range(cfg.build_max_concurrent):
         path = buildsem._slot_path(cfg, i)
-        counted = [b for b in alive if b["slot"] == i and b["state"] != "yielded"]
+        counted = [b for b in alive if b["slot"] == i and b["state"] != "yielded"
+                   and not b.get("over")]  # a process a build left behind counts on no slot
         entry: dict = {"slot": i, "busy": bool(counted)}
         if counted:
             first = counted[-1]  # the newest: the one a waiter is behind
@@ -417,6 +418,10 @@ def render(snap: dict) -> str:
         if b["state"] == "yielded":
             lines.append(f"  {_yielded_text(b, pair)} — pid {b['pid']} (does not count: the"
                          " next build starts beside it; nothing was stopped)")
+        elif b.get("over"):
+            lines.append(f"  left behind: {buildlog.who(b)} `{short_cmd(b['argv'], 50)}` ended"
+                         f" {fmt_s(b.get('ended_s'))} ago, but a process it started still holds"
+                         " its seat (does not count: builds start beside it; gc waits for it)")
         elif b.get("id") not in shown:  # a second build counting on one slot: one woke up
             lines.append("  " + _holder_text(dict(b, busy=True), yield_s, pair)
                          + f" — pid {b['pid']} (was yielded, working again)")

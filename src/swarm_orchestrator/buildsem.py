@@ -27,6 +27,11 @@ them is gone. No daemon, no counter to leak.
   caps the builds the gate can have alive. The seat file holds the build's
   record (id, swarm, phase, pid, command, start), which ``--status`` and the
   waiting line show; whether the lock is held is whether the build is alive.
+  Once its own ``swarm build`` saw the command end, the record says ``over``:
+  whatever still holds the seat then is a process the build left behind,
+  which is no build. It counts on no slot, is not measured, and its seat is
+  not one of those: the next build takes the next number (:func:`_free_seat`),
+  so leftovers never fill the gate. gc alone still waits for them.
 - A **slot**, ``buildsem/slotN`` (``N < max_concurrent``), *shared*. It is
   a lock and nothing else. ``swarm gc`` takes every slot exclusively while it
   deletes build output (see *gc takes its turn*), which works only while no
@@ -614,9 +619,11 @@ def behind(tickets: list[dict], wall: str | None) -> set[str]:
 def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False) -> dict:
     """Measure the holders if due, and log who was set aside or woke up. A
     measurement that fails sets nobody aside: the queue then waits, as it would
-    without idle yield, and the build that is waiting is not harmed."""
+    without idle yield, and the build that is waiting is not harmed. A process a
+    build left behind counts for nothing, so it is not measured: set aside, it
+    would take a place of ``idle_yield_max`` from the builds."""
     try:
-        st, changes = buildidle.update(cfg, holders, now, force=force)
+        st, changes = buildidle.update(cfg, buildpair.counted(holders), now, force=force)
     except Exception:  # noqa: BLE001 -- measuring must never break a queued build
         return {"ts": 0.0, "h": {}}
     for c in changes:
@@ -631,13 +638,20 @@ def _idle_pass(cfg: Config, holders: list[dict], now: float, force: bool = False
 
 def _free_seat(cfg: Config) -> tuple[int, int] | None:
     """A seat nobody holds, locked: ``(index, fd)``; ``None`` when the builds
-    alive already number ``max_concurrent + idle_yield_max``."""
-    for k in range(seats(cfg)):
-        fd = os.open(_seat_path(cfg, k), os.O_CREAT | os.O_RDWR, 0o644)
+    alive already number ``max_concurrent + idle_yield_max``. A seat only a
+    process left behind by a build that ended holds (its record is ``over``) is
+    not a build's: the next one serves instead, so such processes, however
+    many, never use up the seats. Under ``queue.lock``."""
+    k = builds = 0
+    while builds < seats(cfg):
+        path = _seat_path(cfg, k)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
+            builds += not (read_record(path) or {}).get("over")
+            k += 1
             continue
         return k, fd
     return None
@@ -647,13 +661,14 @@ def _claim(cfg: Config) -> Claim | None:
     """Take a seat and a slot if a build may start now. Under ``queue.lock``.
 
     May start: fewer than ``max_concurrent`` builds *count* (alive and not set
-    aside), a slot has no counted build on it, and a seat is free. A slot with
-    nobody on it is preferred to one whose holders are all set aside. A slot
-    that cannot be shared is gc's: it holds every one of them while it runs, so
-    then there is none to take."""
+    aside), a slot has no counted build on it, and a seat is free. A process a
+    build left behind is no build (:func:`buildpair.counted`): it counts on no
+    slot and is not measured. A slot with nobody on it is preferred to one
+    whose holders are all set aside. A slot that cannot be shared is gc's: it
+    holds every one of them while it runs, so then there is none to take."""
     now = time.time()
     cap = cfg.build_max_concurrent
-    holders = live_holders(cfg)
+    holders = buildpair.counted(live_holders(cfg))
     st = _idle_pass(cfg, holders, now)
     aside = buildidle.set_aside(cfg, st, holders, now)
     if len(holders) - len(aside) >= cap:
@@ -1286,6 +1301,11 @@ def _alive_text(cfg: Config, holders: list[dict], now: float) -> str:
     h = min(holders, key=lambda r: r.get("start_ts") or now)
     more = f" and {len(holders) - 1} more" if len(holders) > 1 else ""
     slot = f"slot {h['slot']}" if isinstance(h.get("slot"), int) else "a seat"
+    if h.get("over"):
+        ended = buildlog.fmt_s(now - (h.get("ended") or now))
+        return (f"a process left behind by {buildlog.who_text(cfg, h)}"
+                f" `{buildlog.short_cmd(h.get('argv', ''), 40)}` on {slot}, which ended"
+                f" {ended} ago{more}")
     return (f"{buildlog.who_text(cfg, h)} `{buildlog.short_cmd(h.get('argv', ''), 40)}`"
             f" on {slot}, running {buildlog.fmt_s(now - (h.get('start_ts') or now))}{more}")
 

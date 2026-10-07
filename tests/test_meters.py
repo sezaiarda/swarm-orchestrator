@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 from swarm_orchestrator import launch, meters, usage
 from swarm_orchestrator.config import load
@@ -155,7 +157,12 @@ def test_every_worker_launch_carries_the_tap(tmp_path, monkeypatch):
     monkeypatch.setenv("SWARM_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("SWARM_WORKER_SETTINGS", raising=False)
     cfg = load(project_dir=str(tmp_path))
-    assert "swarm_orchestrator.meters" in launch._worker_shell(cfg, "P1", tmp_path)
+    shell = launch._worker_shell(cfg, "P1", tmp_path)
+    words = shlex.split(shell)
+    value = words[words.index("--settings") + 1]
+    # Inline, or (lean) in the settings file only the owner can read.
+    text = value if value.startswith("{") else Path(value).read_text()
+    assert "swarm_orchestrator.meters" in text
 
 
 def tap(stdin: str, state, home):

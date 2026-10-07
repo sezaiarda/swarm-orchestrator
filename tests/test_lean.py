@@ -51,11 +51,16 @@ def _cfg(tmp_path: Path, monkeypatch, toml: str = ""):
     return load(project_dir=str(tmp_path))
 
 
+def _read(value: str) -> dict:
+    """A ``--settings`` value: inline JSON, or the file a lean session is given."""
+    return json.loads(value) if value.lstrip().startswith("{") else json.loads(Path(value).read_text())
+
+
 def _flags(tokens: list[str]) -> tuple[str | None, dict | None]:
     """The ``--setting-sources`` value and the one ``--settings`` object."""
     assert tokens.count("--settings") <= 1, "claude only takes the last --settings"
     sources = tokens[tokens.index("--setting-sources") + 1] if "--setting-sources" in tokens else None
-    settings = json.loads(tokens[tokens.index("--settings") + 1]) if "--settings" in tokens else None
+    settings = _read(tokens[tokens.index("--settings") + 1]) if "--settings" in tokens else None
     return sources, settings
 
 
@@ -217,3 +222,21 @@ def test_unreadable_worker_settings_are_passed_as_given(tmp_path, monkeypatch, o
 def test_a_replacing_command_is_left_alone(tmp_path, monkeypatch, owner):
     cfg = _cfg(tmp_path, monkeypatch, '[swarm]\nmaster_cmd = "fake-master.sh"\n')
     assert master.master_command(cfg, master.INIT) == "fake-master.sh"
+
+
+def test_the_owner_settings_never_reach_the_command_line(tmp_path, monkeypatch, owner):
+    """They carry the owner's ``env``: the command line is readable by anyone on
+    the box (``ps``, a tmux pane), the file only by its owner, from its first byte."""
+    import stat
+
+    cfg = _cfg(tmp_path, monkeypatch)
+    owner.write_text(json.dumps({"env": {"SOME_TOKEN": "s3cret"}, "permissions": {}}))
+    shell = launch._worker_shell(cfg, "W1", tmp_path)
+    assert "s3cret" not in shell
+    path = Path(shlex.split(shell)[shlex.split(shell).index("--settings") + 1])
+    assert path.parent == cfg.state_dir / "lean" and "s3cret" in path.read_text()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    # Named by its content: the same settings share one file, nothing is rewritten.
+    assert launch._worker_shell(cfg, "W1", tmp_path) == shell
+    assert len(list(path.parent.glob("*.settings.json"))) == 1

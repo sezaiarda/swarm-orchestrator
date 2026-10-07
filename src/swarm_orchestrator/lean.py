@@ -22,7 +22,9 @@ project's files, so theirs are merged over the carried copy here, keeping the
 project's word final the way Claude Code itself would. Then :data:`LEAN` (no
 auto-memory, no claude.ai connectors) and last the swarm's own settings (the
 worker settings and the meters tap). Claude Code takes one ``--settings``, the
-last given, so everything goes in that one.
+last given, so everything goes in that one. It is written to a file only its
+owner can read (:func:`settings_file`), never put on the command line: the
+owner's ``env`` must not show in ``ps`` or a tmux pane's command.
 
 Rejected: ``--bare`` (never reads the OAuth login), ``--safe-mode`` (drops the
 project's CLAUDE.md and commands too), ``--disable-slash-commands`` (drops
@@ -39,7 +41,9 @@ is left as configured.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shlex
 from pathlib import Path
 from typing import Iterable
@@ -98,6 +102,27 @@ def settings(cwd: Path, own: dict | None = None, owner: Path | None = None) -> d
     return _merge(_merge(out, LEAN), own or {})
 
 
+def settings_file(cfg, data: dict) -> Path:
+    """``data`` in ``<state>/lean/<digest>.settings.json``, mode 0600 from the
+    moment it exists (the directory 0700), and its path. Named by its content,
+    so every session with the same settings shares one file and a change is a
+    new file, never a rewrite under a running session."""
+    text = json.dumps(data, separators=(",", ":"), sort_keys=True)
+    folder = Path(cfg.state_dir) / "lean"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    path = folder / f"{hashlib.sha256(text.encode()).hexdigest()[:16]}.settings.json"
+    if not path.is_file():
+        tmp = folder / f".{path.name}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, text.encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    return path
+
+
 def args(cfg, cwd: Path, settings_arg: str = "", cmd: Iterable[str] = ()) -> list[str]:
     """The flags a session in ``cwd`` gets: lean ones, or plain ``--settings``.
 
@@ -108,8 +133,7 @@ def args(cfg, cwd: Path, settings_arg: str = "", cmd: Iterable[str] = ()) -> lis
     picks = any(t == "--setting-sources" or t.startswith("--setting-sources=") for t in cmd)
     if not cfg.lean_sessions or own is None or picks:
         return plain
-    merged = json.dumps(settings(cwd, own), separators=(",", ":"))
-    return ["--setting-sources", SOURCES, "--settings", merged]
+    return ["--setting-sources", SOURCES, "--settings", str(settings_file(cfg, settings(cwd, own)))]
 
 
 def shell(cfg, cwd: Path, settings_arg: str = "", cmd: str = "") -> str:

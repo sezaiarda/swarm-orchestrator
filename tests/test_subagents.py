@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,12 @@ def cfg(tmp_path, monkeypatch):
     return load(project_dir=str(tmp_path))
 
 
+def _settings(flags: dict[str, str]) -> dict:
+    """The one ``--settings`` object, from the file a lean session is given."""
+    value = flags["--settings"]
+    return json.loads(value) if value.startswith("{") else json.loads(Path(value).read_text())
+
+
 def _flags(shell: str) -> dict[str, str]:
     """The value after each ``--flag`` of a session's shell command."""
     words = shlex.split(shell.split(" && exec ", 1)[1])
@@ -42,7 +49,7 @@ def test_a_lead_gets_sonnet_builders_and_an_opus_builder_for_hard_rows(cfg):
         assert agents[name]["effort"] == "high", name
     assert agents["Explore"]["model"] == "claude-sonnet-5-5"
     assert "Edit" not in agents["Explore"]["tools"]
-    env = json.loads(flags["--settings"])["env"]
+    env = _settings(flags)["env"]
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-sonnet-5-5"
     assert "CLAUDE_CODE_SUBAGENT_MODEL_FORCE" not in env  # or builder-hard could not be Opus
     assert flags["--effort"] == "medium"  # the lead's own, from [worker].effort
@@ -56,7 +63,7 @@ def test_operator_and_overseer_run_sonnet_high_and_force_their_subagents(cfg, ki
     assert flags["--model"] == "claude-sonnet-5-5" and flags["--effort"] == "high"
     agents = json.loads(flags["--agents"])
     assert "builder-hard" not in agents and agents["builder"]["model"] == "claude-sonnet-5-5"
-    env = json.loads(flags["--settings"])["env"]
+    env = _settings(flags)["env"]
     assert env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] == "1"
 
 
@@ -66,8 +73,8 @@ def test_subagent_settings_can_be_left_to_claude(cfg):
     agents = json.loads(flags["--agents"])
     assert all("model" not in a and "effort" not in a for a in agents.values())
     assert "builder-hard" not in agents
-    assert "env" not in json.loads(flags["--settings"]) or not any(
-        k.startswith("CLAUDE_CODE_SUBAGENT") for k in json.loads(flags["--settings"])["env"])
+    assert "env" not in _settings(flags) or not any(
+        k.startswith("CLAUDE_CODE_SUBAGENT") for k in _settings(flags)["env"])
 
 
 def test_a_row_naming_the_alias_of_the_swarms_model_runs_on_the_swarms_own(cfg):

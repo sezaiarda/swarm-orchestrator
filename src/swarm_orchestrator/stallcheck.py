@@ -83,6 +83,32 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+#: Transcript entries that are work: a turn of the session, or a message to it.
+#: Metadata, file snapshots, away summaries and queued notifications are not.
+_TURNS = ("user", "assistant")
+#: How far back from a transcript's end its last turn is looked for.
+TURN_TAIL_BYTES = 2_000_000
+
+
+def _last_turn_at(path: Path) -> float:
+    """The timestamp of the last turn in transcript ``path``; its mtime when no
+    turn with a timestamp is within :data:`TURN_TAIL_BYTES` of the end."""
+    for line in reversed(_tail_lines(path, TURN_TAIL_BYTES)):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") not in _TURNS:
+            continue
+        raw = entry.get("timestamp")
+        if isinstance(raw, str):
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+    return _mtime(path)
+
+
 def _newest_first(paths) -> list[Path]:
     return sorted(paths, key=_mtime, reverse=True)
 
@@ -96,11 +122,23 @@ class Sources:
     outputs: list[Path] = field(default_factory=list)  # newest first
 
     def last_activity(self) -> float | None:
-        """The newest write to any of them; ``None`` without a lead transcript
-        (a worker still booting, or one whose transcript cannot be found)."""
+        """When the lead or any subagent or teammate last took a turn (or was
+        written to by the owner); ``None`` without a lead transcript (a worker
+        still booting, or one whose transcript cannot be found).
+
+        Read from the entries' own timestamps, not from file mtimes: Claude Code
+        touches an idle session's transcript without adding a turn to it, which
+        kept a worker idle for four hours looking busy. Background task output
+        is not activity either: a stuck wait loop can print for ever. Both are
+        still shown to the model (:func:`material`)."""
         if self.lead is None:
             return None
-        return max(_mtime(p) for p in [self.lead, *self.subagents, *self.outputs])
+        best = _last_turn_at(self.lead)
+        for path in self.subagents:  # newest mtime first; a turn is never newer
+            if _mtime(path) <= best:
+                break
+            best = max(best, _last_turn_at(path))
+        return best
 
 
 def _turn_session(cfg: Config, phase: str) -> str | None:

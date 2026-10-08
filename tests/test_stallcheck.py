@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -56,19 +57,23 @@ def env(tmp_path, monkeypatch):
     return {"cfg": cfg, "tmp": tmp_path, "wt": wt, "sent": sent, "mp": monkeypatch}
 
 
+def _iso(ago_s: float) -> str:
+    return datetime.fromtimestamp(time.time() - ago_s, timezone.utc).isoformat()
+
+
 def _transcripts(env, silent_s: float) -> Path:
-    """A lead transcript with one teammate and a background output, all last
-    written ``silent_s`` ago."""
+    """A lead transcript with one teammate and a background output, whose last
+    turns were ``silent_s`` ago."""
     pdir = env["tmp"] / "claude" / "projects" / gc_mod.transcript_name(env["wt"])
     sid = "cf3a0aee"
     lead = pdir / f"{sid}.jsonl"
     subs = pdir / sid / "subagents"
     subs.mkdir(parents=True)
     entries = [
-        {"type": "user", "timestamp": "2026-10-08T00:48:54Z",
+        {"type": "user", "timestamp": _iso(silent_s + 2),
          "message": {"role": "user", "content": "<teammate-message teammate_id=\"w15\">"
                      "The nextest run is still running. I'll pick up the results.</teammate-message>"}},
-        {"type": "assistant", "timestamp": "2026-10-08T00:48:56Z",
+        {"type": "assistant", "timestamp": _iso(silent_s),
          "message": {"role": "assistant", "content": [
              {"type": "thinking", "thinking": "SECRET-THOUGHT"},
              {"type": "text", "text": "The builder's test run is still going. I'll wait."}]}},
@@ -76,7 +81,7 @@ def _transcripts(env, silent_s: float) -> Path:
     ]
     lead.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
     sub = subs / "agent-a1.jsonl"
-    sub.write_text(json.dumps({"type": "assistant", "timestamp": "2026-10-08T00:48:50Z",
+    sub.write_text(json.dumps({"type": "assistant", "timestamp": _iso(silent_s + 6),
                                "message": {"role": "assistant", "content": [
                                    {"type": "tool_use", "name": "Bash",
                                     "input": {"command": "cargo nextest run",
@@ -260,10 +265,27 @@ def test_no_transcript_means_no_check(env, sup):
 def test_a_recent_subagent_write_counts_as_activity(env, sup):
     lead = _transcripts(env, silent_s=2 * H)
     sub = lead.parent / lead.stem / "subagents" / "agent-a1.jsonl"
-    os.utime(sub, None)  # a teammate that is still working
+    with sub.open("a") as fh:  # a teammate that is still working
+        fh.write(json.dumps({"type": "assistant", "timestamp": _iso(60),
+                             "message": {"role": "assistant", "content": "still going"}}) + "\n")
     _seam(env, STUCK)
     _run(sup)
     assert _prompts(env) == []
+
+
+def test_a_touched_transcript_without_a_new_turn_is_still_silent(env, sup):
+    """Claude Code touches an idle session's transcript (metadata, snapshots,
+    away summaries, queued notifications) without a turn: that is no activity."""
+    lead = _transcripts(env, silent_s=2 * H)
+    with lead.open("a") as fh:
+        fh.write(json.dumps({"type": "system", "subtype": "away_summary",
+                             "timestamp": _iso(30), "content": "waiting"}) + "\n")
+        fh.write(json.dumps({"type": "file-history-snapshot", "snapshot": {}}) + "\n")
+    for path in (lead, *lead.parent.glob(f"{lead.stem}/subagents/*.jsonl")):
+        os.utime(path, None)
+    _seam(env, STUCK)
+    _run(sup)
+    assert len(_prompts(env)) == 1
 
 
 def test_the_watchdog_sweep_starts_it(env, sup):

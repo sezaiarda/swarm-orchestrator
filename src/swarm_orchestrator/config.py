@@ -325,6 +325,11 @@ class Config:
         choices=("", *EFFORTS), parse=_effort,
         doc='claude --effort per worker; "" = inherit yours',
         why="passed as `claude --effort` on the command line a pane is spawned with")
+    worker_sonnet_effort: str = _k(
+        "worker", "sonnet_effort", "", NEXT,
+        choices=("", *EFFORTS), parse=_effort,
+        doc='claude --effort for a Sonnet lead; "" = effort',
+        why="passed as `claude --effort` on the command line a pane is spawned with")
     # Every subagent a swarm session starts (a lead's builders, an Explore, the
     # operator's or the Overseer's helpers) runs on these: see subagents.py.
     subagent_model: str = _k(

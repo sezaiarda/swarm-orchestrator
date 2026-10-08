@@ -288,7 +288,8 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
     appended to its system prompt, naming the rows of its batch.
 
     ``effort`` replaces ``[worker].effort`` for a session of another kind ("" or
-    None keeps it). Every session's subagents run on ``[worker]
+    None keeps it); a worker whose lead runs on Sonnet takes ``[worker]
+    sonnet_effort`` when set. Every session's subagents run on ``[worker]
     subagent_model``/``subagent_effort`` (:mod:`subagents`).
     """
     model = models_mod.override(cfg, phase) if cmd is None else ""
@@ -319,6 +320,9 @@ def _worker_shell(cfg: Config, phase: str, cwd: Path, cmd: str | None = None,
     cmd += lean.shell(cfg, cwd, settings, cmd)
     cmd += f" --agents {shlex.quote(subagents.agents_arg(cfg))}"
     level = effort or cfg.worker_effort
+    if worker and cfg.worker_sonnet_effort and models_mod.same(
+            model or models_mod.default(cfg), "sonnet"):
+        level = cfg.worker_sonnet_effort
     if level:
         cmd += f" --effort {shlex.quote(level)}"
     return f"cd {shlex.quote(str(cwd))} && exec {cmd}"

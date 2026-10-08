@@ -86,3 +86,16 @@ def test_a_row_naming_the_alias_of_the_swarms_model_runs_on_the_swarms_own(cfg):
             "- [ ] `a-W2` · model:`sonnet` · **another**\n")
     assert models_mod.overrides(cfg, text) == {"a-W2": "sonnet"}
     assert models_mod.override(cfg, "a-W1", text) == ""
+
+
+def test_a_sonnet_lead_takes_sonnet_effort_and_an_opus_lead_keeps_worker_effort(cfg, monkeypatch):
+    from swarm_orchestrator import models as models_mod
+
+    cfg.worker_cmd = "claude --model claude-opus-5-5"
+    cfg.worker_sonnet_effort = "high"
+    rows = {"k-W1": "", "k-W2": "sonnet"}
+    monkeypatch.setattr(models_mod, "override", lambda c, phase, *a: rows[phase])
+    opus = _flags(launch_mod._worker_shell(cfg, "k-W1", cfg.project_dir))
+    sonnet = _flags(launch_mod._worker_shell(cfg, "k-W2", cfg.project_dir))
+    assert opus["--model"] == "claude-opus-5-5" and opus["--effort"] == "medium"
+    assert sonnet["--model"] == "sonnet" and sonnet["--effort"] == "high"

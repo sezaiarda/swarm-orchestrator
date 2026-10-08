@@ -98,6 +98,7 @@ address, and the listener answers for it under the new name.
 | `ready_marker` | `""` | `SWARM_READY_MARKER` | next | Text that means "claude has booted". `""` means the running `claude --version`, which the boot banner prints; if that cannot be read, `Claude Code`. |
 | `worker_settings` | `'{"teammateMode":"in-process"}'` | `SWARM_WORKER_SETTINGS` | next | JSON merged over the user's settings via `--settings`. The meters status-line tap is added unless this JSON sets its own `statusLine`. Register `scripts/stop-hook.py` here as a `Stop` hook to get recaps (see below). `""` passes no settings. |
 | `effort` | `"high"` | `SWARM_WORKER_EFFORT` | next | `claude --effort` for every worker: one of `low`, `medium`, `high`, `xhigh` or `max`. `""` inherits the user's setting. |
+| `sonnet_effort` | `""` | | next | `claude --effort` for a worker whose lead runs on Sonnet (a row with ``model:`sonnet` ``, or a Sonnet `worker_cmd`), so Opus and Sonnet leads can run at different efforts. `""` uses `effort`. |
 | `done_grace_s` | `0` | `SWARM_DONE_GRACE` | hot | Seconds a worker keeps its slot after `swarm done` before the supervisor is poked. A detached child sleeps and then delivers the poke, so `swarm done` itself returns at once. |
 | `park_after` | `120` | `SWARM_PARK_AFTER` | hot | Seconds any session — worker, operator job or Overseer pass — may sit in `swarm waiting` before it is parked, alive, to its own window, freeing what it held (a worker's slot, the operator window, the master pane). `0` disables parking. |
 

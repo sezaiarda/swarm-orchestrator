@@ -57,7 +57,11 @@ BUILDER = (
     "You build one ledger row in this worktree, as your brief says: make the change, run"
     " the targeted tests and the gate command it names, and fix what fails. Never commit,"
     " push, run `swarm done` or edit the ledger, phase history or lessons; the lead records."
-    " Read narrowly (grep, line ranges), not whole files. Reply in at most 10 lines: what changed, files, tests run and their result,"
+    " Read narrowly (grep, line ranges), not whole files. Wait for every command you start:"
+    " your reply ends your work, so never reply while a test run or build is still going."
+    " A run that may outlast one Bash call goes in the background, then you wait for it in"
+    " the foreground (a bounded loop on its output) until it ends."
+    " Reply in at most 10 lines: what changed, files, tests run and their result,"
     " anything unresolved. Details go to a file under $TMPDIR, not into the reply."
 )
 

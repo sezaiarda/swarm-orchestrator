@@ -17,10 +17,7 @@ the order above is a good default) and what each builder must be told.
 
 ## 2. One builder per row
 `Agent` with `subagent_type: "builder"` (it runs on {builder_model}), one row each, never a fork:
-a builder starts from its brief alone, not from your context. Give it no `name`, no `team_name` and
-no `run_in_background`: the call returns when the builder is done, and several calls in one message
-run side by side. A named builder is a teammate that goes idle while its own test run is still
-going and is never woken to report it: a lead once waited six hours on one. Any other subagent (`Explore`,
+a builder starts from its brief alone, not from your context. Any other subagent (`Explore`,
 `Plan`, `general-purpose`) is already set to {builder_model}; pass no `model` to any of them.
 The brief, and nothing more (the builder knows the swarm's rules and the reply format):
 

@@ -101,6 +101,8 @@ address, and the listener answers for it under the new name.
 | `sonnet_effort` | `""` | | next | `claude --effort` for a worker whose lead runs on Sonnet (a row with ``model:`sonnet` ``, or a Sonnet `worker_cmd`), so Opus and Sonnet leads can run at different efforts. `""` uses `effort`. |
 | `done_grace_s` | `0` | `SWARM_DONE_GRACE` | hot | Seconds a worker keeps its slot after `swarm done` before the supervisor is poked. A detached child sleeps and then delivers the poke, so `swarm done` itself returns at once. |
 | `park_after` | `120` | `SWARM_PARK_AFTER` | hot | Seconds any session — worker, operator job or Overseer pass — may sit in `swarm waiting` before it is parked, alive, to its own window, freeing what it held (a worker's slot, the operator window, the master pane). `0` disables parking. |
+| `stall_check_s` | `3600` | | hot | Seconds a busy worker may stay silent (no write to its transcript, its subagents' or teammates' transcripts, or its background task output) before the watchdog sweep has `stall_model` look at it. If the model finds it stuck, the swarm types one line, `Swarm stall check: <what is wrong and what to do>`, into the worker's pane; stuck on two checks in a row, you are told. At most one check per phase per this many seconds of silence; none while the phase waits on you, the swarm is frozen or held at a usage cap. Runs only with the watchdog on (`[swarm].watchdog_s`). `0` disables it. |
+| `stall_model` | `"haiku"` | | hot | The model of a stall check, called through `claude -p` like a recap. |
 
 Registering the Stop hook (the path is wherever this repo lives):
 

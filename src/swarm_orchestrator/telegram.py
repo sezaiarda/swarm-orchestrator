@@ -105,6 +105,7 @@ KINDS = (
     "drain",  # supervisor: `swarm down --drain` finished waiting and is stopping the swarm
     "idle-build",  # resources.sampler: a build holds a slot with its tree idle
     "restart",  # restart: a `swarm restart` did not happen, or did not come back up
+    "stall",  # supervisor: a silent worker was found stuck on two checks in a row
     "other",  # unclassified (the default)
 )
 

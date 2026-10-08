@@ -79,6 +79,7 @@ from . import state as state_mod
 from . import reload as reload_mod
 from . import runs as runs_mod
 from . import session as session_mod
+from . import stallcheck
 from . import telegram, tmux
 from . import usage as usage_mod
 from .config import Config, load
@@ -230,6 +231,11 @@ class Supervisor:
         self._thawed_since = 0.0  # when the last freeze it carried on from began
         self._deferred: list[str] = []
         self._freeze_said: list[str] | None = None
+        # Stall checks (see `_stall_sweep`), by phase: when the last one started,
+        # how many in a row found the worker stuck, and the thread of a live one.
+        self._stall_at: dict[str, float] = {}
+        self._stall_streak: dict[str, int] = {}
+        self._stall_threads: dict[str, threading.Thread] = {}
 
     # -- setup / teardown -------------------------------------------------
     def _open_fifo(self) -> None:
@@ -2185,6 +2191,7 @@ class Supervisor:
             st = state_mod.read(self.cfg)  # slots changed under us
         if self._reap_gone_parked(st):
             st = state_mod.read(self.cfg)
+        self._stall_sweep(st, now)
         if st.push_owed:
             pushowed.retry(self.cfg, self.log, min_gap=pushowed.TICK_RETRY_S)
         if st.landing and st.integ_queue and st.integ_blocked is None:
@@ -2226,6 +2233,102 @@ class Supervisor:
         self.log.line(f"WATCHDOG-RELAUNCH idle={idle:.0f}s ready={ready}")
         self._touch()  # the relaunch counts as movement; don't re-fire next sweep
         self._fill_slots(f"watchdog: idle {idle:.0f}s with ready phases", force=True)
+
+    # -- stall checks: a busy worker silent for an hour gets a model's look --
+    def _stall_ok(self, st: state_mod.State, phase: str) -> bool:
+        """``phase`` is busy in a slot and may be looked at: not waiting on the
+        owner, and the swarm neither frozen nor held at a usage cap."""
+        if st.frozen or st.usage_hold or self._frozen_since is not None:
+            return False
+        if phase in st.waiting or phase in st.parked:
+            return False
+        return any(s.phase == phase for s in st.busy_slots())
+
+    def _stall_sweep(self, st: state_mod.State, now: float) -> None:
+        """Start a stall check for each busy worker silent for ``[worker]
+        .stall_check_s``, at most one per phase per that many seconds.
+
+        A worker can stop with nothing left to wake it (a teammate gone idle on
+        a test run that was killed, say), and nothing it does reaches the
+        supervisor. Its silence is read from the files it writes
+        (:func:`stallcheck.sources`); the model's look runs on a thread of its
+        own, like a gc, so the loop never waits on it."""
+        window = self.cfg.stall_check_s
+        busy = {s.phase for s in st.busy_slots() if s.phase}
+        for gone in [p for p in self._stall_at if p not in busy]:
+            self._stall_at.pop(gone, None)
+            self._stall_streak.pop(gone, None)
+        if not window or self._handover is not None:
+            return
+        for slot in st.busy_slots():
+            phase = slot.phase
+            if not phase or not slot.pane_id or not self._stall_ok(st, phase):
+                continue
+            if now - self._stall_at.get(phase, 0.0) < window:
+                continue
+            thread = self._stall_threads.get(phase)
+            if thread is not None and thread.is_alive():
+                continue
+            src = stallcheck.sources(
+                self.cfg, phase, Path(slot.worktree) if slot.worktree else None)
+            last = src.last_activity()
+            if last is None or now - last < window:
+                continue
+            self._stall_at[phase] = now
+            thread = threading.Thread(
+                target=self._stall_run, args=(phase, slot.pane_id, src, last),
+                name=f"stall:{phase}", daemon=True)
+            self._stall_threads[phase] = thread
+            thread.start()
+
+    def _stall_run(self, phase: str, pane: str, src: stallcheck.Sources, last: float) -> None:
+        """Thread body: one stall check, its verdict logged and acted on. A
+        worker found stuck gets one line in its pane; found stuck on two checks
+        in a row, the owner is asked to look."""
+        silent = time.time() - last
+        try:
+            verdict = stallcheck.judge(
+                self.cfg, stallcheck.material(self.cfg, phase, src, pane, silent))
+        except Exception as exc:  # noqa: BLE001 - a thread must report, not vanish
+            verdict = stallcheck.Verdict(None, reason=f"error: {exc!r}")
+        word = {True: "stuck", False: "ok", None: "none"}[verdict.stuck]
+        why = verdict.why if verdict.stuck is not None else verdict.reason
+        self.log.line(f"STALL-CHECK {phase} silent={silent:.0f}s verdict={word} why={why}")
+        if verdict.stuck is False:
+            self._stall_streak.pop(phase, None)
+        if not verdict.stuck:
+            return
+        st = state_mod.read(self.cfg)
+        if not self._stall_ok(st, phase) or not any(
+                s.phase == phase and s.pane_id == pane for s in st.busy_slots()):
+            self.log.line(f"STALL-NUDGE-SKIPPED {phase} no longer a silent busy worker")
+            return
+        if (src.last_activity() or 0.0) > last:
+            self.log.line(f"STALL-NUDGE-SKIPPED {phase} it moved during the check")
+            return
+        streak = self._stall_streak.get(phase, 0) + 1
+        self._stall_streak[phase] = streak
+        try:
+            sent = tmux.send_submit(pane, stallcheck.nudge_line(verdict.message))
+        except Exception as exc:  # noqa: BLE001 - logged; the next check tries again
+            self.log.line(f"STALL-NUDGE-FAILED {phase} {exc!r}")
+            sent = False
+        if sent:
+            self.log.line(f"STALL-NUDGE {phase} streak={streak}")
+        else:
+            self.log.line(f"STALL-NUDGE-FAILED {phase} not delivered")
+        if streak == 2:
+            self._ask(
+                f"stall:{phase}",
+                telegram.fitted(
+                    self.cfg,
+                    f"Look at worker {phase}: it has been silent {silent / 3600:.1f}h and was"
+                    " found stuck on two checks in a row; the swarm's nudge did not help (",
+                    verdict.why,
+                    ").",
+                ),
+                cooldown=0.0, kind="stall", phase=phase, source="supervisor._stall_run",
+            )
 
     def _finish_if_settled(
         self, st: state_mod.State | None = None, tag: str = "FINISH"

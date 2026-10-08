@@ -299,6 +299,15 @@ class Config:
         gate="park-shift",
         doc="seconds a worker may wait on you before parking",
         why="the supervisor reads it when it arms a park timer")
+    # See stallcheck.py: a busy worker silent this long gets a model look.
+    stall_check_s: int = _k(
+        "worker", "stall_check_s", 3600, HOT, minimum=0,
+        doc="silent seconds before a stall check; 0 = off",
+        why="the supervisor reads it on each watchdog sweep")
+    stall_model: str = _k(
+        "worker", "stall_model", "haiku", HOT,
+        doc="model that judges whether a silent worker is stuck",
+        why="read when a stall check starts")
     command_template: str = _k(
         "worker", "command_template", "/prime {phase}", NEXT,
         doc="prime line typed into a new pane ({phase} expands)",

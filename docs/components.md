@@ -89,7 +89,22 @@ periodic poll. On each sweep it:
 - finishes a run that has settled;
 - tells you if a finished run still had ready phases;
 - retries owed pushes, at most every 15 minutes, and clears at once one that
-  was pushed by hand since.
+  was pushed by hand since;
+- runs a stall check on a busy worker that has written nothing for
+  `[worker].stall_check_s` (default 3600, `0` = off): no write to its lead
+  transcript, to any subagent's or teammate's transcript (`<session>/subagents/`
+  under `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`), or to its
+  background task output under its `TMPDIR`. Not while it waits on you, nor
+  while the swarm is frozen or held at a usage cap, and at most once per phase
+  per `stall_check_s`. On a thread of its own, `[worker].stall_model` (Haiku,
+  through `claude -p`, `SWARM_STALL_CMD` in tests) is shown the lead
+  transcript's last ~80k characters, each subagent's last entries, the
+  worker's process tree, the build gate, the task output files and the pane,
+  and answers whether it is stuck: nothing running and nothing that will wake
+  it. A stuck worker gets one line typed into its pane, `Swarm stall check:
+  <what is wrong and what to do>` (`STALL-CHECK` and `STALL-NUDGE` in the log);
+  stuck on two checks in a row, you are asked to look. A verdict that is not
+  JSON, or no answer at all, does nothing.
 
 A swarm that is moving is never touched. The sweep exists because a supervisor
 that only reacts to input cannot notice a worker killed out-of-band, which never
@@ -2405,6 +2420,7 @@ progress is stopped, or will stop, on something only you can do.
 | a drain finished but the swarm could not shut itself down | `drain` | asks you |
 | a restart failed and left the swarm without a supervisor | `restart` | asks you |
 | a restart failed and left the swarm down | `restart` | asks you |
+| a silent worker was found stuck on two stall checks in a row (the nudge did not help) | `stall` | asks you |
 | the Overseer's summary on the clock (`swarm overseer-summary`) | `summary` | summary |
 | the swarm's own summary on the clock, when no pass wrote one or the Overseer is off | `summary` | summary |
 | the run finished: what landed, what failed, what is left for you | `finish` | summary |
